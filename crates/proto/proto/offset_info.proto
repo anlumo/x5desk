@@ -1,0 +1,11 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// java: insta360.messages.OffsetInfo  (insta360/messages/OffsetInfo.java:32)
+message OffsetInfo {
+  int32 offset_version = 1;
+  string offset        = 2;
+}

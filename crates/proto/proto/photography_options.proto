@@ -1,0 +1,654 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+import "_inferred/insta360/messages/button_press_mode.proto";
+import "_inferred/insta360/messages/card_location.proto";
+import "_inferred/insta360/messages/flicker.proto";
+import "_inferred/insta360/messages/fov_type.proto";
+import "_inferred/insta360/messages/gamma_mode.proto";
+import "_inferred/insta360/messages/initial_perspective_type.proto";
+import "_inferred/insta360/messages/photo_size.proto";
+import "_inferred/insta360/messages/preset_icon_type.proto";
+import "_inferred/insta360/messages/raw_capture_type.proto";
+import "_inferred/insta360/messages/video_resolution.proto";
+import "capture_beauty_info.proto";
+import "gimbal_status.proto";
+import "livephoto_switch.proto";
+import "virtual_ptz.proto";
+
+// placement inferred: only referenced from this file
+// java: insta360.messages.GimbalPanoType  (insta360/messages/GimbalPanoType.java:37)
+enum GimbalPanoType {
+  GIMBAL_PANO_TYPE_UNKNOWN = 0;
+  GIMBAL_PANO_TYPE_360     = 1;
+  GIMBAL_PANO_TYPE_180     = 2;
+  GIMBAL_PANO_TYPE_3X3     = 3;
+  GIMBAL_PANO_TYPE_SUPER   = 4;
+}
+
+// placement inferred: only referenced from this file
+// java: insta360.messages.PhotoSizeId  (insta360/messages/PhotoSizeId.java:37)
+enum PhotoSizeId {
+  PHOTO_SIZE_16_9   = 0;
+  PHOTO_SIZE_1_1    = 1;
+  PHOTO_SIZE_9_16   = 2;
+  PHOTO_SIZE_27_10  = 3;
+  PHOTO_SIZE_4_3    = 4;
+  PHOTO_SIZE_2P35_1 = 5;
+  PHOTO_SIZE_3_4    = 6;
+}
+
+// java: insta360.messages.PhotographyOptions  (insta360/messages/PhotographyOptions.java:48)
+message PhotographyOptions {
+  uint32 channel                                  = 1;
+  sint32 brightness                               = 2;
+  uint32 contrast                                 = 3;
+  uint32 saturation                               = 4;
+  sint32 hue                                      = 5;
+  uint32 sharpness                                = 6;
+  sint32 exposure_bias                            = 7;
+  ExposureMode exposure_mode                      = 8;
+  ExposureProg exposure_prog                      = 9;
+  ExposureManual exposure_manual                  = 10;
+  AEMeterMode meter_mode                          = 11;
+  repeated uint32 manual_meter_weights            = 12;
+  WhiteBalance white_balance                      = 13;
+  Flicker flicker                                 = 14;
+  uint32 ev_index                                 = 15;
+  ExposureParameter auto_mode_video_param         = 16;
+  ExposureParameter auto_mode_still_param         = 17;
+  GammaMode gamma_mode                            = 18;
+  LongExposureManual long_exposure_manual         = 19;
+  ExposureOptions still_exposure                  = 20;
+  ExposureOptions video_exposure                  = 21;
+  bool preview_mctf_enable                        = 22;
+  bool preview_sport_mode_enable                  = 23;
+  uint32 video_iso_top_limit                      = 24;
+  RawCaptureType raw_capture_type                 = 25;
+  uint32 photography_self_timer                   = 26;
+  uint32 aeb_capture_num                          = 27;
+  PREVIEW_SPORT_LEVEL preview_sport_level         = 28;
+  uint32 record_duration                          = 29;
+  PhotoSizeId photo_size_id                       = 30;
+  VideoResolution record_resolution               = 31;
+  uint32 video_bitrate                            = 32;
+  FovType fov_type                                = 33;
+  bool flowstate_base_enable                      = 34;
+  COLOR_MODE color_mode                           = 35;
+  repeated ResRecLimit res_rec_limit              = 36;
+  uint32 accelerate_frequency                     = 37;
+  double focal_length_value                       = 38;
+  uint32 white_balance_value                      = 39;
+  PhotoSize photo_resolution                      = 40;
+  uint32 remaining_time                           = 41;
+  bool dark_eis_enable                            = 42;
+  Flow_State_Level flow_state_level               = 43;
+  uint32 burst_capture_num                        = 44;
+  uint32 cache_capture_num                        = 45;
+  bool metering_enable                            = 46;
+  TimeRecInfo time_rec_info                       = 47;
+  ButtonPressMode preset_mode                     = 48;
+  PresetIconType preset_sub_mode                  = 49;
+  string preset_name                              = 50;
+  uint32 burst_capture_time                       = 51;
+  bool cache_capture_enable                       = 52;
+  double zoom_scale                               = 53;
+  uint32 max_rec_time                             = 54;
+  Flow_State_Level_By_Cv5 flow_state_level_by_cv5 = 55;
+  StarLapse_Export_Type starlapse_export_type     = 56;
+  bool timeshift_normal_speed                     = 57;
+  bool video_flowstate_base_enable                = 58;
+  bool double_zoom_enable                         = 59;
+  uint32 strobe_recommend_fps                     = 60;
+  Pano_Exposure_Mode pano_exposure_mode           = 61;
+  VIDEO_SELFIE_MODE selfie_mode                   = 62;
+  bool hdr_switch_status                          = 63;
+  BoolTypeSecure live_rtmp_auto_bitrate           = 64;
+  uint32 live_prefer_video_bitrate                = 65;
+  uint32 live_prefer_audio_bitrate                = 66;
+  VideoEncoderType live_video_encoder             = 67;
+  AudioEncoderType live_audio_encoder             = 68;
+  PlantformType live_plantform                    = 69;
+  FlowStateHorizonType flowstate_horizon_enable   = 70;
+  bool purevideo_enhanc_switch                    = 71;
+  bool i_log_switch                               = 72;
+  bool color_recovery_switch                      = 73;
+  RENDER_VLP_EULER render_vlp_euler               = 74;
+  RENDER_VLP_RESOLUTION render_vlp_res            = 75;
+  RENDER_VLP_FOV render_vlp_fov                   = 76;
+  PHOTO_HDR_TYPE hdr_mode                         = 77;
+  uint32 render_distortion_correction             = 78;
+  Ptz_Movement_Status ptz_movement_status         = 79;
+  RENDER_CENTER_POINT center_point                = 80;
+  uint32 ptz_fov_factor                           = 81;
+  bool track_reset                                = 82;
+  bool FACE_OPTIMIZE_MODE                         = 83;
+  RENDER_VLP_QUAT render_vlp_quat                 = 84;
+  LivePhotoSwitch livephoto_switch_info           = 85;
+  uint32 p3_switch                                = 86;
+  P3_EXTERN_PARAM p3_extern_param                 = 87;
+  MACROLENS_SWITCH_TYPE macrolens_switch_mode     = 88;
+  bool beauty_switch                              = 89;
+  CaptureBeautyParams beauty_info                 = 90;
+  GimbalOptions gimbal_options                    = 91;
+  GimbalStatus gimbal_status                      = 92;
+  AFModeType af_mode                              = 93;
+  AFTriggerParams af_trigger_params               = 94;
+  float af_len_focus_distance                     = 95;
+  bool selfie_mirror_switch                       = 96;
+  bool auto_tracking_switch                       = 97;
+  GimbalPanoType gimbal_pano_type                 = 98;
+  repeated RemainingTimeInfo remaining_time_list  = 99;
+  Iq3AMode iq_3a_mode                             = 100;
+  bool fovc_switch                                = 101;
+  uint32 blue_level                               = 102;
+  uint32 noise_level                              = 103;
+  GammaModeLevel gamma_mode_level                 = 104;
+  AFSceneChangeType af_scene_change               = 105;
+  InitialPerspectiveType initial_perspective      = 106;
+  TouchAFSubscribe touch_af_subscribe             = 107;
+  bool rebuild_before_rec                         = 108;
+  ACTIONVIEW_SWITCH_TYPE actionview_switch        = 109;
+  uint64 version_number                           = 110;
+  BorderStyle border_style                        = 111;
+  string aperture_value                           = 112;
+  PreviewOrientation preview_orientation          = 113;
+  TimelapseScene timelapse_scene                  = 114;
+
+  // java: insta360.messages.PhotographyOptions$ACTIONVIEW_SWITCH_TYPE  (insta360/messages/PhotographyOptions.java:595)
+  enum ACTIONVIEW_SWITCH_TYPE {
+    ACTIONVIEW_SWITCH_UNKNOWN    = 0;
+    ACTIONVIEW_SWITCH_FOV_VALUE  = 1;
+    ACTIONVIEW_SWITCH_ACTIONVIEW = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$AEMeterMode  (insta360/messages/PhotographyOptions.java:695)
+  enum AEMeterMode {
+    AE_METER_MODE_NORMAL = 0;
+    AE_METER_MODE_MANUAL = 1;
+  }
+
+  // java: insta360.messages.PhotographyOptions$AFModeType  (insta360/messages/PhotographyOptions.java:791)
+  enum AFModeType {
+    AF_MODE_OFF                = 0;
+    AF_MODE_AUTO               = 1;
+    AF_MODE_MACRO              = 2;
+    AF_MODE_CONTINUOUS_VIDEO   = 3;
+    AF_MODE_CONTINUOUS_PICTURE = 4;
+    AF_MODE_EDOF               = 5;
+    AF_MODE_SHOW               = 6;
+    AF_MODE_FOCUS_FIXED        = 7;
+  }
+
+  // java: insta360.messages.PhotographyOptions$AFSceneChangeType  (insta360/messages/PhotographyOptions.java:906)
+  enum AFSceneChangeType {
+    AF_SCENE_CHANGE_NOT_DETECTED = 0;
+    AF_SCENE_CHANGE_DETECTED     = 1;
+    AF_SCENE_CHANGE_UNKNOWN      = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$AFTriggerType  (insta360/messages/PhotographyOptions.java:1332)
+  enum AFTriggerType {
+    AF_TRIGGER_IDLE   = 0;
+    AF_TRIGGER_START  = 1;
+    AF_TRIGGER_CANCEL = 2;
+    AF_TRIGGER_END    = 3;
+  }
+
+  // java: insta360.messages.PhotographyOptions$AudioEncoderType  (insta360/messages/PhotographyOptions.java:1436)
+  enum AudioEncoderType {
+    AUDIO_DEFAULT = 0;
+    AUDIO_ACC     = 1;
+  }
+
+  // java: insta360.messages.PhotographyOptions$BoolTypeSecure  (insta360/messages/PhotographyOptions.java:1532)
+  enum BoolTypeSecure {
+    BOOL_UNKNOWN = 0;
+    BOOL_DISABLE = 1;
+    BOOL_ENABLE  = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$BorderStyle  (insta360/messages/PhotographyOptions.java:1632)
+  enum BorderStyle {
+    UNKNOWN_BORDER  = 0;
+    NONE_BORDER     = 1;
+    MINIMAL_BORDER  = 2;
+    TEXTURED_BORDER = 3;
+    VINYL_BORDER    = 4;
+  }
+
+  // java: insta360.messages.PhotographyOptions$COLOR_MODE  (insta360/messages/PhotographyOptions.java:2925)
+  enum COLOR_MODE {
+    COLOR_MODE_INVALID = 0;
+    COLOR_MODE_NORMAL  = 1;
+    COLOR_MODE_LOG     = 2;
+    COLOR_MODE_VIVID   = 3;
+    COLOR_MODE_HDR     = 4;
+    COLOR_MODE_DOLBY   = 5;
+  }
+
+  // java: insta360.messages.PhotographyOptions$ExposureMode  (insta360/messages/PhotographyOptions.java:3634)
+  enum ExposureMode {
+    EXP_MODE_AUTO    = 0;
+    EXP_MODE_PROGRAM = 1;
+    EXP_MODE_MANUAL  = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$FlowStateHorizonType  (insta360/messages/PhotographyOptions.java:4707)
+  enum FlowStateHorizonType {
+    FLOW_STATE_HORIZON_DISABLE = 0;
+    FLOW_STATE_HORIZON_ENABLE  = 1;
+    FLOW_STATE_HORIZON_AUTO    = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$Flow_State_Level  (insta360/messages/PhotographyOptions.java:4807)
+  enum Flow_State_Level {
+    Flow_State_Level_Close    = 0;
+    Flow_State_Level_Low      = 1;
+    Flow_State_Level_Standard = 2;
+    FLOW_State_Level_High     = 3;
+  }
+
+  // java: insta360.messages.PhotographyOptions$Flow_State_Level_By_Cv5  (insta360/messages/PhotographyOptions.java:4911)
+  enum Flow_State_Level_By_Cv5 {
+    Flow_State_Level_CV5_Close   = 0;
+    FLOW_State_Level_CV5_Slight  = 1;
+    FLOW_State_Level_CV5_General = 2;
+    FLOW_State_Level_CV5_Strong  = 3;
+  }
+
+  // java: insta360.messages.PhotographyOptions$GammaModeLevel  (insta360/messages/PhotographyOptions.java:5015)
+  enum GammaModeLevel {
+    UNKNOWN = 0;
+    WEAK    = 1;
+    MEDIUM  = 2;
+    STRONG  = 3;
+  }
+
+  // java: insta360.messages.PhotographyOptions$Iq3AMode  (insta360/messages/PhotographyOptions.java:5881)
+  enum Iq3AMode {
+    IQ_3A_INVALID = 0;
+    IQ_3A_NORMAL  = 1;
+    IQ_3A_PRO     = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$MACROLENS_SWITCH_TYPE  (insta360/messages/PhotographyOptions.java:6197)
+  enum MACROLENS_SWITCH_TYPE {
+    MACROLENS_SWITCH_NONE = 0;
+    MACROLENS_SWITCH_OFF  = 1;
+    MACROLENS_SWITCH_ON   = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$PHOTO_HDR_TYPE  (insta360/messages/PhotographyOptions.java:6513)
+  enum PHOTO_HDR_TYPE {
+    HDR_OFF  = 0;
+    HDR_AUTO = 1;
+    HDR_AEB  = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$PREVIEW_SPORT_LEVEL  (insta360/messages/PhotographyOptions.java:6613)
+  enum PREVIEW_SPORT_LEVEL {
+    PREVIEW_SPORT_AUTO   = 0;
+    PREVIEW_SPORT_FAST   = 1;
+    PREVIEW_SPORT_FASTER = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$PTZ_FOV  (insta360/messages/PhotographyOptions.java:6713)
+  enum PTZ_FOV {
+    VLP_BACK    = 0;
+    VLP_FRONT   = 1;
+    VLP_TOP     = 2;
+    VLP_BOTTOM  = 3;
+    VLP_TRACK   = 4;
+    VLP_ADVANCE = 5;
+    VLP_FREE    = 6;
+  }
+
+  // java: insta360.messages.PhotographyOptions$Pano_Exposure_Mode  (insta360/messages/PhotographyOptions.java:6825)
+  enum Pano_Exposure_Mode {
+    Pano_Exposure_Mode_Off      = 0;
+    Pano_Exposure_Mode_Light    = 1;
+    Pano_Exposure_Mode_Lsolated = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$PlantformType  (insta360/messages/PhotographyOptions.java:6925)
+  enum PlantformType {
+    PLANTFORM_DEFAULT            = 0;
+    PLANTFORM_FACEBOOK           = 1;
+    PLANTFORM_WECHAT             = 2;
+    PLANTFORM_WEIBO              = 3;
+    PLANTFORM_GOOGLE_STREET_VIEW = 4;
+    PLANTFORM_QZONE              = 5;
+    PLANTFORM_YOUTUBE            = 6;
+    PLANTFORM_KAKAOTALK          = 7;
+    PLANTFORM_TWITTER            = 8;
+    PLANTFORM_QQ                 = 9;
+    PLANTFORM_VEER               = 10;
+    PLANTFORM_KUAISHOU           = 11;
+    PLANTFORM_DOUYIN             = 12;
+    PLANTFORM_BILIBILI           = 13;
+    PLANTFORM_DOUYU              = 14;
+    PLANTFORM_HUYA               = 15;
+    PLANTFORM_NONE               = 16;
+  }
+
+  // java: insta360.messages.PhotographyOptions$PreviewOrientation  (insta360/messages/PhotographyOptions.java:7067)
+  enum PreviewOrientation {
+    PREVIEW_ORIENTATION_UNKNOWN   = 0;
+    PREVIEW_ORIENTATION_LANDSCAPE = 1;
+    PREVIEW_ORIENTATION_PORTRAIT  = 2;
+    PREVIEW_ORIENTATION_ADAPTIVE  = 3;
+  }
+
+  // java: insta360.messages.PhotographyOptions$ShutterSpeed  (insta360/messages/PhotographyOptions.java:8898)
+  enum ShutterSpeed {
+    SPEED_AUTO   = 0;
+    SPEED_60     = 1;
+    SPEED_30     = 2;
+    SPEED_15     = 3;
+    SPEED_8      = 4;
+    SPEED_4      = 5;
+    SPEED_2      = 6;
+    SPEED_1P6    = 7;
+    SPEED_1P3    = 8;
+    SPEED_1      = 9;
+    SPEED_1D1P25 = 10;
+    SPEED_1D1P67 = 11;
+    SPEED_1D2    = 12;
+    SPEED_1D2P5  = 13;
+    SPEED_1D3    = 14;
+    SPEED_1D4    = 15;
+    SPEED_1D5    = 16;
+    SPEED_1D6P25 = 17;
+    SPEED_1D8P   = 18;
+    SPEED_1D10   = 19;
+    SPEED_1D12P5 = 20;
+    SPEED_1D15   = 21;
+    SPEED_1D20   = 22;
+    SPEED_1D25   = 23;
+    SPEED_1D30   = 24;
+    SPEED_1D40   = 25;
+    SPEED_1D50   = 26;
+    SPEED_1D60   = 27;
+    SPEED_1D80   = 28;
+    SPEED_1D100  = 29;
+    SPEED_1D120  = 30;
+    SPEED_1D160  = 31;
+    SPEED_1D200  = 32;
+    SPEED_1D240  = 33;
+    SPEED_1D320  = 34;
+    SPEED_1D400  = 35;
+    SPEED_1D500  = 36;
+    SPEED_1D640  = 37;
+    SPEED_1D800  = 38;
+    SPEED_1D1000 = 39;
+    SPEED_1D1250 = 40;
+    SPEED_1D1600 = 41;
+    SPEED_1D2000 = 42;
+    SPEED_1D2500 = 43;
+    SPEED_1D3200 = 44;
+    SPEED_1D4000 = 45;
+    SPEED_1D5000 = 46;
+    SPEED_1D6400 = 47;
+    SPEED_1D8000 = 48;
+  }
+
+  // java: insta360.messages.PhotographyOptions$StarLapse_Export_Type  (insta360/messages/PhotographyOptions.java:9136)
+  enum StarLapse_Export_Type {
+    StarLapse_Video   = 0;
+    Star_Trails_Video = 1;
+    Star_Trails_Photo = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$TimelapseScene  (insta360/messages/PhotographyOptions.java:9630)
+  enum TimelapseScene {
+    TIMELAPSE_SCENE_UNKNOWN               = 0;
+    TIMELAPSE_SCENE_TRAFFIC_FLOW_DYNAMICS = 1;
+    TIMELAPSE_SCENE_SUNRISE_SUNSET_CYCLE  = 2;
+    TIMELAPSE_SCENE_SWIRLING_CLOUDS       = 3;
+    TIMELAPSE_SCENE_DAY_NIGHT_TRANSITION  = 4;
+    TIMELAPSE_SCENE_FLOWER_BLOOMING       = 5;
+    TIMELAPSE_SCENE_CUSTOMIZE             = 6;
+  }
+
+  // java: insta360.messages.PhotographyOptions$TouchAFSubscribeAction  (insta360/messages/PhotographyOptions.java:10107)
+  enum TouchAFSubscribeAction {
+    TOUCH_AF_SUBSCRIBE_ACTION_UNKNOWN = 0;
+    TOUCH_AF_SUBSCRIBE_ACTION_START   = 1;
+    TOUCH_AF_SUBSCRIBE_ACTION_END     = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$VIDEO_SELFIE_MODE  (insta360/messages/PhotographyOptions.java:10207)
+  enum VIDEO_SELFIE_MODE {
+    MODE_NONE  = 0;
+    ME_MODE    = 1;
+    TORCH_MODE = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$VideoEncoderType  (insta360/messages/PhotographyOptions.java:10307)
+  enum VideoEncoderType {
+    VIDEO_DEFAULT = 0;
+    VIDEO_H264    = 1;
+    VIDEO_H265    = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$WhiteBalance  (insta360/messages/PhotographyOptions.java:10407)
+  enum WhiteBalance {
+    WB_AUTO   = 0;
+    WB_2700K  = 1;
+    WB_4000K  = 2;
+    WB_5000K  = 3;
+    WB_6500K  = 4;
+    WB_7500K  = 5;
+    WB_2000K  = 6;
+    WB_2200K  = 7;
+    WB_2400K  = 8;
+    WB_2600K  = 9;
+    WB_2800K  = 10;
+    WB_3000K  = 11;
+    WB_3200K  = 12;
+    WB_3400K  = 13;
+    WB_3600K  = 14;
+    WB_3800K  = 15;
+    WB_4500K  = 16;
+    WB_5500K  = 17;
+    WB_6000K  = 18;
+    WB_7000K  = 19;
+    WB_8000K  = 20;
+    WB_8500K  = 21;
+    WB_9000K  = 22;
+    WB_9500K  = 23;
+    WB_10000K = 24;
+  }
+
+  // java: insta360.messages.PhotographyOptions$AFTriggerParams  (insta360/messages/PhotographyOptions.java:989)
+  message AFTriggerParams {
+    AFTriggerType type = 1;
+    float roi_x        = 2;
+    float roi_y        = 3;
+    float roi_w        = 4;
+    float roi_h        = 5;
+  }
+
+  // java: insta360.messages.PhotographyOptions$ExposureManual  (insta360/messages/PhotographyOptions.java:3037)
+  message ExposureManual {
+    RelateMode relate_mode           = 1;
+    uint32 iso                       = 2;
+    ShutterSpeed shutter_speed       = 3;
+    uint32 video_iso                 = 4;
+    ShutterSpeed video_shutter_speed = 5;
+    uint32 still_iso                 = 6;
+    ShutterSpeed still_shutter_speed = 7;
+
+    // java: insta360.messages.PhotographyOptions$ExposureManual$RelateMode  (insta360/messages/PhotographyOptions.java:3203)
+    enum RelateMode {
+      RELATE_MODE_VIDEO           = 0;
+      RELATE_MODE_STILL           = 1;
+      RELATE_MODE_VIDEO_AND_STILL = 2;
+    }
+  }
+
+  // java: insta360.messages.PhotographyOptions$ExposureOptions  (insta360/messages/PhotographyOptions.java:3717)
+  message ExposureOptions {
+    Program program      = 1;
+    uint32 iso           = 2;
+    double shutter_speed = 3;
+
+    // java: insta360.messages.PhotographyOptions$ExposureOptions$Program  (insta360/messages/PhotographyOptions.java:3815)
+    enum Program {
+      AUTO             = 0;
+      ISO_PRIORITY     = 1;
+      SHUTTER_PRIORITY = 2;
+      MANUAL           = 3;
+      ADAPTIVE         = 4;
+      FULL_AUTO        = 5;
+    }
+  }
+
+  // java: insta360.messages.PhotographyOptions$ExposureParameter  (insta360/messages/PhotographyOptions.java:4093)
+  message ExposureParameter {
+    uint32 iso                 = 1;
+    ShutterSpeed shutter_speed = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$ExposureProg  (insta360/messages/PhotographyOptions.java:4320)
+  message ExposureProg {
+    ProgMode mode              = 1;
+    uint32 iso                 = 2;
+    ShutterSpeed shutter_speed = 3;
+
+    // java: insta360.messages.PhotographyOptions$ExposureProg$ProgMode  (insta360/messages/PhotographyOptions.java:4421)
+    enum ProgMode {
+      PROG_MODE_OFF           = 0;
+      PROG_MODE_ISO           = 1;
+      PROG_MODE_SHUTTER_SPEED = 2;
+    }
+  }
+
+  // java: insta360.messages.PhotographyOptions$GimbalOptions  (insta360/messages/PhotographyOptions.java:5102)
+  message GimbalOptions {
+    GimbalRcSpeed gimbal_rc_speed                   = 1;
+    GimbalFollowSpeed gimbal_follow_speed           = 2;
+    GimbalTrackSensitivity gimbal_track_sensitivity = 3;
+    GimbalMode gimbal_mode                          = 4;
+
+    // java: insta360.messages.PhotographyOptions$GimbalOptions$GimbalFollowSpeed  (insta360/messages/PhotographyOptions.java:5222)
+    enum GimbalFollowSpeed {
+      GIMBAL_FOLLOW_SPEED_UNKNOWN   = 0;
+      GIMBAL_FOLLOW_SPEED_SLOW      = 1;
+      GIMBAL_FOLLOW_SPEED_MIDDLE    = 2;
+      GIMBAL_FOLLOW_SPEED_FAST      = 3;
+      GIMBAL_FOLLOW_SPEED_SENSITIVE = 4;
+    }
+
+    // java: insta360.messages.PhotographyOptions$GimbalOptions$GimbalMode  (insta360/messages/PhotographyOptions.java:5330)
+    enum GimbalMode {
+      GIMBAL_MODE_UNKNOWN    = 0;
+      GIMBAL_MODE_FPV        = 1;
+      GIMBAL_MODE_FOLLOW     = 2;
+      GIMBAL_MODE_PITCH_LOCK = 3;
+      GIMBAL_MODE_FPV_VERT   = 4;
+      GIMBAL_MODE_LOCK       = 5;
+      GIMBAL_MODE_STAB_VERT  = 6;
+    }
+
+    // java: insta360.messages.PhotographyOptions$GimbalOptions$GimbalRcSpeed  (insta360/messages/PhotographyOptions.java:5442)
+    enum GimbalRcSpeed {
+      GIMBAL_RC_SPEED_UNKNOWN = 0;
+      GIMBAL_RC_SPEED_SLOW    = 1;
+      GIMBAL_RC_SPEED_MIDDLE  = 2;
+      GIMBAL_RC_SPEED_FAST    = 3;
+    }
+
+    // java: insta360.messages.PhotographyOptions$GimbalOptions$GimbalTrackSensitivity  (insta360/messages/PhotographyOptions.java:5546)
+    enum GimbalTrackSensitivity {
+      GIMBAL_TS_UNKNOWN = 0;
+      GIMBAL_TS_SLOW    = 1;
+      GIMBAL_TS_MEDIUM  = 2;
+      GIMBAL_TS_FAST    = 3;
+      GIMBAL_TS_AUTO    = 4;
+    }
+  }
+
+  // java: insta360.messages.PhotographyOptions$LongExposureManual  (insta360/messages/PhotographyOptions.java:5964)
+  message LongExposureManual {
+    uint32 iso           = 1;
+    uint32 shutter_speed = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$P3_EXTERN_PARAM  (insta360/messages/PhotographyOptions.java:6280)
+  message P3_EXTERN_PARAM {
+    uint32 evmap_level = 1;
+    uint32 ae_state    = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$RENDER_CENTER_POINT  (insta360/messages/PhotographyOptions.java:7154)
+  message RENDER_CENTER_POINT {
+    float x = 1;
+    float y = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$RENDER_VLP_EULER  (insta360/messages/PhotographyOptions.java:7374)
+  message RENDER_VLP_EULER {
+    uint64 timestamp = 1;
+    float yaw        = 2;
+    float pitch      = 3;
+    float roll       = 4;
+  }
+
+  // java: insta360.messages.PhotographyOptions$RENDER_VLP_FOV  (insta360/messages/PhotographyOptions.java:7658)
+  message RENDER_VLP_FOV {
+    PTZ_FOV current_fov = 1;
+    PTZ_FOV fixed_fov   = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$RENDER_VLP_QUAT  (insta360/messages/PhotographyOptions.java:7902)
+  message RENDER_VLP_QUAT {
+    float quat_x = 1;
+    float quat_y = 2;
+    float quat_z = 3;
+    float quat_w = 4;
+  }
+
+  // java: insta360.messages.PhotographyOptions$RENDER_VLP_RESOLUTION  (insta360/messages/PhotographyOptions.java:8184)
+  message RENDER_VLP_RESOLUTION {
+    VideoResolution pano_res = 1;
+    VideoResolution sub_res  = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$RemainingTimeInfo  (insta360/messages/PhotographyOptions.java:8428)
+  message RemainingTimeInfo {
+    uint32 remaining_time     = 1;
+    CardLocation cardLocation = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$ResRecLimit  (insta360/messages/PhotographyOptions.java:8655)
+  message ResRecLimit {
+    VideoResolution video_res = 1;
+    uint32 limit_time         = 2;
+  }
+
+  // java: insta360.messages.PhotographyOptions$TimeRecInfo  (insta360/messages/PhotographyOptions.java:9219)
+  message TimeRecInfo {
+    uint32 sub_mode             = 1;
+    uint32 timer_mode           = 2;
+    uint32 rec_time             = 3;
+    uint32 interval_photo_couts = 4;
+    uint32 hour                 = 5;
+    uint32 minute               = 6;
+    uint32 second               = 7;
+  }
+
+  // java: insta360.messages.PhotographyOptions$TouchAFSubscribe  (insta360/messages/PhotographyOptions.java:9725)
+  message TouchAFSubscribe {
+    TouchAFSubscribeAction action = 1;
+    float roi_x                   = 2;
+    float roi_y                   = 3;
+    float roi_w                   = 4;
+    float roi_h                   = 5;
+    float weight                  = 6;
+  }
+}

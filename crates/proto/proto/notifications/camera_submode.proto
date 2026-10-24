@@ -1,0 +1,16 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+import "_inferred/insta360/messages/photo_sub_mode.proto";
+import "_inferred/insta360/messages/sensor_device.proto";
+import "_inferred/insta360/messages/video_sub_mode.proto";
+
+// java: insta360.messages.NotifyCameraSubMode  (insta360/messages/NotifyCameraSubMode.java:28)
+message NotifyCameraSubMode {
+  PhotoSubMode photo_submode = 1;
+  VideoSubMode video_submode = 2;
+  SensorDevice sensor        = 3;
+}

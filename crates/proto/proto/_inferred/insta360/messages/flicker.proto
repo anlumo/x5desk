@@ -1,0 +1,13 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// placement inferred: referenced from 2 files
+// java: insta360.messages.Flicker  (insta360/messages/Flicker.java:37)
+enum Flicker {
+  FLICKER_AUTO = 0;
+  FLICKER_60HZ = 1;
+  FLICKER_50HZ = 2;
+}

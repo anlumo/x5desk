@@ -1,0 +1,30 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// java: insta360.messages.LivePhotoSwitch  (insta360/messages/LivePhotoSwitch.java:33)
+message LivePhotoSwitch {
+  ErrorCode error_code         = 1;
+  LivePhotoMode livephoto_type = 2;
+
+  // java: insta360.messages.LivePhotoSwitch$ErrorCode  (insta360/messages/LivePhotoSwitch.java:121)
+  enum ErrorCode {
+    LIVEPHOTO_ERROR_STATUS_NONE                             = 0;
+    LIVEPHOTO_ERROR_STATUS_LOW_BATTERY                      = 1;
+    LIVEPHOTO_ERROR_STATUS_HIGH_TEMPERATURE                 = 2;
+    LIVEPHOTO_ERROR_STATUS_LOW_BATTERY_AND_HIGH_TEMPERATURE = 3;
+    LIVEPHOTO_ERROR_STATUS_SDCARD_FULL                      = 4;
+    LIVEPHOTO_ERROR_STATUS_SDCARD_NOT_FOUND                 = 5;
+    LIVEPHOTO_ERROR_STATUS_SDCARD_IO_ERROR                  = 6;
+  }
+
+  // java: insta360.messages.LivePhotoSwitch$LivePhotoMode  (insta360/messages/LivePhotoSwitch.java:233)
+  enum LivePhotoMode {
+    LIVEPHOTO_NONE    = 0;
+    LIVEPHOTO_OFF     = 1;
+    LIVEPHOTO_ON      = 2;
+    LIVEPHOTO_LOADING = 3;
+  }
+}

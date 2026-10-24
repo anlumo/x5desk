@@ -1,0 +1,44 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// placement inferred: referenced from 4 files
+// java: insta360.messages.CameraCaptureState  (insta360/messages/CameraCaptureState.java:37)
+enum CameraCaptureState {
+  NOT_CAPTURE                = 0;
+  NORMAL_CAPTURE             = 1;
+  TIMELAPSE_CAPTURE          = 2;
+  INTERVAL_SHOOTING_CAPTURE  = 3;
+  SINGLE_SHOOTING            = 4;
+  HDR_SHOOTING               = 5;
+  SELF_TIMER_SHOOTING        = 6;
+  BULLET_TIME_CAPTURE        = 7;
+  SETTINGS_NEW_VALUE         = 8;
+  HDR_CAPTURE                = 9;
+  BURST_SHOOTING             = 10;
+  STATIC_TIMELAPSE_SHOOTING  = 11;
+  INTERVAL_VIDEO_CAPTURE     = 12;
+  TIMESHIFT_CAPTURE          = 13;
+  AEB_NIGHT_SHOOTING         = 14;
+  SINGLE_POWER_PANO_SHOOTING = 15;
+  HDR_POWER_PANO_SHOOTING    = 16;
+  SUPER_NORMAL_CAPTURE       = 17;
+  LOOP_RECORDING_CAPTURE     = 18;
+  STARLAPSE_SHOOTING         = 19;
+  FPV_RECORDING_CAPTURE      = 20;
+  MOVIE_RECORDING_CAPTURE    = 21;
+  SLOW_MOTION_CAPTURE        = 22;
+  SELFIE_RECORDING_CAPTURE   = 23;
+  PURE_RECORDING_CAPTURE     = 24;
+  PRE_RECORD                 = 25;
+  TIME_RECORDING             = 26;
+  TIME_INTERVAL_SHOOTING     = 27;
+  PRE_RECORD_STOP            = 28;
+  DASH_CAM                   = 29;
+  PTZ_RECORD                 = 30;
+  MOSQUITO_SHOOTING          = 31;
+  GIMBAL_PANO_SHOOTING       = 32;
+  CONCERT_VIDEO_CAPTURE      = 33;
+}

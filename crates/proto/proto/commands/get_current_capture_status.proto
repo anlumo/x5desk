@@ -1,0 +1,37 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+import "_inferred/insta360/messages/camera_capture_state.proto";
+import "_inferred/insta360/messages/camera_capture_trigger_source.proto";
+import "_inferred/insta360/messages/capture_state_submode.proto";
+import "interval_rec_info.proto";
+
+// java: insta360.messages.CameraCaptureStatus  (insta360/messages/CameraCaptureStatus.java:33)
+message CameraCaptureStatus {
+  CameraCaptureState state                  = 1;
+  uint32 capture_time                       = 2;
+  uint32 capture_nums                       = 3;
+  string keyTimePointDetail                 = 4;
+  CameraCaptureTriggerSource trigger_source = 5;
+  uint32 interval_time                      = 6;
+  uint32 exposure_mode                      = 7;
+  int32 max_record_time                     = 8;
+  uint32 max_pre_rec_time                   = 9;
+  CaptureStateSubmode capture_submode       = 10;
+  IntervalRecInfo interval_recInfo          = 11;
+  uint32 duration                           = 12;
+  uint32 record_angle                       = 13;
+  uint32 record_inbox                       = 14;
+  uint32 pre_record_time                    = 15;
+  uint32 pre_record_max_time                = 16;
+  uint32 total_exposure_time                = 17;
+  uint32 current_exposure_time              = 18;
+}
+
+// java: insta360.messages.GetCurrentCaptureStatusResp  (insta360/messages/GetCurrentCaptureStatusResp.java:28)
+message GetCurrentCaptureStatusResp {
+  CameraCaptureStatus status = 1;
+}

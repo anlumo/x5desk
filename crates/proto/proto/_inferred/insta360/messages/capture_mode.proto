@@ -1,0 +1,26 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// placement inferred: referenced from 3 files
+// java: insta360.messages.CaptureMode  (insta360/messages/CaptureMode.java:37)
+enum CaptureMode {
+  Capture_MODE_UNKNOWN       = 0;
+  Capture_MODE_NORMAL        = 1;
+  Capture_MODE_BULLETTIME    = 2;
+  Capture_MODE_HDR           = 3;
+  Capture_MODE_TIMESHIFT     = 4;
+  Capture_MODE_SUPER_VIDEO   = 5;
+  Capture_MODE_LOOPRECORDING = 6;
+  Capture_MODE_FPV           = 7;
+  Capture_MODE_MOVIE         = 8;
+  Capture_MODE_SLOWMOTION    = 9;
+  Capture_MODE_SELFIE        = 10;
+  Capture_MODE_PURE_VIDEO    = 11;
+  Capture_MODE_DASH_CAM      = 12;
+  Capture_MODE_PTZ           = 13;
+  Capture_MODE_MOSQUITO      = 14;
+  Capture_MODE_CONCERT_VIDEO = 15;
+}

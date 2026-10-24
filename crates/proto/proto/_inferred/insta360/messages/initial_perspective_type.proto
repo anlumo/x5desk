@@ -1,0 +1,13 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// placement inferred: referenced from 2 files
+// java: insta360.messages.InitialPerspectiveType  (insta360/messages/InitialPerspectiveType.java:37)
+enum InitialPerspectiveType {
+  INITIAL_PERSPECTIVE_UNKNOWN = 0;
+  INITIAL_PERSPECTIVE_NO      = 1;
+  INITIAL_PERSPECTIVE_YES     = 2;
+}

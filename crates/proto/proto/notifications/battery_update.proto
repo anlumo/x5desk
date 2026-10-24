@@ -1,0 +1,12 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+import "battery.proto";
+
+// java: insta360.messages.NotificationBatteryUpdate  (insta360/messages/NotificationBatteryUpdate.java:28)
+message NotificationBatteryUpdate {
+  BatteryInfo battery_status = 1;
+}

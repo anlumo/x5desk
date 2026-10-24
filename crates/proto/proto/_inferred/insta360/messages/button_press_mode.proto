@@ -1,0 +1,35 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// placement inferred: referenced from 5 files
+// java: insta360.messages.ButtonPressMode  (insta360/messages/ButtonPressMode.java:37)
+enum ButtonPressMode {
+  DO_NOT_CHANGE           = 0;
+  DO_NOTHING              = 1;
+  SHUT_DOWN               = 2;
+  TAKE_PICTURE            = 3;
+  CAPTURE                 = 4;
+  SELFTIMER               = 5;
+  TIMELAPSE               = 6;
+  HIGH_FRAME_RATE         = 7;
+  ACTION_TIMELAPSE_VIDEO  = 8;
+  INTERVAL_SHOOTING       = 9;
+  ACTION_INTERVAL_VIDEO   = 10;
+  TAKE_HDR_IMAGE          = 11;
+  ACTION_STATIC_TIMELAPSE = 12;
+  ACTION_CALIBRATE_GYRO   = 13;
+  ACTION_HDR_CAPTURE      = 14;
+  ACTION_TIMESHIFT        = 15;
+  TAKE_BURST_IMAGE        = 16;
+  TAKE_AEB_NIGHT_IMAGE    = 17;
+  SUPER_CAPTURE           = 18;
+  ACTION_LOOPRECORDING    = 19;
+  TAKE_STARLAPSE_IMAGE    = 20;
+  FPV_RECORDING           = 21;
+  MOVIE_RECORDING         = 22;
+  SLOW_MOTION_RECORDING   = 23;
+  SELFIE_RECORDING        = 24;
+}

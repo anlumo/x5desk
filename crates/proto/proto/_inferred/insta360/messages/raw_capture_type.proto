@@ -1,0 +1,18 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// placement inferred: referenced from 3 files
+// java: insta360.messages.RawCaptureType  (insta360/messages/RawCaptureType.java:37)
+enum RawCaptureType {
+  RAW_CAPTURE_TYPE_OFF          = 0;
+  RAW_CAPTURE_TYPE_DNG          = 1;
+  RAW_CAPTURE_TYPE_RAW          = 2;
+  RAW_CAPTURE_TYPE_PURESHOT     = 3;
+  RAW_CAPTURE_TYPE_PURESHOT_RAW = 4;
+  RAW_CAPTURE_TYPE_INSP         = 5;
+  RAW_CAPTURE_TYPE_INSP_RAW     = 6;
+  RAW_CAPTURE_TYPE_IDEAL_RAW    = 7;
+}

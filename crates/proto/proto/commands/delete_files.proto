@@ -1,0 +1,28 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// java: insta360.messages.DeleteFiles  (insta360/messages/DeleteFiles.java:32)
+message DeleteFiles {
+  repeated string uri = 1;
+}
+
+// java: insta360.messages.DeleteFilesResp  (insta360/messages/DeleteFilesResp.java:39)
+message DeleteFilesResp {
+  repeated string fail_uri   = 1;
+  repeated DeleteError error = 2 [packed = false];
+
+  // java: insta360.messages.DeleteFilesResp$DeleteError  (insta360/messages/DeleteFilesResp.java:135)
+  enum DeleteError {
+    UNKNOW       = 0;
+    FILE_PALYING = 1;
+  }
+}
+
+// java: insta360.messages.PBDeleteFilesReq  (insta360/messages/PBDeleteFilesReq.java:31)
+message PBDeleteFilesReq {
+  uint32 start = 1;
+  uint32 end   = 2;
+}

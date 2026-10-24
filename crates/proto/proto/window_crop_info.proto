@@ -1,0 +1,15 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// java: insta360.messages.WindowCropInfo  (insta360/messages/WindowCropInfo.java:31)
+message WindowCropInfo {
+  uint32 src_width    = 1;
+  uint32 src_height   = 2;
+  uint32 dst_width    = 3;
+  uint32 dst_height   = 4;
+  int32 crop_offset_x = 5;
+  int32 crop_offset_y = 6;
+}

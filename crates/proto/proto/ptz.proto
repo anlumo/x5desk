@@ -1,0 +1,134 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// placement inferred: only referenced from this file
+// java: insta360.messages.PTZFactoryType  (insta360/messages/PTZFactoryType.java:37)
+enum PTZFactoryType {
+  PTZ_OPTION_UNKNOWN       = 0;
+  LINK_TEST                = 1;
+  TOUCH_IC                 = 2;
+  AF_CORRECT               = 3;
+  HALL_SWITCH              = 4;
+  RC_KEY                   = 5;
+  SENSOR_SERIAL_GMS586     = 6;
+  PTZ_GIMBAL_MIDPOINT_CALI = 7;
+  PTZ_INTER_DETECT         = 8;
+  PTZ_MC_SELF_TEST         = 9;
+  PTZ_CALIBRATION_MODE     = 10;
+  PTZ_OPTIONS_NUM          = 11;
+}
+
+// placement inferred: only referenced from this file
+// java: insta360.messages.PTZInterDetectType  (insta360/messages/PTZInterDetectType.java:37)
+enum PTZInterDetectType {
+  PTZ_MODE_NULL       = 0;
+  PTZ_MODE_NEAR_CHECK = 1;
+  PTZ_MODE_FAR_CHECK  = 2;
+  PTZ_MODE_FACE_CALIB = 3;
+}
+
+// placement inferred: only referenced from this file
+// java: insta360.messages.PTZInterDetectprogress  (insta360/messages/PTZInterDetectprogress.java:37)
+enum PTZInterDetectprogress {
+  PTZ_PRO_IDLE = 0;
+  PTZ_PRO_BUSY = 1;
+  PTZ_PRO_PASS = 2;
+  PTZ_PRO_NG   = 3;
+}
+
+// placement inferred: only referenced from this file
+// java: insta360.messages.PTZLensType  (insta360/messages/PTZLensType.java:37)
+enum PTZLensType {
+  NOT_INSTALLED           = 0;
+  INSTALLED_ANGLE_DILATOR = 1;
+  INSTALLED_ND_MIRROR     = 2;
+  UNKNOWN                 = 3;
+}
+
+// placement inferred: only referenced from this file
+// java: insta360.messages.PTZRCKeyType  (insta360/messages/PTZRCKeyType.java:37)
+enum PTZRCKeyType {
+  RC_KEY_RESET  = 0;
+  RC_KEY_UP     = 1;
+  RC_KEY_DOWN   = 2;
+  RC_KEY_LEFT   = 3;
+  RC_KEY_RIGHT  = 4;
+  RC_KEY_MIDDLE = 5;
+  TP_KEY_PRESS  = 6;
+}
+
+// java: insta360.messages.GetPtzOptions  (insta360/messages/GetPtzOptions.java:33)
+message GetPtzOptions {
+  repeated PTZFactoryType option_types = 1 [packed = false];
+}
+
+// java: insta360.messages.GetPtzOptionsResp  (insta360/messages/GetPtzOptionsResp.java:34)
+message GetPtzOptionsResp {
+  repeated PTZFactoryType option_types = 1 [packed = false];
+  PtzCtrlInfo value                    = 2;
+}
+
+// java: insta360.messages.PTZInterDetectCaliResult  (insta360/messages/PTZInterDetectCaliResult.java:31)
+message PTZInterDetectCaliResult {
+  uint32 POS          = 1;
+  uint32 INF          = 2;
+  uint32 NEAR         = 3;
+  uint32 INF_DEFAULT  = 4;
+  uint32 NEAR_DEFAULT = 5;
+}
+
+// java: insta360.messages.PtzCtrlInfo  (insta360/messages/PtzCtrlInfo.java:39)
+message PtzCtrlInfo {
+  PTZLINK_INFO ptz_link_info             = 1;
+  uint32 touch_ic_state                  = 2;
+  PTZAF_CORRECT ptz_af_correct           = 3;
+  PTZLensType hall_switch_state          = 4;
+  PTZRCKeyType ptz_rc_key                = 5;
+  string ptz_serial                      = 6;
+  PTZ_GIMBAL_MC ptz_gimbal_midpoint_cali = 7;
+  PTZINTERDECETINFO ptz_inter_detect     = 8;
+  bool ptz_mc_self_test                  = 9;
+  uint32 ptz_cali_mode                   = 10;
+
+  // java: insta360.messages.PtzCtrlInfo$PTZAF_CORRECT  (insta360/messages/PtzCtrlInfo.java:225)
+  message PTZAF_CORRECT {
+    uint32 param1 = 1;
+    uint32 param2 = 2;
+  }
+
+  // java: insta360.messages.PtzCtrlInfo$PTZINTERDECETINFO  (insta360/messages/PtzCtrlInfo.java:441)
+  message PTZINTERDECETINFO {
+    PTZInterDetectType ptz_inter_detect_mode           = 1;
+    PTZInterDetectprogress ptz_inter_detect_progress   = 2;
+    PTZInterDetectCaliResult ptz_inter_detect_cali_res = 3;
+  }
+
+  // java: insta360.messages.PtzCtrlInfo$PTZLINK_INFO  (insta360/messages/PtzCtrlInfo.java:717)
+  message PTZLINK_INFO {
+    string PTZSFVERSION = 1;
+    string PTZUUID      = 2;
+    string PTZSERIAL    = 3;
+    bool PTZIMUINVAILD  = 4;
+    bool PTZTOUCHIC     = 5;
+    string PTZHWVERSION = 6;
+  }
+
+  // java: insta360.messages.PtzCtrlInfo$PTZ_GIMBAL_MC  (insta360/messages/PtzCtrlInfo.java:1089)
+  message PTZ_GIMBAL_MC {
+    repeated double ptz_gimbal_midpoint_list = 3;
+  }
+}
+
+// java: insta360.messages.SetPtzOptions  (insta360/messages/SetPtzOptions.java:34)
+message SetPtzOptions {
+  repeated PTZFactoryType option_types = 1 [packed = false];
+  PtzCtrlInfo value                    = 2;
+}
+
+// java: insta360.messages.SetPtzOptionsResp  (insta360/messages/SetPtzOptionsResp.java:33)
+message SetPtzOptionsResp {
+  repeated PTZFactoryType option_types = 1 [packed = false];
+}

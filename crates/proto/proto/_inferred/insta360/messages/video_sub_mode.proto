@@ -1,0 +1,34 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// placement inferred: referenced from 3 files
+// java: insta360.messages.VideoSubMode  (insta360/messages/VideoSubMode.java:37)
+enum VideoSubMode {
+  VIDEO_NORMAL          = 0;
+  VIDEO_BULLETTIME      = 1;
+  VIDEO_TIMELAPSE       = 2;
+  VIDEO_HDR             = 3;
+  VIDEO_TIMESHIFT       = 4;
+  VIDEO_SUPER           = 5;
+  VIDEO_LOOPRECORDING   = 6;
+  VIDEO_FPV             = 7;
+  VIDEO_MOVIE           = 8;
+  VIDEO_SLOW_MOTION     = 9;
+  VIDEO_SELFIE          = 10;
+  VIDEO_PURE            = 11;
+  VIDEO_LIVEVIEW        = 12;
+  VIDEO_CAMERA_LIVEVIEW = 13;
+  VIDEO_DASH_CAM        = 14;
+  VIDEO_PTZ             = 15;
+  VIDEO_MOSQUITO        = 16;
+  VIDEO_MANUAL          = 17;
+  VIDEO_FOLLOW          = 18;
+  VIDEO_TEMPLATE        = 19;
+  VIDEO_GRAMMY          = 20;
+  VIDEO_HITCHCOCK       = 21;
+  VIDEO_CONCERT         = 22;
+  VIDEO_NONE            = 100;
+}

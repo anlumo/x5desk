@@ -1,0 +1,33 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// java: insta360.messages.MaterialFavoriteReq  (insta360/messages/MaterialFavoriteReq.java:33)
+message MaterialFavoriteReq {
+  uint32 cmd_type    = 1;
+  uint32 index_start = 2;
+  uint32 index_end   = 3;
+  bool is_end_flag   = 4;
+}
+
+// java: insta360.messages.MaterialFavoriteResp  (insta360/messages/MaterialFavoriteResp.java:33)
+message MaterialFavoriteResp {
+  uint32 cmd_type     = 1;
+  bool is_end_flag    = 2;
+  uint32 material_num = 3;
+}
+
+// java: insta360.messages.SetFavorite  (insta360/messages/SetFavorite.java:34)
+message SetFavorite {
+  uint32 material_index  = 1;
+  uint32 favorite_flag   = 2;
+  string material_url    = 3;
+  int64 modify_timestamp = 4;
+}
+
+// java: insta360.messages.SetFavoriteList  (insta360/messages/SetFavoriteList.java:33)
+message SetFavoriteList {
+  repeated SetFavorite set_favorite = 1;
+}

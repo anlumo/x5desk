@@ -1,0 +1,169 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// placement inferred: only referenced from this file
+// java: insta360.messages.CustomFilmBatchState  (insta360/messages/CustomFilmBatchState.java:37)
+enum CustomFilmBatchState {
+  CUSTOM_FILM_BATCH_STATE_UNSPECIFIED = 0;
+  CUSTOM_FILM_BATCH_STATE_PENDING     = 1;
+  CUSTOM_FILM_BATCH_STATE_PROCESSING  = 2;
+  CUSTOM_FILM_BATCH_STATE_COMMITTED   = 3;
+  CUSTOM_FILM_BATCH_STATE_FAILED      = 4;
+}
+
+// placement inferred: only referenced from this file
+// java: insta360.messages.FinishState  (insta360/messages/FinishState.java:37)
+enum FinishState {
+  FINISH_STATE_UNSPECIFIED = 0;
+  FINISH_STATE_DONE        = 1;
+  FINISH_STATE_EMPTY       = 2;
+  FINISH_STATE_FILEERROR   = 3;
+}
+
+// placement inferred: only referenced from this file
+// java: insta360.messages.ResultIndex  (insta360/messages/ResultIndex.java:37)
+enum ResultIndex {
+  RESULT_INDEX_UNSPECIFIED = 0;
+  RESULT_INDEX_APEI        = 1;
+  RESULT_INDEX_CLIP        = 2;
+  RESULT_INDEX_PLANE       = 3;
+}
+
+// placement inferred: only referenced from this file
+// java: insta360.messages.StorageLocation  (insta360/messages/StorageLocation.java:37)
+enum StorageLocation {
+  STORAGE_LOCATION_UNSPECIFIED = 0;
+  STORAGE_LOCATION_INTERNAL    = 1;
+  STORAGE_LOCATION_EXTERNAL    = 2;
+}
+
+// java: insta360.messages.AlgoAnalyzeSubFileInfo  (insta360/messages/AlgoAnalyzeSubFileInfo.java:38)
+message AlgoAnalyzeSubFileInfo {
+  string analyze_file_path             = 1;
+  int64 last_valid_analyze_size        = 2;
+  repeated AnalyzeInfo analysis_result = 3;
+  repeated string segment_file_paths   = 4;
+}
+
+// java: insta360.messages.AnalyzeInfo  (insta360/messages/AnalyzeInfo.java:30)
+message AnalyzeInfo {
+  ResultIndex algo_type     = 1;
+  bool is_finish            = 2;
+  FinishState finish_status = 3;
+}
+
+// java: insta360.messages.CardMemberRef  (insta360/messages/CardMemberRef.java:29)
+message CardMemberRef {
+  string file_path = 1;
+}
+
+// java: insta360.messages.CustomFilmDate  (insta360/messages/CustomFilmDate.java:33)
+message CustomFilmDate {
+  int64 day_key    = 1;
+  bool analyzed    = 2;
+  uint32 rule_mask = 3;
+}
+
+// java: insta360.messages.EditFileInfo  (insta360/messages/EditFileInfo.java:38)
+message EditFileInfo {
+  string file_path                           = 1;
+  FavoriteInfo favorite_info                 = 2;
+  repeated AlgoAnalyzeSubFileInfo algo_infos = 3;
+  StorageLocation storage_location           = 4;
+  FileMeta file_meta                         = 5;
+  bool needs_idle_analysis                   = 6;
+}
+
+// java: insta360.messages.EditFileInfoList  (insta360/messages/EditFileInfoList.java:38)
+message EditFileInfoList {
+  repeated EditFileInfo edit_file_info_list = 1;
+  string device_sn                          = 2;
+  string device_model_name                  = 3;
+  repeated HighlightCard cards              = 4;
+  repeated CustomFilmDate custom_film_dates = 5;
+  string custom_batch_id                    = 6;
+  uint64 custom_batch_generation            = 7;
+  CustomFilmBatchState custom_batch_state   = 8;
+  string custom_batch_card_id               = 9;
+}
+
+// java: insta360.messages.FavoriteInfo  (insta360/messages/FavoriteInfo.java:32)
+message FavoriteInfo {
+  bool playback_is_favorite = 1;
+  int64 modify_timestamp    = 2;
+}
+
+// java: insta360.messages.FileMeta  (insta360/messages/FileMeta.java:37)
+message FileMeta {
+  int64 creation_time_ms      = 1;
+  uint32 duration_ms          = 2;
+  SubMediaType sub_media_type = 3;
+  FileCategory file_category  = 4;
+  uint32 file_scene_info_type = 5;
+
+  // java: insta360.messages.FileMeta$FileCategory  (insta360/messages/FileMeta.java:164)
+  enum FileCategory {
+    FILE_CATEGORY_UNKNOW                    = 0;
+    FILE_CATEGORY_PLANE                     = 1;
+    FILE_CATEGORY_DOUBLE_FISH_EYE_PANO      = 2;
+    FILE_CATEGORY_FISH_EYE                  = 3;
+    FILE_CATEGORY_WIDE_ANGLE                = 4;
+    FILE_CATEGORY_DOUBLE_HALF_FISH_EYE_PANO = 5;
+    FILE_CATEGORY_EQUIRECTANGULAR_PANO      = 6;
+  }
+
+  // java: insta360.messages.FileMeta$SubMediaType  (insta360/messages/FileMeta.java:276)
+  enum SubMediaType {
+    SUB_MEDIA_TYPE_VIDEO_NORMAL           = 0;
+    SUB_MEDIA_TYPE_VIDEO_BULLETTIME       = 1;
+    SUB_MEDIA_TYPE_VIDEO_TIMELAPSE        = 2;
+    SUB_MEDIA_TYPE_PHOTO_NORMAL           = 3;
+    SUB_MEDIA_TYPE_PHOTO_HDR              = 4;
+    SUB_MEDIA_TYPE_PHOTO_INTERVALSHOOTING = 5;
+    SUB_MEDIA_TYPE_VIDEO_HDR              = 6;
+    SUB_MEDIA_TYPE_PHOTO_BURST            = 7;
+    SUB_MEDIA_TYPE_VIDEO_STATIC_TIMELAPSE = 8;
+    SUB_MEDIA_TYPE_VIDEO_TIMESHIFT        = 9;
+    SUB_MEDIA_TYPE_PHOTO_AEB_NIGHT_MODE   = 10;
+    SUB_MEDIA_TYPE_VIDEO_SUPER_NORMAL     = 11;
+    SUB_MEDIA_TYPE_VIDEO_LOOPRECORDING    = 12;
+    SUB_MEDIA_TYPE_PHOTO_STARLAPSE        = 13;
+    SUB_MEDIA_TYPE_PHOTO_PANO_MODE        = 14;
+    SUB_MEDIA_TYPE_VIDEO_FPV              = 15;
+    SUB_MEDIA_TYPE_VIDEO_MOVIE            = 16;
+    SUB_MEDIA_TYPE_VIDEO_SLOWMOTION       = 17;
+    SUB_MEDIA_TYPE_VIDEO_SELFIE           = 18;
+    SUB_MEDIA_TYPE_PHOTO_PURESHOTPLUS     = 19;
+    SUB_MEDIA_TYPE_VIDEO_PURE             = 20;
+    SUB_MEDIA_TYPE_VIDEO_STARLAPSE        = 21;
+    SUB_MEDIA_TYPE_PHOTO_STARTRAIL        = 22;
+    SUB_MEDIA_TYPE_VIDEO_DASH_CAM         = 23;
+    SUB_MEDIA_TYPE_VIDEO_VIR_PTZ          = 24;
+    SUB_MEDIA_TYPE_VIDEO_ORDINARY         = 25;
+    SUB_MEDIA_TYPE_PHOTO_ORDINARY         = 26;
+    SUB_MEDIA_TYPE_VIDEO_IEV              = 27;
+    SUB_MEDIA_TYPE_PHOTO_AEB              = 28;
+    SUB_MEDIA_TYPE_LONG_EXP               = 29;
+    SUB_MEDIA_TYPE_PHOTO_360_PANO         = 30;
+    SUB_MEDIA_TYPE_PHOTO_SUPER_PANO       = 31;
+    SUB_MEDIA_TYPE_PHOTO_GIMBAL_PANO_MODE = 32;
+  }
+}
+
+// java: insta360.messages.HighlightCard  (insta360/messages/HighlightCard.java:41)
+message HighlightCard {
+  string card_id                   = 1;
+  int64 day_timestamp              = 2;
+  repeated CardMemberRef members   = 3;
+  int64 last_video_timestamp       = 4;
+  string cover_page_path           = 5;
+  uint32 rule_mask                 = 6;
+  uint32 sequence_in_day           = 7;
+  int64 card_update_time           = 8;
+  uint32 custom_trigger_reason     = 9;
+  repeated int64 selected_day_keys = 10;
+  string batch_id                  = 11;
+}

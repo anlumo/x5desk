@@ -1,0 +1,13 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// java: insta360.messages.DashCamInfo  (insta360/messages/DashCamInfo.java:31)
+message DashCamInfo {
+  uint64 disk_total_space    = 1;
+  uint64 disk_free_size      = 2;
+  uint64 dash_cam_loop_space = 3;
+  uint64 dash_cam_file_space = 4;
+}

@@ -1,0 +1,58 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// placement inferred: referenced from 2 files
+// java: insta360.messages.GammaMode  (insta360/messages/GammaMode.java:37)
+enum GammaMode {
+  STANDARD        = 0;
+  LOG             = 1;
+  VIVID           = 2;
+  FLAT            = 3;
+  URBAN_1         = 4;
+  URBAN_2         = 5;
+  OCEANBLUE_1     = 6;
+  OCEANBLUE_2     = 7;
+  SNOW_1          = 8;
+  SNOW_2          = 9;
+  BIKING_1        = 10;
+  BIKING_2        = 11;
+  NIGHTLIGHT_1    = 12;
+  NIGHTLIGHT_2    = 13;
+  PORTRAIT        = 14;
+  LEICA_1         = 15;
+  LEICA_2         = 16;
+  FILM            = 17;
+  VINTAGE         = 18;
+  URBAN           = 19;
+  NIGHT           = 20;
+  CLEAR           = 21;
+  GLOW            = 22;
+  SELFIE          = 23;
+  NC_FILM         = 24;
+  NC_FILM_2       = 25;
+  CC_FILM         = 26;
+  CC_FILM_2       = 27;
+  NEON            = 28;
+  VACATION        = 29;
+  BWHC            = 30;
+  LEICA_ETN       = 31;
+  LEICA_BW_HC     = 32;
+  NEGATIVE_FILM   = 33;
+  POSITIVE_FILM   = 34;
+  NEGATIVE_FILM_2 = 35;
+  LEICA_3         = 36;
+  EUROAMERICAN    = 37;
+  JAPANESE        = 38;
+  BLUE            = 39;
+  FROSTED_CCD     = 40;
+  AMBER_CCD       = 41;
+  BLUE_CCD        = 42;
+  STICKER_1       = 43;
+  STICKER_2       = 44;
+  STICKER_3       = 45;
+  NORDIC          = 46;
+  WARM_GOLD       = 47;
+}

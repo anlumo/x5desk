@@ -1,0 +1,52 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// java: insta360.messages.CheckAuthorization  (insta360/messages/CheckAuthorization.java:36)
+message CheckAuthorization {
+  string id                    = 1;
+  InitiatorType initiator_type = 2;
+  string device_id             = 3;
+
+  // java: insta360.messages.CheckAuthorization$InitiatorType  (insta360/messages/CheckAuthorization.java:140)
+  enum InitiatorType {
+    UNKNOWN                = 0;
+    PHONE_IOS              = 1;
+    PHONE_ANDROID          = 2;
+    PHONE_HARMONYOS        = 3;
+    WATCH_WATCHOS          = 16;
+    WATCH_GARMINOS         = 17;
+    WATCH_HARMONYOS        = 18;
+    CYCLOCOMPUTER_GARMINOS = 32;
+    REMOTE_BEACON          = 48;
+  }
+}
+
+// java: insta360.messages.CheckAuthorizationResp  (insta360/messages/CheckAuthorizationResp.java:37)
+message CheckAuthorizationResp {
+  AuthorizationStatus authorization_status = 1;
+  FindmyPairStatus findmy_pair_status      = 2;
+  uint32 findmy_pair_id                    = 3;
+  string device_id                         = 4;
+
+  // java: insta360.messages.CheckAuthorizationResp$AuthorizationStatus  (insta360/messages/CheckAuthorizationResp.java:85)
+  enum AuthorizationStatus {
+    AUTHORIZED                       = 0;
+    UNAUTHORIZED                     = 1;
+    SYSTEMBUSY                       = 2;
+    CONNECTED_BY_OTHER_PHONT         = 3;
+    CONNECTED_BY_OTHER_WATCH         = 4;
+    CONNECTED_BY_OTHER_CYCLOCOMPUTER = 5;
+    CONNECTED_BY_OTHER_REMOTE        = 6;
+    AUTHORIZATION_FAILED_SLEEPING    = 7;
+  }
+
+  // java: insta360.messages.CheckAuthorizationResp$FindmyPairStatus  (insta360/messages/CheckAuthorizationResp.java:269)
+  enum FindmyPairStatus {
+    FINDMY_PAIR_STATUS_NONE   = 0;
+    FINDMY_PAIR_STATUS_UNPAIR = 1;
+    FINDMY_PAIR_STATUS_PAIRED = 2;
+  }
+}

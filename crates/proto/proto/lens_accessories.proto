@@ -1,0 +1,42 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// java: insta360.messages.LensAccessoriesInfo  (insta360/messages/LensAccessoriesInfo.java:33)
+message LensAccessoriesInfo {
+  Lens_Accessories_Type lens_accessories_type = 1;
+
+  // java: insta360.messages.LensAccessoriesInfo$Lens_Accessories_Type  (insta360/messages/LensAccessoriesInfo.java:105)
+  enum Lens_Accessories_Type {
+    LENS_ACCESSORIES_TYPE_UNKOWN                           = 0;
+    LENS_ACCESSORIES_TYPE_STANDARD                         = 1;
+    LENS_ACCESSORIES_TYPE_BLACK_MIST_FILTER                = 2;
+    LENS_ACCESSORIES_TYPE_WIDE_ANGLE_LENS                  = 3;
+    LENS_ACCESSORIES_TYPE_ADJUSTABLE_MACRO_LENS            = 4;
+    LENS_ACCESSORIES_TYPE_ANAMORPHIC_LENS                  = 5;
+    LENS_ACCESSORIES_TYPE_STAR_FILTER                      = 6;
+    LENS_ACCESSORIES_TYPE_ND_FILTER                        = 7;
+    LENS_ACCESSORIES_TYPE_MICEO_LENS                       = 8;
+    LENS_ACCESSORIES_TYPE_MICEO_LENS_5                     = 9;
+    LENS_ACCESSORIES_TYPE_MICEO_LENS_11P6                  = 10;
+    LENS_ACCESSORIES_TYPE_MICEO_LENS_21P5                  = 11;
+    LENS_ACCESSORIES_TYPE_MICEO_LENS_38                    = 12;
+    LENS_ACCESSORIES_TYPE_TELE_PHOTO_LENS_50MM             = 13;
+    LENS_ACCESSORIES_TYPE_WIDE_ANGLE_LENS_180              = 14;
+    LENS_ACCESSORIES_TYPE_TELE_PHOTO_LENS_85MM             = 15;
+    LENS_ACCESSORIES_TYPE_ND_FILTER_ND16                   = 16;
+    LENS_ACCESSORIES_TYPE_ND_FILTER_ND32                   = 17;
+    LENS_ACCESSORIES_TYPE_ND_FILTER_ND64                   = 18;
+    LENS_ACCESSORIES_TYPE_STD_WIDE_ANGLE_BLACK_MIST_FILTER = 19;
+    LENS_ACCESSORIES_TYPE_STD_WIDE_ANGLE_ND16              = 20;
+    LENS_ACCESSORIES_TYPE_STD_WIDE_ANGLE_ND32              = 21;
+    LENS_ACCESSORIES_TYPE_STD_WIDE_ANGLE_ND64              = 22;
+    LENS_ACCESSORIES_TYPE_STD_WIDE_ANGLE_DIVING_HOUSING    = 23;
+    LENS_ACCESSORIES_TYPE_DIVING_HOUSING                   = 24;
+    LENS_ACCESSORIES_TYPE_UV_FILTER                        = 25;
+    LENS_ACCESSORIES_TYPE_TELE_PHOTO_LENS_200MM            = 26;
+    LENS_ACCESSORIES_TYPE_TELE_PHOTO_LENS_90MM             = 27;
+  }
+}

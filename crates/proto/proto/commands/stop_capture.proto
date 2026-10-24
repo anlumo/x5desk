@@ -1,0 +1,22 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+import "_inferred/insta360/messages/capture_mode.proto";
+import "_inferred/insta360/messages/trigger_source.proto";
+import "extra_info.proto";
+import "video.proto";
+
+// java: insta360.messages.StopCapture  (insta360/messages/StopCapture.java:28)
+message StopCapture {
+  ExtraMetadata extra_metadata = 1;
+  CaptureMode mode             = 2;
+  TriggerSource trigger_source = 3;
+}
+
+// java: insta360.messages.StopCaptureResp  (insta360/messages/StopCaptureResp.java:28)
+message StopCaptureResp {
+  Video video = 1;
+}

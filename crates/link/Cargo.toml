@@ -1,0 +1,15 @@
+[package]
+name = "link"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# `Camera::sim`: a simulated camera for tests of the code above the link.
+sim = []
+
+[dependencies]
+proto.workspace = true
+prost.workspace = true
+nusb.workspace = true
+# Already in the tree through nusb: its hotplug watch is a `Stream`.
+futures-core = "0.3"

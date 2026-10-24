@@ -1,0 +1,14 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// placement inferred: referenced from 3 files
+// java: insta360.messages.AuthorizationOperationType  (insta360/messages/AuthorizationOperationType.java:37)
+enum AuthorizationOperationType {
+  BLE_CONNECT                = 0;
+  WIFI_PWD_SETTING           = 1;
+  CLOUD_BIND                 = 2;
+  USB_STORAGE_PASSWD_SETTING = 3;
+}

@@ -1,0 +1,14 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// placement inferred: referenced from 7 files
+// java: insta360.messages.SensorDevice  (insta360/messages/SensorDevice.java:37)
+enum SensorDevice {
+  SENSOR_DEVICE_UNKNOWN = 0;
+  SENSOR_DEVICE_FRONT   = 1;
+  SENSOR_DEVICE_REAR    = 2;
+  SENSOR_DEVICE_ALL     = 3;
+}

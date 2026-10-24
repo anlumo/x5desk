@@ -1,0 +1,24 @@
+// Reconstructed by scripts/wire2proto.py from Square Wire classes (Insta360 app 2.34.6).
+// Field order follows schemaIndex; type order within the file and reserved ranges are not recoverable.
+syntax = "proto3";
+
+package insta360.messages;
+
+// java: insta360.messages.PhoneInfo  (insta360/messages/PhoneInfo.java:35)
+message PhoneInfo {
+  PhoneType device_type = 1;
+  string manufacturer   = 2;
+  string model          = 3;
+  string os_version     = 4;
+
+  // java: insta360.messages.PhoneInfo$PhoneType  (insta360/messages/PhoneInfo.java:155)
+  enum PhoneType {
+    UNKNOWN        = 0;
+    IOS_DEVICE     = 1;
+    ANDROID_DEVICE = 2;
+  }
+}
+
+// java: insta360.messages.PhoneInfoResp  (insta360/messages/PhoneInfoResp.java:25)
+message PhoneInfoResp {
+}
