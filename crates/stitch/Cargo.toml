@@ -1,0 +1,23 @@
+[package]
+name = "stitch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Dual-fisheye -> equirect / perspective for the Insta360 X5 on a shared wgpu device, from NV12 textures"
+
+[dependencies]
+wgpu.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+burn = { workspace = true, features = ["extension", "cubecl"] }
+burn-store.workspace = true
+# names the unfused backend the fusion client resolves tensors to (`raft.rs`)
+burn-cubecl = { version = "0.22", default-features = false }
+# names the pinned storage of a tensor (`ManagedResource`)
+cubecl-runtime = { version = "0.11", default-features = false }
+
+[build-dependencies]
+burn-onnx.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
