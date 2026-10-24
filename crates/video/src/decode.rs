@@ -1,0 +1,851 @@
+//! Vulkan Video decode (H.264 / H.265) into a ring of NV12 images that wgpu samples in place (DPB and output
+//! distinct, no copy). Rules from PLAN.md §2.1:
+//! - An output image's home state is RESOURCE (SHADER_READ_ONLY_OPTIMAL), wgpu's initial state for it. The decode
+//!   queue moves it to VIDEO_DECODE_DST, decodes and moves it back; wgpu only samples it.
+//! - Output images are CONCURRENT across wgpu's family and the decode family; DPB images are private.
+//! - Timeline `done`: the decode of frame f signals f + 1. Timeline `free`: each wgpu submit that samples f waits for
+//!   `done ≥ f + 1` (`Ring::acquire`), the next submit after the last of them signals f + 1 (`Ring::release`); the
+//!   decode into a slot waits for `free` and `done` from the frame that used the slot before.
+use crate::{
+    Error::{self, Bad},
+    Gpu, Result, h264, h265,
+};
+use ash::vk::{self, native::*};
+use std::{
+    ffi::c_void,
+    ptr,
+    sync::{Arc, Mutex},
+};
+use wgpu_hal::api::Vulkan as Vk;
+
+/// Output ring size: how far decoding runs ahead of the consumer. Also the bitstream and command buffer ring.
+pub const OUT: usize = 4;
+/// Most DPB slots: 16 references and the current picture.
+pub const MAXS: usize = 17;
+const BS: u64 = 8 << 20; // bitstream bytes per access unit
+const WAIT: u64 = 50_000_000; // ns decode() waits for its slot before returning Full
+const NV12: vk::Format = vk::Format::G8_B8R8_2PLANE_420_UNORM;
+const RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
+    aspect_mask: vk::ImageAspectFlags::COLOR,
+    base_mip_level: 0,
+    level_count: 1,
+    base_array_layer: 0,
+    layer_count: 1,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Codec {
+    H264,
+    H265,
+}
+
+/// The picture in a DPB slot. `num`: H.264 FrameNum, or LongTermFrameIdx when `long`.
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct Ref {
+    pub live: bool,
+    pub long: bool,
+    pub num: u32,
+    pub poc: [i32; 2],
+}
+
+/// Picture management's answer: the current picture's slot, how many reference slots it listed, its coded size
+/// and display window.
+pub(crate) struct Pic {
+    pub setup: usize,
+    pub n: usize,
+    pub w: u32,
+    pub h: u32,
+    pub view: [u32; 4],
+}
+
+enum St {
+    H264(h264::State),
+    H265(h265::State),
+}
+
+impl St {
+    /// 1: slice, 2: parameter set, 0: anything else
+    fn kind(&self, n: &[u8]) -> u8 {
+        match self {
+            St::H264(_) => match h264::nal_type(n) {
+                1..=5 => 1,
+                7 | 8 => 2,
+                _ => 0,
+            },
+            St::H265(_) => match h265::nal_type(n) {
+                0..=31 => 1,
+                32..=34 => 2,
+                _ => 0,
+            },
+        }
+    }
+
+    fn put(&mut self, n: &[u8]) -> Result<bool> {
+        match self {
+            St::H264(s) => s.put(n),
+            St::H265(s) => s.put(n),
+        }
+    }
+}
+
+/// A decoder's output: the NV12 textures and the two timelines. Share it (`Arc`) with the thread that samples.
+pub struct Ring {
+    tex: Vec<wgpu::Texture>,
+    imgs: Vec<vk::Image>,      // their images (wgpu owns them)
+    views: Vec<vk::ImageView>, // and decode views
+    pub done: vk::Semaphore,
+    pub free: vk::Semaphore,
+    // `free` values: the highest staged, the highest a submit has taken. Staging under the lock keeps at most one,
+    // rising, value in wgpu's list.
+    rel: Mutex<[u64; 2]>,
+    dev: ash::Device,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+}
+
+impl Ring {
+    /// The NV12 texture that holds frame `f`; sample it through R8Unorm / Rg8Unorm plane views.
+    pub fn texture(&self, f: u64) -> &wgpu::Texture {
+        &self.tex[(f % OUT as u64) as usize]
+    }
+
+    /// Frames fully decoded: frames below this are ready to sample without stalling wgpu's queue.
+    pub fn ready(&self) -> u64 {
+        unsafe { self.dev.get_semaphore_counter_value(self.done) }.unwrap_or(0)
+    }
+
+    /// Call before each wgpu submit that samples frame `f` (a frame `decode` returned); a paused view acquires its
+    /// frame again for every redraw. Stages the wait `done ≥ f + 1`. wgpu attaches staged semaphores to the next
+    /// submit on its queue from any thread: when another thread's submit takes the wait first, it still orders this
+    /// one, which comes later in submission order.
+    pub fn acquire(&self, g: &Gpu, f: u64) {
+        if let Some(q) = unsafe { g.queue.as_hal::<Vk>() } {
+            q.add_wait_semaphore(self.done, Some(f + 1), vk::PipelineStageFlags::ALL_COMMANDS);
+        }
+    }
+
+    /// Call after the last submit that samples frame `f`. Stages the signal `free = f + 1`: the decoder may then
+    /// overwrite `f` and every earlier frame, so a consumer holding several frames releases them in order. The next
+    /// submit from any thread carries the signal; with none (an idle UI), `decode` sends it with an empty submit once
+    /// it needs the slot.
+    pub fn release(&self, g: &Gpu, f: u64) {
+        let Some(q) = (unsafe { g.queue.as_hal::<Vk>() }) else {
+            return;
+        };
+        let mut r = self.rel.lock().unwrap_or_else(|e| e.into_inner());
+        if r[0] <= f {
+            // one signal per submit: two in one batch execute in either order, and the values must rise
+            if !q.remove_signal_semaphore(self.free) {
+                r[1] = r[0];
+            }
+            q.add_signal_semaphore(self.free, Some(f + 1));
+            r[0] = f + 1;
+        }
+    }
+
+    /// Sends a release still staged that reaches `free ≥ v` with an empty submit, unless one a submit has taken
+    /// reaches it: wgpu 30 hands the staged semaphores to `vkQueueSubmit` also without command buffers.
+    fn flush(&self, g: &Gpu, v: u64) {
+        let Some(q) = (unsafe { g.queue.as_hal::<Vk>() }) else {
+            return;
+        };
+        let mut r = self.rel.lock().unwrap_or_else(|e| e.into_inner());
+        if r[0] < v || r[1] >= v {
+            return;
+        }
+        // taking it out is the only way to see whether a submit has taken it since
+        if !q.remove_signal_semaphore(self.free) {
+            r[1] = r[0];
+            return;
+        }
+        q.add_signal_semaphore(self.free, Some(r[0]));
+        drop((q, r));
+        g.queue.submit([]);
+    }
+}
+
+impl Drop for Ring {
+    fn drop(&mut self) {
+        unsafe {
+            // operations staged but never submitted must not reach a destroyed semaphore
+            if let Some(q) = self.queue.as_hal::<Vk>() {
+                while q.remove_wait_semaphore(self.done) {}
+                while q.remove_signal_semaphore(self.free) {}
+            }
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            self.dev.destroy_semaphore(self.done, None);
+            self.dev.destroy_semaphore(self.free, None);
+            // the textures (fields) go after their views
+            for &v in &self.views {
+                self.dev.destroy_image_view(v, None);
+            }
+        }
+    }
+}
+
+/// One stream's decoder. Lives on a media thread; `ring` (or the `Deref` to it) gives the textures, `acquire` and
+/// `release`.
+pub struct Decoder {
+    pub ring: Arc<Ring>,
+    /// texture size: the session's maximum coded extent
+    pub w: u32,
+    pub h: u32,
+    /// display window (x, y, w, h) inside the texture: the SPS's cropping of the last picture decoded (or of the
+    /// first SPS before that); it changes only with a new SPS
+    pub view: [u32; 4],
+    /// index of the next frame
+    pub frame: u64,
+    st: St,
+    refs: Vec<Ref>,
+    dpb: Vec<(vk::Image, vk::ImageView)>,
+    mem: Vec<vk::DeviceMemory>, // session, DPB and bitstream memory
+    session: vk::VideoSessionKHR,
+    params: vk::VideoSessionParametersKHR,
+    bs: vk::Buffer,
+    map: *mut u8,
+    slot: usize,  // bitstream bytes per ring slot
+    align: usize, // bitstream size alignment
+    pool: vk::CommandPool,
+    cbs: Vec<vk::CommandBuffer>,
+    offs: Vec<u32>,
+    reset: bool,
+    dev: ash::Device,
+    vq: ash::khr::video_queue::Device,
+}
+
+// `map` points into host-coherent memory that only this decoder touches
+unsafe impl Send for Decoder {}
+
+impl std::ops::Deref for Decoder {
+    type Target = Ring;
+    fn deref(&self) -> &Ring {
+        &self.ring
+    }
+}
+
+fn barrier(
+    img: vk::Image,
+    from: vk::ImageLayout,
+    to: vk::ImageLayout,
+) -> vk::ImageMemoryBarrier<'static> {
+    let rw = vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE;
+    vk::ImageMemoryBarrier::default()
+        .src_access_mask(rw)
+        .dst_access_mask(rw)
+        .old_layout(from)
+        .new_layout(to)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(img)
+        .subresource_range(RANGE)
+}
+
+impl Decoder {
+    /// A decoder for `codec` with the parameter sets in `params` (VPS / SPS / PPS NAL units from `hvcC` / `avcC`
+    /// or in band) and textures of `w` × `h`, grown to the SPS's coded size if that is larger.
+    pub fn new<P: AsRef<[u8]>>(
+        g: &Gpu,
+        codec: Codec,
+        params: &[P],
+        w: u32,
+        h: u32,
+    ) -> Result<Decoder> {
+        let mut st = match codec {
+            Codec::H264 => St::H264(Default::default()),
+            Codec::H265 => St::H265(Default::default()),
+        };
+        for p in params.iter().map(AsRef::as_ref).filter(|p| p.len() > 2) {
+            st.put(p)?;
+        }
+        // profile, coded size, display window and DPB slots (references, the current picture, one spare) from the
+        // first SPS
+        let (idc, cw, ch, view, slots) = match &st {
+            St::H264(s) => {
+                let s = s.sps.iter().flatten().next().ok_or(Bad("no SPS"))?;
+                (
+                    s.profile_idc as u32,
+                    s.width_mbs * 16,
+                    s.height_mbs * 16,
+                    s.view(),
+                    s.max_num_ref_frames as usize + 2,
+                )
+            }
+            St::H265(s) => {
+                let s = s.sps.iter().flatten().next().ok_or(Bad("no SPS"))?;
+                (
+                    s.ptl.profile_idc as u32,
+                    s.width,
+                    s.height,
+                    s.view(),
+                    s.dpbm.max_dec_minus1[s.max_sub as usize] as usize + 2,
+                )
+            }
+        };
+        let (w, h, h265) = (w.max(cw), h.max(ch), codec == Codec::H265);
+        let ext = vk::Extent2D {
+            width: w,
+            height: h,
+        };
+        unsafe {
+            let mut p5 = vk::VideoDecodeH265ProfileInfoKHR::default().std_profile_idc(idc);
+            let mut p4 = vk::VideoDecodeH264ProfileInfoKHR::default()
+                .std_profile_idc(idc)
+                .picture_layout(vk::VideoDecodeH264PictureLayoutFlagsKHR::PROGRESSIVE);
+            let pr = vk::VideoProfileInfoKHR::default()
+                .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
+                .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+                .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8);
+            let pr = [match h265 {
+                true => pr
+                    .video_codec_operation(vk::VideoCodecOperationFlagsKHR::DECODE_H265)
+                    .push_next(&mut p5),
+                false => pr
+                    .video_codec_operation(vk::VideoCodecOperationFlagsKHR::DECODE_H264)
+                    .push_next(&mut p4),
+            }];
+            let list = vk::VideoProfileListInfoKHR::default().profiles(&pr);
+            let list = &list as *const _ as *const c_void;
+
+            let (mut c5, mut c4) = (
+                vk::VideoDecodeH265CapabilitiesKHR::default(),
+                vk::VideoDecodeH264CapabilitiesKHR::default(),
+            );
+            let mut dc = vk::VideoDecodeCapabilitiesKHR::default();
+            let mut caps = vk::VideoCapabilitiesKHR::default();
+            dc.p_next = if h265 {
+                &mut c5 as *mut _ as *mut c_void
+            } else {
+                &mut c4 as *mut _ as *mut c_void
+            };
+            caps.p_next = &mut dc as *mut _ as *mut c_void;
+            (g.vqi.fp().get_physical_device_video_capabilities_khr)(g.pd, &pr[0], &mut caps)
+                .result()?;
+            if !dc
+                .flags
+                .contains(vk::VideoDecodeCapabilityFlagsKHR::DPB_AND_OUTPUT_DISTINCT)
+                || !caps
+                    .flags
+                    .contains(vk::VideoCapabilityFlagsKHR::SEPARATE_REFERENCE_IMAGES)
+            {
+                return Err(Bad("the driver lacks distinct DPB / output images"));
+            }
+            if w > caps.max_coded_extent.width || h > caps.max_coded_extent.height {
+                return Err(Bad("picture larger than the driver decodes"));
+            }
+            let slots = slots.min(caps.max_dpb_slots as usize).min(MAXS);
+            let hd = g.device.as_hal::<Vk>().ok_or(Bad("not a Vulkan device"))?;
+
+            // from here every object belongs to `ring`, `d` or wgpu as soon as it exists: an error drops it
+            let image = |usage, flags, fams: &[u32]| -> Result<(vk::Image, vk::DeviceMemory)> {
+                let mut info = vk::ImageCreateInfo::default()
+                    .flags(flags)
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(NV12)
+                    .extent(vk::Extent3D {
+                        width: w,
+                        height: h,
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(usage)
+                    .initial_layout(vk::ImageLayout::UNDEFINED);
+                if fams.len() > 1 {
+                    info = info
+                        .sharing_mode(vk::SharingMode::CONCURRENT)
+                        .queue_family_indices(fams);
+                }
+                info.p_next = list;
+                let img = g.dev.create_image(&info, None)?;
+                let m = g
+                    .alloc(
+                        g.dev.get_image_memory_requirements(img),
+                        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                    )
+                    .and_then(|m| match g.dev.bind_image_memory(img, m, 0) {
+                        Ok(()) => Ok(m),
+                        Err(e) => {
+                            g.dev.free_memory(m, None);
+                            Err(e.into())
+                        }
+                    });
+                if m.is_err() {
+                    g.dev.destroy_image(img, None);
+                }
+                Ok((img, m?))
+            };
+            let iv = |img, usage| {
+                let mut u = vk::ImageViewUsageCreateInfo::default().usage(usage);
+                let info = vk::ImageViewCreateInfo::default()
+                    .image(img)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(NV12)
+                    .subresource_range(RANGE)
+                    .push_next(&mut u);
+                g.dev.create_image_view(&info, None)
+            };
+            let sem = || {
+                let mut t = vk::SemaphoreTypeCreateInfo::default()
+                    .semaphore_type(vk::SemaphoreType::TIMELINE);
+                g.dev
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default().push_next(&mut t), None)
+            };
+            let mut ring = Ring {
+                tex: vec![],
+                imgs: vec![],
+                views: vec![],
+                done: vk::Semaphore::null(),
+                free: vk::Semaphore::null(),
+                rel: Mutex::new([0; 2]),
+                dev: g.dev.clone(),
+                device: g.device.clone(),
+                queue: g.queue.clone(),
+            };
+            ring.done = sem()?;
+            ring.free = sem()?;
+            let size = wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            };
+            for _ in 0..OUT {
+                let (img, m) = image(
+                    vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR
+                        | vk::ImageUsageFlags::SAMPLED
+                        | vk::ImageUsageFlags::TRANSFER_SRC,
+                    vk::ImageCreateFlags::MUTABLE_FORMAT | vk::ImageCreateFlags::EXTENDED_USAGE,
+                    &[g.gfx, g.dec.family],
+                )?;
+                let desc = wgpu_hal::TextureDescriptor {
+                    label: Some("decoded"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::NV12,
+                    usage: wgpu::TextureUses::RESOURCE | wgpu::TextureUses::COPY_SRC,
+                    memory_flags: wgpu_hal::MemoryFlags::empty(),
+                    view_formats: vec![],
+                };
+                // wgpu owns image and memory from here and frees them once the texture is unused
+                let hal = hd.texture_from_raw(
+                    img,
+                    &desc,
+                    None,
+                    wgpu_hal::vulkan::TextureMemory::Dedicated(m),
+                );
+                let desc = wgpu::TextureDescriptor {
+                    label: Some("decoded"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::NV12,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                };
+                ring.tex.push(g.device.create_texture_from_hal::<Vk>(
+                    hal,
+                    &desc,
+                    wgpu::TextureUses::RESOURCE,
+                ));
+                ring.imgs.push(img);
+                ring.views
+                    .push(iv(img, vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR)?);
+            }
+
+            let mut d = Decoder {
+                ring: Arc::new(ring),
+                w,
+                h,
+                view,
+                frame: 0,
+                st,
+                refs: vec![Ref::default(); slots],
+                dpb: vec![],
+                mem: vec![],
+                session: vk::VideoSessionKHR::null(),
+                params: vk::VideoSessionParametersKHR::null(),
+                bs: vk::Buffer::null(),
+                map: ptr::null_mut(),
+                slot: BS.next_multiple_of(caps.min_bitstream_buffer_offset_alignment.max(1))
+                    as usize,
+                align: caps.min_bitstream_buffer_size_alignment.max(1) as usize,
+                pool: vk::CommandPool::null(),
+                cbs: vec![],
+                offs: vec![],
+                reset: true,
+                dev: g.dev.clone(),
+                vq: g.vq.clone(),
+            };
+            let info = vk::VideoSessionCreateInfoKHR::default()
+                .queue_family_index(g.dec.family)
+                .video_profile(&pr[0])
+                .picture_format(NV12)
+                .max_coded_extent(ext)
+                .reference_picture_format(NV12)
+                .max_dpb_slots(slots as u32)
+                .max_active_reference_pictures(
+                    (slots as u32 - 1).min(caps.max_active_reference_pictures),
+                )
+                .std_header_version(&caps.std_header_version);
+            let (vq, dh) = (g.vq.fp(), g.dev.handle());
+            (vq.create_video_session_khr)(dh, &info, ptr::null(), &mut d.session).result()?;
+            let mut n = 0;
+            (vq.get_video_session_memory_requirements_khr)(dh, d.session, &mut n, ptr::null_mut())
+                .result()?;
+            let mut reqs = vec![vk::VideoSessionMemoryRequirementsKHR::default(); n as usize];
+            (vq.get_video_session_memory_requirements_khr)(
+                dh,
+                d.session,
+                &mut n,
+                reqs.as_mut_ptr(),
+            )
+            .result()?;
+            let mut binds = vec![];
+            for r in &reqs {
+                d.mem
+                    .push(g.alloc(r.memory_requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)?);
+                binds.push(
+                    vk::BindVideoSessionMemoryInfoKHR::default()
+                        .memory_bind_index(r.memory_bind_index)
+                        .memory(d.mem[d.mem.len() - 1])
+                        .memory_size(r.memory_requirements.size),
+                );
+            }
+            (vq.bind_video_session_memory_khr)(dh, d.session, binds.len() as u32, binds.as_ptr())
+                .result()?;
+            for i in 0..slots {
+                let (img, m) = image(
+                    vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR,
+                    vk::ImageCreateFlags::empty(),
+                    &[],
+                )?;
+                d.mem.push(m);
+                d.dpb.push((img, vk::ImageView::null()));
+                d.dpb[i].1 = iv(img, vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR)?;
+            }
+
+            let mut info = vk::BufferCreateInfo::default()
+                .size((d.slot * OUT) as u64)
+                .usage(vk::BufferUsageFlags::VIDEO_DECODE_SRC_KHR);
+            info.p_next = list;
+            d.bs = g.dev.create_buffer(&info, None)?;
+            d.mem.push(g.alloc(
+                g.dev.get_buffer_memory_requirements(d.bs),
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )?);
+            let m = d.mem[d.mem.len() - 1];
+            g.dev.bind_buffer_memory(d.bs, m, 0)?;
+            d.map = g
+                .dev
+                .map_memory(m, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())?
+                as *mut u8;
+            let info = vk::CommandPoolCreateInfo::default()
+                .queue_family_index(g.dec.family)
+                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+            d.pool = g.dev.create_command_pool(&info, None)?;
+            let info = vk::CommandBufferAllocateInfo::default()
+                .command_pool(d.pool)
+                .command_buffer_count(OUT as u32);
+            d.cbs = g.dev.allocate_command_buffers(&info)?;
+            d.params(g)?;
+            Ok(d)
+        }
+    }
+
+    /// Waits until every semaphore in `s` reaches `v`.
+    unsafe fn wait(&self, s: &[vk::Semaphore], v: u64, ns: u64) -> Result<bool> {
+        match unsafe {
+            self.dev.wait_semaphores(
+                &vk::SemaphoreWaitInfo::default()
+                    .semaphores(s)
+                    .values(&[v; 2][..s.len()]),
+                ns,
+            )
+        } {
+            Ok(()) => Ok(true),
+            Err(vk::Result::TIMEOUT) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// (Re)creates the session parameters from every stored parameter set.
+    unsafe fn params(&mut self, g: &Gpu) -> Result<()> {
+        let (vq, dh) = (g.vq.fp(), g.dev.handle());
+        let mut p = vk::VideoSessionParametersKHR::null();
+        let mut info =
+            vk::VideoSessionParametersCreateInfoKHR::default().video_session(self.session);
+        let r = match &self.st {
+            St::H265(s) => {
+                let vps: Vec<_> = s.vps.iter().flatten().map(h265::Vps::std).collect();
+                let sps: Vec<_> = s.sps.iter().flatten().map(h265::Sps::std).collect();
+                let vps_id = |p: &h265::Pps| Some(s.sps.get(p.sps_id as usize)?.as_ref()?.vps_id);
+                let pps: Vec<_> = s
+                    .pps
+                    .iter()
+                    .flatten()
+                    .filter_map(|p| Some(p.std(vps_id(p)?)))
+                    .collect();
+                let (v, q): (Vec<_>, Vec<_>) = (
+                    vps.iter().map(|x| x.raw).collect(),
+                    sps.iter().map(|x| x.raw).collect(),
+                );
+                let add = vk::VideoDecodeH265SessionParametersAddInfoKHR::default()
+                    .std_vp_ss(&v)
+                    .std_sp_ss(&q)
+                    .std_pp_ss(&pps);
+                let c = vk::VideoDecodeH265SessionParametersCreateInfoKHR::default()
+                    .max_std_vps_count(v.len() as u32)
+                    .max_std_sps_count(q.len() as u32)
+                    .max_std_pps_count(pps.len() as u32)
+                    .parameters_add_info(&add);
+                info.p_next = &c as *const _ as *const c_void;
+                unsafe { (vq.create_video_session_parameters_khr)(dh, &info, ptr::null(), &mut p) }
+            }
+            St::H264(s) => {
+                let sps: Vec<_> = s.sps.iter().flatten().map(h264::Sps::std).collect();
+                let pps: Vec<_> = s.pps.iter().flatten().map(h264::Pps::std).collect();
+                let add = vk::VideoDecodeH264SessionParametersAddInfoKHR::default()
+                    .std_sp_ss(&sps)
+                    .std_pp_ss(&pps);
+                let c = vk::VideoDecodeH264SessionParametersCreateInfoKHR::default()
+                    .max_std_sps_count(sps.len() as u32)
+                    .max_std_pps_count(pps.len() as u32)
+                    .parameters_add_info(&add);
+                info.p_next = &c as *const _ as *const c_void;
+                unsafe { (vq.create_video_session_parameters_khr)(dh, &info, ptr::null(), &mut p) }
+            }
+        };
+        r.result()?;
+        if self.params != vk::VideoSessionParametersKHR::null() {
+            // decodes in flight still use the old object
+            unsafe {
+                self.wait(&[self.ring.done], self.frame, u64::MAX)?;
+                (vq.destroy_video_session_parameters_khr)(dh, self.params, ptr::null());
+            }
+        }
+        self.params = p;
+        Ok(())
+    }
+
+    /// Decodes one access unit (the NAL units of one sample: its slices plus any in-band parameter sets) into
+    /// texture `frame % OUT` and returns the frame index. Waits up to 50 ms for the consumer to release that slot
+    /// (`free`; a release no submit has carried yet goes out with an empty one); then returns `Error::Full` with
+    /// nothing changed.
+    pub fn decode(&mut self, g: &Gpu, au: &[&[u8]]) -> Result<u64> {
+        let (f, r) = (self.frame, OUT as u64);
+        let k = (f % r) as usize;
+        // the consumer released frame f - OUT and its decode is done (a frame released without being sampled may
+        // still be decoding): its texture, bitstream slot and command buffer are free
+        let (s, v) = ([self.ring.free, self.ring.done], (f + 1).saturating_sub(r));
+        if f >= r && !unsafe { self.wait(&s, v, 0)? } {
+            self.ring.flush(g, v);
+            if !unsafe { self.wait(&s, v, WAIT)? } {
+                return Err(Error::Full);
+            }
+        }
+        let h265 = matches!(self.st, St::H265(_));
+        let mut dirty = false;
+        for n in au {
+            if n.len() > 2 && self.st.kind(n) == 2 {
+                dirty |= self.st.put(n)?;
+            }
+        }
+        if dirty {
+            unsafe { self.params(g)? };
+        }
+
+        // bitstream: start code + NAL unit for every slice
+        self.offs.clear();
+        let (base, mut o) = (unsafe { self.map.add(k * self.slot) }, 0);
+        for n in au.iter().filter(|n| n.len() > 2 && self.st.kind(n) == 1) {
+            if o + 3 + n.len() + self.align > self.slot {
+                return Err(Bad("access unit too large"));
+            }
+            self.offs.push(o as u32);
+            unsafe {
+                ptr::copy_nonoverlapping([0u8, 0, 1].as_ptr(), base.add(o), 3);
+                ptr::copy_nonoverlapping(n.as_ptr(), base.add(o + 3), n.len());
+            }
+            o += 3 + n.len();
+        }
+        if o == 0 {
+            return Err(Bad("no slices"));
+        }
+        let range = o.next_multiple_of(self.align);
+        unsafe { ptr::write_bytes(base.add(o), 0, range - o) };
+
+        let mut act = [0u8; MAXS];
+        let (mut p5, mut p4): (StdVideoDecodeH265PictureInfo, StdVideoDecodeH264PictureInfo) =
+            unsafe { std::mem::zeroed() };
+        let pic = match &mut self.st {
+            St::H265(s) => s.picture(au, &mut self.refs, &mut p5, &mut act)?,
+            St::H264(s) => s.picture(au, &mut self.refs, &mut p4, &mut act)?,
+        };
+        if pic.w > self.w || pic.h > self.h {
+            return Err(Bad("picture larger than the decoder"));
+        }
+        self.view = pic.view;
+
+        // reference slots: the active ones, then the setup slot (slot index -1 in begin, its index in decode)
+        let ext = vk::Extent2D {
+            width: pic.w,
+            height: pic.h,
+        };
+        let (mut r5, mut r4): (
+            [StdVideoDecodeH265ReferenceInfo; MAXS],
+            [StdVideoDecodeH264ReferenceInfo; MAXS],
+        ) = unsafe { std::mem::zeroed() };
+        let mut d5 = [vk::VideoDecodeH265DpbSlotInfoKHR::default(); MAXS];
+        let mut d4 = [vk::VideoDecodeH264DpbSlotInfoKHR::default(); MAXS];
+        let mut res = [vk::VideoPictureResourceInfoKHR::default(); MAXS];
+        let mut sl = [vk::VideoReferenceSlotInfoKHR::default(); MAXS];
+        for (j, i) in act[..pic.n]
+            .iter()
+            .map(|&i| i as usize)
+            .chain([pic.setup])
+            .enumerate()
+        {
+            let r = self.refs[i];
+            r5[j].PicOrderCntVal = r.poc[0];
+            (r4[j].FrameNum, r4[j].PicOrderCnt) = (r.num as u16, r.poc);
+            r4[j].flags.set_used_for_long_term_reference(r.long as u32);
+            d5[j].p_std_reference_info = &r5[j];
+            d4[j].p_std_reference_info = &r4[j];
+            res[j] = vk::VideoPictureResourceInfoKHR::default()
+                .coded_extent(ext)
+                .image_view_binding(self.dpb[i].1);
+            sl[j] = vk::VideoReferenceSlotInfoKHR {
+                p_next: if h265 {
+                    &d5[j] as *const _ as *const c_void
+                } else {
+                    &d4[j] as *const _ as *const c_void
+                },
+                slot_index: i as i32,
+                p_picture_resource: &res[j],
+                ..Default::default()
+            };
+        }
+        let n = pic.n;
+        let setup = sl[n];
+        sl[n].slot_index = -1;
+        let reset = std::mem::replace(&mut self.reset, false);
+        let i5 = vk::VideoDecodeH265PictureInfoKHR::default()
+            .std_picture_info(&p5)
+            .slice_segment_offsets(&self.offs);
+        let i4 = vk::VideoDecodeH264PictureInfoKHR::default()
+            .std_picture_info(&p4)
+            .slice_offsets(&self.offs);
+        let mut dec = vk::VideoDecodeInfoKHR::default()
+            .src_buffer(self.bs)
+            .src_buffer_offset((k * self.slot) as u64)
+            .src_buffer_range(range as u64)
+            .dst_picture_resource(
+                vk::VideoPictureResourceInfoKHR::default()
+                    .coded_extent(ext)
+                    .image_view_binding(self.ring.views[k]),
+            )
+            .setup_reference_slot(&setup)
+            .reference_slots(&sl[..n]);
+        dec.p_next = if h265 {
+            &i5 as *const _ as *const c_void
+        } else {
+            &i4 as *const _ as *const c_void
+        };
+
+        let (cb, all, d) = (self.cbs[k], vk::PipelineStageFlags::ALL_COMMANDS, &self.dev);
+        let (vq, none) = (g.vq.fp(), vk::DependencyFlags::empty());
+        unsafe {
+            d.begin_command_buffer(
+                cb,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
+            // the output image leaves home (still UNDEFINED before its first decode); the setup slot's old
+            // picture is dead. The global barrier makes the earlier decodes' DPB writes visible to this one's
+            // reference reads: an image barrier's access scopes cover only its own image.
+            let home = match f < r {
+                true => vk::ImageLayout::UNDEFINED,
+                false => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            };
+            let bars = [
+                barrier(
+                    self.ring.imgs[k],
+                    home,
+                    vk::ImageLayout::VIDEO_DECODE_DST_KHR,
+                ),
+                barrier(
+                    self.dpb[pic.setup].0,
+                    vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::VIDEO_DECODE_DPB_KHR,
+                ),
+            ];
+            let mem = [vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+                .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)];
+            d.cmd_pipeline_barrier(cb, all, all, none, &mem, &[], &bars);
+            let begin = vk::VideoBeginCodingInfoKHR::default()
+                .video_session(self.session)
+                .video_session_parameters(self.params)
+                .reference_slots(&sl[..=n]);
+            (vq.cmd_begin_video_coding_khr)(cb, &begin);
+            if reset {
+                (vq.cmd_control_video_coding_khr)(
+                    cb,
+                    &vk::VideoCodingControlInfoKHR::default()
+                        .flags(vk::VideoCodingControlFlagsKHR::RESET),
+                );
+            }
+            (g.vdq.fp().cmd_decode_video_khr)(cb, &dec);
+            (vq.cmd_end_video_coding_khr)(cb, &vk::VideoEndCodingInfoKHR::default());
+            let back = [barrier(
+                self.ring.imgs[k],
+                vk::ImageLayout::VIDEO_DECODE_DST_KHR,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            )];
+            d.cmd_pipeline_barrier(cb, all, all, none, &[], &[], &back);
+            d.end_command_buffer(cb)?;
+
+            let nw = (f >= r) as usize;
+            let (ws, wv, wst) = ([self.ring.free], [v], [all]);
+            let (ss, sv, cbs) = ([self.ring.done], [f + 1], [cb]);
+            let mut tl = vk::TimelineSemaphoreSubmitInfo::default()
+                .wait_semaphore_values(&wv[..nw])
+                .signal_semaphore_values(&sv);
+            let submit = vk::SubmitInfo::default()
+                .wait_semaphores(&ws[..nw])
+                .wait_dst_stage_mask(&wst[..nw])
+                .command_buffers(&cbs)
+                .signal_semaphores(&ss)
+                .push_next(&mut tl);
+            let q = g.dec.queue.lock().unwrap_or_else(|e| e.into_inner());
+            d.queue_submit(*q, &[submit], vk::Fence::null())?;
+        }
+        self.frame += 1;
+        Ok(f)
+    }
+}
+
+impl Drop for Decoder {
+    fn drop(&mut self) {
+        unsafe {
+            // every submitted decode can finish: decode() submits only once its slot is released
+            let _ = self.wait(&[self.ring.done], self.frame, u64::MAX);
+            let (d, vq, dh) = (&self.dev, self.vq.fp(), self.dev.handle());
+            (vq.destroy_video_session_parameters_khr)(dh, self.params, ptr::null());
+            (vq.destroy_video_session_khr)(dh, self.session, ptr::null());
+            for &(img, v) in &self.dpb {
+                d.destroy_image_view(v, None);
+                d.destroy_image(img, None);
+            }
+            d.destroy_buffer(self.bs, None);
+            d.destroy_command_pool(self.pool, None);
+            for &m in &self.mem {
+                d.free_memory(m, None);
+            }
+        }
+    }
+}
