@@ -1,0 +1,20 @@
+[package]
+name = "fx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Image effects on the shared wgpu device: colour adjustments, automatic colour and underwater correction, .cube LUTs and looks, log -> Rec.709, defringe, clarity, overlays"
+
+[dependencies]
+wgpu.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+# sticker / watermark PNGs (inflate, filters, palettes, 16-bit); already in the app through image <- eframe
+png = "0.18"
+# text overlays: TrueType parsing, layout metrics, kerning and the outline rasteriser
+ab_glyph = "0.2"
+# egui's bundled fonts (Ubuntu Light), already in the app through epaint
+epaint_default_fonts = "0.37"
+
+[dev-dependencies]
+pollster.workspace = true
