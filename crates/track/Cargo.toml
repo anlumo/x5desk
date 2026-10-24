@@ -1,0 +1,27 @@
+[package]
+name = "track"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AI tracking, framing, re-identification, face privacy blur and highlights for 360 video with open models (VitTrack, YOLOX, OSNet, YuNet) on the shared wgpu device"
+
+[dependencies]
+wgpu.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+burn = { workspace = true, features = ["extension", "cubecl"] }
+burn-store.workspace = true
+burn-cubecl = { version = "0.22", default-features = false }
+cubecl-runtime = { version = "0.11", default-features = false }
+# owns the device's one burn attachment (`stitch::attach`), shared with RAFT
+stitch.workspace = true
+# highlights: the auto edit is an editor timeline; camera motion from stab's gyro track; audio from the file's AAC
+edit.workspace = true
+stab.workspace = true
+media.workspace = true
+
+[build-dependencies]
+burn-onnx.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true

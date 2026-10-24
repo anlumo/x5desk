@@ -1,0 +1,62 @@
+Networks compiled into crate track by burn-onnx (build.rs), all under permissive licences whose texts are next to
+this file. Checked against onnxruntime on crops of a real frame, two crops per batch against one run each:
+src/tests.rs `vs_onnxruntime`, largest output differences 1.6e-6 (VitTrack), 2.2e-4 (YOLOX-nano, outputs up to 3.2),
+1.1e-5 (OSNet-AIN, up to 12), 8.8e-6 (YuNet, up to 8.4).
+
+object_tracking_vittrack_2023sep.onnx
+  What: VitTrack, single-object tracker (OSTrack-style one-stream ViT), template 1x3x128x128 + search 1x3x256x256 ->
+        confidence 1x1x16x16, box size 1x2x16x16, box offset 1x2x16x16. Contributed to the OpenCV model zoo by Pengyu
+        Liu (GSoC 2023); OpenCV's cv::TrackerVit (modules/video/src/tracking/tracker_vit.cpp) is the reference for
+        pre- and post-processing (BGR, ImageNet mean / std, Hann window on the confidence).
+  Source: https://github.com/opencv/opencv_zoo/tree/main/models/object_tracking_vittrack
+          (downloaded from the zoo's mirror https://huggingface.co/opencv/object_tracking_vittrack/resolve/main/object_tracking_vittrack_2023sep.onnx)
+  Licence: Apache-2.0 ("All files in this directory are licensed under Apache 2.0 License", the directory's README
+           and LICENSE) -> LICENSE-vittrack
+  sha256: 2990f0b7cd44d92afa48cd97db6de7be113fc1d9594fddb74e2725c10478e91d
+
+yolox_nano.onnx
+  What: YOLOX-nano (0.91 M parameters), COCO 80 classes, 1x3x416x416 BGR 0..255 (no normalisation, YOLOX >= 0.1.1rc0)
+        -> 1x3549x85 (x, y, log w, log h in grid cells of strides 8 / 16 / 32, objectness, class probabilities).
+        Trained on COCO 2017 by Megvii.
+  Source: https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_nano.onnx
+  Licence: Apache-2.0, Copyright (c) 2021-2022 Megvii Inc. (repository LICENSE) -> LICENSE-yolox
+  sha256: c789161ed43c8269fcd4e67c67eeeb4e80c622da2eb296a20bc6007bd18a0b7d
+  Considered: yolox_tiny.onnx from the same release (sha256 427cc366d34e27ff7a03e2899b5e3671425c262ea2291f88bb942bc1cc70b0f7,
+  19.3 MB): on v627 frame 300 it found 25 people against nano's 21, at ~60 ms against ~17 ms per 8 tiles; not worth
+  5.5x the size.
+
+osnet_ain_x1_0_msmt17.onnx
+  What: OSNet-AIN x1.0 person re-identification (Zhou et al., "Learning Generalisable Omni-Scale Representations
+        for Person Re-Identification", TPAMI 2021), 2.17 M parameters, trained by the authors on MSMT17:
+        1x3x256x128 RGB, ImageNet mean / std -> 512-d feature (eval mode: after the fc layer, before the classifier).
+  Source: the authors' weights https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_ain_x1_0_msmt17_256x128_amsgrad_ep50_lr0.0015_coslr_b64_fb10_softmax_labsmth_flip_jitter.pth
+          (sha256 8a07e8da38946f7cee37f4561617bf8b6d2fe8f3a4027852893ea092e46d919f), network code
+          torchreid/models/osnet_ain.py of https://github.com/KaiyangZhou/deep-person-reid (master, 2026-10-23).
+          Exported by us: osnet_ain_x1_0(num_classes=4101) with the checkpoint loaded strictly, eval(), classifier
+          replaced by Identity, torch.onnx.export(1x3x256x128, opset 17, dynamo=False, dynamic batch axis) with torch
+          2.14.1 (CPU); onnxruntime matches torch to 3.1e-5 (outputs up to 9.4).
+  Licence: MIT (torchreid repository LICENSE, Copyright (c) 2018 Kaiyang Zhou; the Hugging Face repository is tagged
+           MIT too) -> LICENSE-osnet. The training data (MSMT17) is a research dataset with its own terms; the
+           weights are published under MIT by their authors.
+  sha256: 72ebea6b22435b84643ef4c2f825f338f5219b7f7e30ddaaa48db57016fe36bb
+  Considered: osnet_x0_25 from the same repository (0.2 M parameters, 0.9 MB exported, MSMT17 combineall): on v627's
+  blank test it found the subject again on 4 of 5 gaps against OSNet-AIN's 5 of 5. Tencent Youtu's person re-ID
+  from the OpenCV zoo (Apache-2.0) is 107 MB.
+
+face_detection_yunet_2023mar.onnx
+  What: YuNet face detector (Wu et al., "YuNet: A Tiny Millisecond-level Face Detector", 2023), 53 k parameters,
+        1x3x640x640 BGR 0..255 -> per stride 8 / 16 / 32: class and objectness scores (sigmoid), box (x, y offsets
+        and log w, h in cells), five landmarks. OpenCV's FaceDetectorYN (modules/objdetect/src/face_detect.cpp) is the
+        reference for the decoding.
+  Source: https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet
+          (downloaded from https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx)
+  Licence: MIT ("All files in this directory are licensed under MIT License", Copyright (c) 2020 Shiqi Yu) ->
+           LICENSE-yunet
+  sha256: 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
+  Considered for licence plates: LPD-YuNet from the same zoo (license_plate_detection_lpd_yunet_2023mar.onnx, Apache-2.0,
+  1.03 M parameters, sha256 6d4978a7b6d25514d5e24811b82bfb511d166bdd8ca3b03aa63c1623d4d039c7), trained on Chinese
+  plates. Its outputs matched onnxruntime (1.1e-5), but on two Wikimedia Commons photos placed in an equirect as
+  views 15°, 30° and 60° wide it found the EU plate on a car only at 60° (score 0.38; the zoo's threshold is 0.8) and
+  a board of three black plates only at 15° (0.32 to 0.59), and on the samples (no plate near) it scored columns and
+  façades at 0.6 to 0.74. Not included.
+
