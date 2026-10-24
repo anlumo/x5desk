@@ -217,8 +217,11 @@ impl Sess {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Camera, Link, code, msg, wire::hex};
-    use std::sync::mpsc::{self, Receiver};
+    use crate::{Camera, Link, Pending, Step, code, msg, wire::hex};
+    use std::{
+        sync::mpsc::{self, Receiver},
+        thread,
+    };
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
     const UUID: &str = "01234567-89ab-cdef-0123-456789abcdef";
@@ -625,5 +628,150 @@ mod tests {
         };
         m.notify(code::WIFI_STATUS, &res.encode_to_vec());
         assert_eq!(r.wait().unwrap(), res);
+    }
+
+    /// The wake-up's session (`crate::session`) on its helper thread, its steps on the receiver.
+    fn wake(m: &Sim, t: Duration) -> (Pending<()>, Receiver<Step>) {
+        let (tx, rx) = mpsc::channel();
+        let p =
+            m.c.flow(move |c| crate::session(c, UUID, t, &mut |s| drop(tx.send(s))));
+        (p, rx)
+    }
+
+    fn body(f: &[u8]) -> &[u8] {
+        &f[16..]
+    }
+
+    #[test]
+    fn wake_up() {
+        // An asleep camera (CHECK_AUTHORIZATION 7) that wakes on the second try; its 8215 came early.
+        let mut m = sim(Some(false));
+        m.notify(code::WIFI_START, &[]);
+        let (p, steps) = wake(&m, Duration::from_secs(5));
+        // CHECK_TYPE, byte for byte as PROTOCOL.md §1.4.
+        m.step();
+        assert_eq!(
+            m.out(),
+            [hex(
+                "19 00 00 00 04 00 00 08 00 02 01 00 00 80 00 00 08 30 08 0f 08 0b 08 c6 01"
+            )]
+        );
+        let id = pb::Options {
+            camera_type: "Insta360 X5".into(),
+            ..Default::default()
+        };
+        m.ok(
+            1,
+            &pb::GetOptionsResp {
+                option_types: vec![48],
+                value: Some(id.clone()),
+            },
+        );
+        // SYNCING_OPTIONS: the BLE option list alone; the app's GET_CURRENT_CAPTURE_STATUS stays local for an X5.
+        m.step();
+        let o = m.out();
+        assert_eq!(o.len(), 1);
+        assert_eq!(&o[0][7..9], &code::GET_OPTIONS.to_le_bytes());
+        let q = pb::GetOptions::decode(body(&o[0])).unwrap();
+        assert_eq!(q.option_types, crate::SYNC);
+        let on = pb::Options {
+            bt_wakeup_sw: 1,
+            ..Default::default()
+        };
+        m.ok(
+            2,
+            &pb::GetOptionsResp {
+                option_types: vec![97],
+                value: Some(on.clone()),
+            },
+        );
+        // CHECK_AUTHORIZATION, id 3 straight after the sync: asleep, asked again after 2 s, then authorized (empty
+        // body).
+        let mut auth = hex(
+            "38 00 00 00 04 00 00 27 00 02 03 00 00 80 00 00 0a 24 30 31 32 33 34 35 36 37 2d 38 39 61 62 \
+             2d 63 64 65 66 2d 30 31 32 33 2d 34 35 36 37 38 39 61 62 63 64 65 66 10 02",
+        );
+        m.step(); // waiter for 8209
+        m.step();
+        assert_eq!(m.out(), [auth.clone()]);
+        m.ok(
+            3,
+            &pb::CheckAuthorizationResp {
+                authorization_status: 7,
+                ..Default::default()
+            },
+        );
+        let t0 = Instant::now();
+        m.step();
+        m.step();
+        assert!(t0.elapsed() >= Duration::from_millis(1900));
+        auth[10] = 4;
+        assert_eq!(m.out(), [auth]);
+        m.ok(4, &());
+        // The 8215 from before counts.
+        m.step();
+        p.wait().unwrap();
+        let s: Vec<_> = steps.try_iter().collect();
+        assert!(
+            matches!(
+                &s[..],
+                [
+                    Step::Options(a),
+                    Step::Synced(Ok(b)),
+                    Step::Auth(7),
+                    Step::Auth(0),
+                    Step::Ready
+                ] if *a == id && *b == on
+            ),
+            "{s:?}"
+        );
+
+        // No 8215 within the time: OPEN_CAMERA_WIFI, then a fresh 8215.
+        let mut m = sim(Some(false));
+        m.s.id = 10;
+        let (p, steps) = wake(&m, Duration::from_millis(50));
+        m.step();
+        m.ok(11, &pb::GetOptionsResp::default());
+        m.step();
+        m.ok(12, &pb::GetOptionsResp::default());
+        m.step();
+        m.step();
+        m.ok(13, &());
+        m.step(); // waiter for 8215
+        m.out();
+        thread::sleep(Duration::from_millis(60));
+        m.s.expire(Instant::now());
+        m.step(); // fresh waiter for 8215
+        m.step();
+        assert_eq!(
+            m.out(),
+            [hex("10 00 00 00 04 00 00 21 00 02 0e 00 00 80 00 00")]
+        );
+        m.ok(14, &());
+        m.notify(code::WIFI_START, &[]);
+        p.wait().unwrap();
+        let s: Vec<_> = steps.try_iter().collect();
+        assert!(
+            matches!(&s[2..], [Step::Auth(0), Step::OpenWifi, Step::Ready]),
+            "{s:?}"
+        );
+
+        // Held by another phone: no retry.
+        let mut m = sim(Some(false));
+        let (p, _steps) = wake(&m, Duration::from_secs(5));
+        m.step();
+        m.ok(1, &pb::GetOptionsResp::default());
+        m.step();
+        m.ok(2, &pb::GetOptionsResp::default());
+        m.step();
+        m.step();
+        m.ok(
+            3,
+            &pb::CheckAuthorizationResp {
+                authorization_status: 3,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(p.wait(), Err(Error::Unauthorized(3))));
     }
 }

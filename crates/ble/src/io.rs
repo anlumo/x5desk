@@ -31,6 +31,8 @@ use tokio::{
 pub(crate) enum Cmd {
     Scan(bool, SyncSender<Result<()>>),
     Connect(Dev, SyncSender<Result<Camera>>),
+    /// The first advertisement of the X5 with this serial (or suffix) before the deadline, scanning meanwhile.
+    Find(String, std::time::Instant, SyncSender<Result<Adv>>),
 }
 
 /// Connect timeout (the app: 20 s).
@@ -85,49 +87,86 @@ pub(crate) fn run(
         };
         let _ = ready.send(Ok(()));
         let mut js = JoinSet::new();
+        // The radio scans while the caller asked for it (`on`) or a find waits; only the caller gets `Seen`.
         let mut on = false;
-        // BlueZ: our own LE-only discovery instead of btleplug's (bluez.rs).
-        #[cfg(target_os = "linux")]
-        let mut le = None;
+        let mut finds: Vec<(String, std::time::Instant, SyncSender<Result<Adv>>)> = vec![];
+        let mut sc: Radio = None;
         let mut ids = Ids::new();
         loop {
+            let dl = finds.iter().map(|f| f.1).min();
             tokio::select! {
                 c = cmds.recv() => match c {
                     Some(Cmd::Scan(s, tx)) => {
-                        if s && !on {
-                            ids.clear()
-                        }
-                        #[cfg(target_os = "linux")]
-                        let r = if s {
-                            scan(&a).await.map(|x| drop(le.replace(x)))
-                        } else {
-                            le.take();
-                            Ok(())
-                        };
-                        #[cfg(not(target_os = "linux"))]
-                        let r = if s { a.start_scan(ScanFilter::default()).await } else { a.stop_scan().await }
-                            .map_err(os);
+                        let r = radio(&a, &mut sc, s || !finds.is_empty(), &mut ids).await;
                         on = s && r.is_ok();
                         let _ = tx.send(r);
                     }
+                    Some(Cmd::Find(k, t, tx)) => match radio(&a, &mut sc, true, &mut ids).await {
+                        Ok(()) => finds.push((k, t, tx)),
+                        Err(e) => drop(tx.send(Err(e))),
+                    },
                     Some(Cmd::Connect(d, tx)) => drop(js.spawn(conn(a.clone(), d, ev.clone(), tx))),
                     None => break,
                 },
-                Some(e) = es.next() => if on {
-                    seen(&a, e, &mut ids, &ev).await
+                Some(e) = es.next() => if sc.is_some() && let Some(v) = seen(&a, e, &mut ids).await {
+                    for f in finds.extract_if(.., |f| v.is(&f.0)) {
+                        let _ = f.2.send(Ok(v.clone()));
+                    }
+                    if on {
+                        let _ = ev.send(Event::Seen(v));
+                    }
                 },
+                _ = async {
+                    match dl {
+                        Some(t) => time::sleep_until(t.into()).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let now = std::time::Instant::now();
+                    for f in finds.extract_if(.., |f| f.1 <= now) {
+                        let _ = f.2.send(Err(Error::Timeout));
+                    }
+                }
                 Some(_) = js.join_next(), if !js.is_empty() => {}
             }
+            if !on && finds.is_empty() {
+                let _ = radio(&a, &mut sc, false, &mut ids).await;
+            }
         }
-        #[cfg(target_os = "linux")]
-        drop(le);
-        #[cfg(not(target_os = "linux"))]
-        if on {
-            let _ = a.stop_scan().await;
-        }
+        let _ = radio(&a, &mut sc, false, &mut ids).await;
         // Cameras outlive the `Ble` handle; the thread ends with the last one.
         while js.join_next().await.is_some() {}
     })
+}
+
+/// A running scan. BlueZ: our own LE-only discovery instead of btleplug's (bluez.rs), which ends when dropped.
+#[cfg(target_os = "linux")]
+type Radio = Option<crate::bluez::Scan>;
+#[cfg(not(target_os = "linux"))]
+type Radio = Option<()>;
+
+/// Starts or stops scanning; a start forgets what the last scan learnt about each address.
+async fn radio(a: &Adapter, r: &mut Radio, s: bool, ids: &mut Ids) -> Result<()> {
+    if s == r.is_some() {
+        return Ok(());
+    }
+    if !s {
+        #[cfg(not(target_os = "linux"))]
+        a.stop_scan().await.map_err(os)?;
+        *r = None;
+        return Ok(());
+    }
+    ids.clear();
+    #[cfg(target_os = "linux")]
+    {
+        *r = Some(scan(a).await?);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        a.start_scan(ScanFilter::default()).await.map_err(os)?;
+        *r = Some(());
+    }
+    Ok(())
 }
 
 /// Starts an LE-only discovery on btleplug's adapter.
@@ -141,7 +180,8 @@ async fn scan(a: &Adapter) -> Result<crate::bluez::Scan> {
         .map_err(os)?
 }
 
-async fn seen(a: &Adapter, e: CentralEvent, ids: &mut Ids, ev: &Sender<Event>) {
+/// The advertisement behind an adapter event, folded into what the scan knows.
+async fn seen(a: &Adapter, e: CentralEvent, ids: &mut Ids) -> Option<Adv> {
     use CentralEvent::*;
     let id = match e {
         DeviceDiscovered(id)
@@ -150,14 +190,9 @@ async fn seen(a: &Adapter, e: CentralEvent, ids: &mut Ids, ev: &Sender<Event>) {
         | ServiceDataAdvertisement { id, .. }
         | ServicesAdvertisement { id, .. }
         | RssiUpdate { id, .. } => id,
-        _ => return,
+        _ => return None,
     };
-    let Ok(p) = a.peripheral(&id).await else {
-        return;
-    };
-    let Ok(Some(q)) = p.properties().await else {
-        return;
-    };
+    let q = a.peripheral(&id).await.ok()?.properties().await.ok()??;
     let mut mfr: Vec<_> = q.manufacturer_data.into_iter().collect();
     mfr.sort_unstable_by_key(|m| m.0);
     let mut v = Adv {
@@ -174,7 +209,7 @@ async fn seen(a: &Adapter, e: CentralEvent, ids: &mut Ids, ev: &Sender<Event>) {
         x5name: None,
     };
     fold(ids, &mut v);
-    let _ = ev.send(Event::Seen(v));
+    Some(v)
 }
 
 /// The camera service and its write / notify characteristics (ble.md §4.6): walking the characteristics, the

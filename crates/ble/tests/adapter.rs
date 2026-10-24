@@ -1,4 +1,5 @@
-//! Needs this machine's Bluetooth adapter; run with `--ignored`. Only scans: nothing is connected or written.
+//! Needs this machine's Bluetooth adapter; run with `--ignored`. Scans and advertises: nothing is connected or
+//! written.
 
 use ble::{Ble, Dev, Error, Event};
 use std::time::{Duration, Instant};
@@ -27,4 +28,15 @@ fn scan() {
     // A device the adapter does not know: refused before any radio work.
     let d = Dev("hci0/dev_00_00_00_00_00_00".into());
     assert!(matches!(b.connect(&d).wait(), Err(Error::NoDevice)));
+}
+
+/// The wake advertisement (flags and the Apple record, the whole 31 bytes) for a made-up token: BlueZ takes it and
+/// the adapter advertises for a second. Nothing is scanned or connected; no camera has this token.
+#[test]
+#[ignore]
+#[cfg(target_os = "linux")]
+fn advertise() {
+    let w = ble::wake("ZZZZZZ").unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    drop(w);
 }

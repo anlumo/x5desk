@@ -2,7 +2,13 @@
 //!
 //! ```text
 //! x5ble scan [secs]                  every device advertising for secs (10), X5s marked
-//! x5ble wake <suffix> [secs]         the wake advertisement for secs (30), scanning for "X5 <suffix>"
+//! x5ble wake <suffix> [uuid|-] [hold] [pause] [standby]
+//!                                    the app's wake-up (`Ble::wake_up`): wake advertisement, find "X5 <suffix>",
+//!                                    hold secs (0) with only the advertisement up, connect, the app's session up to
+//!                                    "camera ready" (asleep: CHECK_AUTHORIZATION 7, asked again), pause secs (0)
+//!                                    after each step; `standby` then sends SET_STANDBY_MODE{WAKE_UP} (56), which the
+//!                                    app never sends. Prints each step and each change in the camera's
+//!                                    advertisement with its time, then keeps the link 10 s for notifications
 //! x5ble info <suffix|address>        find "X5 <suffix>" (30 s; an address `AA:BB:…` skips the scan), connect, print
 //!                                    the link and identity, read the Wi-Fi info (password masked), disconnect
 //! x5ble connect <suffix|address> [uuid] [wakeup]
@@ -10,14 +16,14 @@
 //!                                    `bt_wakeup_sw` (for `wake`), wait for the AP and print its credentials
 //! ```
 //!
-//! `uuid` (or `X5_UUID`) is the persistent client id; without one a fresh id is made and printed.
+//! `uuid` (or `X5_UUID`, also for `-`) is the persistent client id; without one a fresh id is made and printed.
 //!
 //! Every way out of `connect` (success, error, Ctrl-C or SIGTERM, panic) drops the camera handle, which disconnects
 //! before the process ends.
 
-use ble::{Adv, Ble, Dev, Event, Note, Pending};
+use ble::{Adv, Ble, Dev, Event, Note, Pending, Step};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     hash::{BuildHasher, RandomState},
     sync::{
         atomic::{AtomicBool, Ordering::Relaxed},
@@ -71,7 +77,17 @@ fn main() -> R {
         |i: usize, d| Duration::from_secs(a.get(i).and_then(|s| s.parse().ok()).unwrap_or(d));
     match (a.first().map(|s| s.as_str()), a.get(1)) {
         (Some("scan"), _) => scan(secs(1, 10)),
-        (Some("wake"), Some(s)) => wake(s, secs(2, 30)),
+        (Some("wake"), Some(s)) => {
+            let u = a.get(2).filter(|u| *u != "-").cloned();
+            let u = u.or_else(|| std::env::var("X5_UUID").ok());
+            wake(
+                s,
+                u.unwrap_or_else(uuid),
+                secs(3, 0),
+                secs(4, 0),
+                a.get(5).is_some_and(|x| x == "standby"),
+            )
+        }
         (Some("info"), Some(s)) => connect(s, None),
         (Some("connect"), Some(s)) => {
             let u = a.get(2).cloned().or_else(|| std::env::var("X5_UUID").ok());
@@ -84,8 +100,8 @@ fn main() -> R {
             )
         }
         _ => Err(
-            "usage: x5ble scan [secs] | wake <suffix> [secs] | info <suffix|address> \
-             | connect <suffix|address> [uuid] [wakeup]"
+            "usage: x5ble scan [secs] | wake <suffix> [uuid|-] [hold] [pause] [standby] \
+             | info <suffix|address> | connect <suffix|address> [uuid] [wakeup]"
                 .into(),
         ),
     }
@@ -109,6 +125,14 @@ fn line(a: &Adv) -> String {
     );
     for (c, d) in &a.mfr {
         s += &format!(" mfr {c:04x}:[{}]", hex(d));
+    }
+    if let Some(p) = a.proto() {
+        let w = match p.wifi {
+            0 => "off".into(),
+            255 => "not started".into(),
+            t => format!("up {t} s"),
+        };
+        s += &format!(" (wifi {w}, password v{})", p.pwd);
     }
     if let Some(b) = a.beacon() {
         s += &format!(" ibeacon {}/{}", b.major, b.minor);
@@ -171,31 +195,94 @@ fn find(b: &Ble, ev: &Receiver<Event>, s: &str, t: Duration) -> Result<Adv, E> {
     r
 }
 
-fn wake(s: &str, t: Duration) -> R {
+fn wake(s: &str, uuid: String, hold: Duration, pause: Duration, standby: bool) -> R {
     let (b, ev) = Ble::open()?;
     let t0 = Instant::now();
-    let w = ble::wake(s)?;
-    println!(
-        "advertising {:.2} s after start",
-        t0.elapsed().as_secs_f64()
-    );
-    // The camera keeps advertising in standby, so seeing it proves nothing: like the app
-    // (BleConnectPresenter), keep the wake advertisement up until the connect is done.
-    let a = find(&b, &ev, s, t)?;
-    let c = b.connect(&a.dev).wait();
-    println!(
-        "connect after {:.2} s: {}",
-        t0.elapsed().as_secs_f64(),
-        c.as_ref().map_or_else(|e| e.to_string(), |_| "ok".into())
-    );
-    drop(w);
-    let o = c?.options(&[11]).wait()?;
-    println!(
-        "answers after {:.2} s, battery {:?}",
-        t0.elapsed().as_secs_f64(),
-        o.battery_info
-    );
+    let at = move || t0.elapsed().as_secs_f64();
+    // A scan of our own beside the flow's: every change in the camera's advertisement (the Wi-Fi seconds count
+    // down, so about one line a second) and every notification.
+    b.scan(true).wait()?;
+    let k = s.to_string();
+    thread::spawn(move || {
+        let (mut mfr, mut names) = (vec![], BTreeSet::new());
+        for e in ev {
+            match e {
+                Event::Seen(a) if a.is(&k) => {
+                    if a.mfr != mfr || names.insert(a.name.clone()) {
+                        println!("{:.2} s: {}", at(), line(&a));
+                        mfr = a.mfr;
+                    }
+                }
+                Event::Note(_, Note::Other(c, d)) => {
+                    println!("{:.2} s: note {c} [{}]", at(), hex(&d))
+                }
+                Event::Note(_, n) => println!("{:.2} s: note {n:?}", at()),
+                Event::Closed(_, e) => println!("{:.2} s: link lost: {e}", at()),
+                Event::Seen(_) => {}
+            }
+        }
+    });
+    let f = b.wake_up(s, &uuid, hold, Duration::from_secs(30), move |x| {
+        println!("{:.2} s: {}", at(), step(&x));
+        thread::sleep(pause)
+    });
+    // Not interruptible: the flow owns the link until it ends.
+    let c = f.wait();
+    if let Err(e) = &c {
+        println!("{:.2} s: wake-up failed: {e}", at());
+    }
+    let c = c?;
+    if standby {
+        // SetStandbyMode{STANDBY_MODE_WAKE_UP}.
+        let r = w(c.raw(56, vec![0x08, 0x02], Duration::from_secs(10)));
+        println!("{:.2} s: SET_STANDBY_MODE(WAKE_UP): {r:?}", at());
+    }
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end && !STOP.load(Relaxed) {
+        thread::sleep(Duration::from_millis(50))
+    }
+    drop(c);
+    b.scan(false).wait()?;
+    println!("{:.2} s: disconnected", at());
     Ok(())
+}
+
+fn step(s: &Step) -> String {
+    match s {
+        Step::Beacon(None) => "wake advertisement up".into(),
+        Step::Beacon(Some(e)) => format!("no wake advertisement ({e}), going on"),
+        Step::Seen(a) => format!("found {}", line(a)),
+        Step::Retry(e) => format!("connect failed: {e}; looking again"),
+        Step::Connected(l) => match &l.first {
+            Some((t, d)) => format!(
+                "connected, first notification after {:.0} ms: [{}]",
+                t.as_secs_f64() * 1e3,
+                hex(d)
+            ),
+            None => "connected, no notification within 5 s".into(),
+        },
+        Step::Options(o) => format!(
+            "identity {:?}, battery {:?}",
+            o.camera_type,
+            o.battery_info.as_ref().map(|b| b.battery_level)
+        ),
+        Step::Synced(Ok(o)) => format!(
+            "option sync: bt_wakeup_sw {}, firmware {:?} / {:?}",
+            o.bt_wakeup_sw, o.firmware_revision, o.ota_pkg_version
+        ),
+        Step::Synced(Err(e)) => format!("option sync failed: {e}"),
+        Step::Auth(s) => format!(
+            "CHECK_AUTHORIZATION {s}{}",
+            match s {
+                0 => " (authorized)",
+                1 => " (confirm on the camera)",
+                7 => " (asleep: again in 2 s)",
+                _ => "",
+            }
+        ),
+        Step::OpenWifi => "no 8215 within 30 s: OPEN_CAMERA_WIFI".into(),
+        Step::Ready => "8215: camera ready, wake advertisement off".into(),
+    }
 }
 
 fn uuid() -> String {

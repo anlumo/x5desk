@@ -1,5 +1,6 @@
 //! Bytes on and around the BLE link: UCD v1 packets (PROTOCOL.md §4; the subset of `link::ucd` this crate needs),
-//! the UCP "Go2BLE" wrapper (§2.5.3), the phone's wake advertisement (§2.6), and advertised names and iBeacons.
+//! the UCP "Go2BLE" wrapper (§2.5.3), the phone's wake advertisement (§2.6), and advertised names, iBeacons and the
+//! X5's Wi-Fi state record.
 
 /// Message content per UCD packet: the app's BLE budget 206 − 16 (§2.4), so each packet fits one 206-byte write.
 pub const SPAN: usize = 190;
@@ -9,8 +10,8 @@ pub const SPAN_UCP: usize = 183;
 pub const CHUNK: usize = 206;
 /// Company id of the wake advertisement's manufacturer record (Apple, iBeacon layout).
 pub const APPLE: u16 = 0x004C;
-/// Company id (not assigned to Insta360) of the record in an X5's `X5 <token>` advertisement, `00 ff 01` or
-/// `00 78 01` (meaning unknown); the app's wake advertisement for GO cameras uses it too (ble.md §3).
+/// Company id (not assigned to Insta360) of the record in an X5's `X5 <token>` advertisement, `00 tt vv` ([`Proto`]);
+/// the app's wake advertisement for GO cameras uses it too (ble.md §3).
 pub const INSTA: u16 = 0x1A2B;
 
 /// Appends one packet; one pad byte when the unpadded size is a multiple of 512 (§4.3).
@@ -193,6 +194,32 @@ impl Beacon {
             minor: u16::from_be_bytes([d[18], d[19]]),
             tx: d[20] as i8,
         })
+    }
+}
+
+/// What the app (FastBle `BleScanProto`) reads from an X5's `1a2b` record `00 tt vv`: format 0, then `tt` the
+/// seconds its Wi-Fi stays up and `vv` the Wi-Fi password version; a fourth byte would be the net type (3: Wi-Fi
+/// Aware), which the X5 does not send. Format 0 has no power state: the app takes the camera as booted
+/// (`bootUpStatus` 1) whatever it does, and the X5 keeps advertising the record in standby. Seen on a real X5:
+/// `00 ff 01` and `00 78 01` (on USB), `00 64 01` (awake, AP up), `00 52 01` and `00 06 01` (standby, 82 s and 6 s
+/// after an AP session).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Proto {
+    /// Seconds the camera's access point stays up, counted from this advertisement (`wifiActiveTimeS`): 0 off, 255
+    /// not started since boot (`WIFI_UNINITIALIZED`). The app joins a saved AP directly, without BLE, while more than
+    /// 30 s are left and [`Proto::pwd`] equals the saved password's version.
+    pub wifi: u8,
+    /// `Options.WifiInfo.passwd_version` of the current AP password.
+    pub pwd: u8,
+}
+
+impl Proto {
+    /// From the record's data (after the company id).
+    pub fn parse(d: &[u8]) -> Option<Proto> {
+        match *d {
+            [0, wifi, pwd] | [0, wifi, pwd, _] => Some(Proto { wifi, pwd }),
+            _ => None,
+        }
     }
 }
 
@@ -380,6 +407,30 @@ mod tests {
         assert_eq!((b.major, b.minor, b.tx), (Beacon::X5, 1, -59));
         assert_eq!(Beacon::parse(&c[..22]), None);
         assert_eq!(Beacon::parse(&hex("02 01 00")), None);
+    }
+
+    #[test]
+    fn proto() {
+        // Records a real X5 sent (`BleScanProto` format 0, five bytes with the company id): AP up for another 100 s,
+        // password version 1; 255 = Wi-Fi not started since boot.
+        assert_eq!(
+            Proto::parse(&hex("00 64 01")),
+            Some(Proto { wifi: 100, pwd: 1 })
+        );
+        assert_eq!(Proto::parse(&hex("00 ff 01")).unwrap().wifi, 255);
+        // The six-byte variant's net type is not part of the X5's state.
+        assert_eq!(
+            Proto::parse(&hex("00 06 01 03")),
+            Some(Proto { wifi: 6, pwd: 1 })
+        );
+        // The BSA advertisement's `000f: 00 00 00` would read as Wi-Fi off; other formats are not the X5's.
+        assert_eq!(
+            Proto::parse(&hex("00 00 00")),
+            Some(Proto { wifi: 0, pwd: 0 })
+        );
+        for d in ["01 64 01 01", "02 00 01", "00 64", "00 64 01 00 00", ""] {
+            assert_eq!(Proto::parse(&hex(d)), None, "{d}");
+        }
     }
 
     #[test]

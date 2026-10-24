@@ -41,6 +41,25 @@ pub(crate) fn start(suffix: &str) -> Result<Wake> {
     Ok(w)
 }
 
+/// The advertisement's properties: the app's Android advertisement, connectable, with flags and the one
+/// manufacturer record. Android puts the flags `02 01 02` (general discoverable) in front of every connectable
+/// advertisement; BlueZ sends flags only for a discoverable one (from the adapter's setting, or here
+/// `Discoverable`), and on a dual-mode adapter they come out the same. 3 + 28 bytes: the whole legacy 31.
+fn props(d: [u8; 24]) -> PropMap {
+    let v = |x: Box<dyn RefArg>| Variant(x);
+    let md = HashMap::from([(wire::APPLE, v(Box::new(d.to_vec())))]);
+    PropMap::from([
+        ("Type".into(), v(Box::new("peripheral".to_string()))),
+        ("Discoverable".into(), v(Box::new(true))),
+        ("ManufacturerData".into(), v(Box::new(md))),
+        // The app's settings: low-latency mode (100 ms) and TX_POWER_HIGH (1 dBm on Android; BlueZ applies it when
+        // the adapter lists CanSetTxPower).
+        ("MinInterval".into(), v(Box::new(100u32))),
+        ("MaxInterval".into(), v(Box::new(100u32))),
+        ("TxPower".into(), v(Box::new(1i16))),
+    ])
+}
+
 fn call(path: &str, iface: &str, m: &str) -> Message {
     Message::new_method_call("org.bluez", path, iface, m).unwrap()
 }
@@ -67,16 +86,7 @@ fn run(d: [u8; 24], stop: &AtomicBool, ready: &SyncSender<Result<()>>) -> Result
         .min()
         .ok_or(Error::NoAdapter)?;
     let me = Path::from(format!("/x5desk/wake{}", N.fetch_add(1, Relaxed)));
-    let mut props = PropMap::new();
-    let v = |x: Box<dyn RefArg>| Variant(x);
-    props.insert("Type".into(), v(Box::new("peripheral".to_string())));
-    let md = HashMap::from([(wire::APPLE, v(Box::new(d.to_vec())))]);
-    props.insert("ManufacturerData".into(), v(Box::new(md)));
-    // The app's settings: low-latency mode (100 ms) and TX_POWER_HIGH (1 dBm on Android; BlueZ applies it when
-    // the adapter lists CanSetTxPower).
-    props.insert("MinInterval".into(), v(Box::new(100u32)));
-    props.insert("MaxInterval".into(), v(Box::new(100u32)));
-    props.insert("TxPower".into(), v(Box::new(1i16)));
+    let props = props(d);
     let reg = c
         .send(call(&a, MGR, "RegisterAdvertisement").append2(&me, PropMap::new()))
         .map_err(|_| Error::Closed)?;
@@ -134,5 +144,34 @@ fn run(d: [u8; 24], stop: &AtomicBool, ready: &SyncSender<Result<()>>) -> Result
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dbus::arg::prop_cast;
+
+    #[test]
+    fn advert() {
+        let d = wire::wake("ABCDEF").unwrap();
+        let p = props(d);
+        assert_eq!(prop_cast::<String>(&p, "Type").unwrap(), "peripheral");
+        assert_eq!(prop_cast::<bool>(&p, "Discoverable"), Some(&true));
+        let md =
+            prop_cast::<HashMap<u16, Variant<Box<dyn RefArg>>>>(&p, "ManufacturerData").unwrap();
+        assert_eq!(md.len(), 1);
+        let b = md[&wire::APPLE]
+            .0
+            .as_any()
+            .downcast_ref::<Vec<u8>>()
+            .unwrap();
+        assert_eq!(b[..], d[..]);
+        // On air as the app sends it: flags `02 01 02`, then `1b ff 4c 00` and the 24 bytes (PROTOCOL.md §2.6).
+        let mut air = vec![2, 1, 2, 1 + 2 + b.len() as u8, 0xFF];
+        air.extend(wire::APPLE.to_le_bytes());
+        air.extend(b);
+        assert_eq!(air.len(), 31);
+        assert_eq!(&air[..9], &wire::hex("02 01 02 1b ff 4c 00 02 15")[..]);
     }
 }
