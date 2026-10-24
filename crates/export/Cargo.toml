@@ -1,0 +1,18 @@
+[package]
+name = "export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Render jobs for the Insta360 X5: decode -> stitch -> stabilise -> effects -> encode -> mux, 360 and flat, a queue; JPEG frame grabs"
+
+[dependencies]
+video.workspace = true
+media.workspace = true
+stitch.workspace = true
+stab = { path = "../stab" }
+# editor timelines (`Cut::Edit`) and their looks, adjustments and overlays: our own crates
+edit.workspace = true
+fx.workspace = true
+wgpu.workspace = true
+glam.workspace = true
+pollster.workspace = true
