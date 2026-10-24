@@ -1,0 +1,15 @@
+[package]
+name = "stab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stabilisation maths for the Insta360 X5: trailer IMU -> per-frame orientation, smoothing, horizon / direction lock, rolling-shutter terms"
+
+[dependencies]
+glam.workspace = true
+media.workspace = true
+
+[dev-dependencies]
+stitch.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
