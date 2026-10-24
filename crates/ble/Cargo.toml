@@ -1,0 +1,20 @@
+[package]
+name = "ble"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+proto.workspace = true
+prost.workspace = true
+btleplug = "0.13"
+# btleplug is async; the runtime stays inside the crate (one current-thread runtime on the BLE thread).
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+# `StreamExt` for btleplug's event and notification streams.
+futures-util = "0.3"
+# btleplug's UUID type, re-exported.
+uuid = "1"
+
+# The wake advertisement: btleplug cannot advertise, BlueZ's LEAdvertisingManager1 can. Already in the tree through
+# btleplug's BlueZ backend.
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = "0.9"
