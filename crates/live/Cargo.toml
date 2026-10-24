@@ -1,0 +1,11 @@
+[package]
+name = "live"
+version.workspace = true
+edition.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+video.workspace = true
+wgpu.workspace = true
+wgpu-hal.workspace = true
+ash.workspace = true
