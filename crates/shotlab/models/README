@@ -1,0 +1,30 @@
+Network compiled into crate shotlab by burn-onnx (build.rs), under a permissive licence whose text is next to this
+file. Checked against onnxruntime on a real cut: src/clone.rs `vs_onnxruntime` (a 192² crop of a woman in v627
+frame 300, run when X5_ORT names a Python with onnxruntime), largest difference of the person probability 2.2e-6.
+
+human_segmentation_pphumanseg_2023mar.onnx
+  What: PP-HumanSeg v1 "humanseg_mobile" (PaddleSeg contrib/HumanSeg): FCN on HRNet-W18-Small v1, person
+        segmentation, 1x3x192x192 RGB as (c - 0.5) / 0.5 -> 1x2x192x192 softmax (background, person). Converted to
+        ONNX by OpenCV (PaddlePaddle's humanseg_hrnet18_small_v1 inference model through paddle2onnx, opset 11;
+        samples/dnn/dnn_model_runner/dnn_conversion/paddlepaddle in opencv 4.x) and published in the OpenCV model zoo.
+  Source: https://github.com/opencv/opencv_zoo/tree/main/models/human_segmentation_pphumanseg
+          (downloaded from the zoo's mirror https://huggingface.co/opencv/human_segmentation_pphumanseg/resolve/main/human_segmentation_pphumanseg_2023mar.onnx;
+          the mirror's LFS oid is the sha256 below)
+  Licence: Apache-2.0 ("All files in this directory are licensed under Apache 2.0 License", the directory's README
+           and LICENSE; Copyright (c) 2021 PaddlePaddle Authors) -> LICENSE-pphumanseg. Training data: PaddleSeg's
+           HumanSeg README (release/2.1) says the released models were trained on "large-scale portrait data"
+           without naming it, and uses a subset of Supervisely Persons for its fine-tuning example; the weights are
+           published under Apache-2.0 by their authors.
+  sha256: 552d8a984054e59b5d773d24b9b12022b22046ceb2bbc4c9aaeaceb36a9ddf24
+  Build fix: burn-onnx 0.22 resolves 6 of the network's 20 stride-2 3x3 convolutions (SAME_UPPER on even inputs: pad
+  0 before, 1 after) as padding 1 on both sides; build.rs rewrites them in the generated code and asserts the counts.
+  Considered, on perspective crops of people in v627 (night) and v606 (day), against this network at 192²:
+  - MediaPipe selfie segmentation, ONNX from https://huggingface.co/onnx-community/mediapipe_selfie_segmentation
+    (Apache-2.0, 0.45 MB, 256² input, sha256 3241ac4ad8aa35bdaf33946776db29f7c283a413aa0b0dacb9483594b4531aad):
+    made for a face close to the camera; it lost whole people at full-body size (a woman in a brown coat, a man at
+    the frame's edge).
+  - MODNet portrait matting, ONNX from https://huggingface.co/Xenova/modnet (Apache-2.0, 24.7 MB, 512² input, sha256
+    07c308cf0fc7e6e8b2065a12ed7fc07e1de8febb7dc7839d7b7f15dd66584df9): mattes for portraits; on small full-body
+    people it left the torso out or covered only fragments.
+  - This network with its input scaled to 384² (Resize targets doubled): legs went missing; 192² is kept.
+  Not used: Robust Video Matting (GPL-3.0).

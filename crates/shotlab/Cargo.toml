@@ -1,0 +1,35 @@
+[package]
+name = "shotlab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shot Lab for the Insta360 X5: remove passerby, light trails, star stacking, frame delay, clones and editing presets, on the shared wgpu device"
+
+[dependencies]
+wgpu.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+# frames of a clip: decode (video), trailer and MP4 (media), stitch, the gyro (stab); our own crates
+video.workspace = true
+media.workspace = true
+stitch.workspace = true
+stab.workspace = true
+# per-frame passes plug into export's effect hook; editing presets are edit timelines; subjects come from track
+export.workspace = true
+edit.workspace = true
+track.workspace = true
+
+# Clones: the person segmentation network (PP-HumanSeg, models/README) on the shared device, as crate track runs its
+# networks: burn through stitch::attach, its tensors' wgpu buffers written and read by our passes
+burn = { workspace = true, features = ["extension", "cubecl"] }
+burn-store.workspace = true
+burn-cubecl = { version = "0.22", default-features = false }
+cubecl-runtime = { version = "0.11", default-features = false }
+
+[build-dependencies]
+burn-onnx.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
+# export::Edit's colour fields, for the editing presets' render test
+fx.workspace = true
