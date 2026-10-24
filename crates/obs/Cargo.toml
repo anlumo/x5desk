@@ -1,0 +1,19 @@
+[package]
+name = "obs"
+version.workspace = true
+edition.workspace = true
+
+# libx5desk_obs.so, installed as x5desk-obs.so (OBS names a module after its file). The rlib only makes `cargo test`
+# rebuild the library before tests/e2e.rs loads it into OBS.
+[lib]
+name = "x5desk_obs"
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+live.workspace = true
+video.workspace = true
+wgpu.workspace = true
+serde_json = "1"
