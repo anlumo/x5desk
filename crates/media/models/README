@@ -1,0 +1,17 @@
+Data compiled into crate media (include_bytes!). Licence texts are next to this file.
+
+rnnoise.bin
+  What: the trained RNNoise 0.2 network (conv 65->128->384, three GRUs of 384, 32 band gains + voice probability;
+        int8 weights with a float scale per row for the conv2 / GRU layers, float for the rest), read by
+        src/denoise.rs, which ports RNNoise's C code (fft.rs ports its KISS FFT).
+  Source: the model RNNoise's build downloads (rnnoise/model_version at commit 70f1d256acd4b34a572f999a05c87bf00b67730d
+          of https://gitlab.xiph.org/xiph/rnnoise):
+          https://media.xiph.org/rnnoise/models/rnnoise_data-0a8755f8e2d834eff6a54714ecc7d75f9932e845df35f8b59bc52a7cfe6e8b37.tar.gz
+          (sha256 0a8755f8e2d834eff6a54714ecc7d75f9932e845df35f8b59bc52a7cfe6e8b37, as model_version requires).
+          Converted with RNNoise's own src/write_weights.c, built as its default configure does (DISABLE_DEBUG_FLOAT:
+          the float copies of the int8 layers are left out), from that tarball's src/rnnoise_data.c; the file is
+          RNNoise's weight-blob format unchanged (64-byte "DNNw" record headers).
+  Training data: public datasets only (RNNoise README, datasets.txt).
+  Licence: BSD-3-Clause, Copyright (c) 2007-2017, 2024 Jean-Marc Valin, (c) 2023 Amazon, (c) 2017 Mozilla,
+           (c) 2005-2017 Xiph.Org Foundation, (c) 2003-2004 Mark Borgerding (RNNoise COPYING) -> LICENSE-rnnoise
+  sha256: 1ad07b428be34c74d9678d05b3c387b73ccf0e6203a1a5f9ce58689b30b303c8

@@ -1,0 +1,12 @@
+[package]
+name = "media"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# music import: the decoders and containers of MP3, FLAC, WAV, Ogg Vorbis (AAC / M4A come from the workspace)
+symphonia = { workspace = true, features = ["mp3", "flac", "wav", "pcm", "vorbis", "ogg"] }
+cpal.workspace = true
+zune-jpeg.workspace = true
+bytemuck.workspace = true
+libc.workspace = true
