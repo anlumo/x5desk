@@ -1,0 +1,14 @@
+[package]
+name = "edit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Editor model for x5desk: timeline, speed / freeze / reverse, reframing keyframes and camera-movement presets, undo, project files"
+
+[dependencies]
+# Already in the tree (stitch, stab): view orientations are `glam::Quat`, the type stitch::Pose and stab::Pose take.
+glam.workspace = true
+
+[dev-dependencies]
+# tests/footage.rs: frame accuracy against the sample clips' real sample times
+media.workspace = true
