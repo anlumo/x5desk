@@ -1,6 +1,6 @@
 //! The editor's preview sound: the timeline mixed as the exporter mixes it (crate media's mixer: clip audio
 //! time-stretched to its speed under its volume envelope, music with ducking, the limiter; RNNoise on the clips when
-//! denoise is on), played on the default output device from a playhead position. The device callback drains a
+//! denoise is on), played on the output picked in Settings from a playhead position. The device callback drains a
 //! single-producer / single-consumer ring and counts what it played: that count is the editor's clock while it plays.
 //! An underrun holds the clock. Without a device the clock runs on wall time and nothing is mixed. A mixer that fails
 //! reports why and plays silence on, so the clock (and the picture) keep going. The device is looked up, opened and

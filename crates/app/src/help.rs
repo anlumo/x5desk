@@ -182,7 +182,7 @@ fn guide(p: Page) -> &'static [&'static str] {
         ],
         Page::Settings => &[
             "The download folder (camera downloads and card imports), the default export preset, the audio output of \
-             the editor's preview, and the thumbnail cache's limit and clearing.",
+             the player, the live outputs and the editor's preview, and the thumbnail cache's limit and clearing.",
             "Graphics shows the shared Vulkan device: decode, encode and DMA-BUF export capabilities. The client id \
              is what the camera remembers when you allow this computer on it.",
             "Settings are kept in ~/.config/x5desk; thumbnails in ~/.cache/x5desk.",

@@ -651,8 +651,8 @@ impl Aud {
     }
 }
 
-/// The audio player of `p`, or the silent clock when it has no AAC track or there is no output device; its clock;
-/// the audio track's presentation offset (edit list) in seconds; whether it has sound.
+/// The audio player of `p` on the output picked in Settings, or the silent clock when it has no AAC track or there
+/// is no output device; its clock; the audio track's presentation offset (edit list) in seconds; whether it has sound.
 pub(crate) fn audio(p: &Path, end: f64) -> (Aud, audio::Clock, f64, bool) {
     let off = Mp4::open(p)
         .ok()
@@ -670,7 +670,16 @@ pub(crate) fn audio(p: &Path, end: f64) -> (Aud, audio::Clock, f64, bool) {
     thread::Builder::new()
         .name("audio control".into())
         .spawn(move || {
-            let (a, sound) = match audio::Player::open(&p) {
+            // here, not on the UI thread (which waits for the open): `output` waits for a lookup under way
+            let r = match audio::Player::open_on(&p, crate::settings::output()) {
+                // the stream failed: the device picked may be gone since, the system default then
+                Err(e) if e.kind() == std::io::ErrorKind::Other => {
+                    eprintln!("{}: {e}: the default output", p.display());
+                    audio::Player::open(&p)
+                }
+                r => r,
+            };
+            let (a, sound) = match r {
                 Ok(a) => (a, true),
                 Err(e) => {
                     eprintln!("{}: {e}: silent clock", p.display());

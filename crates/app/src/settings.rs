@@ -12,7 +12,7 @@ use std::{
     io::Read,
     path::PathBuf,
     sync::{
-        Mutex,
+        Condvar, Mutex,
         mpsc::{self, Receiver, Sender},
     },
     thread,
@@ -31,19 +31,56 @@ pub struct Prefs {
     file: Option<PathBuf>,
 }
 
-/// The output the editor's preview plays on ([`output`]): [`Prefs::audio`], set by the Settings screen.
-static AUDIO: Mutex<Option<String>> = Mutex::new(None);
+/// The output the player, the live outputs and the editor's preview play on ([`output`]): [`Prefs::audio`], set by
+/// the Settings screen.
+static AUDIO: Out = Out::new();
 
-/// The output device the user picked, else the system default.
-pub fn output() -> Option<cpal::Device> {
-    dev(AUDIO.lock().unwrap().clone())
+/// An output device looked up off the UI thread (an id lists ALSA's devices): the device of the newest pick looked up
+/// so far, the picks made, the newest one looked up.
+struct Out {
+    m: Mutex<(Option<cpal::Device>, u32, u32)>,
+    c: Condvar,
 }
 
-/// The output device with this id (as [`Prefs::audio`] keeps it), else the system default.
-fn dev(id: Option<String>) -> Option<cpal::Device> {
-    let h = cpal::default_host();
-    id.and_then(|s| h.device_by_id(&s.parse().ok()?))
-        .or_else(|| h.default_output_device())
+impl Out {
+    const fn new() -> Out {
+        Out {
+            m: Mutex::new((None, 0, 0)),
+            c: Condvar::new(),
+        }
+    }
+
+    /// Looks up the device with this id (as [`Prefs::audio`] keeps it; unknown or None: the system default) on a
+    /// thread of its own.
+    fn pick(&'static self, id: Option<String>) {
+        let n = {
+            let mut m = self.m.lock().unwrap();
+            m.1 += 1;
+            m.1
+        };
+        thread::spawn(move || {
+            let d = media::audio::device(id.as_deref());
+            let mut m = self.m.lock().unwrap();
+            // an earlier pick whose lookup ends later changes nothing
+            if n > m.2 {
+                (m.0, m.2) = (d, n);
+            }
+            self.c.notify_all();
+        });
+    }
+
+    /// The newest pick's device, else the system default; waits while its lookup runs.
+    fn get(&self) -> Option<cpal::Device> {
+        let m = self.c.wait_while(self.m.lock().unwrap(), |m| m.2 < m.1);
+        let d = m.unwrap().0.clone();
+        d.or_else(|| cpal::default_host().default_output_device())
+    }
+}
+
+/// The output device the user picked, else the system default. Waits for a lookup under way (just after a pick):
+/// never call it on the UI thread.
+pub fn output() -> Option<cpal::Device> {
+    AUDIO.get()
 }
 
 /// A random (version 4) UUID.
@@ -213,7 +250,7 @@ impl Settings {
             ),
         ];
         let cache = p.thumbs();
-        AUDIO.lock().unwrap().clone_from(&p.audio);
+        AUDIO.pick(p.audio.clone());
         Settings {
             p,
             gpu,
@@ -353,7 +390,7 @@ impl Settings {
                         }
                     });
                 if let Some(a) = pick {
-                    AUDIO.lock().unwrap().clone_from(&a);
+                    AUDIO.pick(a.clone());
                     self.p.audio = a;
                     self.p.save();
                 }
@@ -361,8 +398,8 @@ impl Settings {
                 ui.label("");
                 ui.colored_label(
                     weak,
-                    "The editor's preview plays here from its next start. The player and the live outputs use the \
-                     system default.",
+                    "The player and the live outputs play here from the next file opened, the editor's preview from \
+                     its next start.",
                 );
                 ui.end_row();
             });
@@ -461,19 +498,42 @@ mod tests {
         let q = Prefs::load(Some(f.clone()));
         assert_eq!(q, p);
         assert_eq!(q.preset(), Some(4));
-        // an id as the page stores it finds its device again; an unknown one falls back to the default
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// The output device, looked up off the UI thread: every listed id as the page stores it finds that device
+    /// (cpal's `device_by_id` took ALSA's `sysdefault:CARD=x` and `usbstream:CARD=x` for other ids and played on the
+    /// default), an unknown one gives the default, and of two picks in a row the later wins whichever lookup ends
+    /// first.
+    #[test]
+    fn out() {
+        // not AUDIO: other tests play on it
+        static O: Out = Out::new();
         let h = cpal::default_host();
         let id = |d: Option<cpal::Device>| Some(d?.id().ok()?.to_string());
         let outs: Vec<String> = (h.output_devices().into_iter().flatten())
             .filter_map(|d| id(Some(d)))
             .collect();
-        println!("{} output devices, e.g. {:?}", outs.len(), outs.first());
-        if let Some(i) = outs.last() {
-            assert_eq!(id(dev(Some(i.clone()))).as_ref(), Some(i));
+        let t0 = std::time::Instant::now();
+        let bad: Vec<&String> = (outs.iter())
+            .filter(|i| {
+                O.pick(Some(i.to_string()));
+                id(O.get()).as_ref() != Some(i)
+            })
+            .collect();
+        println!(
+            "{} output devices, {:.1} ms a lookup; found as another: {bad:?}",
+            outs.len(),
+            t0.elapsed().as_secs_f64() * 1e3 / outs.len().max(1) as f64
+        );
+        assert!(bad.is_empty());
+        if let [.., a, b] = &outs[..] {
+            O.pick(Some(a.clone()));
+            O.pick(Some(b.clone()));
+            assert_eq!(id(O.get()).as_ref(), Some(b));
         }
-        let def = id(h.default_output_device());
-        assert_eq!(id(dev(Some("alsa:no such device".into()))), def);
-        std::fs::remove_dir_all(&d).unwrap();
+        O.pick(Some("alsa:no such device".into()));
+        assert_eq!(id(O.get()), id(h.default_output_device()));
     }
 
     /// The page reads and trims the thumbnail cache on a thread of its own: its first frame (pass 1 here, which the
