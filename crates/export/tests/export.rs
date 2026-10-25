@@ -1213,9 +1213,9 @@ fn edit_job(tl: edit::Timeline, path: PathBuf, out: Out, enc: Enc, fx: Option<Ho
             tl,
             files: vec![],
             looks: HashMap::from([("film".to_string(), fx::Look::Film.cube())]),
-            adjust: fx::Params::default(),
             over: vec![],
             abr: 192_000,
+            denoise: None,
         })),
         path,
         out,
@@ -1553,6 +1553,163 @@ fn timeline() {
         i == ours.len()
     );
     assert!(i == ours.len() && (ae - ve).abs() <= 1.0 / 48000.0);
+}
+
+/// A one-file timeline of `clips` at 29.97 fps, fixed.
+fn one(src: &Path, clips: Vec<edit::Clip>) -> edit::Timeline {
+    let t = frame_times(src);
+    let mut tl = edit::Timeline::new(edit::Rate {
+        num: 30000,
+        den: 1001,
+    });
+    tl.files = vec![edit::File {
+        path: src.to_str().unwrap().into(),
+        dur: t[t.len() - 1] + 1001.0 / 30000.0,
+    }];
+    tl.clips = clips;
+    tl.fix();
+    tl
+}
+
+const SMALL: Enc = Enc::Video {
+    codec: Codec::H264,
+    deep: false,
+    rate: Rate::Cbr(4_000_000),
+    gop: 30,
+};
+
+fn small() -> Out {
+    Out::Flat {
+        w: 640,
+        h: 360,
+        view: None,
+    }
+}
+
+/// Denoise on an editor timeline (`Edit::denoise`): a plain cut at 1× (v606 2–5 s) is mixed instead of copied, its
+/// audio ends with the video, and it is the source run through `media::denoise::Stereo` from the clip's start with
+/// the delay dropped: in step with it (best lag 0), closer to it than to the dry source, and quieter than that.
+#[test]
+fn timeline_denoise() {
+    let Some(src) = sample("v606.insv") else {
+        return;
+    };
+    let (_l, g, cx) = gpu();
+    let tl = one(&src, vec![edit::Clip::new(0, 2.0, 5.0)]);
+    let path = out("timeline_denoise.mp4");
+    let mut job = edit_job(tl.clone(), path.clone(), small(), SMALL, None);
+    let Cut::Edit(e) = &mut job.cut else {
+        unreachable!()
+    };
+    e.denoise = Some(1.0);
+    export(&g, &cx, job);
+    let s = probe(&path, &["-show_entries", "stream=start_time,duration"]);
+    let st: Vec<&str> = s.split("[/STREAM]").collect();
+    let f = |s: &str, k| get(s, k).parse::<f64>().unwrap();
+    let (ve, ae) = (
+        f(st[0], "start_time") + f(st[0], "duration"),
+        f(st[1], "start_time") + f(st[1], "duration"),
+    );
+    let theirs = audio_hashes(&src);
+    let copied = (audio_hashes(&path).iter())
+        .filter(|h| theirs.contains(h))
+        .count();
+    // both sides averaged, 48 kHz, from `pre` (FFmpeg input options)
+    let mono = |p: &Path, pre: &[&str]| -> Vec<[f32; 2]> {
+        let mut a = vec!["-v", "error"];
+        a.extend_from_slice(pre);
+        a.extend_from_slice(&["-i", p.to_str().unwrap()]);
+        a.extend_from_slice(&["-map", "0:a:0", "-ar", "48000", "-f", "f32le", "-"]);
+        let b = tool("ffmpeg", &a);
+        let x: Vec<f32> = b
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        x.as_chunks::<2>().0.to_vec()
+    };
+    let avg = |v: &[[f32; 2]]| v.iter().map(|s| 0.5 * (s[0] + s[1])).collect::<Vec<f32>>();
+    let dry = mono(&src, &["-ss", "2.0", "-t", "3.2"]);
+    let (mut dn, mut wet) = (media::denoise::Stereo::new(), vec![]);
+    const F: usize = media::denoise::FRAME;
+    for c in dry.as_chunks::<F>().0 {
+        let (mut l, mut r): ([f32; F], [f32; F]) = (
+            std::array::from_fn(|i| c[i][0]),
+            std::array::from_fn(|i| c[i][1]),
+        );
+        dn.frame(&mut l, &mut r);
+        wet.extend(l.iter().zip(&r).map(|(a, b)| 0.5 * (a + b)));
+    }
+    let (ours, dry) = (avg(&mono(&path, &[])), avg(&dry));
+    let wet = &wet[media::denoise::DELAY..];
+    // 2 s from 0.5 s in, lags up to ±1200 samples (the denoiser's delay is 960)
+    let (o, n) = (24000, 96000);
+    let (lw, cw, _) = xcorr(&ours, o, wet, o, n, 1200);
+    let (ld, cd, _) = xcorr(&ours, o, &dry, o, n, 1200);
+    let rms =
+        |x: &[f32]| (x.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / x.len() as f64).sqrt();
+    let (ro, rd, rw) = (
+        rms(&ours[o..o + n]),
+        rms(&dry[o..o + n]),
+        rms(&wet[o..o + n]),
+    );
+    eprintln!(
+        "denoised plain cut: video ends {ve:.6} s, audio {ae:.6} s; {copied} AAC frames copied; against the source \
+         denoised: lag {lw}, correlation {cw:.4}; against it dry: lag {ld}, correlation {cd:.4}; level {ro:.4} (dry \
+         {rd:.4}, denoised here {rw:.4})"
+    );
+    assert!(copied == 0 && (ae - ve).abs() <= 1.0 / 48000.0);
+    assert!(
+        lw == 0 && cw > 0.95 && cw > cd + 0.05,
+        "not the denoised source"
+    );
+    assert!(ro < 0.8 * rd, "not quieter");
+}
+
+/// Adjustments per clip (`edit::Clip::adj`): two freeze frames of one source frame (v635 at 2 s), the first at +1 EV
+/// and the second plain, in one export: each clip's frame is what a one-clip export of it makes (the adjustments
+/// switch at the cut and the first's do not reach the second), and the two differ.
+#[test]
+fn timeline_adjust() {
+    let Some(src) = sample("v635.insv") else {
+        return;
+    };
+    let (_l, g, cx) = gpu();
+    let lo = edit::Clip::still(0, 2.0, 0.3);
+    let mut hi = lo.clone();
+    hi.adj.exposure = 1.0;
+    let grab = |clips: Vec<edit::Clip>, ks: &[u64]| {
+        let (fx, got) = capture(&g, ks);
+        let job = edit_job(
+            one(&src, clips),
+            out("timeline_adjust.mp4"),
+            small(),
+            SMALL,
+            Some(fx),
+        );
+        export(&g, &cx, job);
+        let mut v = std::mem::take(&mut *got.lock().unwrap());
+        v.sort_by_key(|x| x.0);
+        (v.iter())
+            .map(|x| stitch::read_texture(&g.device, &g.queue, &x.1))
+            .collect::<Vec<_>>()
+    };
+    let k = one(&src, vec![hi.clone(), lo.clone()]).frames(1).start;
+    let both = grab(vec![hi.clone(), lo.clone()], &[0, k]);
+    let (a, b) = (grab(vec![hi], &[0]), grab(vec![lo], &[0]));
+    let diff = |x: &[u8], y: &[u8]| x.iter().zip(y).map(|(p, q)| p.abs_diff(*q)).max().unwrap();
+    let mean = |x: &[u8]| x.iter().map(|&v| v as f64).sum::<f64>() / x.len() as f64;
+    eprintln!(
+        "clip 0 (+1 EV) against its own export: max difference {}; clip 1 (frame {k}) against its own: {}; means \
+         {:.1} / {:.1}",
+        diff(&both[0], &a[0]),
+        diff(&both[1], &b[0]),
+        mean(&both[0]),
+        mean(&both[1])
+    );
+    assert!(both.len() == 2 && diff(&both[0], &a[0]) == 0 && diff(&both[1], &b[0]) == 0);
+    assert!(mean(&both[0]) > mean(&both[1]) + 20.0);
 }
 
 /// The editor's tiny-planet preset (`edit::view::preset::planet`: Planet(1) looking down at 280° → a 100° level

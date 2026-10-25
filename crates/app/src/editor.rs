@@ -1,7 +1,7 @@
 //! Editor screen (PLAN.md milestone 7, groups 10, 12, 13) on crate edit's model: a timeline of clips from the
 //! library (drag in, trim, split, delete, reorder, speed with ramp keys, freeze frames), reframing keys from the
-//! viewer's view with easing and camera-movement presets (edit) or Shot Lab cuts (shotlab), a look per clip (ours or
-//! an imported `.cube`) and timeline-wide adjustments, overlays (fx), clip volume envelopes, mute, music with ducking
+//! viewer's view with easing and camera-movement presets (edit) or Shot Lab cuts (shotlab), a look (ours or an
+//! imported `.cube`) and colour adjustments per clip, overlays (fx), clip volume envelopes, mute, music with ducking
 //! and denoise (media), undo / redo (edit's log for the timeline, steps of the extras between its steps), project
 //! files and "Export timeline" (`export::Cut::Edit` on the Export screen's queue). The viewer frames what a flat export
 //! shows and plays the timeline through decks (`deck`) on the preview sound's clock (`sound`); paused, it shows the
@@ -1021,8 +1021,8 @@ impl Editor {
             tl: tl.clone(),
             files,
             looks,
-            adjust: self.x.adj,
             over,
+            denoise: self.x.denoise,
             stab: self.x.stab,
             smooth: self.x.smooth,
         })
@@ -1756,7 +1756,9 @@ impl Editor {
         let tl = self.pj.tl();
         let e = tl.at(self.t.min(tl.dur() - 0.5 * tl.out.fps.t(1)).max(0.0));
         if self.fresh || self.dirty || size != self.size {
-            let (look, amt) = e.map_or((String::new(), 1.0), |e| (e.clip.look.clone(), e.clip.amt));
+            let (look, amt, adj) = e.map_or((String::new(), 1.0, fx::Params::default()), |e| {
+                (e.clip.look.clone(), e.clip.amt, e.clip.adj)
+            });
             let c = self.cur();
             let seam = (c.as_ref())
                 .and_then(|c| self.seam.as_ref().filter(|s| !self.playing && s.0 == c.2))
@@ -1777,7 +1779,7 @@ impl Editor {
                 seam,
                 &vv,
                 self.pano,
-                &self.x.adj,
+                &adj,
                 (&look, amt),
                 &self.x.over,
                 self.t,
@@ -3083,22 +3085,39 @@ impl Editor {
                     self.end();
                     self.changed();
                 }
+                ui.separator();
+                ui.label(format!("Adjustments of clip {}", k + 1));
+                let mut a = c.adj;
+                let r = (doc::ADJ.iter().zip(doc::adj(&mut a)))
+                    .map(|((_, n, lo, hi), v)| ui.add(egui::Slider::new(v, *lo..=*hi).text(*n)))
+                    .reduce(|p, q| p | q);
+                // the picture changes, the clips stay: no `changed` (playback goes on)
+                if r.as_ref().is_some_and(|r| r.drag_started()) {
+                    self.begin();
+                }
+                if ui.button("Reset").clicked() {
+                    a = fx::Params::default();
+                }
+                if a != c.adj {
+                    let x = self.pj.edit(k, |c| c.adj = a);
+                    self.err = x.err().map(|e| e.0);
+                    self.dirty = true;
+                }
+                if r.is_some_and(|r| r.drag_stopped()) {
+                    self.end();
+                }
+                if ui.button("Adjustments on every clip").clicked() {
+                    self.begin();
+                    for j in 0..self.pj.tl().clips.len() {
+                        let _ = self.pj.edit(j, |x| x.adj = a);
+                    }
+                    self.end();
+                    self.dirty = true;
+                }
             }
             None => {
-                ui.label("Select a clip for its look.");
+                ui.label("Select a clip for its look and adjustments.");
             }
-        }
-        ui.separator();
-        ui.label("Adjustments (whole timeline)");
-        let a0 = self.x.adj;
-        for ((_, n, lo, hi), v) in doc::ADJ.iter().zip(doc::adj(&mut self.x.adj)) {
-            ui.add(egui::Slider::new(v, *lo..=*hi).text(*n));
-        }
-        if ui.button("Reset").clicked() {
-            self.x.adj = fx::Params::default();
-        }
-        if self.x.adj != a0 {
-            self.dirty = true;
         }
     }
 
@@ -3229,9 +3248,8 @@ impl Editor {
         let mut on = self.x.denoise.is_some();
         let mut s = self.x.denoise.unwrap_or(1.0);
         ui.horizontal(|ui| {
-            ui.checkbox(&mut on, "Denoise").on_hover_text(
-                "RNNoise on the clips' audio (preview; the export does not denoise yet)",
-            );
+            ui.checkbox(&mut on, "Denoise")
+                .on_hover_text("RNNoise on the clips' audio (preview and export)");
             ui.add_enabled(on, egui::Slider::new(&mut s, 0.0..=1.0).text("Strength"));
         });
         if on.then_some(s) != self.x.denoise {

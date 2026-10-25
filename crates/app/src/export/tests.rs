@@ -745,8 +745,8 @@ fn timeline_faces() {
             files: vec![vec![f.clone()]],
             tl: tl.clone(),
             looks: Default::default(),
-            adjust: fx::Params::default(),
             over: vec![],
+            denoise: None,
             stab: None,
             smooth: 0.0,
         };

@@ -31,5 +31,3 @@ burn-onnx.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true
-# export::Edit's colour fields, for the editing presets' render test
-fx.workspace = true

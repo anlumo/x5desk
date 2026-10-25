@@ -321,7 +321,8 @@ pub struct Lab {
     pub flat: bool,
 }
 
-/// An editor timeline to export (`export::Cut::Edit`) with the editor's timeline-wide effects and stabilisation.
+/// An editor timeline to export (`export::Cut::Edit`) with the editor's timeline-wide effects, denoise and
+/// stabilisation.
 #[derive(Clone)]
 pub struct Tl {
     /// the project's name (output file names)
@@ -330,8 +331,8 @@ pub struct Tl {
     /// per `tl.files` entry: its files (a recording's main files; the music file)
     pub files: Vec<Vec<PathBuf>>,
     pub looks: std::collections::HashMap<String, fx::Cube>,
-    pub adjust: fx::Params,
     pub over: Vec<(fx::Image, fx::Place, f32)>,
+    pub denoise: Option<f32>,
     pub stab: gyro::Mode,
     pub smooth: f64,
 }
@@ -1086,6 +1087,7 @@ impl Keep {
         tl.clips.push(edit::Clip {
             look: id.into(),
             amt: x.amt,
+            adj: x.adj,
             ..edit::Clip::new(0, a, b)
         });
         tl.fix();
@@ -1097,9 +1099,9 @@ impl Keep {
                 .map(|l| (id.to_string(), l.cube()))
                 .into_iter()
                 .collect(),
-            adjust: x.adj,
             over: vec![],
             abr: 192_000,
+            denoise: None,
         };
         let v = s.view;
         // a followed subject: its directions turned into the frame this export stitches in
@@ -1227,9 +1229,9 @@ impl Keep {
                 tl: e.tl.clone(),
                 files: e.files.clone(),
                 looks: e.looks.clone(),
-                adjust: e.adjust,
                 over: e.over.clone(),
                 abr: 192_000,
+                denoise: e.denoise,
             })),
             path: t.it.path.clone(),
             out: match x.pano {

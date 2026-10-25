@@ -118,9 +118,9 @@ fn guide(p: Page) -> &'static [&'static str] {
              playhead (S), reorder them by dragging, delete the selected one (Delete).",
             "Reframe: set the view in the viewer and press K for a key; keys ease between views, or apply a camera \
              movement preset or a Shot Lab cut. Speed ramps and freeze frames are on the Clip tab.",
-            "Colour: a look per clip (ours or an imported .cube) and adjustments for the whole timeline. Audio: clip \
-             volume, mute, music that ducks under the clips' audio, voice denoise (in the preview; the export does not \
-             denoise yet). Overlays: text, a PNG sticker or watermark, a nadir patch over the tripod.",
+            "Colour: a look (ours or an imported .cube) and adjustments per clip, each with a button that puts it on \
+             every clip. Audio: clip volume, mute, music that ducks under the clips' audio, voice denoise. Overlays: \
+             text, a PNG sticker or watermark, a nadir patch over the tripod.",
             "Undo and redo cover every step. Save the project to a file, and Export timeline hands it to the Export \
              screen's queue.",
             "AI: on the Reframe tab, Track a subject and draw a box around it in the viewer; it is followed from the \

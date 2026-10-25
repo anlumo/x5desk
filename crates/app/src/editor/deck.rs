@@ -1,6 +1,6 @@
 //! The editor's viewer: timeline frames from decks (a source file's video on its media thread, `player::Src`,
 //! positioned for one timeline clip), drawn by crate stitch's preview with the frame's stabilisation pose (template
-//! seam), then the clip's look, the adjustments and the overlays through crate fx, into a texture egui shows. Two
+//! seam), then the clip's adjustments and look and the overlays through crate fx, into a texture egui shows. Two
 //! decks: the clip playing and the next one, which seeks to its first frame before the cut.
 
 use crate::{

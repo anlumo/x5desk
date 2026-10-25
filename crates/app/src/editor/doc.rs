@@ -1,6 +1,7 @@
-//! What a project holds beyond crate edit's timeline: the colour adjustments, overlays, denoise and stabilisation the
-//! export applies to the whole timeline. They ride in the project file as a top-level `"x5desk"` object, which edit's
-//! reader ignores (unknown fields), so one file holds the whole project.
+//! What a project holds beyond crate edit's timeline: the overlays, denoise and stabilisation the export applies to the
+//! whole timeline. They ride in the project file as a top-level `"x5desk"` object, which edit's reader ignores (unknown
+//! fields), so one file holds the whole project. Colour adjustments are per clip, in edit's clips; a file from before
+//! held the timeline's in `"x5desk"`, and its clips take them on load.
 
 use crate::gyro;
 
@@ -46,7 +47,6 @@ impl Over {
 /// The timeline-wide effects and settings.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Extra {
-    pub adj: fx::Params,
     pub over: Vec<Over>,
     /// RNNoise strength on the clips' audio; None: off.
     pub denoise: Option<f32>,
@@ -57,7 +57,6 @@ pub struct Extra {
 impl Default for Extra {
     fn default() -> Extra {
         Extra {
-            adj: fx::Params::default(),
             over: vec![],
             denoise: None,
             stab: Some(stab::Lock::Horizon),
@@ -66,7 +65,8 @@ impl Default for Extra {
     }
 }
 
-/// The adjustments: key, label, range; `adj` lists the fields in this order.
+/// A clip's adjustments: key (in files from before: `"x5desk"."adjust"`), label, range; `adj` lists the fields in this
+/// order.
 #[rustfmt::skip]
 pub const ADJ: [(&str, &str, f32, f32); 20] = [
     ("exposure", "Exposure (EV)", -3.0, 3.0), ("brightness", "Brightness", -1.0, 1.0),
@@ -343,10 +343,6 @@ const LOCKS: [(gyro::Mode, &str); 4] = [
 impl Extra {
     /// The `"x5desk"` object.
     pub fn json(&self) -> String {
-        let mut a = self.adj;
-        let adj: Vec<String> = (ADJ.iter().zip(adj(&mut a)))
-            .map(|(d, v)| format!("\"{}\": {:?}", d.0, *v))
-            .collect();
         let over: Vec<String> = (self.over.iter())
             .map(|o| {
                 let pic = match &o.pic {
@@ -375,8 +371,7 @@ impl Extra {
             .find(|l| l.0 == self.stab)
             .map_or("off", |l| l.1);
         format!(
-            "{{\"adjust\": {{{}}},\n  \"over\": [{}],\n  \"denoise\": {},\n  \"stab\": \"{lock}\", \"smooth\": {:?}}}",
-            adj.join(", "),
+            "{{\"over\": [{}],\n  \"denoise\": {},\n  \"stab\": \"{lock}\", \"smooth\": {:?}}}",
             over.join(","),
             self.denoise.map_or("null".into(), |d| format!("{d:?}")),
             self.smooth
@@ -386,13 +381,6 @@ impl Extra {
     /// From a `"x5desk"` object; missing fields keep their defaults, malformed ones are errors.
     pub fn read(j: &J) -> Result<Extra, String> {
         let mut x = Extra::default();
-        if let Some(a) = j.get("adjust") {
-            for (d, v) in ADJ.iter().zip(adj(&mut x.adj)) {
-                if let Some(n) = a.get(d.0) {
-                    *v = n.n().ok_or(format!("adjust.{}", d.0))? as f32;
-                }
-            }
-        }
         if let Some(J::A(v)) = j.get("over") {
             for (i, o) in v.iter().enumerate() {
                 let bad = || format!("overlay {i}");
@@ -456,10 +444,19 @@ pub fn save(pj: &edit::Project, x: &Extra) -> String {
 }
 
 pub fn load(s: &str) -> Result<(edit::Project, Extra), String> {
-    let pj = edit::Project::load(s).map_err(|e| e.0)?;
-    let x = match parse(s)?.get("x5desk") {
-        Some(j) => Extra::read(j)?,
-        None => Extra::default(),
-    };
-    Ok((pj, x))
+    let (mut tl, doc) = (edit::Timeline::load(s).map_err(|e| e.0)?, parse(s)?);
+    let j = doc.get("x5desk");
+    // a file from before: the timeline's adjustments go on the clips without their own
+    if let Some(a) = j.and_then(|j| j.get("adjust")) {
+        let mut p = fx::Params::default();
+        for (d, v) in ADJ.iter().zip(adj(&mut p)) {
+            if let Some(n) = a.get(d.0) {
+                *v = n.n().ok_or(format!("adjust.{}", d.0))? as f32;
+            }
+        }
+        let def = fx::Params::default();
+        (tl.clips.iter_mut().filter(|c| c.adj == def)).for_each(|c| c.adj = p);
+    }
+    let x = j.map_or(Ok(Extra::default()), Extra::read)?;
+    Ok((edit::Project::with(tl).map_err(|e| e.0)?, x))
 }

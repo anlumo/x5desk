@@ -3,10 +3,10 @@
 //! (`stab` poses as the stitch pose) -> 360 equirect or a reframed flat view -> effects on the RGBA frame (an editor
 //! timeline's looks, adjustments and overlays through crate fx, then `Job::fx`) -> NV12 / P010 -> `video::Encoder` on
 //! its own thread -> MP4 (`media::mux`, `sv3d` / `st3d` for 360). Audio: spans played at 1× copy their source's AAC;
-//! an editor timeline that is more than a plain cut mixes its clips' audio, time-stretched to their speed, with the
-//! music and encodes it (`Edit`). Either way the audio ends with the last video frame. Frame grabs (`Enc::Jpeg`) take
-//! the same path into a JPEG (`jpeg`, GPano for 360). `Queue` runs jobs one after another on a background thread with
-//! progress and cancel.
+//! an editor timeline that is more than a plain cut mixes its clips' audio, time-stretched to their speed (and
+//! denoised), with the music and encodes it (`Edit`). Either way the audio ends with the last video frame. Frame grabs
+//! (`Enc::Jpeg`) take the same path into a JPEG (`jpeg`, GPano for 360). `Queue` runs jobs one after another on a
+//! background thread with progress and cancel.
 //!
 //! Output goes to `<path>.part` and is renamed to `path` once complete; an error or a cancel removes it. wgpu errors and
 //! panics on the job's threads (render, decode, encode) are caught (error scopes, `catch_unwind`) and fail the job
@@ -18,6 +18,7 @@ pub mod jpeg;
 use media::{
     aacenc,
     audio::Aac,
+    denoise::{self, Stereo},
     insv::{self, Trailer},
     mix::{self, Kind, Mixer, Track},
     mp4::{self, Mp4},
@@ -93,13 +94,14 @@ pub enum Cut {
 
 /// An editor timeline (crate edit). Output frame n, at `tl.out.fps`, shows `tl.frame(n)`: its clip's source frame
 /// at that source time (cuts, speed ramps, freeze frames), its view on a flat output (unless `Out::Flat` has a view of
-/// its own) and its clip's look.
+/// its own), its clip's adjustments and look.
 ///
-/// Audio: when every clip plays forwards at 1×, unmuted, at gain 1, and there is no music, the clips' AAC is copied.
-/// Otherwise each clip's audio follows its speed curve (`media::stretch`: pitch kept, 0.5×–2×, silent at other
-/// speeds) under its gain envelope, with 5 ms fades at its ends; freeze frames and muted clips are silent. The music
-/// plays at its offset and gain, ducked by the mixer (`media::mix`, sidechain on the clip audio, `edit::DUCK` deep)
-/// when `edit::Music::duck`; the mix, through the mixer's limiter, is AAC-encoded (`media::aacenc`).
+/// Audio: when every clip plays forwards at 1×, unmuted, at gain 1, and there is no music and no denoise, the clips'
+/// AAC is copied. Otherwise each clip's audio follows its speed curve (`media::stretch`: pitch kept, 0.5×–2×, silent
+/// at other speeds), denoised after the stretch when `denoise` is set (as the editor's preview does), under its gain
+/// envelope, with 5 ms fades at its ends; freeze frames and muted clips are silent. The music plays at its offset and
+/// gain, ducked by the mixer (`media::mix`, sidechain on the clip audio, `edit::DUCK` deep) when `edit::Music::duck`;
+/// the mix, through the mixer's limiter, is AAC-encoded (`media::aacenc`).
 ///
 /// Reversed clips are not supported yet: such a job fails.
 pub struct Edit {
@@ -109,14 +111,14 @@ pub struct Edit {
     /// entry's path. The music is the first file of its entry.
     pub files: Vec<Vec<PathBuf>>,
     /// Look ids (`edit::Clip::look`) to their tables (`fx::Look::cube`, a parsed `.cube`); an unknown id fails the
-    /// job. A clip's `amt` is its look's intensity (`fx::Params::mix`).
+    /// job. A clip's `amt` is its look's intensity (`fx::Params::mix`), its `adj` the adjustments under the look.
     pub looks: HashMap<String, fx::Cube>,
-    /// Colour adjustments on every frame, under the clip's look.
-    pub adjust: fx::Params,
     /// Overlays on every frame, after the colour: image, placement, opacity (watermarks, stickers, text).
     pub over: Vec<(fx::Image, fx::Place, f32)>,
     /// AAC bit rate of a mixed soundtrack, bit/s (stereo: 128000–256000).
     pub abr: u32,
+    /// RNNoise strength (0..=1, `media::denoise::Stereo::strength`) on every clip's audio; None: off.
+    pub denoise: Option<f32>,
 }
 
 impl Edit {
@@ -130,6 +132,7 @@ impl Edit {
     /// Nothing but cuts at 1×: the source audio can be copied.
     fn plain(&self) -> bool {
         self.tl.out.music.is_none()
+            && self.denoise.is_none()
             && self.tl.clips.iter().all(|c| {
                 c.hold == 0.0
                     && !c.rev
@@ -550,14 +553,24 @@ struct Voice {
     s0: i64,
     st: Stretch,
     chunk: Vec<f32>,
-    /// stretched output from output frame `y0`; the stretch finished
+    /// stretched (and denoised up to `dn.done`) output from output frame `y0`; the stretch finished
     y: Vec<f32>,
     y0: u64,
     done: bool,
+    dn: Option<Box<Dn>>,
+}
+
+/// A voice's denoiser: frames of `y` done, the delay still to drop, a frame per side.
+struct Dn {
+    st: Stereo,
+    done: usize,
+    drop: usize,
+    l: [f32; denoise::FRAME],
+    r: [f32; denoise::FRAME],
 }
 
 impl Voice {
-    fn new(tl: &edit::Timeline, p: &Plan, k: usize) -> Result<Voice, String> {
+    fn new(tl: &edit::Timeline, p: &Plan, k: usize, dn: Option<f32>) -> Result<Voice, String> {
         let c = p.of[tl.clips[k].file as usize];
         let cl = &p.clips[c];
         let (fi, ti) = cl.aac.ok_or("no audio")?;
@@ -597,10 +610,31 @@ impl Voice {
             chunk: vec![],
             y: vec![],
             done: false,
+            dn: dn.map(|s| {
+                let mut st = Stereo::new();
+                st.strength = s.clamp(0.0, 1.0);
+                Box::new(Dn {
+                    st,
+                    done: 0,
+                    drop: denoise::DELAY,
+                    l: [0.0; denoise::FRAME],
+                    r: [0.0; denoise::FRAME],
+                })
+            }),
         })
     }
 
-    /// Stretches on until the output reaches output frame `to` or the clip's end.
+    /// Frames of `y` ready.
+    fn ready(&self) -> usize {
+        match &self.dn {
+            // nothing until the denoiser's delay is dropped
+            Some(d) if d.drop > 0 => 0,
+            Some(d) => d.done,
+            None => self.y.len() / 2,
+        }
+    }
+
+    /// Stretches (and denoises) on until the output reaches output frame `to` or the clip's end.
     fn fill(&mut self, tl: &edit::Timeline, p: &Plan, to: u64) -> Result<(), String> {
         let fps = tl.out.fps;
         let (m, tr) = (
@@ -608,10 +642,16 @@ impl Voice {
             &p.clips[self.c].mp4[self.tr.0].tracks[self.tr.1],
         );
         let ts = tr.timescale as i64;
-        while !self.done && self.y0 + (self.y.len() / 2) as u64 <= to {
+        while !self.done && self.y0 + self.ready() as u64 <= to {
             if self.j == self.n.end {
                 self.st.finish(&mut self.y);
                 self.done = true;
+                if let Some(d) = &mut self.dn {
+                    // through the denoiser's delay
+                    let n = self.y.len() + 2 * (denoise::DELAY + denoise::FRAME);
+                    self.y.resize(n, 0.0);
+                    d.run(&mut self.y);
+                }
                 break;
             }
             let (ta, tb) = (
@@ -656,8 +696,35 @@ impl Voice {
             }
             self.st.run(&self.chunk, v, &mut self.y);
             self.j += 1;
+            if let Some(d) = &mut self.dn {
+                d.run(&mut self.y);
+            }
         }
         Ok(())
+    }
+}
+
+impl Dn {
+    /// Denoises the whole frames of `y` not done yet; drops the delay from its start once that much is done.
+    fn run(&mut self, y: &mut Vec<f32>) {
+        const F: usize = denoise::FRAME;
+        while self.done + F <= y.len() / 2 {
+            let y = &mut y[2 * self.done..2 * (self.done + F)];
+            for (i, f) in y.as_chunks::<2>().0.iter().enumerate() {
+                (self.l[i], self.r[i]) = (f[0], f[1]);
+            }
+            self.st.frame(&mut self.l, &mut self.r);
+            for (i, f) in y.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                (f[0], f[1]) = (self.l[i], self.r[i]);
+            }
+            self.done += F;
+        }
+        // the denoiser's output is DELAY frames late
+        if self.drop > 0 && self.done >= self.drop {
+            y.drain(..2 * self.drop);
+            self.done -= self.drop;
+            self.drop = 0;
+        }
     }
 }
 
@@ -666,6 +733,8 @@ impl Voice {
 struct Mixdown<'a> {
     tl: &'a edit::Timeline,
     p: &'a Plan,
+    /// `Edit::denoise`
+    dn: Option<f32>,
     mx: Mixer,
     /// per clip track of `mx`, in order (the music's comes last): timeline clip, output frames, voice while it plays
     vs: Vec<(usize, [u64; 2], Option<Voice>)>,
@@ -728,6 +797,7 @@ impl<'a> Mixdown<'a> {
         Ok(Some(Mixdown {
             tl,
             p,
+            dn: e.denoise,
             mx,
             vs,
             music,
@@ -756,16 +826,19 @@ impl<'a> Mixdown<'a> {
                 }
                 let v = match v {
                     Some(v) => v,
-                    None => v.insert(Voice::new(self.tl, self.p, *k)?),
+                    None => v.insert(Voice::new(self.tl, self.p, *k, self.dn)?),
                 };
                 v.fill(self.tl, self.p, q)?;
                 b.resize(2 * n as usize, 0.0);
                 let s = p.max(v.y0);
                 let (i, len) = ((s - v.y0) as usize, (q - s) as usize);
-                let got = (v.y.len() / 2).saturating_sub(i).min(len);
+                let got = v.ready().saturating_sub(i).min(len);
                 b[2 * (s - p) as usize..][..2 * got].copy_from_slice(&v.y[2 * i..2 * (i + got)]);
-                let d = (q.saturating_sub(v.y0) as usize).min(v.y.len() / 2);
+                let d = (q.saturating_sub(v.y0) as usize).min(v.ready());
                 v.y.drain(..2 * d);
+                if let Some(dn) = &mut v.dn {
+                    dn.done -= d;
+                }
                 v.y0 += d as u64;
             }
             if let Some((mu, mt)) = &mut self.music {
@@ -1253,9 +1326,8 @@ fn render(
     // crate fx on an editor timeline's frames: its state and the copy of the frame it reads, the overlays
     let fxc = ed
         .filter(|e| {
-            e.adjust != fx::Params::default()
-                || !e.over.is_empty()
-                || e.tl.clips.iter().any(|c| !c.look.is_empty())
+            !e.over.is_empty()
+                || (e.tl.clips.iter()).any(|c| !c.look.is_empty() || c.adj != fx::Params::default())
         })
         .map(|_| fx::Ctx::new(&g.device, &g.queue));
     let mut gfx = (fxc.as_ref()).map(|x| {
@@ -1271,7 +1343,7 @@ fn render(
         _ => vec![],
     };
     let ovr: Vec<&fx::Overlay> = over.iter().collect();
-    // the timeline clip whose look is set
+    // the timeline clip whose look and adjustments are set
     let mut look: Option<usize> = None;
     let input = enc.as_ref().map(|e| e.input.clone());
     let total = pl.runs.iter().map(|r| r.k.len() as u64).sum::<u64>();
@@ -1395,7 +1467,7 @@ fn render(
                                     }
                                     fx.set(&fx::Params {
                                         mix: c.amt,
-                                        ..ed.adjust
+                                        ..c.adj
                                     });
                                     look = Some(ev.k);
                                 }

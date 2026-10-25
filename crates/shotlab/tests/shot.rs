@@ -1306,7 +1306,7 @@ fn render(
             tl,
             files: vec![vec![src.to_path_buf()]],
             looks: Default::default(),
-            adjust: fx::Params::default(),
+            denoise: None,
             over: vec![],
             abr: 192_000,
         })),

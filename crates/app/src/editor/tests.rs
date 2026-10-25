@@ -1,51 +1,53 @@
 use super::*;
 
-/// The extras survive a project file round trip next to edit's timeline, and edit's reader ignores them.
+/// The extras survive a project file round trip next to edit's timeline (a clip's adjustments in it), and edit's
+/// reader ignores them.
 #[test]
 fn extras() {
     let mut pj = Project::new(FPS).unwrap();
     let f = pj.file("/v/a.insv", 10.0).unwrap();
     pj.insert(0, Clip::new(f, 1.0, 4.0)).unwrap();
-    let mut x = Extra::default();
-    x.adj.exposure = 0.5;
-    x.adj.purple = 0.25;
-    x.denoise = Some(0.7);
-    x.stab = Some(stab::Lock::Direction);
-    x.smooth = 1.25;
-    x.over = vec![
-        Over {
-            pic: Pic::Text {
-                s: "Hi \"there\"\n\\ é".into(),
-                px: 48.0,
-                rgba: [10, 20, 30, 255],
+    pj.edit(0, |c| (c.adj.exposure, c.adj.purple) = (0.5, 0.25))
+        .unwrap();
+    let x = Extra {
+        denoise: Some(0.7),
+        stab: Some(stab::Lock::Direction),
+        smooth: 1.25,
+        over: vec![
+            Over {
+                pic: Pic::Text {
+                    s: "Hi \"there\"\n\\ é".into(),
+                    px: 48.0,
+                    rgba: [10, 20, 30, 255],
+                },
+                place: fx::Place::Flat {
+                    at: [0.25, 0.75],
+                    w: 0.3,
+                    rot: 12.0,
+                },
+                opacity: 0.5,
             },
-            place: fx::Place::Flat {
-                at: [0.25, 0.75],
-                w: 0.3,
-                rot: 12.0,
+            Over {
+                pic: Pic::Disc([1, 2, 3, 4]),
+                place: fx::Place::Sphere {
+                    yaw: 0.0,
+                    pitch: -90.0,
+                    fov: 40.0,
+                    roll: 5.0,
+                },
+                opacity: 1.0,
             },
-            opacity: 0.5,
-        },
-        Over {
-            pic: Pic::Disc([1, 2, 3, 4]),
-            place: fx::Place::Sphere {
-                yaw: 0.0,
-                pitch: -90.0,
-                fov: 40.0,
-                roll: 5.0,
+            Over {
+                pic: Pic::Png("/l/logo.png".into()),
+                place: fx::Place::Flat {
+                    at: [0.9, 0.1],
+                    w: 0.1,
+                    rot: 0.0,
+                },
+                opacity: 0.9,
             },
-            opacity: 1.0,
-        },
-        Over {
-            pic: Pic::Png("/l/logo.png".into()),
-            place: fx::Place::Flat {
-                at: [0.9, 0.1],
-                w: 0.1,
-                rot: 0.0,
-            },
-            opacity: 0.9,
-        },
-    ];
+        ],
+    };
     let s = doc::save(&pj, &x);
     assert!(edit::Project::load(&s).is_ok(), "edit reads the file");
     let (p2, x2) = doc::load(&s).unwrap();
@@ -309,7 +311,7 @@ fn history() {
     );
     let f = e.pj.file("/nowhere/a.insv", 20.0).unwrap();
     e.ed(|p| p.insert(0, Clip::new(f, 0.0, 10.0)));
-    e.x.adj.exposure = 0.5;
+    e.x.denoise = Some(0.5);
     e.sync();
     e.ed(|p| p.split(4.0));
     e.x.over.push(Over {
@@ -339,11 +341,11 @@ fn history() {
     assert_eq!((&e.x, e.history()), (&x, (5, 0)));
     e.undo();
     e.undo();
-    e.x.adj.contrast = 0.25;
+    e.x.denoise = Some(0.25);
     e.sync();
     assert_eq!(e.history(), (4, 0));
     e.redo();
-    assert!(e.x.over.is_empty() && (e.x.stab, e.x.smooth) == h && e.x.adj.contrast == 0.25);
+    assert!(e.x.over.is_empty() && (e.x.stab, e.x.smooth) == h && e.x.denoise == Some(0.25));
     for _ in 0..4 {
         e.undo();
     }
@@ -362,6 +364,132 @@ fn history() {
     let bad = out("bad.cube");
     std::fs::write(&bad, "LUT_3D_SIZE 2\n0 0 0\n").unwrap();
     assert!(e.cube(&bad).is_err() && e.pj.tl().clips[0].look == id);
+}
+
+/// Adjustments are per clip (no samples needed): a project file from before, with the timeline's adjustments in
+/// `"x5desk"`, loads with them on every clip and saves them there; a drag on the Colour tab's Exposure slider (egui
+/// input, the slider found through AccessKit) changes the selected clip's only, as one undo step and without pausing
+/// (no `changed`); the job takes each clip's and the denoise setting.
+#[test]
+fn colour() {
+    // as the app wrote it before
+    let old = r#"{"x5edit": 1,
+ "fps": [30000, 1001],
+ "files": [
+  {"path": "/nowhere/a.insv", "dur": 20.0}],
+ "clips": [
+  {"file": 0, "a": 0.5, "b": 4.5, "hold": 0.0, "rev": false, "mute": false, "amt": 1.0, "look": "", "speed": [], "vol": [], "view": []},
+  {"file": 0, "a": 5.0, "b": 9.0, "hold": 0.0, "rev": false, "mute": false, "amt": 1.0, "look": "", "speed": [], "vol": [], "view": []}],
+ "view": [],
+ "music": null,
+ "x5desk": {"adjust": {"exposure": 0.5, "brightness": 0.0, "brilliance": 0.0, "contrast": 0.25, "highlights": 0.0, "shadows": 0.0, "whites": 0.0, "blacks": 0.0, "saturation": 0.0, "vibrance": 0.0, "temperature": 0.0, "tint": 0.0, "clarity": 0.0, "sharpen": 0.0, "auto": 0.0, "water": 0.0, "purple": 0.0, "green": 0.0, "blue": 0.0, "reach": 4.0},
+  "over": [],
+  "denoise": 0.7,
+  "stab": "horizon", "smooth": 0.5}}
+"#;
+    let (pj, x) = doc::load(old).unwrap();
+    let a = fx::Params {
+        exposure: 0.5,
+        contrast: 0.25,
+        ..Default::default()
+    };
+    assert!(pj.tl().clips.iter().all(|c| c.adj == a));
+    assert_eq!((x.denoise, x.smooth), (Some(0.7), 0.5));
+    let s = doc::save(&pj, &x);
+    assert_eq!(
+        s.matches("\"adjust\": {\"exposure\": 0.5, \"contrast\": 0.25}")
+            .count(),
+        2,
+        "{s}"
+    );
+    assert_eq!(s.matches("\"adjust\"").count(), 2, "{s}");
+    let (p2, x2) = doc::load(&s).unwrap();
+    assert_eq!((p2.tl(), &x2), (pj.tl(), &x));
+
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = stitch::Ctx::new(&g.device, &g.queue);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut e = Editor::new(&g, &cx, &ctx, player::still(&g, &cx), None);
+    e.take(pj, x, None);
+    e.sel = Some(1);
+    let mut t = 0.0;
+    let mut step = |e: &mut Editor, ev: Vec<egui::Event>| {
+        t += 1.0 / 60.0;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(500.0, 1400.0),
+            )),
+            time: Some(t),
+            events: ev,
+            ..Default::default()
+        };
+        let mut o = ctx.run_ui(raw, |ui| e.colour_ui(ui));
+        o.textures_delta.clear();
+        e.sync();
+        o.platform_output.accesskit_update
+    };
+    let u = step(&mut e, vec![]).expect("AccessKit is on");
+    // the slider its text labels
+    let l = (u.nodes.iter())
+        .find(|(_, n)| n.role() == egui::Role::Label && n.value() == Some("Exposure (EV)"))
+        .map(|x| x.0);
+    let r = (u.nodes.iter())
+        .find(|(_, n)| {
+            n.role() == egui::Role::Slider && l.is_some_and(|l| n.labelled_by().contains(&l))
+        })
+        .and_then(|(_, n)| n.bounds())
+        .expect("the Exposure slider");
+    let (v0, h0) = (e.ver, e.history());
+    let y = ((r.y0 + r.y1) / 2.0) as f32;
+    let (p, q) = (
+        egui::pos2((r.x0 + 0.5 * (r.x1 - r.x0)) as f32, y),
+        egui::pos2((r.x0 + 0.75 * (r.x1 - r.x0)) as f32, y),
+    );
+    let btn = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    for ev in [
+        vec![egui::Event::PointerMoved(p)],
+        vec![btn(p, true)],
+        vec![egui::Event::PointerMoved(p + (q - p) * 0.5)],
+        vec![egui::Event::PointerMoved(q)],
+        vec![btn(q, false)],
+        vec![],
+    ] {
+        step(&mut e, ev);
+    }
+    let ex = |e: &Editor| {
+        e.pj.tl()
+            .clips
+            .iter()
+            .map(|c| c.adj.exposure)
+            .collect::<Vec<_>>()
+    };
+    eprintln!(
+        "Exposure slider at {r:?}: exposures {:?}, history {:?} (before {h0:?})",
+        ex(&e),
+        e.history()
+    );
+    assert!(ex(&e)[0] == 0.5 && ex(&e)[1] > 1.0, "{:?}", ex(&e));
+    assert_eq!((e.history(), e.ver), ((h0.0 + 1, 0), v0));
+    let j = e.job().unwrap();
+    assert_eq!(
+        (
+            j.tl.clips
+                .iter()
+                .map(|c| c.adj.exposure)
+                .collect::<Vec<_>>(),
+            j.denoise
+        ),
+        (ex(&e), Some(0.7))
+    );
+    e.undo();
+    assert_eq!(ex(&e), [0.5, 0.5]);
 }
 
 /// One timeline frame with `ev` as the input at `t` s: the timeline drawn in a known rect, what its widgets asked for
@@ -491,18 +619,18 @@ fn sync() {
     let a = |e: &Editor| e.pj.tl().clips.first().map(|c| c.a);
     let state = |e: &Editor, w: &str| {
         let s = format!(
-            "{w}: history {:?}, edit's {:?}, a {:?}, exposure {}",
+            "{w}: history {:?}, edit's {:?}, a {:?}, denoise {:?}",
             e.history(),
             e.pj.history(),
             a(e),
-            e.x.adj.exposure
+            e.x.denoise
         );
         eprintln!("{s}");
     };
     e.ed(|p| p.insert(0, Clip::new(f, 0.0, 10.0)));
     e.ed(|p| p.trim(0, 1.0, 10.0));
     e.sync();
-    e.x.adj.exposure = 0.5;
+    e.x.denoise = Some(0.5);
     e.sync();
     e.ed(|p| p.trim(0, 2.0, 10.0));
     e.undo();
@@ -524,7 +652,7 @@ fn sync() {
     // back in order: the extras step, the trim, the insert
     e.undo();
     state(&e, "undo");
-    assert_eq!((a(&e), e.x.adj.exposure), (Some(1.0), 0.0));
+    assert_eq!((a(&e), e.x.denoise), (Some(1.0), None));
     e.undo();
     state(&e, "undo");
     assert_eq!(a(&e), Some(0.0));
@@ -536,8 +664,8 @@ fn sync() {
     }
     state(&e, "redone");
     assert_eq!(
-        (a(&e), e.x.adj.exposure, e.history()),
-        (Some(1.0), 0.5, (3, 0))
+        (a(&e), e.x.denoise, e.history()),
+        (Some(1.0), Some(0.5), (3, 0))
     );
     // a replacement whose second clip is bad: nothing changes, the steps undone stay to redo (edit's trim first)
     e.undo();
@@ -555,7 +683,7 @@ fn sync() {
     e.redo();
     assert_eq!((e.pj.tl().clips.len(), a(&e)), (1, Some(1.0)));
     e.redo();
-    assert_eq!((e.x.adj.exposure, e.history()), (0.5, (3, 0)));
+    assert_eq!((e.x.denoise, e.history()), (Some(0.5), (3, 0)));
     e.shot(0, Ok(vec![Clip::new(f, 0.0, 5.0), Clip::new(f, 5.0, 9.0)]));
     e.sync();
     assert_eq!(
