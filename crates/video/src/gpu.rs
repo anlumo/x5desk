@@ -60,6 +60,15 @@ const EXT: [&CStr; 13] = [
     ext::queue_family_foreign::NAME,
 ];
 
+/// Held across instance creation: no two threads of the process are in the loader's ICD scan at once. The loader
+/// (1.4.363) scans every ICD manifest in `vkEnumerateInstanceExtensionProperties` (its preload under one lock, then
+/// a scan under none) and in `vkCreateInstance` (under `loader_lock`), so scans overlap and each calls every ICD's
+/// `vk_icdNegotiateLoaderICDInterfaceVersion`. NVIDIA's (`libGLX_nvidia.so.0` 615.78.08, also installed on
+/// machines without an NVIDIA GPU) initialises lazily: it sets its done flag, then opens an X display and fills the
+/// pointer it jumps through, so a second caller meanwhile jumps to NULL (SIGSEGV, both stacks in the core). The
+/// loader unloads that ICD whenever no scan or instance holds it, so its init reruns on later `Gpu::new`s too.
+static SCAN: Mutex<()> = Mutex::new(());
+
 impl Gpu {
     /// Opens the high-performance Vulkan adapter with every adapter feature, the experimental features, the decode
     /// and encode queues, and whichever of the video and external memory / semaphore extensions the driver has.
@@ -67,7 +76,11 @@ impl Gpu {
         let err = |e: &dyn std::fmt::Display| Error::Gpu(e.to_string());
         let mut d = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
         d.backends = wgpu::Backends::VULKAN;
-        let instance = wgpu::Instance::new(d);
+        // a poisoned lock still holds the guard
+        let instance = {
+            let _g = SCAN.lock();
+            wgpu::Instance::new(d)
+        };
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
