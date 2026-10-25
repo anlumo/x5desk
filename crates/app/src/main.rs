@@ -79,7 +79,7 @@ mod webcam;
 use eframe::{egui, egui_wgpu};
 use std::{
     cell::RefCell,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard,
         atomic::{AtomicBool, Ordering::Relaxed},
@@ -252,6 +252,20 @@ pub fn xdg(var: &str, home: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|d| d.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(home)))
+}
+
+/// Makes the app's config dir `d` before a save there: created if missing, owner-only also when it exists already
+/// (it holds the stream key, the client id, the recent files). Its parents keep their modes.
+pub fn private(d: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    if let Some(p) = d.parent() {
+        std::fs::create_dir_all(p)?
+    }
+    match std::fs::DirBuilder::new().mode(0o700).create(d) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+        _ => {}
+    }
+    std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))
 }
 
 /// wgpu-core's `Surface::configure` waits for the queue to go idle and fails (`GpuWaitTimeout`) when another thread

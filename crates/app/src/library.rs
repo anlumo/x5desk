@@ -137,7 +137,7 @@ impl Recent {
         }
         if let Err(e) = f
             .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
+            .map_or(Ok(()), crate::private)
             .and_then(|_| std::fs::write(f, s))
         {
             eprintln!("{}: {e}", f.display());
@@ -564,10 +564,12 @@ mod tests {
 
     #[test]
     fn recent() {
-        let f = std::env::var_os("X5_FIXTURES")
+        // a directory of its own: a save makes the file's directory owner-only
+        let d = std::env::var_os("X5_FIXTURES")
             .map_or_else(std::env::temp_dir, PathBuf::from)
             .join(format!("x5desk-recent-{}", std::process::id()));
-        let _ = std::fs::remove_file(&f);
+        let _ = std::fs::remove_dir_all(&d);
+        let f = d.join("recent");
         let mut r = Recent::at(Some(f.clone()));
         assert!(r.list.is_empty());
         for i in 0..25 {
@@ -579,6 +581,6 @@ mod tests {
         assert_eq!(r2.list[0], Path::new("/v/10.insv"));
         assert_eq!(r2.list[1], Path::new("/v/24.insv"));
         assert_eq!(r2.list.iter().filter(|p| p.ends_with("10.insv")).count(), 1);
-        std::fs::remove_file(&f).unwrap();
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

@@ -915,7 +915,7 @@ impl Set {
         let s = format!("dest={}\nauto={}\n", self.dest.display(), self.auto as u8);
         if let Err(e) = f
             .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
+            .map_or(Ok(()), crate::private)
             .and_then(|_| std::fs::write(f, s))
         {
             eprintln!("{}: {e}", f.display());

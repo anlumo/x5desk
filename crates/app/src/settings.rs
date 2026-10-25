@@ -111,7 +111,7 @@ impl Prefs {
         let t = f.with_extension("new");
         let r = f
             .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
+            .map_or(Ok(()), crate::private)
             .and_then(|_| std::fs::write(&t, s))
             .and_then(|_| std::fs::rename(&t, f));
         if let Err(e) = r {
