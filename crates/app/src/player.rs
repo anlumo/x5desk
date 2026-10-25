@@ -249,7 +249,24 @@ impl Src {
         ctx: &egui::Context,
     ) -> Job {
         let (w, h) = (self.fr.w, self.fr.h);
-        if snap.as_ref().is_none_or(|x| (x.w, x.h) != (w, h)) {
+        // the lens planes as they are: R8 / RG8, or R16 / RG16 for P010 (H.265 Main 10)
+        let deep = self.v.rings[0].texture(0).format() == wgpu::TextureFormat::P010;
+        let (fy, fc, b) = match deep {
+            true => (
+                wgpu::TextureFormat::R16Unorm,
+                wgpu::TextureFormat::Rg16Unorm,
+                2,
+            ),
+            false => (
+                wgpu::TextureFormat::R8Unorm,
+                wgpu::TextureFormat::Rg8Unorm,
+                1,
+            ),
+        };
+        if snap
+            .as_ref()
+            .is_none_or(|x| (x.w, x.h, x.y[0].format()) != (w, h, fy))
+        {
             let tex = |w, h, format| {
                 g.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("raft input"),
@@ -266,10 +283,10 @@ impl Src {
                     view_formats: &[],
                 })
             };
-            let bpr = w.next_multiple_of(256) as u64;
+            let bpr = (w * b).next_multiple_of(256) as u64;
             *snap = Some(Snap {
-                y: [0, 1].map(|_| tex(w, h, wgpu::TextureFormat::R8Unorm)),
-                uv: [0, 1].map(|_| tex(w / 2, h / 2, wgpu::TextureFormat::Rg8Unorm)),
+                y: [0, 1].map(|_| tex(w, h, fy)),
+                uv: [0, 1].map(|_| tex(w / 2, h / 2, fc)),
                 buf: g.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("raft input"),
                     size: bpr * h as u64 * 3,
@@ -281,7 +298,7 @@ impl Src {
             });
         }
         let x = snap.as_ref().unwrap();
-        let bpr = w.next_multiple_of(256);
+        let bpr = (w * b).next_multiple_of(256);
         let mut e = g.device.create_command_encoder(&Default::default());
         for i in 0..2 {
             let (r, [rx, ry, _, _]) = self.lens[i];

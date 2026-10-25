@@ -1,7 +1,7 @@
 //! Plain videos, without an Insta360 trailer (our own exports): a 2:1 picture is an equirect shown in every view mode
 //! through crate stitch's preview, any other plays flat. As in the player the audio clock (or the silent one) is the
 //! master and the media thread (`clip`) decodes ahead; each UI frame takes the newest frame due, converts it from NV12
-//! to RGBA (`movie.wgsl`) and draws it. 10-bit H.265 does not decode yet (crate video decodes 8-bit).
+//! or P010 (H.265 Main 10) to RGBA (`movie.wgsl`) and draws it.
 
 use crate::{
     clip::{self, Pic, Video},
@@ -76,7 +76,10 @@ impl Movie {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: FMT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // copied out by the tests
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let rv = rgba.create_view(&Default::default());
@@ -108,14 +111,15 @@ impl Movie {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let deep = v.rings[0].texture(0).format() == wgpu::TextureFormat::P010;
         g.queue
-            .write_buffer(&o, 0, bytemuck::cast_slice(&[x, y, 0, 0]));
+            .write_buffer(&o, 0, bytemuck::cast_slice(&[x, y, deep as u32, 0]));
         let bg = (0..OUT)
             .map(|s| {
                 let t = v.rings[0].texture(s);
-                let pl = |format, aspect| {
+                // the plane's own format: R8 / RG8, or R16 / RG16 for P010
+                let pl = |aspect| {
                     t.create_view(&wgpu::TextureViewDescriptor {
-                        format: Some(format),
                         aspect,
                         ..Default::default()
                     })
@@ -127,14 +131,12 @@ impl Movie {
                         wgpu::BindGroupEntry {
                             binding: 0,
                             resource: wgpu::BindingResource::TextureView(&pl(
-                                wgpu::TextureFormat::R8Unorm,
                                 wgpu::TextureAspect::Plane0,
                             )),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
                             resource: wgpu::BindingResource::TextureView(&pl(
-                                wgpu::TextureFormat::Rg8Unorm,
                                 wgpu::TextureAspect::Plane1,
                             )),
                         },
@@ -246,6 +248,26 @@ impl Movie {
         }
     }
 
+    /// Records frame `p`'s conversion into the RGBA picture; the caller acquires `p` for the submit.
+    fn yuv(&self, e: &mut wgpu::CommandEncoder, p: &Pic) {
+        let mut rp = e.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("movie"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.rv,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        rp.set_pipeline(&self.pipe);
+        rp.set_bind_group(0, &self.bg[(p.f[0] % OUT) as usize], &[]);
+        rp.draw(0..3, 0..1);
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, rs: &RenderState) {
         if ui.input(|i| i.key_pressed(egui::Key::Space)) {
             self.play(!self.playing);
@@ -338,22 +360,7 @@ impl Movie {
                 let g = &self.g;
                 let mut e = g.device.create_command_encoder(&Default::default());
                 if self.fresh {
-                    let mut rp = e.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("movie"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &self.rv,
-                            depth_slice: None,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        ..Default::default()
-                    });
-                    rp.set_pipeline(&self.pipe);
-                    rp.set_bind_group(0, &self.bg[(p.f[0] % OUT) as usize], &[]);
-                    rp.draw(0..3, 0..1);
+                    self.yuv(&mut e, &p);
                 }
                 if sphere {
                     Tgt::fit(&mut self.tgt, g, rs, size);
@@ -400,5 +407,148 @@ impl Drop for Movie {
         if let Some((id, rs)) = &self.flat {
             rs.renderer.write().free_texture(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::export::{Exp, Set, Spec};
+    use std::time::Instant;
+
+    /// FFmpeg's decode of frame `k`: luma and the interleaved chroma, as codes in 8-bit units (10-bit codes / 4).
+    fn ffmpeg(p: &Path, k: usize, deep: bool) -> Vec<f64> {
+        let o = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(p)
+            .args(["-vf", &format!("select=eq(n\\,{k})")])
+            .args([
+                "-fps_mode",
+                "passthrough",
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+            ])
+            .args(["-pix_fmt", if deep { "p010le" } else { "nv12" }, "-"])
+            .output()
+            .expect("ffmpeg");
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        match deep {
+            // P010: the code in the high 10 bits
+            true => (o.stdout.chunks(2))
+                .map(|b| (u16::from_le_bytes([b[0], b[1]]) >> 6) as f64 / 4.0)
+                .collect(),
+            false => o.stdout.iter().map(|&b| b as f64).collect(),
+        }
+    }
+
+    /// The viewer on 360 exports of v635 (`X5_SAMPLES`) through the Export screen's queue, H.265 10-bit (P010
+    /// pictures) and 8-bit (NV12): a P-frame after a seek converts to FFmpeg's decode through BT.709 limited range with
+    /// nearest chroma (`movie.wgsl`), every channel at most 1 level off and nearly all exact.
+    #[test]
+    fn deep() {
+        let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+            eprintln!("X5_SAMPLES unset: skipped");
+            return;
+        };
+        let g = Arc::new(Gpu::new().unwrap());
+        let cx = Ctx::new(&g.device, &g.queue);
+        let ctx = egui::Context::default();
+        let dir = std::env::var_os("X5_FIXTURES")
+            .map_or_else(std::env::temp_dir, PathBuf::from)
+            .join(format!("x5desk-movie-{}", std::process::id()));
+        // the log prints each job's end
+        let mut e = Exp::new(&g, &cx, &ctx, Some(dir.clone()), true);
+        let mut s = Spec::of(&d.join("v635.insv")).unwrap();
+        s.dur = 0.5;
+        e.source(s);
+        // in this order: v635_360_1920.mp4, then -2
+        for deep in [true, false] {
+            let x = Set {
+                preset: None,
+                w: 1920,
+                deep,
+                qp: Some(20),
+                raft: false,
+                stab: None,
+                ..Set::default()
+            };
+            e.queue(x, false).unwrap();
+        }
+        let t0 = Instant::now();
+        while !e.idle() {
+            assert!(t0.elapsed().as_secs() < 120, "exports stalled");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        e.tick();
+        drop(e);
+        let k = 9;
+        for (f, deep) in [("v635_360_1920.mp4", true), ("v635_360_1920-2.mp4", false)] {
+            let p = dir.join(f);
+            let mut m = Movie::open(&g, &cx, &p, &ctx, None).unwrap();
+            let fmt = m.v.rings[0].texture(0).format();
+            let [w, h] = [m.rgba.width(), m.rgba.height()].map(|x| x as usize);
+            assert_eq!(
+                (fmt == wgpu::TextureFormat::P010, m.sphere(), w),
+                (deep, true, 1920)
+            );
+            m.seek(k);
+            let t0 = Instant::now();
+            while m.held.is_none_or(|p| p.k != k) {
+                m.tick(&ctx);
+                assert_eq!(
+                    (m.err.as_deref(), t0.elapsed().as_secs() < 10),
+                    (None, true)
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let pic = m.held.unwrap();
+            let mut enc = g.device.create_command_encoder(&Default::default());
+            m.yuv(&mut enc, &pic);
+            m.v.acquire(&g, &pic);
+            g.queue.submit([enc.finish()]);
+            let px = stitch::read_texture(&g.device, &g.queue, &m.rgba);
+            let v = ffmpeg(&p, k, deep);
+            assert_eq!(v.len(), w * h * 3 / 2);
+            let (y, uv) = v.split_at(w * h);
+            let (mut off, mut max) = (0, 0.0f64);
+            for (i, q) in px.chunks(4).enumerate() {
+                let (r, c) = (i / w, i % w);
+                let l = (y[i] - 16.0) / 219.0;
+                let j = r / 2 * w + c / 2 * 2;
+                let (cb, cr) = ((uv[j] - 128.0) / 224.0, (uv[j + 1] - 128.0) / 224.0);
+                let rgb = [
+                    l + 1.5748 * cr,
+                    l - 0.1873 * cb - 0.4681 * cr,
+                    l + 1.8556 * cb,
+                ];
+                for (a, b) in q.iter().zip(rgb) {
+                    let x = b.clamp(0.0, 1.0) * 255.0;
+                    off += (*a as f64 != x.round()) as usize;
+                    max = max.max((*a as f64 - x).abs());
+                }
+            }
+            eprintln!(
+                "{f} ({fmt:?}), frame {k}: {off} of {} channels not the nearest level, at most {max:.3} off",
+                w * h * 3
+            );
+            // Vulkan allows either neighbour; RADV writes 8-bit targets through f16 rounded toward zero, so a level
+            // and 0.5 to ~0.63 can come out a level low. The 8-bit scale on P010 (255 instead of 65535 / 256) is up
+            // to 2.6 levels off on this frame.
+            assert!(max < 0.7, "{max}");
+            // and plays on to the last frame, muted
+            m.vol(0.0);
+            m.play(true);
+            while m.held.is_some_and(|p| p.k + 1 < m.v.times.len()) {
+                m.tick(&ctx);
+                assert_eq!(
+                    (m.err.as_deref(), t0.elapsed().as_secs() < 20),
+                    (None, true)
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
