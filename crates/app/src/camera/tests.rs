@@ -859,6 +859,48 @@ fn library_list() {
     std::fs::remove_dir_all(&d).unwrap();
 }
 
+/// The Downloads pane has whether a queued import waits for its card from the volumes the worker found mounted, not
+/// from a look at every queued file each frame (a whole card's album queued at once stat'ed each file per frame).
+#[test]
+fn downloads_card() {
+    let d = dir("dlcard");
+    let card = d.join("X5");
+    let mut q = dl::Queue::load(None);
+    for i in 0..3 {
+        let u = format!("file://{}/DCIM/Camera01/VID_{i}_00_1.insv", card.display());
+        q.add(&u, d.join(format!("VID_{i}.insv")));
+    }
+    let (mut c, ..) = headless(d.clone(), Arc::new(Mutex::new(q)));
+    fn walk(s: &egui::Shape, v: &mut Vec<String>) {
+        match s {
+            egui::Shape::Text(t) => v.push(t.galley.text().to_string()),
+            egui::Shape::Vec(x) => x.iter().for_each(|s| walk(s, v)),
+            _ => {}
+        }
+    }
+    let shown = |c: &mut Cam, s: &str| {
+        let r = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+        let i = egui::RawInput {
+            screen_rect: Some(r),
+            ..Default::default()
+        };
+        let mut o = c.ctx.clone().run_ui(i, |ui| drop(c.downloads(ui)));
+        o.textures_delta.clear();
+        let mut v = vec![];
+        o.shapes.iter().for_each(|x| walk(&x.shape, &mut v));
+        v.iter().filter(|t| *t == s).count()
+    };
+    assert_eq!(shown(&mut c, "queued: waiting for the card"), 3);
+    c.info.disk = vec![disk::Vol {
+        root: card,
+        dev: "/dev/sdb1".into(),
+        cam: None,
+    }];
+    assert_eq!(shown(&mut c, "queued"), 3, "the card is in");
+    drop(c);
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
 /// A mounted card (a fake mount: a DCIM tree, with the samples of `X5_SAMPLES` as a recording when set) through
 /// the worker: found and shown with no camera connected, the camera's grouping, thumbnails from the trailers, an
 /// import through the queue without a camera, the card's removal.

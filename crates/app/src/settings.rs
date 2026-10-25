@@ -13,7 +13,7 @@ use std::{
     path::PathBuf,
     sync::{
         Mutex,
-        mpsc::{self, Receiver},
+        mpsc::{self, Receiver, Sender},
     },
     thread,
 };
@@ -153,13 +153,18 @@ pub struct Settings {
     gpu: Vec<(&'static str, String)>,
     cache: album::Cache,
     /// the thumbnail cache's files and bytes, measured when the page opens
-    usage: Option<(usize, u64)>,
+    usage: Option<Usage>,
+    /// the cache thread (a directory of up to ~5000 files): trims to a limit (None: only measures), sends the usage
+    io: Option<(Sender<Option<u64>>, Receiver<Usage>)>,
     /// output devices (id, name), listed on a thread when the page first opens: ALSA takes a while
     outs: Vec<(String, String)>,
     listing: Option<Receiver<Vec<(String, String)>>>,
     listed: bool,
-    shown: u64,
+    /// the frame it was last drawn in
+    shown: Option<u64>,
 }
+
+type Usage = (usize, u64);
 
 /// Codec operations of a video queue, as text.
 fn ops(f: ash::vk::VideoCodecOperationFlagsKHR) -> String {
@@ -214,19 +219,44 @@ impl Settings {
             gpu,
             cache,
             usage: None,
+            io: None,
             outs: vec![],
             listing: None,
             listed: false,
-            shown: 0,
+            shown: None,
         }
+    }
+
+    /// Has the cache thread trim the cache to `cap` (None: only measure it) and measure it.
+    fn disk(&mut self, ctx: &egui::Context, cap: Option<u64>) {
+        let (tx, _) = self.io.get_or_insert_with(|| {
+            let ((tx, rx), (utx, urx)) = (mpsc::channel(), mpsc::channel());
+            let (c, ctx) = (self.cache.clone(), ctx.clone());
+            thread::spawn(move || {
+                for cap in rx {
+                    if let Some(x) = cap {
+                        c.trim(x)
+                    }
+                    if utx.send(c.usage()).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+            });
+            (tx, urx)
+        });
+        let _ = tx.send(cap);
     }
 
     /// `frame`: the UI frame number (a page shown again after a gap is measured again).
     pub fn ui(&mut self, ui: &mut egui::Ui, frame: u64, cam: &mut Cam, exp: &mut export::Exp) {
-        if self.shown + 1 != frame {
-            self.usage = Some(self.cache.usage());
+        if let Some((_, rx)) = &self.io {
+            self.usage = rx.try_iter().last().or(self.usage);
         }
-        self.shown = frame;
+        if self.shown.map(|s| s + 1) != Some(frame) {
+            self.disk(ui.ctx(), None);
+        }
+        self.shown = Some(frame);
         if !self.listed {
             self.listed = true;
             let (tx, rx) = mpsc::channel();
@@ -341,13 +371,13 @@ impl Settings {
             grid(ui, "set cache", &mut |ui| {
                 ui.label("In use");
                 ui.horizontal(|ui| {
-                    match self.usage {
-                        Some((n, b)) => ui.label(format!("{n} thumbnails, {}", mb(b))),
-                        None => ui.label("no cache folder"),
+                    match (self.cache.dir(), self.usage) {
+                        (None, _) => ui.label("no cache folder"),
+                        (_, Some((n, b))) => ui.label(format!("{n} thumbnails, {}", mb(b))),
+                        _ => ui.label("measuring…"),
                     };
                     if ui.button("Clear").on_hover_text("Thumbnails come from the camera again").clicked() {
-                        self.cache.trim(0);
-                        self.usage = Some(self.cache.usage());
+                        self.disk(ui.ctx(), Some(0));
                     }
                 });
                 ui.end_row();
@@ -368,8 +398,7 @@ impl Settings {
                     (self.p.cache, self.cache.cap) = (c, c);
                     self.p.save();
                     // the least recently used go first
-                    self.cache.trim(c);
-                    self.usage = Some(self.cache.usage());
+                    self.disk(ui.ctx(), Some(c));
                 }
                 ui.end_row();
                 ui.label("Folder");
@@ -444,6 +473,65 @@ mod tests {
         }
         let def = id(h.default_output_device());
         assert_eq!(id(dev(Some("alsa:no such device".into()))), def);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// The page reads and trims the thumbnail cache on a thread of its own: its first frame (pass 1 here, which the
+    /// page took for a continuation and never measured) has no number yet, the usage follows, Clear's request (limit
+    /// 0) empties the cache; a test hook's prefs have no cache.
+    #[test]
+    fn cache_thread() {
+        let d = std::env::var_os("X5_FIXTURES")
+            .map_or_else(std::env::temp_dir, PathBuf::from)
+            .join(format!("x5desk-thumbs-{}", std::process::id()));
+        let t = d.join("thumbs");
+        std::fs::create_dir_all(&t).unwrap();
+        for i in 0..3 {
+            std::fs::write(t.join(format!("{i:016x}")), [0u8; 100]).unwrap();
+        }
+        let g = std::sync::Arc::new(Gpu::new().unwrap());
+        let cx = stitch::Ctx::new(&g.device, &g.queue);
+        let ctx = egui::Context::default();
+        // one pass per frame: a second one (the grids' first layout) would take the thread's answer in the same frame
+        ctx.options_mut(|o| o.max_passes = 1.try_into().unwrap());
+        let p = Prefs::load(None);
+        assert!(p.thumbs().dir().is_none());
+        let mut cam = Cam::new(
+            &ctx,
+            None,
+            &[],
+            false,
+            None,
+            &p,
+            None,
+            (crate::bt::sim(), vec![]),
+            false,
+        );
+        let mut exp = export::Exp::new(&g, &cx, &ctx, Some(d.join("out")), false);
+        let mut s = Settings::new(&g, p);
+        s.cache = album::Cache::at(Some(t.clone()));
+        let mut n = 0;
+        let mut frame = |s: &mut Settings| {
+            n += 1;
+            let mut o = ctx.run_ui(Default::default(), |ui| s.ui(ui, n, &mut cam, &mut exp));
+            // no renderer takes them
+            o.textures_delta.clear();
+            s.usage
+        };
+        type F<'a> = dyn FnMut(&mut Settings) -> Option<Usage> + 'a;
+        let until = |s: &mut Settings, f: &mut F, u| {
+            let t0 = std::time::Instant::now();
+            while f(s) != Some(u) {
+                assert!(t0.elapsed().as_secs() < 10, "{:?}", s.usage);
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        assert_eq!(frame(&mut s), None, "the UI thread read the cache");
+        until(&mut s, &mut frame, (3, 300));
+        s.disk(&egui::Context::default(), Some(0));
+        until(&mut s, &mut frame, (0, 0));
+        assert_eq!(std::fs::read_dir(&t).unwrap().count(), 0);
+        drop((s, frame));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

@@ -1810,7 +1810,7 @@ impl Cam {
             );
             return None;
         }
-        let (mut act, on) = (None, self.info.conn == Conn::On);
+        let (mut act, on, vols) = (None, self.info.conn == Conn::On, &self.info.disk);
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
@@ -1829,8 +1829,11 @@ impl Cam {
                                     format!("{} of {} · {:.1} MB/s", mb(n), mb(t), d.rate / 1e6)
                                 }
                                 St::Running => "starting…".into(),
+                                // the worker's mount table, not a stat of every queued file each frame
                                 St::Queued => match dl::local(&d.uri) {
-                                    Some(p) if !p.exists() => "queued: waiting for the card".into(),
+                                    Some(p) if !vols.iter().any(|v| p.starts_with(&v.root)) => {
+                                        "queued: waiting for the card".into()
+                                    }
                                     None if !on => "queued: waiting for the camera".into(),
                                     _ => "queued".into(),
                                 },

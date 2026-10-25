@@ -269,6 +269,7 @@ pub fn thumb(b: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 
 /// Thumbnails on disk, one file per item and camera: `u32 w, h` (LE), then RGBA. Least recently used first out
 /// (the modification time is the last use) once they take more than `cap` bytes.
+#[derive(Clone)]
 pub struct Cache {
     dir: Option<PathBuf>,
     pub cap: u64,
