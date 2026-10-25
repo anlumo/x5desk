@@ -1,7 +1,7 @@
 Networks compiled into crate track by burn-onnx (build.rs), all under permissive licences whose texts are next to
 this file. Checked against onnxruntime on crops of a real frame, two crops per batch against one run each:
 src/tests.rs `vs_onnxruntime`, largest output differences 1.6e-6 (VitTrack), 2.2e-4 (YOLOX-nano, outputs up to 3.2),
-1.1e-5 (OSNet-AIN, up to 12), 8.8e-6 (YuNet, up to 8.4).
+8.8e-6 (YuNet, up to 8.4). Person re-identification uses no network (last section).
 
 object_tracking_vittrack_2023sep.onnx
   What: VitTrack, single-object tracker (OSTrack-style one-stream ViT), template 1x3x128x128 + search 1x3x256x256 ->
@@ -25,24 +25,6 @@ yolox_nano.onnx
   19.3 MB): on v627 frame 300 it found 25 people against nano's 21, at ~60 ms against ~17 ms per 8 tiles; not worth
   5.5x the size.
 
-osnet_ain_x1_0_msmt17.onnx
-  What: OSNet-AIN x1.0 person re-identification (Zhou et al., "Learning Generalisable Omni-Scale Representations
-        for Person Re-Identification", TPAMI 2021), 2.17 M parameters, trained by the authors on MSMT17:
-        1x3x256x128 RGB, ImageNet mean / std -> 512-d feature (eval mode: after the fc layer, before the classifier).
-  Source: the authors' weights https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_ain_x1_0_msmt17_256x128_amsgrad_ep50_lr0.0015_coslr_b64_fb10_softmax_labsmth_flip_jitter.pth
-          (sha256 8a07e8da38946f7cee37f4561617bf8b6d2fe8f3a4027852893ea092e46d919f), network code
-          torchreid/models/osnet_ain.py of https://github.com/KaiyangZhou/deep-person-reid (master, 2026-10-23).
-          Exported by us: osnet_ain_x1_0(num_classes=4101) with the checkpoint loaded strictly, eval(), classifier
-          replaced by Identity, torch.onnx.export(1x3x256x128, opset 17, dynamo=False, dynamic batch axis) with torch
-          2.14.1 (CPU); onnxruntime matches torch to 3.1e-5 (outputs up to 9.4).
-  Licence: MIT (torchreid repository LICENSE, Copyright (c) 2018 Kaiyang Zhou; the Hugging Face repository is tagged
-           MIT too) -> LICENSE-osnet. The training data (MSMT17) is a research dataset with its own terms; the
-           weights are published under MIT by their authors.
-  sha256: 72ebea6b22435b84643ef4c2f825f338f5219b7f7e30ddaaa48db57016fe36bb
-  Considered: osnet_x0_25 from the same repository (0.2 M parameters, 0.9 MB exported, MSMT17 combineall): on v627's
-  blank test it found the subject again on 4 of 5 gaps against OSNet-AIN's 5 of 5. Tencent Youtu's person re-ID
-  from the OpenCV zoo (Apache-2.0) is 107 MB.
-
 face_detection_yunet_2023mar.onnx
   What: YuNet face detector (Wu et al., "YuNet: A Tiny Millisecond-level Face Detector", 2023), 53 k parameters,
         1x3x640x640 BGR 0..255 -> per stride 8 / 16 / 32: class and objectness scores (sigmoid), box (x, y offsets
@@ -60,3 +42,43 @@ face_detection_yunet_2023mar.onnx
   a board of three black plates only at 15° (0.32 to 0.59), and on the samples (no plate near) it scored columns and
   façades at 0.6 to 0.74. Not included.
 
+No model: person re-identification (src/reid.rs)
+  What: LOMO, the local maximal occurrence feature of Liao, Hu, Zhu, Li, "Person Re-identification by Local Maximal
+        Occurrence Representation and Metric Learning", CVPR 2015 (https://arxiv.org/abs/1406.4216), written by us
+        from the paper: joint HSV (6 levels) and two SILTP texture histograms over 10 x 10 windows of a 48 x 128 crop
+        of the person's box, the largest count per row of windows, three scales; a brightness normalisation in place
+        of the paper's Retinex; each pixel weighted by how much its colour is the box's and not the strips' beside it
+        (a crop twice the box's width). The tracker's gallery weighs the dimensions by a Fisher ratio fitted to its
+        own features of the subject against those of the people next to it (in place of the paper's XQDA, which would
+        be trained on public re-ID sets), once it holds 12 of theirs; before that it compares by plain cosine against
+        a threshold of its own (0.63 in place of 0.5). 15120 dimensions, cosine similarity.
+  Licence: nothing to license: no weights, no training data, our code (patents not checked).
+  Replaces: osnet_ain_x1_0_msmt17.onnx (OSNet-AIN x1.0, torchreid, weights MIT), removed 2026-10-25 because its
+        training data, MSMT17, is released for research only. No learned replacement qualified: each person re-ID or
+        image-embedding model looked at has training data that excludes commercial use or is undisclosed, e.g.
+        ImageNet ("Researcher shall use the Database only for non-commercial research and educational purposes",
+        https://image-net.org/accessagreement.php), which DINOv2 (weights Apache-2.0) takes in "as is"
+        (ImageNet-22k, arXiv:2304.07193 Table 15), DINOv3 samples and ImageNet-initialised re-ID models start from;
+        web crawls whose publishers advise against commercial or deployed use (OpenAI CLIP's model card; LAION-2B,
+        DataComp-1B); undisclosed sets (SigLIP 2's WebLI); synthetic re-ID sets textured from DeepFashion (ClonedPerson,
+        UnrealPerson) or web images of unknown copyright (RandPerson). The clean learned path left: OSNet-AIN trained
+        from random weights on people we render from CC0 assets (MakeHuman, Poly Haven), loaded as before.
+  Measured against OSNet-AIN on the samples (tests/footage.rs, 2026-10-25), OSNet first:
+    sep (everyone in the clip, tracklets linked by IoU, same person 2 s apart and more against people seen on one
+    frame, plain cosine): v627 ROC AUC 0.9975 / 0.9948, same-person pairs above the 1 % false-match threshold
+    96.7 % / 91.9 %, the person ranked first among the others on its frame 96.2 % / 97.7 %; v606 0.9940 / 0.9789,
+    94.7 % / 81.2 %, 99.2 % / 95.9 %.
+    reid (the subject against a gallery of its first 4 s, 4 to 17 s later): the subject most alike on v627 37 / 30
+    of 37 key frames, v606 66 / 65 of 66; the find rule (OSNet 0.65, LOMO 0.5 by the weights, margin 0.05) passes
+    the subject on v627 37 / 37 of 37 and v606 40 / 64 of 66, the others 1 / 6 of 899 and 0 / 6 of 768 (LOMO on
+    v606 with weights from its 8 features of others). With nobody seen next to the subject yet (LOMO by plain
+    cosine, 0.63): the subject 4 of 37 and 52 of 66, the others 1 of 899 and 0 of 768; 0.5 there would pass 561 and
+    308 of them, as weights from the first 1, 3, 8 features of others would 802, 254, 20 of v627's 899.
+    subject with X5_BLANK (v627 none and 5 gaps, v606 none and 3; scored against a reference track): back on the
+    subject after every gap with both, 98.3 to 100 % / 98.3 to 100 % of the frames after the gap on it, never on
+    someone else (the rest without a box).
+    Dark-clothed subjects at night (v627 picks at yaw 21 and 127, with and without a 2 s gap at frame 150): LOMO
+    holds the yaw 21 subject with and without the gap; on the yaw 127 pick, once the subject is lost at frame 153,
+    it takes someone else in dark clothes (after the gap at frame 248, without it at 153 to 168; by plain cosine,
+    the gallery holding 8 and 10 features of others) where OSNet finds the subject again. Re-ID per call in the
+    tracker 1.4 to 3.3 ms (CPU) against 7 to 13 ms (GPU), median.

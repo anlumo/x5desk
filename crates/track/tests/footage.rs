@@ -7,6 +7,7 @@
 use glam::{Vec2, Vec3};
 use media::insv::{self, Meta, Trailer};
 use std::{
+    collections::{BTreeSet, HashSet},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -15,8 +16,8 @@ use std::{
 };
 use stitch::{Calib, Ctx, Frame, Pose, Preview, Src, Stitcher, View};
 use track::{
-    Ai, Blur, Cam, Emb, Framer, Hide, LOW, Region, Sample, Scorer, Sig, State, Subject, Tracker,
-    face_tiles, iou, sim, sphere, yaw_pitch,
+    Ai, Blur, Cam, Emb, Framer, Gallery, Hide, LOW, Region, Sample, Scorer, Sig, State, Subject,
+    Tracker, face_tiles, iou, sim, sphere, yaw_pitch,
 };
 
 /// Lens texture side the streams are scaled to, equirect for the networks, output view.
@@ -757,10 +758,13 @@ fn subject() {
 }
 
 /// Re-identification after a gap against a reference track of the subject (`X5_REF`, a `<clip>_track.csv` of
-/// `subject` checked by eye; v627 or v606): the people of every 10th frame embedded; the subject's features of the first 4 s (and those of the people
-/// within 30° of it then) are the gallery; from 8 s on, the subject and everyone else are scored against it. Prints
-/// the similarity distributions, how many pass the tracker's rule and how often the subject is the most similar
-/// person in the frame (what finding it again in a crowd needs).
+/// `subject` checked by eye; v627 or v606): the people of every 10th frame embedded; the subject's features of the
+/// first 4 s (and those of the people within 30° of it then) make a `Gallery` as the tracker's (the newest 24 a side);
+/// from 8 s on, the subject and everyone else are scored by it. Then again with the subject's features alone (the
+/// tracker's gallery while nobody has been seen next to the subject) and with the first 1 to 20 features of the people
+/// next to it (plain cosine below 12). Prints the similarity distributions, how many pass the tracker's rules (the
+/// subject's, the others'), how often the subject is the most similar person in the frame (what finding it again in a
+/// crowd needs) and whom `find()` would take.
 #[test]
 fn reid() {
     let (Some(d), Ok(rp)) = (samples(), std::env::var("X5_REF")) else {
@@ -813,64 +817,257 @@ fn reid() {
             }
         }
     }
-    let (me, not): (Vec<&Emb>, Vec<&Emb>) = (
-        v.iter()
-            .filter(|x| x.0 < 120 && x.1)
-            .map(|x| &x.2)
-            .collect(),
-        v.iter()
-            .filter(|x| x.0 < 120 && !x.1)
-            .map(|x| &x.2)
-            .collect(),
-    );
-    let best = |g: &[&Emb], e: &Emb| g.iter().map(|x| sim(x, e)).fold(-1f32, f32::max);
-    let sc: Vec<(usize, bool, f32, f32)> = v
-        .iter()
-        .filter(|x| x.0 >= 240)
-        .map(|x| (x.0, x.1, best(&me, &x.2), best(&not, &x.2)))
-        .collect();
-    for who in [true, false] {
-        let mut m: Vec<f64> = sc
+    // the tracker's gallery, then one of the subject's features alone (nobody seen next to it: plain cosine), then
+    // with the first features of the people seen next to it
+    for nb in [usize::MAX, 0, 1, 2, 3, 4, 6, 8, 12, 16, 20] {
+        let mut gal = Gallery::default();
+        let (me, not) = v
             .iter()
-            .filter(|x| x.1 == who)
-            .map(|x| x.2 as f64)
+            .filter(|x| x.0 < 120)
+            .partition::<Vec<&(usize, bool, Emb)>, _>(|x| x.1);
+        let g0: Vec<_> = me.into_iter().chain(not.into_iter().take(nb)).collect();
+        for x in &g0 {
+            gal.add(x.2, x.1);
+        }
+        let sc: Vec<(usize, bool, (f32, f32))> = v
+            .iter()
+            .filter(|x| x.0 >= 240)
+            .map(|x| (x.0, x.1, gal.score(&x.2)))
             .collect();
-        let n = m.len();
-        let (p50, p95, mx) = pct(&mut m);
+        let n = g0.iter().filter(|x| x.1).count();
         eprintln!(
-            "{}: {n} samples, similarity to the gallery: 5 % {:.3}, median {p50:.3}, 95 % {p95:.3}, max {mx:.3}",
-            ["others", "subject"][who as usize],
-            m[n / 20]
+            "gallery: {n} subject and {} neighbour features from frames 0..120",
+            g0.len() - n
         );
-    }
-    for (s, mg) in [(0.5, 0.05), (0.6, 0.05), (0.65, 0.05), (0.7, 0.05)] {
-        let pass = |who: bool| {
+        for who in [true, false] {
+            let mut m: Vec<f64> = sc
+                .iter()
+                .filter(|x| x.1 == who)
+                .map(|x| x.2.0 as f64)
+                .collect();
+            let n = m.len();
+            let (p50, p95, mx) = pct(&mut m);
+            eprintln!(
+                "  {}: {n} samples, similarity to the gallery: 5 % {:.3}, median {p50:.3}, 95 % {p95:.3}, 99 % {:.3}, \
+                 max {mx:.3}",
+                ["others", "subject"][who as usize],
+                m[n / 20],
+                m[(n * 99 / 100).min(n - 1)]
+            );
+        }
+        let pass = |who: bool, f: &dyn Fn((f32, f32)) -> bool| {
             let t: Vec<_> = sc.iter().filter(|x| x.1 == who).collect();
-            let p = t.iter().filter(|x| x.2 >= s && x.2 >= x.3 + mg).count();
-            format!("{p}/{}", t.len())
+            format!("{}/{}", t.iter().filter(|x| f(x.2)).count(), t.len())
         };
+        let ss: &[f32] = match nb {
+            0 => &[0.5, 0.55, 0.6, 0.63, 0.65, 0.68, 0.7],
+            usize::MAX => &[0.45, 0.5, 0.55, 0.6, 0.65],
+            _ => &[],
+        };
+        for (s, mg) in ss.iter().flat_map(|&s| [(s, 0.02), (s, 0.05)]) {
+            let f = |(m, n): (f32, f32)| m >= s && m >= n + mg;
+            eprintln!(
+                "  rule me >= {s}, me >= not + {mg}: subject passes {}, others {}",
+                pass(true, &f),
+                pass(false, &f)
+            );
+        }
+        // per key frame: is the subject the most similar person, and whom find() takes (the most similar of those the
+        // tracker's rule passes; here of everyone on the sphere, not only the 8 nearest within reach)
+        let ks: BTreeSet<usize> = sc.iter().map(|x| x.0).collect();
+        let (mut top, mut sub, mut me, mut other) = (0, 0, 0, 0);
+        for k in ks.iter() {
+            let m = sc.iter().filter(|x| x.0 == *k);
+            let s = m
+                .clone()
+                .filter(|x| x.1)
+                .map(|x| x.2.0)
+                .fold(-2f32, f32::max);
+            sub += (s > -2.0) as usize;
+            top += (s > -2.0 && m.clone().filter(|x| !x.1).all(|x| x.2.0 < s)) as usize;
+            match m
+                .filter(|x| gal.is(x.2))
+                .max_by(|a, b| a.2.0.total_cmp(&b.2.0))
+            {
+                Some(x) if x.1 => me += 1,
+                Some(_) => other += 1,
+                None => {}
+            }
+        }
         eprintln!(
-            "rule me >= {s}, me >= not + {mg}: subject passes {}, others {}",
-            pass(true),
-            pass(false)
+            "  the tracker's rule (threshold {}): subject passes {}, others {}; taken for someone seen next to it: \
+             subject {}, others {}; the subject is the most similar person on {top}/{sub} key frames from 240 on; \
+             find() would take the subject on {me}, someone else on {other} of {}",
+            gal.same(),
+            pass(true, &|s| gal.is(s)),
+            pass(false, &|s| gal.is(s)),
+            pass(true, &|s| gal.other(s)),
+            pass(false, &|s| gal.other(s)),
+            ks.len()
         );
     }
-    let ks: std::collections::BTreeSet<usize> = sc.iter().filter(|x| x.1).map(|x| x.0).collect();
-    let top = ks
-        .iter()
-        .filter(|&&k| {
-            let m = sc.iter().filter(|x| x.0 == k);
-            let s = m.clone().filter(|x| x.1).map(|x| x.2).fold(-1f32, f32::max);
-            m.filter(|x| !x.1).all(|x| x.2 < s)
-        })
-        .count();
-    eprintln!(
-        "gallery: {} subject and {} neighbour features from frames 0..120; the subject is the most similar person on \
-         {top}/{} key frames from 240 on",
-        me.len(),
-        not.len(),
-        ks.len()
-    );
+}
+
+/// Same person against different people over everyone in a clip, without a reference (`X5_SEP`, default v627 and
+/// v606): the people (score ≥ 0.3) of every frame over `sphere()` are linked into tracklets, a box taking over the
+/// tracklet of the previous frame's box it overlaps most (IoU ≥ 0.5, one to one); a box overlapping another person's
+/// ends its tracklet (which is which is unsure then, and its crop holds both). Every 5th frame's tracked people are
+/// embedded. Same person: two features of one tracklet at least 2 s apart; different people: features of two
+/// tracklets seen on one frame, whenever taken. Prints both similarity distributions, the ROC AUC, the share of
+/// same-person pairs above the 1 % false-match threshold, and re-acquisition among people: how often a tracklet's
+/// feature is more like its features from 2 s and more before than every other person on that frame is (rank 1).
+#[test]
+fn sep() {
+    let Some(d) = samples() else { return };
+    let names = std::env::var("X5_SEP").unwrap_or_else(|_| "v627,v606".into());
+    let g = gpu();
+    let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
+    let st = sphere();
+    for name in names.split(',') {
+        let name: &'static str = match name {
+            "v635" => "v635",
+            "v606" => "v606",
+            _ => "v627",
+        };
+        let c = clip(&d, name);
+        let gap = (2.0 * c.fps).round() as usize;
+        let rig = Rig::new(&g, &c);
+        let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
+        let mut dec = Dec::new(&c, c.n);
+        // open tracklets (id, box); features (frame, tracklet, feature); tracklet pairs seen on one frame
+        let (mut open, mut next) = (Vec::<(usize, (Vec3, Vec2))>::new(), 0);
+        let (mut fs, mut co) = (Vec::<(usize, usize, Emb)>::new(), HashSet::new());
+        for k in 0..c.n {
+            assert!(dec.next());
+            rig.upload(&g, &dec.buf);
+            rig.stitch(&g, &c.poses[k]);
+            let ps: Vec<(Vec3, Vec2)> = ai
+                .detect(&pano, &st, 0.3)
+                .into_iter()
+                .filter(|x| x.cls == 0)
+                .map(|x| x.on())
+                .collect();
+            let mut m: Vec<(f32, usize, usize)> = open
+                .iter()
+                .enumerate()
+                .flat_map(|(a, o)| {
+                    ps.iter()
+                        .enumerate()
+                        .map(move |(i, b)| (iou(o.1, *b, false), a, i))
+                })
+                .filter(|x| x.0 >= 0.5)
+                .collect();
+            m.sort_by(|a, b| b.0.total_cmp(&a.0));
+            let (mut ids, mut used) = (vec![None; ps.len()], vec![false; open.len()]);
+            for (_, a, i) in m {
+                if !used[a] && ids[i].is_none() {
+                    (used[a], ids[i]) = (true, Some(open[a].0));
+                }
+            }
+            open = (0..ps.len())
+                .filter(|&i| (0..ps.len()).all(|j| j == i || iou(ps[i], ps[j], true) < 0.1))
+                .map(|i| {
+                    let id = ids[i].unwrap_or_else(|| {
+                        next += 1;
+                        next - 1
+                    });
+                    (id, ps[i])
+                })
+                .collect();
+            for (i, a) in open.iter().enumerate() {
+                for b in &open[i + 1..] {
+                    co.insert((a.0.min(b.0), a.0.max(b.0)));
+                }
+            }
+            if k % 5 == 0 && !open.is_empty() {
+                let b: Vec<_> = open.iter().map(|o| o.1).collect();
+                for (o, e) in open.iter().zip(ai.embed(&pano, &b)) {
+                    fs.push((k, o.0, e));
+                }
+            }
+        }
+        drop(dec);
+        let (mut same, mut diff) = (vec![], vec![]);
+        for (i, a) in fs.iter().enumerate() {
+            for b in &fs[i + 1..] {
+                if a.1 == b.1 {
+                    if a.0.abs_diff(b.0) >= gap {
+                        same.push(sim(&a.2, &b.2) as f64);
+                    }
+                } else if co.contains(&(a.1.min(b.1), a.1.max(b.1))) {
+                    diff.push(sim(&a.2, &b.2) as f64);
+                }
+            }
+        }
+        same.sort_by(f64::total_cmp);
+        diff.sort_by(f64::total_cmp);
+        // per mille
+        let at = |v: &[f64], p: usize| v[(v.len() * p / 1000).min(v.len() - 1)];
+        // the chance that a same-person pair is more similar than a different-people one
+        let mut all: Vec<(f64, bool)> = same.iter().map(|&s| (s, true)).collect();
+        all.extend(diff.iter().map(|&s| (s, false)));
+        all.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (mut below, mut sum) = (0u64, 0u64);
+        for x in &all {
+            if x.1 {
+                sum += below;
+            } else {
+                below += 1;
+            }
+        }
+        let auc = sum as f64 / (same.len() * diff.len()).max(1) as f64;
+        let t1 = at(&diff, 990);
+        let tpr = same.iter().filter(|&&s| s > t1).count() as f64 / same.len().max(1) as f64;
+        let (mut hit, mut tot, mut crowd) = (0, 0, 0);
+        for q in &fs {
+            let gal: Vec<&Emb> = fs
+                .iter()
+                .filter(|x| x.1 == q.1 && x.0 + gap <= q.0)
+                .map(|x| &x.2)
+                .collect();
+            let others: Vec<&Emb> = fs
+                .iter()
+                .filter(|x| x.0 == q.0 && x.1 != q.1)
+                .map(|x| &x.2)
+                .collect();
+            if gal.is_empty() || others.is_empty() {
+                continue;
+            }
+            let best = |e: &Emb| gal.iter().map(|g| sim(g, e)).fold(-1f32, f32::max);
+            let me = best(&q.2);
+            tot += 1;
+            crowd += others.len();
+            hit += others.iter().all(|o| best(o) < me) as usize;
+        }
+        let ids: HashSet<usize> = fs.iter().map(|x| x.1).collect();
+        eprintln!(
+            "{name}: {} tracklets embedded, {} features (every 5th frame); same person {gap} frames apart and more",
+            ids.len(),
+            fs.len()
+        );
+        eprintln!(
+            "  same person: {} pairs, similarity 5 % {:.3}, median {:.3}, 95 % {:.3}",
+            same.len(),
+            at(&same, 50),
+            at(&same, 500),
+            at(&same, 950)
+        );
+        eprintln!(
+            "  different people: {} pairs, median {:.3}, 99 % {:.3}, 99.9 % {:.3}, max {:.3}",
+            diff.len(),
+            at(&diff, 500),
+            t1,
+            at(&diff, 999),
+            diff.last().copied().unwrap_or(0.0)
+        );
+        eprintln!(
+            "  ROC AUC {auc:.4}; same-person pairs above the 1 % false-match threshold {t1:.3}: {:.1} %; rank 1 among \
+             the people of the frame {hit}/{tot} ({:.1} %, {:.1} others each)",
+            100.0 * tpr,
+            100.0 * hit as f64 / tot.max(1) as f64,
+            crowd as f64 / tot.max(1) as f64
+        );
+    }
 }
 
 /// Whether direction `w` lies in region `r`'s ellipse (the one `Blur` blurs, without its feather).

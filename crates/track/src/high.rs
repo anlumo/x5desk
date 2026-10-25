@@ -11,7 +11,7 @@
 //! 2 to 8 s each, until they fill the duration asked for. [`timeline`] cuts them into an `edit::Timeline` in clip
 //! order, each reframed along the auto framer's path ([`crate::Framer`]).
 
-use crate::{Ai, Cam, Crops, Det, In, Job, Norm, Pano, Region, Shot, read, yaw_pitch};
+use crate::{Ai, Cam, Crops, Det, In, Job, Pano, RGB, Region, Shot, read, yaw_pitch};
 use glam::{Vec2, Vec3};
 use std::{io, path::Path};
 
@@ -294,13 +294,6 @@ pub fn timeline(
 
 /// Thumbnail side: six cube faces of `TH`² per sphere.
 const TH: u32 = 32;
-
-/// Thumbnail colours as they are.
-const RGB: Norm = Norm {
-    a: [1.0; 3],
-    b: [0.0; 3],
-    bgr: false,
-};
 
 impl Ai {
     /// A thumbnail of the whole sphere for change detection: the six cube faces at `TH`² (RGB, 0..1, planar).

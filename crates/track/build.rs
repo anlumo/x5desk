@@ -5,7 +5,6 @@ fn main() {
     for m in [
         "object_tracking_vittrack_2023sep",
         "yolox_nano",
-        "osnet_ain_x1_0_msmt17",
         "face_detection_yunet_2023mar",
     ] {
         println!("cargo::rerun-if-changed=models/{m}.onnx");

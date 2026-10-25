@@ -4,7 +4,7 @@
 
 use crate::{Ai, Cam, Crops, In, Job, SIDE, det, dir, privacy, read, reid, vit};
 use glam::{Vec2, Vec3};
-use std::{path::PathBuf, process::Command};
+use std::{path::PathBuf, process::Command, sync::OnceLock};
 
 const ORT: &str = r#"
 import sys, numpy as np, onnxruntime as ort
@@ -56,10 +56,15 @@ fn diff(a: &[f32], b: &[f32]) -> (f32, f32) {
     })
 }
 
-/// A device opened like `video::Gpu`: every adapter feature (burn needs them), the experimental ones.
+/// A device opened like `video::Gpu`: every adapter feature (burn needs them), the experimental ones. From the test
+/// binary's one instance: instances created on parallel test threads race in NVIDIA's ICD (`video::gpu` `SCAN`).
 fn open() -> (wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue) {
-    let inst = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let ad = pollster::block_on(inst.request_adapter(&Default::default())).unwrap();
+    static I: OnceLock<(wgpu::Instance, wgpu::Adapter)> = OnceLock::new();
+    let (inst, ad) = I.get_or_init(|| {
+        let inst = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let ad = pollster::block_on(inst.request_adapter(&Default::default())).unwrap();
+        (inst, ad)
+    });
     let (dev, q) = pollster::block_on(
         ad.request_device(&wgpu::DeviceDescriptor {
             required_features: ad
@@ -72,7 +77,7 @@ fn open() -> (wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue) {
         }),
     )
     .unwrap();
-    (inst, ad, dev, q)
+    (inst.clone(), ad.clone(), dev, q)
 }
 
 /// The app's start-up order (`stitch::attach`, then its own uncaptured-error handler), then two `Ai`s: both reuse
@@ -231,30 +236,8 @@ fn vs_onnxruntime() {
         assert!(e < 1e-3 * m.max(1.0), "YOLOX tile {t}");
     }
 
-    // OSNet-AIN: two person-sized crops in one batch against one run each
-    let b = [
-        (dir(0.0, -10.0), Vec2::new(8.0, 20.0)),
-        (dir(40.0, -5.0), Vec2::new(5.0, 12.0)),
-    ];
-    let mut ai = ai;
-    let _ = ai.embed(&p, &b);
-    let x = ai.ri.t.clone().narrow(0, 0, 2);
-    let o = read(ai.reid.forward(x.clone()));
-    let xi = read(x);
-    let n = 3 * 256 * 128;
-    for t in 0..2 {
-        let r = ort(
-            &py,
-            "osnet_ain_x1_0_msmt17.onnx",
-            &d,
-            &[("images", &xi[t * n..][..n], &[1, 3, 256, 128])],
-        );
-        let (e, m) = diff(&o[t * reid::DIM..][..reid::DIM], &r[0]);
-        eprintln!("OSNet-AIN crop {t}: max |burn − ort| {e:.2e} (max |ort| {m:.2})");
-        assert!(e < 1e-3 * m.max(1.0), "OSNet crop {t}");
-    }
-
     // YuNet: two face tiles in one batch against one run each, all 12 outputs
+    let mut ai = ai;
     let nets = ai.nets().unwrap();
     let s = privacy::FS as usize;
     let tiles = crate::ring(2, 75.0, 0.0);
@@ -291,6 +274,47 @@ fn vs_onnxruntime() {
         );
         assert!(e < 1e-3 * m.max(1.0), "YuNet tile {t}");
     }
+}
+
+/// LOMO on synthetic crops (a figure 24 px wide, red over blue, in the middle of the box, on grey, a noise texture):
+/// unit length; the figure in half the light is the same, 5 px aside more alike than one with its colours swapped
+/// (whose texture, two thirds of the feature, is the same).
+#[test]
+fn lomo() {
+    let (w, h) = (reid::W as usize, reid::H as usize);
+    let mut s = 1u32;
+    let noise: Vec<f32> = (0..w * h)
+        .map(|_| {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            (s >> 8) as f32 / (1 << 24) as f32
+        })
+        .collect();
+    let fig = |top: [f32; 3], bot: [f32; 3], x0: usize, k: f32| {
+        let mut px = vec![0f32; 3 * w * h];
+        for (i, v) in px.iter_mut().enumerate() {
+            let (c, y, x) = (i / (w * h), i / w % h, i % w);
+            let col = match (x0..x0 + 24).contains(&x) {
+                false => [0.5; 3],
+                true if y < h / 2 => top,
+                _ => bot,
+            };
+            *v = k * col[c] * (0.8 + 0.2 * noise[i % (w * h)]);
+        }
+        let mut e = [0.0; reid::DIM];
+        reid::lomo(&px, &mut e);
+        e
+    };
+    let (r, b) = ([0.8, 0.1, 0.1], [0.1, 0.2, 0.7]);
+    let a = fig(r, b, 36, 1.0);
+    let s = |e: reid::Emb| reid::sim(&a, &e);
+    let (one, dark, aside, other) = (
+        s(a),
+        s(fig(r, b, 36, 0.5)),
+        s(fig(r, b, 41, 1.0)),
+        s(fig(b, r, 36, 1.0)),
+    );
+    eprintln!("length² {one:.5}, darker {dark:.4}, aside {aside:.3}, colours swapped {other:.3}");
+    assert!((one - 1.0).abs() < 1e-4 && dark > 0.999 && aside > 0.95 && other < aside - 0.2);
 }
 
 #[test]

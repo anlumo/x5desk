@@ -7,7 +7,7 @@
 //! found again by appearance (`reid`): its features from the pick and from frames where it was tracked with
 //! certainty against those of the people seen next to it; anything else by the pick's template.
 
-use crate::reid::{self, Emb, Gallery, MARGIN, SAME};
+use crate::reid::{self, Emb, Gallery};
 use crate::{Ai, Cam, Crops, Det, In, Job, Norm, Pano, deg, iou, read, sphere, tan};
 use burn::tensor::Tensor;
 use glam::{Vec2, Vec3};
@@ -169,16 +169,16 @@ impl Tracker {
         Ok(tr)
     }
 
-    /// Similarity of feature `e` to the subject and to the people seen next to it (persons only).
+    /// Similarity of feature `e` to the subject and to the people seen next to it (`Gallery::score`; persons only).
     pub fn appearance(&self, e: &Emb) -> Option<(f32, f32)> {
         self.gal.as_ref().map(|g| g.score(e))
     }
 
-    /// Samples the appearance of the subject's box `x` and of the others `o` in view, and returns how much `x` looked
-    /// like the subject and like the others before. `x` joins the subject's features only if it looks like it (`SAME`)
-    /// and more than like the others (or `sure`): a box that drifted onto someone else must not teach the tracker their
-    /// look, also one nobody seen next to the subject looks like more; one that looks like the others and not like the
-    /// subject joins the others.
+    /// Samples the appearance of the subject's box `x` and of the others `o` in view, and returns whether `x` looked
+    /// like one of the others and not like the subject before (`Gallery::other`). `x` joins the subject's features
+    /// only if it looks like it (`Gallery::same`) and more than like the others (or `sure`): a box that drifted onto
+    /// someone else must not teach the tracker their look, also one nobody seen next to the subject looks like more;
+    /// one that looks like the others and not like the subject joins the others.
     fn look(
         &mut self,
         ai: &mut Ai,
@@ -186,7 +186,7 @@ impl Tracker {
         x: &Det,
         o: &[(f32, Det)],
         sure: bool,
-    ) -> Option<(f32, f32)> {
+    ) -> Option<bool> {
         let g = self.gal.as_mut()?;
         // others overlapping the box may be the subject detected twice
         let b: Vec<_> = std::iter::once(x.on())
@@ -203,15 +203,16 @@ impl Tracker {
         } else {
             g.score(&e[0])
         };
-        if sure || s.0 >= s.1.max(SAME) {
+        let d = g.other(s);
+        if sure || s.0 >= s.1.max(g.same()) {
             g.add(e[0], true);
-        } else if s.0 < s.1.min(SAME) {
+        } else if s.0 < s.1.min(g.same()) {
             g.add(e[0], false);
         }
         for e in &e[1..] {
             g.add(*e, false);
         }
-        Some(s)
+        Some(d)
     }
 
     /// Takes template `i` around the subject's box in `p`; tracking uses it from now on.
@@ -309,8 +310,7 @@ impl Tracker {
             && let Some(g) = &self.gal
         {
             let e = ai.embed(p, &[(d, deg(sz))]);
-            let (me, not) = g.score(&e[0]);
-            take = me >= SAME && me >= not + MARGIN;
+            take = g.is(g.score(&e[0]));
         }
         // a box several times larger or smaller in one frame is the tracker jumping to something else
         sz = sz.clamp(self.sz * 0.7, self.sz * 1.4);
@@ -326,9 +326,7 @@ impl Tracker {
                 if let [(a, x), o @ ..] = &v[..]
                     && *a > 0.5
                     && o.first().is_none_or(|o| o.0 < 0.1)
-                    && let Some((me, not)) = self.look(ai, p, x, o, false)
-                    && me < SAME
-                    && not > me + MARGIN
+                    && self.look(ai, p, x, o, false) == Some(true)
                 {
                     take = false;
                     self.miss = self.miss.max(MISS - 1);
@@ -434,7 +432,7 @@ impl Tracker {
                 .iter()
                 .zip(&e)
                 .map(|(x, e)| (g.score(e), x))
-                .filter(|((m, n), _)| *m >= SAME && *m >= n + MARGIN)
+                .filter(|(s, _)| g.is(*s))
                 .max_by(|a, b| a.0.0.total_cmp(&b.0.0))
                 .map(|((m, _), x)| (m, *x))?;
             self.sz = tan(x.size);

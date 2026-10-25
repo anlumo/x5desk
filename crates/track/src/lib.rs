@@ -1,8 +1,9 @@
 //! AI tracking and framing for 360 video with open models on the app's shared wgpu device (PLAN.md group 11):
-//! VitTrack (OpenCV zoo) follows one subject, YOLOX-nano (Megvii) detects people and objects, OSNet-AIN (torchreid)
-//! tells people apart so the tracker finds its subject again, YuNet (OpenCV zoo) finds faces for the privacy blur
-//! ([`Hide`], [`Blur`]); [`Scorer`] picks highlights and [`timeline`] cuts them into an editor timeline. All
-//! Apache-2.0 or MIT (`models/README`), compiled in by burn-onnx (`build.rs`) and run by burn.
+//! VitTrack (OpenCV zoo) follows one subject, YOLOX-nano (Megvii) detects people and objects, YuNet (OpenCV zoo) finds
+//! faces for the privacy blur ([`Hide`], [`Blur`]); people are told apart by LOMO (Liao et al.), a hand-made appearance
+//! feature with no model, so the tracker finds its subject again; [`Scorer`] picks highlights and [`timeline`] cuts
+//! them into an editor timeline. The networks are Apache-2.0 or MIT (`models/README`), compiled in by burn-onnx
+//! (`build.rs`) and run by burn.
 //!
 //! Everything happens on the sphere: a network only ever sees a perspective crop of the stitched equirect, centred
 //! where it should look and written straight into its input tensor by `crop.wgsl`, so seams and poles never reach it.
@@ -25,7 +26,7 @@ pub use det::{CLASSES, Det, SIDE, ring, sphere};
 pub use frame::{Framer, LOW, Shot};
 pub use high::{BIN, Highlight, Scorer, Sig, timeline};
 pub use privacy::{Hide, Region, face_tiles};
-pub use reid::{DIM, Emb, sim};
+pub use reid::{DIM, Emb, Gallery, sim};
 pub use vit::{Sample, State, Subject, Tracker, smooth};
 
 use burn::backend::Cube;
@@ -192,6 +193,13 @@ struct Norm {
     bgr: bool,
 }
 
+/// Colours as they are (thumbnails, re-identification).
+const RGB: Norm = Norm {
+    a: [1.0; 3],
+    b: [0.0; 3],
+    bgr: false,
+};
+
 /// `crop.wgsl` `Job`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -272,8 +280,8 @@ pub struct Pano {
     w: u32,
 }
 
-/// Wall time summed while `Ai::timing` is set: crop passes (each waited for), tracker, detector and re-ID runs
-/// (network, read-back, decoding), and how many of each.
+/// Wall time summed while `Ai::timing` is set: crop passes (each waited for), tracker and detector runs (network,
+/// read-back, decoding) and re-ID passes (read-back, features), and how many of each.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Times {
     pub crop: Duration,
@@ -295,7 +303,6 @@ pub struct Ai {
     det: det::model::Model,
     di: In,
     dc: Crops,
-    reid: reid::model::Model,
     ri: In,
     rc: Crops,
     /// Face detection, made on first use.
@@ -367,7 +374,6 @@ impl Ai {
             det: det::model::Model::from_embedded(&bd),
             di: In::new(&bd, [det::MAX, 3, s, s])?,
             dc: Crops::new(dev, &g[1], det::MAX, det::MAX * 3 * s * s),
-            reid: reid::model::Model::from_embedded(&bd),
             ri: In::new(&bd, [reid::MAX, 3, rh, rw])?,
             rc: Crops::new(dev, &g[1], reid::MAX, reid::MAX * 3 * rw * rh),
             pv: None,
@@ -409,10 +415,10 @@ impl Ai {
         }
     }
 
-    /// Runs the tracker, the detector at every batch size (1 to 9 tiles) and re-ID (1 to 8 crops) once on a black
-    /// panorama, so that the kernels of each shape are compiled and autotuned before the first frame that needs them
-    /// instead of stalling it (seconds on the first use of each; 16 to 39 s in all here). Call once after `new`, off
-    /// the UI thread. Faces (`faces`) and thumbnails compile on their first call (11 to 17 s for faces here).
+    /// Runs the tracker and the detector at every batch size (1 to 9 tiles) once on a black panorama, so that the
+    /// kernels of each shape are compiled and autotuned before the first frame that needs them instead of stalling it
+    /// (seconds on the first use of each; 16 to 39 s in all here). Call once after `new`, off the UI thread. Faces
+    /// (`faces`) compile on their first call (11 to 17 s here); re-identification and thumbnails run no network.
     pub fn warm(&mut self) -> Result<(), String> {
         let t = self.wd.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -438,10 +444,6 @@ impl Ai {
         let c = ring(det::MAX, 90.0, 0.0);
         for n in 1..=det::MAX {
             self.detect(&p, &c[..n], 1.0);
-        }
-        let b = [(Vec3::NEG_X, Vec2::new(10.0, 20.0)); reid::MAX];
-        for n in 1..=reid::MAX {
-            self.embed(&p, &b[..n]);
         }
         Ok(())
     }
