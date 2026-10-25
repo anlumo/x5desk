@@ -76,14 +76,22 @@ fn still(clip: &str, w: u32) -> Option<Image> {
             "[0:v:0][0:v:1]hstack,v360=input=dfisheye:output=equirect:ih_fov=193:iv_fov=193:w={w}:h={}",
             w / 2
         );
+        // written beside it and renamed: a parallel test that finds `p` must never read it half written
+        let id = format!(
+            "{}-{:?}.png",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let tmp = p.with_extension(id);
         let st = Command::new("ffmpeg")
             .args(["-v", "error", "-y", "-ss", "2", "-i"])
             .arg(s.join(format!("{clip}.insv")))
             .args(["-filter_complex", &f, "-frames:v", "1"])
-            .arg(&p)
+            .arg(&tmp)
             .status()
             .expect("ffmpeg");
         assert!(st.success(), "ffmpeg v360");
+        std::fs::rename(tmp, &p).unwrap();
     }
     Some(Image::png(&std::fs::read(&p).unwrap()).unwrap())
 }

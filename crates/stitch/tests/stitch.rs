@@ -232,6 +232,7 @@ fn frame(file: &Path, t: usize, n: usize) -> Option<Vec<u8>> {
     let name = file.file_name()?.to_string_lossy();
     let p = fixtures().join(format!("{name}_t{t}_{n}.nv12"));
     if !p.exists() {
+        let tmp = part(&p);
         let ok = Command::new("ffmpeg")
             .args(["-v", "error", "-y", "-i"])
             .arg(file)
@@ -242,15 +243,27 @@ fn frame(file: &Path, t: usize, n: usize) -> Option<Vec<u8>> {
                 &format!("select=eq(n\\,{n})"),
             ])
             .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "nv12"])
-            .arg(&p)
+            .arg(&tmp)
             .status()
             .is_ok_and(|s| s.success());
-        if !ok {
+        if !ok || std::fs::rename(&tmp, &p).is_err() {
+            _ = std::fs::remove_file(&tmp);
             eprintln!("ffmpeg could not make {}: skipped", p.display());
             return None;
         }
     }
     std::fs::read(&p).ok()
+}
+
+/// Where this thread writes fixture `p` before renaming it into place: tests run in parallel, and one that finds
+/// `p` must never read it half written.
+fn part(p: &Path) -> PathBuf {
+    let id = format!(
+        "{}-{:?}.part",
+        std::process::id(),
+        std::thread::current().id()
+    );
+    p.with_extension(id)
 }
 
 /// Frame 0 of v635: trailer, calibration, both lenses as NV12 ([lens 0, lens 1]).
@@ -1029,7 +1042,9 @@ fn old(c: &Clip, w: u32, raft: bool) -> Option<Vec<u8>> {
     let lens = [0, 1].map(|k| fx.join(format!("v635_lens{k}.rgba")));
     for (k, p) in lens.iter().enumerate() {
         if !p.exists() {
-            std::fs::write(p, rgba(&c.nv[k], SIDE, SIDE)).unwrap();
+            let tmp = part(p);
+            std::fs::write(&tmp, rgba(&c.nv[k], SIDE, SIDE)).unwrap();
+            std::fs::rename(tmp, p).unwrap();
         }
     }
     let out = fx.join(format!(
