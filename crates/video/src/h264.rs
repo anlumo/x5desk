@@ -522,6 +522,7 @@ impl State {
             w,
             h,
             view: sps.view(),
+            deep: false,
         })
     }
 }

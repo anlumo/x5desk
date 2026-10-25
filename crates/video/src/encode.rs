@@ -60,8 +60,11 @@ pub struct Cfg {
     /// IDR period in frames.
     pub gop: u32,
     pub rate: Rate,
-    /// CBR / VBR: the rate control buffer (the decoder's buffering) in ms of the average bitrate, starting 90 % full.
-    /// 1000 for files; 100 for low latency (RTMP), which also cuts the start-up burst (`Rate::Cbr`).
+    /// CBR / VBR: the rate control buffer (the decoder's buffering) in ms of the average bitrate, starting 90 % full
+    /// (RADV ignores the initial occupancy). 1000 for files; 100 for low latency (RTMP), which also cuts the start-up
+    /// burst (`Rate::Cbr`). RADV's CBR holds the target from a buffer of about 500 ms on; with less the P-frames run
+    /// over their share and the excess is never paid back: +4 to +10 % at 100 ms (each IDR capped at about the
+    /// buffer), up to +2.4 % at 250 ms (Mesa 26.2.5, the `cbr` test).
     pub vbv: u32,
     /// Driver quality level (higher: better and slower, per the spec), clamped to the highest usable
     /// (`Encoder::levels`). RADV (Mesa 26.2.5): 0 and 1 write identical H.265 streams (both the firmware's balanced

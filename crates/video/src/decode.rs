@@ -1,5 +1,5 @@
-//! Vulkan Video decode (H.264 / H.265) into a ring of NV12 images that wgpu samples in place (DPB and output
-//! distinct, no copy). Rules from PLAN.md §2.1:
+//! Vulkan Video decode (H.264 / H.265 Main and Main 10) into a ring of NV12 / P010 images that wgpu samples in place
+//! (DPB and output distinct, no copy). Rules from PLAN.md §2.1:
 //! - An output image's home state is RESOURCE (SHADER_READ_ONLY_OPTIMAL), wgpu's initial state for it. The decode
 //!   queue moves it to VIDEO_DECODE_DST, decodes and moves it back; wgpu only samples it.
 //! - Output images are CONCURRENT across wgpu's family and the decode family; DPB images are private.
@@ -25,6 +25,7 @@ pub const MAXS: usize = 17;
 const BS: u64 = 8 << 20; // bitstream bytes per access unit
 const WAIT: u64 = 50_000_000; // ns decode() waits for its slot before returning Full
 const NV12: vk::Format = vk::Format::G8_B8R8_2PLANE_420_UNORM;
+const P010: vk::Format = vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
 const RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     aspect_mask: vk::ImageAspectFlags::COLOR,
     base_mip_level: 0,
@@ -50,14 +51,15 @@ pub(crate) struct Ref {
     pub none: bool,
 }
 
-/// Picture management's answer: the current picture's slot, how many reference slots it listed, its coded size
-/// and display window.
+/// Picture management's answer: the current picture's slot, how many reference slots it listed, its coded size,
+/// display window and bit depth (10 when `deep`, else 8).
 pub(crate) struct Pic {
     pub setup: usize,
     pub n: usize,
     pub w: u32,
     pub h: u32,
     pub view: [u32; 4],
+    pub deep: bool,
 }
 
 enum St {
@@ -90,7 +92,8 @@ impl St {
     }
 }
 
-/// A decoder's output: the NV12 textures and the two timelines. Share it (`Arc`) with the thread that samples.
+/// A decoder's output: the NV12 (8-bit) or P010 (10-bit) textures and the two timelines. Share it (`Arc`) with the
+/// thread that samples.
 pub struct Ring {
     tex: Vec<wgpu::Texture>,
     imgs: Vec<vk::Image>,      // their images (wgpu owns them)
@@ -106,7 +109,9 @@ pub struct Ring {
 }
 
 impl Ring {
-    /// The NV12 texture that holds frame `f`; sample it through R8Unorm / Rg8Unorm plane views.
+    /// The texture that holds frame `f`. Its format is the stream's, the same for every frame: NV12, sampled through
+    /// R8Unorm / Rg8Unorm plane views, or P010 (H.265 Main 10), sampled through R16Unorm / Rg16Unorm plane views that
+    /// read the 10-bit sample `d` as `64·d / 65535` (P010 keeps it in the high bits, the low 6 are zero).
     pub fn texture(&self, f: u64) -> &wgpu::Texture {
         &self.tex[(f % OUT as u64) as usize]
     }
@@ -197,6 +202,7 @@ pub struct Decoder {
     pub view: [u32; 4],
     /// index of the next frame
     pub frame: u64,
+    deep: bool,
     st: St,
     refs: Vec<Ref>,
     dpb: Vec<(vk::Image, vk::ImageView)>,
@@ -244,7 +250,8 @@ fn barrier(
 
 impl Decoder {
     /// A decoder for `codec` with the parameter sets in `params` (VPS / SPS / PPS NAL units from `hvcC` / `avcC`
-    /// or in band) and textures of `w` × `h`, grown to the SPS's coded size if that is larger.
+    /// or in band) and textures of `w` × `h`, grown to the SPS's coded size if that is larger. The first SPS's bit
+    /// depth picks the textures' format (`Ring::texture`): 8 NV12, 10 P010; a picture of the other depth is an error.
     pub fn new<P: AsRef<[u8]>>(
         g: &Gpu,
         codec: Codec,
@@ -259,9 +266,9 @@ impl Decoder {
         for p in params.iter().map(AsRef::as_ref).filter(|p| p.len() > 2) {
             st.put(p)?;
         }
-        // profile, coded size, display window and DPB slots (references, the current picture, one spare) from the
-        // first SPS
-        let (idc, cw, ch, view, slots) = match &st {
+        // profile, coded size, display window, DPB slots (references, the current picture, one spare) and bit depth
+        // from the first SPS
+        let (idc, cw, ch, view, slots, deep) = match &st {
             St::H264(s) => {
                 let s = s.sps.iter().flatten().next().ok_or(Bad("no SPS"))?;
                 (
@@ -270,6 +277,7 @@ impl Decoder {
                     s.height_mbs * 16,
                     s.view(),
                     s.max_num_ref_frames as usize + 2,
+                    false,
                 )
             }
             St::H265(s) => {
@@ -280,10 +288,26 @@ impl Decoder {
                     s.height,
                     s.view(),
                     s.dpbm.max_dec_minus1[s.max_sub as usize] as usize + 2,
+                    s.depth > 8,
                 )
             }
         };
         let (w, h, h265) = (w.max(cw), h.max(ch), codec == Codec::H265);
+        let (fmt, tf, bits) = match deep {
+            true => (
+                P010,
+                wgpu::TextureFormat::P010,
+                vk::VideoComponentBitDepthFlagsKHR::TYPE_10,
+            ),
+            false => (
+                NV12,
+                wgpu::TextureFormat::NV12,
+                vk::VideoComponentBitDepthFlagsKHR::TYPE_8,
+            ),
+        };
+        if !g.device.features().contains(tf.required_features()) {
+            return Err(Bad("wgpu lacks the output texture format"));
+        }
         let ext = vk::Extent2D {
             width: w,
             height: h,
@@ -295,8 +319,8 @@ impl Decoder {
                 .picture_layout(vk::VideoDecodeH264PictureLayoutFlagsKHR::PROGRESSIVE);
             let pr = vk::VideoProfileInfoKHR::default()
                 .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
-                .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
-                .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8);
+                .luma_bit_depth(bits)
+                .chroma_bit_depth(bits);
             let pr = [match h265 {
                 true => pr
                     .video_codec_operation(vk::VideoCodecOperationFlagsKHR::DECODE_H265)
@@ -342,7 +366,7 @@ impl Decoder {
                 let mut info = vk::ImageCreateInfo::default()
                     .flags(flags)
                     .image_type(vk::ImageType::TYPE_2D)
-                    .format(NV12)
+                    .format(fmt)
                     .extent(vk::Extent3D {
                         width: w,
                         height: h,
@@ -383,7 +407,7 @@ impl Decoder {
                 let info = vk::ImageViewCreateInfo::default()
                     .image(img)
                     .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(NV12)
+                    .format(fmt)
                     .subresource_range(RANGE)
                     .push_next(&mut u);
                 g.dev.create_image_view(&info, None)
@@ -426,7 +450,7 @@ impl Decoder {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::NV12,
+                    format: tf,
                     usage: wgpu::TextureUses::RESOURCE | wgpu::TextureUses::COPY_SRC,
                     memory_flags: wgpu_hal::MemoryFlags::empty(),
                     view_formats: vec![],
@@ -444,7 +468,7 @@ impl Decoder {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::NV12,
+                    format: tf,
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
                     view_formats: &[],
                 };
@@ -464,6 +488,7 @@ impl Decoder {
                 h,
                 view,
                 frame: 0,
+                deep,
                 st,
                 refs: vec![Ref::default(); slots],
                 dpb: vec![],
@@ -485,9 +510,9 @@ impl Decoder {
             let info = vk::VideoSessionCreateInfoKHR::default()
                 .queue_family_index(g.dec.family)
                 .video_profile(&pr[0])
-                .picture_format(NV12)
+                .picture_format(fmt)
                 .max_coded_extent(ext)
-                .reference_picture_format(NV12)
+                .reference_picture_format(fmt)
                 .max_dpb_slots(slots as u32)
                 .max_active_reference_pictures(
                     (slots as u32 - 1).min(caps.max_active_reference_pictures),
@@ -689,6 +714,9 @@ impl Decoder {
         };
         if pic.w > self.w || pic.h > self.h {
             return Err(Bad("picture larger than the decoder"));
+        }
+        if pic.deep != self.deep {
+            return Err(Bad("picture bit depth other than the decoder's"));
         }
         self.view = pic.view;
 

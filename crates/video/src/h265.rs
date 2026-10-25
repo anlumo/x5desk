@@ -1,6 +1,6 @@
-//! H.265 parameter sets and slice headers as Vulkan Video decode needs them (Main, 4:2:0 8-bit; PCM, tiles and
-//! inter RPS prediction; no long-term references, scaling lists or range extensions), plus POC (8.3.1) and RPS
-//! (8.3.2) picture management.
+//! H.265 parameter sets and slice headers as Vulkan Video decode needs them (Main and Main 10, 4:2:0 8- or 10-bit;
+//! PCM, tiles and inter RPS prediction; no long-term references, scaling lists or range extensions), plus POC
+//! (8.3.1) and RPS (8.3.2) picture management.
 use crate::{
     Error::Bad,
     Result,
@@ -331,6 +331,8 @@ pub struct Sps {
     pub width: u32,
     pub height: u32,
     pub conf_win: Option<[u32; 4]>,
+    /// bit depth, luma and chroma alike: 8 or 10
+    pub depth: u8,
     pub log2_max_poc_lsb: u32,
     pub dpbm: Dpbm,
     pub log2_min_cb_minus3: u8,
@@ -370,8 +372,13 @@ pub fn sps(n: &[u8]) -> Result<Sps> {
         }
         s.conf_win = Some(c.map(|x| x as u32));
     }
-    if b.ue() != 0 || b.ue() != 0 {
-        return Err(Bad("H.265 bit depth other than 8"));
+    match (b.ue(), b.ue()) {
+        (d @ (0 | 2), c) if c == d => s.depth = 8 + d as u8,
+        _ => {
+            return Err(Bad(
+                "H.265 bit depth other than 8 or 10 (luma and chroma alike)",
+            ));
+        }
     }
     s.log2_max_poc_lsb = b.ue().min(12) + 4;
     s.dpbm = dpbm(&mut b, s.max_sub as u32);
@@ -728,6 +735,7 @@ impl State {
             w: sps.width,
             h: sps.height,
             view: sps.view(),
+            deep: sps.depth > 8,
         })
     }
 }
@@ -858,6 +866,8 @@ impl Sps {
         }
         s.chroma_format_idc = StdVideoH265ChromaFormatIdc_STD_VIDEO_H265_CHROMA_FORMAT_IDC_420;
         (s.pic_width_in_luma_samples, s.pic_height_in_luma_samples) = (self.width, self.height);
+        s.bit_depth_luma_minus8 = self.depth - 8;
+        s.bit_depth_chroma_minus8 = self.depth - 8;
         s.sps_video_parameter_set_id = self.vps_id;
         s.sps_max_sub_layers_minus1 = self.max_sub;
         s.sps_seq_parameter_set_id = self.id;

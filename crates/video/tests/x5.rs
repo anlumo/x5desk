@@ -101,18 +101,20 @@ fn decode(g: &Gpu, d: &mut Decoder, au: &[&[u8]]) -> u64 {
     }
 }
 
-/// The window `[x, y, w, h]` of frame `f` read back through wgpu copies of the NV12 texture's plane views, as I420;
-/// the caller acquires and releases `f`.
+/// The window `[x, y, w, h]` of frame `f` read back through wgpu copies of the texture's plane views: NV12 as I420,
+/// P010 as it is (FFmpeg's `p010le`: Y, then interleaved Cb Cr, little-endian words); the caller acquires and
+/// releases `f`.
 fn read(g: &Gpu, d: &Ring, [x, y, w, h]: [u32; 4], f: u64) -> Vec<u8> {
-    let (w, h) = (w as usize, h as usize);
-    let bpr = w.next_multiple_of(256); // both planes have w bytes per row
+    let tex = d.texture(f);
+    let deep = tex.format() == wgpu::TextureFormat::P010;
+    let (w, h, b) = (w as usize, h as usize, 1 + deep as usize);
+    let bpr = (w * b).next_multiple_of(256); // both planes have w samples per row
     let buf = g.device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: (bpr * h * 3 / 2) as u64,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let tex = d.texture(f);
     let mut e = g.device.create_command_encoder(&Default::default());
     for (aspect, s, offset) in [
         (wgpu::TextureAspect::Plane0, 1, 0),
@@ -160,9 +162,12 @@ fn read(g: &Gpu, d: &Ring, [x, y, w, h]: [u32; 4], f: u64) -> Vec<u8> {
     };
     g.device.poll(i).unwrap();
     let m = buf.slice(..).get_mapped_range().unwrap();
-    let mut out = Vec::with_capacity(w * h * 3 / 2);
-    for y in 0..h {
-        out.extend_from_slice(&m[y * bpr..y * bpr + w]);
+    let mut out = Vec::with_capacity(w * h * 3 / 2 * b);
+    for y in 0..h + if deep { h / 2 } else { 0 } {
+        out.extend_from_slice(&m[y * bpr..y * bpr + w * b]);
+    }
+    if deep {
+        return out;
     }
     let uv = &m[bpr * h..];
     for c in 0..2 {
@@ -210,9 +215,9 @@ fn exact(d: Vec<usize>) -> bool {
     d.iter().all(|&n| n == 0)
 }
 
-/// FFmpeg's software decode of an Annex B stream: raw I420 frames of the display window in display order, read
-/// from its stdout.
-fn ffdecode(codec: Codec, es: Vec<u8>) -> ChildStdout {
+/// FFmpeg's software decode of an Annex B stream: raw frames of the display window in display order (the stream's
+/// own format, or `pix`), read from its stdout.
+fn ffdecode(codec: Codec, es: Vec<u8>, pix: Option<&str>) -> ChildStdout {
     let f = if codec == Codec::H264 { "h264" } else { "hevc" };
     let mut c = Command::new("ffmpeg")
         .args([
@@ -225,6 +230,7 @@ fn ffdecode(codec: Codec, es: Vec<u8>) -> ChildStdout {
             "-fps_mode",
             "passthrough",
         ])
+        .args(pix.map(|p| ["-pix_fmt", p]).into_iter().flatten())
         .args(["-f", "rawvideo", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -790,7 +796,7 @@ fn live_matches_ffmpeg() {
     let _l = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let es = std::fs::read(&path).unwrap();
     let aus = annexb(Codec::H264, &es);
-    let mut ff = ffdecode(Codec::H264, es.clone());
+    let mut ff = ffdecode(Codec::H264, es.clone(), None);
     let g = Gpu::new().unwrap();
     let params: Vec<_> = aus[0]
         .iter()
@@ -859,6 +865,7 @@ fn live_loss() {
             .flatten()
             .flat_map(|n| [&[0, 0, 1], *n].concat())
             .collect(),
+        None,
     );
     let g = Gpu::new().unwrap();
     let params: Vec<_> = (aus[0].iter().copied())
@@ -895,6 +902,7 @@ fn live_loss() {
 /// - x264 B-pyramid: POC type 0, MMCO 1, temporal direct, implicit weights (POC distances)
 /// - x265 B-pyramid, open GOP: sub-layer non-reference pictures, RPS in slice headers, CRAs with RASL pictures,
 ///   conformance window; then again from the first CRA, where only its RASL pictures may fail
+/// - the same x265 stream in Main 10: P010 textures, against FFmpeg's `p010le` (the low 6 bits included)
 #[test]
 fn x26x_matches_ffmpeg() {
     if !ffmpeg() {
@@ -903,28 +911,29 @@ fn x26x_matches_ffmpeg() {
     let _l = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let g = Gpu::new().unwrap();
     let (w, h) = (720, 404);
-    let fs = w * h * 3 / 2;
-    for (codec, name, args) in [
+    let x265 = "-c:v libx265 -x265-params keyint=25:min-keyint=25:bframes=4:ref=3:open-gop=1:log-level=error -f hevc";
+    for (codec, name, deep, args) in [
         (
             Codec::H264,
             "x264 P",
+            false,
             "-c:v libx264 -bf 0 -refs 4 -g 25 -f h264",
         ),
         (
             Codec::H264,
             "x264 B",
+            false,
             "-c:v libx264 -bf 3 -refs 3 -g 25 -x264-params b-pyramid=normal:direct=temporal:weightb=1 -f h264",
         ),
-        (
-            Codec::H265,
-            "x265 B",
-            "-c:v libx265 -x265-params keyint=25:min-keyint=25:bframes=4:ref=3:open-gop=1:log-level=error -f hevc",
-        ),
+        (Codec::H265, "x265 B", false, x265),
+        (Codec::H265, "x265 Main 10 B", true, x265),
     ] {
+        let fs = w * h * 3 / 2 * (1 + deep as usize);
         let o = Command::new("ffmpeg")
             .args(["-v", "error", "-f", "lavfi", "-i"])
             .arg(format!("testsrc2=size={w}x{h}:rate=30"))
-            .args(["-frames:v", "60", "-pix_fmt", "yuv420p"])
+            .args(["-frames:v", "60", "-pix_fmt"])
+            .arg(if deep { "yuv420p10le" } else { "yuv420p" })
             .args(args.split(' '))
             .arg("-")
             .output()
@@ -934,7 +943,7 @@ fn x26x_matches_ffmpeg() {
             continue;
         }
         let aus = annexb(codec, &o.stdout);
-        let mut ff = ffdecode(codec, o.stdout.clone());
+        let mut ff = ffdecode(codec, o.stdout.clone(), deep.then_some("p010le"));
         let mut want = vec![0; fs * aus.len()];
         ff.read_exact(&mut want).unwrap();
         assert_eq!(
@@ -954,6 +963,8 @@ fn x26x_matches_ffmpeg() {
             .position(|au| codec == Codec::H265 && au.iter().any(|n| h265::nal_type(n) == 21));
         for start in [Some(0), cra].into_iter().flatten() {
             let mut d = Decoder::new(&g, codec, &params, 0, 0).unwrap();
+            let p010 = d.texture(0).format() == wgpu::TextureFormat::P010;
+            assert_eq!(p010, deep, "{name}: texture format");
             let (mut got, mut skipped) = (vec![], 0);
             for au in &aus[start..] {
                 match d.decode(&g, au) {
@@ -993,6 +1004,64 @@ fn x26x_matches_ffmpeg() {
             }
         }
     }
+}
+
+/// An H.265 Main 10 MP4 in `X5_MAIN10` (e.g. an export with one of the app's default presets, 5.7K / 8K): P010
+/// textures, every frame of the first video track byte-identical to FFmpeg's `p010le` (the low 6 bits included).
+#[test]
+fn main10_matches_ffmpeg() {
+    let Some(path) = std::env::var_os("X5_MAIN10").map(PathBuf::from) else {
+        println!("X5_MAIN10 unset: skipped");
+        return;
+    };
+    if !ffmpeg() {
+        return;
+    }
+    let _l = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut file, tracks) = mp4::read(&path).unwrap();
+    let t = &tracks[0];
+    let g = Gpu::new().unwrap();
+    let mut d = Decoder::new(&g, t.codec, &t.params, t.width, t.height).unwrap();
+    assert_eq!(d.texture(0).format(), wgpu::TextureFormat::P010);
+    let [_, _, w, h] = d.view;
+    let fs = (w * h * 3) as usize;
+    let mut c = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(&path)
+        .args(["-map", "0:v:0", "-fps_mode", "passthrough"])
+        .args(["-f", "rawvideo", "-pix_fmt", "p010le", "-"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut o = c.stdout.take().unwrap();
+    let ff = std::thread::spawn(move || {
+        let (mut b, mut v) = (vec![0; fs], vec![]);
+        while o.read_exact(&mut b).is_ok() {
+            v.push(hash(&b));
+        }
+        assert!(c.wait().unwrap().success());
+        v
+    });
+    let (mut ours, mut buf) = (vec![], vec![]);
+    for i in 0..t.samples.len() {
+        mp4::sample(&mut file, t, i, &mut buf);
+        let f = decode(&g, &mut d, &mp4::nals(&buf, t.nal_len));
+        d.acquire(&g, f);
+        ours.push(hash(&read(&g, &d, d.view, f)));
+        d.release(&g, f);
+    }
+    let theirs = ff.join().unwrap();
+    let bad = ours.iter().zip(&theirs).filter(|(a, b)| a != b).count();
+    println!(
+        "{}: {} frames of {w}x{h} (texture {}x{}), FFmpeg {}, {bad} differing",
+        path.display(),
+        ours.len(),
+        d.w,
+        d.h,
+        theirs.len()
+    );
+    assert_eq!(theirs.len(), ours.len());
+    assert_eq!(bad, 0);
 }
 
 const RGB: &str = r"

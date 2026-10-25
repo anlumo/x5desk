@@ -1,5 +1,5 @@
-//! The shared Vulkan device (`Gpu`), H.265 / H.264 parsers, Vulkan Video decode into NV12 wgpu textures and encode
-//! from NV12 / P010 wgpu textures.
+//! The shared Vulkan device (`Gpu`), H.265 / H.264 parsers, Vulkan Video decode into NV12 / P010 wgpu textures and
+//! encode from NV12 / P010 wgpu textures.
 mod bits;
 mod bitw;
 pub mod decode;

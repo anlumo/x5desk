@@ -366,8 +366,8 @@ fn decode(g: &Gpu, d: &mut Decoder, au: &[&[u8]]) -> u64 {
     }
 }
 
-/// wgpu copies of the NV12 planes of the decoder texture `tex`, rect `[x, y, w, h]`, to `buf` at byte `off` of each
-/// plane (Y at 0, CbCr at `pitch × rows`), rows `pitch` bytes apart; then back to its home state RESOURCE.
+/// wgpu copies of the NV12 / P010 planes of the decoder texture `tex`, rect `[x, y, w, h]`, to `buf` at byte `off` of
+/// each plane (Y at 0, CbCr at `pitch × rows`), rows `pitch` bytes apart; then back to its home state RESOURCE.
 fn stage(
     e: &mut wgpu::CommandEncoder,
     tex: &wgpu::Texture,
@@ -413,10 +413,12 @@ fn stage(
     e.transition_resources(std::iter::empty(), [home].into_iter());
 }
 
-/// The window `[x, y, w, h]` of frame `f` read back through wgpu copies of the NV12 texture's plane views, as I420;
-/// the caller acquires and releases `f`.
+/// The window `[x, y, w, h]` of frame `f` read back through wgpu copies of the texture's plane views: NV12 as I420,
+/// P010 as it is (FFmpeg's `p010le`); the caller acquires and releases `f`.
 fn read(g: &Gpu, d: &Ring, [x, y, w, h]: [u32; 4], f: u64) -> Vec<u8> {
-    let pitch = w.next_multiple_of(256);
+    let deep = d.texture(f).format() == wgpu::TextureFormat::P010;
+    let b = 1 + deep as u32; // bytes per sample
+    let pitch = (w * b).next_multiple_of(256);
     let buf = g.device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: (pitch * h * 3 / 2) as u64,
@@ -434,10 +436,13 @@ fn read(g: &Gpu, d: &Ring, [x, y, w, h]: [u32; 4], f: u64) -> Vec<u8> {
         })
         .unwrap();
     let m = buf.slice(..).get_mapped_range().unwrap();
-    let (w, h, p) = (w as usize, h as usize, pitch as usize);
-    let mut out = Vec::with_capacity(w * h * 3 / 2);
-    for y in 0..h {
-        out.extend_from_slice(&m[y * p..y * p + w]);
+    let (w, h, p, b) = (w as usize, h as usize, pitch as usize, b as usize);
+    let mut out = Vec::with_capacity(w * h * 3 / 2 * b);
+    for y in 0..h + if deep { h / 2 } else { 0 } {
+        out.extend_from_slice(&m[y * p..y * p + w * b]);
+    }
+    if deep {
+        return out;
     }
     let uv = &m[p * h..];
     for c in 0..2 {
@@ -448,8 +453,8 @@ fn read(g: &Gpu, d: &Ring, [x, y, w, h]: [u32; 4], f: u64) -> Vec<u8> {
     out
 }
 
-/// Our decoder on our stream against FFmpeg's decode of the same file, every frame by hash; returns the frames that
-/// differ.
+/// Our decoder on our stream against FFmpeg's decode of the same file, every frame by hash (Main 10: P010 against
+/// FFmpeg's `p010le`, the low 6 bits included); returns the frames that differ.
 fn cross_check(
     g: &Gpu,
     codec: Codec,
@@ -459,8 +464,11 @@ fn cross_check(
     w: u32,
     h: u32,
 ) -> usize {
-    let fs = (w * h * 3 / 2) as usize;
-    let mut o = ff(&["-i", file.to_str().unwrap()], None, "yuv420p");
+    let mut d = Decoder::new(g, codec, params, w, h).unwrap();
+    let deep = d.texture(0).format() == wgpu::TextureFormat::P010;
+    let fs = (w * h * 3 / 2) as usize * (1 + deep as usize);
+    let pix = if deep { "p010le" } else { "yuv420p" };
+    let mut o = ff(&["-i", file.to_str().unwrap()], None, pix);
     let ffh = std::thread::spawn(move || {
         let (mut b, mut v) = (vec![0; fs], vec![]);
         while o.read_exact(&mut b).is_ok() {
@@ -468,7 +476,6 @@ fn cross_check(
         }
         v
     });
-    let mut d = Decoder::new(g, codec, params, w, h).unwrap();
     assert_eq!(d.view, [0, 0, w, h]);
     let mut ours = vec![];
     for p in ps {
@@ -633,7 +640,8 @@ fn p010(f: u64, w: usize, h: usize, o: &mut [u16]) {
 
 /// H.265 Main 10 from synthetic P010 pictures that wgpu copies into the encoder's input textures through their plane
 /// aspects: limited range, centre chroma siting; ffprobe's profile, pixel format and colour tags, a clean FFmpeg
-/// decode, PSNR(Y) against the source, and the MP4. A second encoder at constant QP 24 (clean decode, PSNR).
+/// decode, PSNR(Y) against the source, our decoder (P010) against FFmpeg, and the MP4. A second encoder at constant
+/// QP 24 (clean decode, PSNR, our decoder).
 #[test]
 fn h265_main10() {
     if !ffmpeg() {
@@ -757,6 +765,11 @@ fn h265_main10() {
         let (mean, min) = stats(&v);
         println!("Main 10 {what} PSNR(Y) vs source: mean {mean:.2} dB, min {min:.2} dB");
         assert!(min > 45.0);
+    }
+    for (what, (ps, params), f) in [("CBR", &r[0], &f), ("QP 24", &r[1], &fq)] {
+        let bad = cross_check(&g, Codec::H265, params, ps, f, w, h);
+        println!("our decoder vs FFmpeg on our Main 10 {what}: {bad} of {n} frames differ");
+        assert_eq!(bad, 0);
     }
     let m = out("main10.mp4");
     mux(&m, Codec::H265, params, ps, w, h, fps);
@@ -1026,6 +1039,85 @@ fn sizes() {
                 println!("our decoder vs FFmpeg: {bad} of {N} frames differ");
                 assert_eq!(bad, 0);
             }
+        }
+    }
+}
+
+/// CBR against the rate control buffer: 30 s of v635 lens 0's middle 1920x1080 window (its 175 frames looped) at
+/// 1080p30 6 Mbit/s, H.264 and H.265, buffers of 100 ms (the app's RTMP setting), 250 ms and 1000 ms (files). From
+/// 1000 ms the driver's rate control holds the target over the whole stream, its first IDR (RADV starts at QP 25)
+/// paid back. With less, RADV (Mesa 26.2.5) runs the P-frames over their share and never pays the excess back, so the
+/// stream breaks the leaky bucket it was given: +4 to +10 % at 100 ms (3 to 12 Mbit/s, this footage; each IDR capped
+/// at about the buffer), up to +2.4 % at 250 ms. The initial occupancy (0 to 100 %), the GOP flags and sizes and the
+/// GOP-remaining hints leave the frame sizes as they are, to the byte: RADV ignores them.
+#[test]
+fn cbr() {
+    let Some(path) = sample_file("v635.insv") else {
+        return;
+    };
+    let _l = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    let g = Gpu::new().unwrap();
+    let (mut file, tracks) = mp4::read(&path).unwrap();
+    let t = &tracks[0];
+    let (w, h, fps, n, rate) = (1920, 1080, [30, 1], 900, 6_000_000);
+    let base = Cfg {
+        codec: Codec::H264,
+        deep: false,
+        w,
+        h,
+        fps,
+        gop: 60,
+        rate: Rate::Cbr(rate),
+        vbv: 100,
+        quality: 0,
+        full: true,
+        chroma: 0,
+    };
+    let cfgs: Vec<_> = [Codec::H264, Codec::H265]
+        .into_iter()
+        .flat_map(|codec| [100, 250, 1000].map(|vbv| Cfg { codec, vbv, ..base }))
+        .collect();
+    let encs = cfgs.iter().map(|c| Encoder::new(&g, c).unwrap()).collect();
+    let mut d = Decoder::new(&g, t.codec, &t.params, t.width, t.height).unwrap();
+    let (mut buf, m) = (vec![], t.samples.len() as u64);
+    let (r, _) = run(&g, encs, n, &[], |f, inputs| {
+        // sample 0 is an IDR: the loop restarts the decoder's picture management
+        mp4::sample(&mut file, t, (f % m) as usize, &mut buf);
+        let k = decode(&g, &mut d, &mp4::nals(&buf, t.nal_len));
+        let cbs: Vec<_> = inputs
+            .iter()
+            .map(|i| {
+                i.copy_texture(&g, d.texture(k), [960, 1380, w, h], [0, 0], f)
+                    .unwrap()
+            })
+            .collect();
+        d.acquire(&g, k);
+        g.queue.submit(cbs);
+        d.release(&g, k);
+    });
+    let pc = |ps: &[Packet]| (bitrate(ps, fps) / rate as f64 - 1.0) * 100.0;
+    for (c, (ps, _)) in cfgs.iter().zip(&r) {
+        let mean = |key: bool| {
+            let v: Vec<_> = ps
+                .iter()
+                .filter(|p| p.key == key)
+                .map(|p| p.data.len())
+                .collect();
+            v.iter().sum::<usize>() / v.len()
+        };
+        println!(
+            "{:?} CBR 6 Mbit/s, {} ms buffer: {:+.2} % over 30 s, {:+.2} % from frame 60; IDR mean {} B, P mean {} B \
+             (share {} B)",
+            c.codec,
+            c.vbv,
+            pc(ps),
+            pc(&ps[60..]),
+            mean(true),
+            mean(false),
+            rate / 8 / 30
+        );
+        if c.vbv == 1000 {
+            assert!(pc(ps).abs() < 2.0);
         }
     }
 }
