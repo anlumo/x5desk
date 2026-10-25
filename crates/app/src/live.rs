@@ -261,6 +261,15 @@ impl Set {
     }
 }
 
+/// Where the stream key starts in `url` when it is there: with the key field empty, the last path segment after the
+/// app (`rtmp://host/app/key`, `Rtmp::start`'s rule).
+fn kat(url: &str) -> Option<usize> {
+    let p = url.find("://").map_or(0, |i| i + 3);
+    let app = p + url[p..].find('/')? + 1;
+    let k = url.rfind('/')? + 1;
+    (k > app && k < url.len()).then_some(k)
+}
+
 /// Which source the outputs show.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Pick {
@@ -883,9 +892,29 @@ impl Live {
         ui.add_enabled_ui(!streaming, |ui| {
             egui::Grid::new("rtmp").num_columns(2).show(ui, |ui| {
                 ui.label("Server URL");
+                // a stream key typed into the URL is masked as the key field masks it (same character count: the
+                // cursor's places stay)
+                let hide = self.set.key.trim().is_empty() && !self.show_key;
+                let mut lay = |ui: &egui::Ui, b: &dyn egui::TextBuffer, _: f32| {
+                    let t = b.as_str();
+                    let t = match kat(t).filter(|_| hide) {
+                        Some(k) => t[..k].to_owned() + &"•".repeat(t[k..].chars().count()),
+                        None => t.into(),
+                    };
+                    let v = ui.visuals();
+                    let c = (v.override_text_color).unwrap_or(v.widgets.inactive.text_color());
+                    let mut j = egui::text::LayoutJob::simple_singleline(
+                        t,
+                        egui::TextStyle::Body.resolve(ui.style()),
+                        c,
+                    );
+                    j.keep_trailing_whitespace = true;
+                    ui.fonts_mut(|f| f.layout_job(j))
+                };
                 ui.add(
                     egui::TextEdit::singleline(&mut self.set.url)
                         .hint_text("rtmp://host/app")
+                        .layouter(&mut lay)
                         .desired_width(360.0),
                 );
                 ui.end_row();
@@ -1236,9 +1265,13 @@ impl Outs {
             asc: enc.asc().to_vec(),
             lag: 1000,
         };
-        let r = Arc::new(
-            Rtmp::start(s.url.trim(), s.key.trim(), cfg).map_err(|e| format!("RTMP: {e}"))?,
-        );
+        // a key in the URL goes as the key: crate live's errors quote the URL
+        let (url, key) = (s.url.trim(), s.key.trim());
+        let (url, key) = match kat(url).filter(|_| key.is_empty()) {
+            Some(k) => (&url[..k - 1], &url[k..]),
+            None => (url, key),
+        };
+        let r = Arc::new(Rtmp::start(url, key, cfg).map_err(|e| format!("RTMP: {e}"))?);
         let pic = tex(&self.g, w, h, wgpu::TextureFormat::Rgba8Unorm);
         let pv = pic.create_view(&Default::default());
         let yuv = stitch::Yuv::new(
@@ -1820,6 +1853,26 @@ mod tests {
             "abcdef"
         );
         std::fs::remove_file(&f).unwrap();
+    }
+
+    /// A stream key in the URL (key field empty) is its last path segment after the app; a URL with the app only has
+    /// none.
+    #[test]
+    fn key_in_url() {
+        for (u, k) in [
+            (
+                "rtmp://a.example/live2/abcd-efgh-ijkl",
+                Some("abcd-efgh-ijkl"),
+            ),
+            ("rtmp://a.example:1935/app/inst/k3y?x=1", Some("k3y?x=1")),
+            ("rtmp://[::1]/app/key", Some("key")),
+            ("rtmp://a.example/app", None),
+            ("rtmp://a.example/app/", None),
+            ("rtmp://a.example", None),
+            ("", None),
+        ] {
+            assert_eq!(kat(u).map(|i| &u[i..]), k, "{u}");
+        }
     }
 
     /// Every size and rate the screen offers gets an H.264 encoder (level, size and bitrate limits).
