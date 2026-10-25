@@ -364,6 +364,11 @@ fn history() {
     let bad = out("bad.cube");
     std::fs::write(&bad, "LUT_3D_SIZE 2\n0 0 0\n").unwrap();
     assert!(e.cube(&bad).is_err() && e.pj.tl().clips[0].look == id);
+    // a clip of a recording with no main file (a proxy, say from a project file) fails the job, not the export
+    let f = e.pj.file("/nowhere/b.lrv", 20.0).unwrap();
+    e.ed(|p| p.insert(0, Clip::new(f, 0.0, 5.0)));
+    let r = e.job().map(|_| ());
+    assert_eq!(r, Err("b.lrv: no full-resolution file".into()));
 }
 
 /// Adjustments are per clip (no samples needed): a project file from before, with the timeline's adjustments in

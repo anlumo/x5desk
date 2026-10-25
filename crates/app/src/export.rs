@@ -328,7 +328,8 @@ pub struct Tl {
     /// the project's name (output file names)
     pub name: String,
     pub tl: edit::Timeline,
-    /// per `tl.files` entry: its files (a recording's main files; the music file)
+    /// per `tl.files` entry: its files (a recording's main files, never none for a clip's: `Editor::job` refuses
+    /// those; the music file)
     pub files: Vec<Vec<PathBuf>>,
     pub looks: std::collections::HashMap<String, fx::Cube>,
     pub over: Vec<(fx::Image, fx::Place, f32)>,

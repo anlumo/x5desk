@@ -1003,12 +1003,18 @@ impl Editor {
             return Err("Reversed clips do not export yet.".into());
         }
         let music = tl.out.music.as_ref().map(|m| m.file as usize);
-        let files = (tl.files.iter().enumerate())
+        let files: Vec<Vec<PathBuf>> = (tl.files.iter().enumerate())
             .map(|(i, f)| match Some(i) == music {
                 true => vec![PathBuf::from(&f.path)],
                 false => crate::library::pair(Path::new(&f.path)).main,
             })
             .collect();
+        // a clip of a proxy or another file with no main file beside it: nothing to render it from (the export's
+        // face pass reads a clip's main files)
+        if let Some(c) = tl.clips.iter().find(|c| files[c.file as usize].is_empty()) {
+            let p = &tl.files[c.file as usize].path;
+            return Err(format!("{}: no full-resolution file", name(p)));
+        }
         let mut cubes = HashMap::new();
         let looks = (tl.clips.iter())
             .filter(|c| !c.look.is_empty())
