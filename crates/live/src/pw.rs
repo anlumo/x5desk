@@ -912,7 +912,10 @@ fn copier(p: Ptr, g: Arc<Gpu>, rx: mpsc::Receiver<Job>, pool: Arc<Mutex<Vec<wgpu
                         break Err(e.to_string());
                     }
                 }
-                Err(e) => break Err(e.to_string()),
+                // the callback was dropped uncalled: wgpu-core 30 drops the callbacks a `Surface::configure` collected
+                // when it fails because another thread submitted meanwhile (a window resize). The map itself ran,
+                // so the mapping says whether it worked
+                Err(_) => break Ok(()),
             }
         };
         let v = m.and_then(|_| j.rb.get_mapped_range(..).map_err(|e| e.to_string()));
