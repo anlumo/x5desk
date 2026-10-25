@@ -8,6 +8,8 @@ description = "Editor model for x5desk: timeline, speed / freeze / reverse, refr
 [dependencies]
 # Already in the tree (stitch, stab): view orientations are `glam::Quat`, the type stitch::Pose and stab::Pose take.
 glam.workspace = true
+# a clip's colour adjustments are `fx::Params` (plain data; wgpu is in every user's tree anyway)
+fx.workspace = true
 
 [dev-dependencies]
 # tests/footage.rs: frame accuracy against the sample clips' real sample times

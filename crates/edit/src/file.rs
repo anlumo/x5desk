@@ -22,6 +22,19 @@ const EASES: [(Ease, &str); 6] = [
     (Ease::Hold, "hold"),
 ];
 
+/// A clip's adjustments by name: every `fx::Params` field but `mix` (the look's intensity is `Clip::amt`). A file
+/// holds the ones that differ from fx's defaults; missing ones are the defaults (files from before had none).
+macro_rules! adj {
+    ($($f:ident)*) => {
+        pub(crate) fn adj(p: &mut fx::Params) -> [(&'static str, &mut f32); 20] {
+            let fx::Params { $($f,)* mix: _ } = p;
+            [$((stringify!($f), $f)),*]
+        }
+    };
+}
+adj!(exposure brightness brilliance contrast highlights shadows whites blacks saturation vibrance temperature tint
+    clarity sharpen auto water purple green blue reach);
+
 fn esc(o: &mut String, s: &str) {
     o.push('"');
     for c in s.chars() {
@@ -100,7 +113,13 @@ impl Timeline {
                 c.rev, c.mute, c.amt
             );
             esc(&mut o, &c.look);
-            o.push_str(", \"speed\": ");
+            o.push_str(", \"adjust\": {");
+            let (mut a, mut d) = (c.adj, fx::Params::default());
+            let set = adj(&mut a).into_iter().zip(adj(&mut d));
+            for (i, ((k, v), _)) in set.filter(|(x, y)| *x.1 != *y.1).enumerate() {
+                _ = write!(o, "{}\"{k}\": {v:?}", if i > 0 { ", " } else { "" });
+            }
+            o.push_str("}, \"speed\": ");
             pairs(&mut o, &c.speed);
             o.push_str(", \"vol\": ");
             pairs(&mut o, &c.vol);
@@ -191,6 +210,16 @@ fn clip(c: &Val) -> Result<Clip> {
     }
     if let Some(v) = opt("look") {
         r.look = str(v)?.to_owned();
+    }
+    if let Some(v) = opt("adjust") {
+        let Val::Obj(_) = v else {
+            return bad("adjust: expected an object");
+        };
+        for (k, x) in adj(&mut r.adj) {
+            if let Some(n) = v.get(k) {
+                *x = num(n).map_err(|e| Error(format!("adjust.{k}: {}", e.0)))?;
+            }
+        }
     }
     if let Some(v) = opt("speed") {
         r.speed = pair(v)?;

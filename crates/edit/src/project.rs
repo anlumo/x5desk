@@ -330,6 +330,7 @@ impl Project {
         let f = Clip {
             look: c.look.clone(),
             amt: c.amt,
+            adj: c.adj,
             // the clip's own keys move its view: start the freeze where they are
             view: view::at(&c.view, s, c.rev)
                 .map(|v| {

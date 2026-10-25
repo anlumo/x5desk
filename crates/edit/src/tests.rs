@@ -102,6 +102,9 @@ impl Rng {
         c.mute = self.n(5) == 0;
         c.look = ["", "warm", "teal & orange \"v2\""][self.n(3)].into();
         c.amt = self.r(0.0, 1.0) as f32;
+        if self.n(2) == 0 {
+            (c.adj.exposure, c.adj.reach) = (self.r(-3.0, 3.0) as f32, self.r(1.0, 12.0) as f32);
+        }
         c
     }
 }
@@ -1760,6 +1763,48 @@ fn save_load_round_trip() {
     })
     .unwrap();
     assert_eq!(Project::load(&p.save()).unwrap().tl(), p.tl());
+}
+
+/// Per-clip adjustments: a file holds the fields that differ from fx's defaults and reads them back; a clip without
+/// any (files from before) has the defaults; split parts and a freeze frame keep the clip's; malformed ones are
+/// refused, unknown fields in them ignored.
+#[test]
+fn adjust() {
+    let mut p = base();
+    p.insert(0, Clip::new(0, 1.0, 4.0)).unwrap();
+    p.edit(0, |c| (c.adj.exposure, c.adj.reach) = (0.5, 6.0))
+        .unwrap();
+    let s = p.save();
+    assert!(
+        s.contains("\"adjust\": {\"exposure\": 0.5, \"reach\": 6.0}"),
+        "{s}"
+    );
+    assert_eq!(Project::load(&s).unwrap().tl(), p.tl());
+    p.split(1.0).unwrap();
+    p.freeze(0.5, 1.0).unwrap();
+    let a = p.tl().clips[0].adj;
+    assert!(
+        p.tl().clips.len() == 4 && p.tl().clips.iter().all(|c| c.adj == a) && a.exposure == 0.5
+    );
+    let old = "{\"x5edit\": 1, \"fps\": [30, 1], \"files\": [{\"path\": \"a\", \"dur\": 5}], \"clips\": [{\"file\": 0, \
+               \"a\": 1, \"b\": 2}], \"view\": []}";
+    assert_eq!(
+        Project::load(old).unwrap().tl().clips[0].adj,
+        fx::Params::default()
+    );
+    for (a, ok) in [
+        ("{}", true),
+        ("{\"tint\": -1, \"later\": [1]}", true),
+        ("null", true),
+        ("[]", false),
+        ("{\"tint\": \"x\"}", false),
+        // finite as f64, not as f32
+        ("{\"tint\": 1e39}", false),
+    ] {
+        let s = old.replace("\"b\": 2}", &format!("\"b\": 2, \"adjust\": {a}}}"));
+        let r = Project::load(&s);
+        assert_eq!(r.is_ok(), ok, "{a}: {:?}", r.err());
+    }
 }
 
 #[test]

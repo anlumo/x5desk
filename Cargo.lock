@@ -3214,6 +3214,7 @@ dependencies = [
 name = "edit"
 version = "0.1.0"
 dependencies = [
+ "fx",
  "glam",
  "media",
 ]

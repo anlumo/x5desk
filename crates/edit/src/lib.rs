@@ -103,6 +103,8 @@ pub struct Clip {
     /// Look (crate fx) id, "" = none, and its intensity.
     pub look: String,
     pub amt: f32,
+    /// Colour adjustments under the look; `mix` is unused (the look's intensity is `amt`).
+    pub adj: fx::Params,
     /// Audio gain envelope (content time, points at least [`GAP`] apart, linear gain 0..=16), linear between points,
     /// constant beyond. Empty: 1.
     pub vol: Vec<(f64, f32)>,
@@ -122,6 +124,7 @@ impl Clip {
             view: vec![],
             look: String::new(),
             amt: 1.0,
+            adj: fx::Params::default(),
             vol: vec![],
             mute: false,
         }
@@ -568,6 +571,12 @@ impl Timeline {
         }
         if !c.amt.is_finite() {
             return bad("look intensity");
+        }
+        if !file::adj(&mut c.adj.clone())
+            .iter()
+            .all(|f| f.1.is_finite())
+        {
+            return bad("adjustments");
         }
         view::check(&c.view)
     }
