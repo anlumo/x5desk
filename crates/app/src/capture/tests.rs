@@ -144,6 +144,22 @@ fn replay_path() {
     }
 }
 
+/// Ready for a screenshot (main.rs) once the worker reported the camera's state, also without `/CONF`: the replayed
+/// camera has none here (a `replay=` run without `conf=`; a camera whose `/CONF` read fails), the preview is off.
+#[test]
+fn idle_without_conf() {
+    let Some(r) = recording() else { return };
+    let mut x = Arc::into_inner(r).unwrap();
+    x.conf = None;
+    let (_g, _w, mut c) = rig(&Arc::new(x), false);
+    until(&mut c, 20.0, |c| c.st.on);
+    assert_eq!(c.st.mode.as_deref(), Some("VIDEO_NORMAL"));
+    assert!(
+        c.st.conf.is_none() && c.idle(),
+        "waits for a /CONF that is not there"
+    );
+}
+
 /// The replayed preview (sent in pairs, as the X5 does) as a live source: 10 s of a 30 fps output clock taking and
 /// drawing it as the Live screen's thread does, a 60 Hz viewer beside it. The clock takes every picture in turn, none
 /// dropped and none repeated but around a stall of this shared host; the viewer shows what the clock takes.

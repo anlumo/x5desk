@@ -630,7 +630,8 @@ impl Capture {
     }
 
     /// The test hook's statistics are printed (and the run may end); ready for a screenshot: a second of pictures
-    /// and, connected, `/CONF` read.
+    /// and, with a camera session, the worker's first report on it (it sends one only after reading the mode, its
+    /// values and `/CONF`, which may fail or be absent: a replayed camera without `conf=`).
     pub fn idle(&self) -> bool {
         let shown = match self.src {
             Src::Preview => self
@@ -640,7 +641,8 @@ impl Capture {
             Src::Webcam => self.web.as_ref().map_or(0, |w| w.lock().unwrap().taken()),
         };
         let stats = self.hook.as_ref().is_none_or(|h| h.stats.is_none()) || self.done;
-        (!self.want || shown > 30) && (!self.st.on || self.st.conf.is_some()) && stats
+        let cam = self.tap.lock().unwrap().cam.is_some();
+        (!self.want || shown > 30) && (!cam || self.st.on) && stats
     }
 
     /// Prints the statistics once `stats=` seconds of pictures went by (test hook).
@@ -892,8 +894,9 @@ impl Capture {
         ui.add_space(4.0);
         self.status(ui, &s);
         ui.add_space(6.0);
+        // the worker reports a session only once it tried to read /CONF
         let Some(cf) = &s.conf else {
-            ui.label("Reading the camera's /CONF…");
+            ui.label("The camera's /CONF could not be read: no capture controls.");
             return;
         };
         let Some(b) = cf.block(s.both) else {
