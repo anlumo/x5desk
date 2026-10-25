@@ -37,9 +37,10 @@
 //! mounted X5; repeatable; the real mount table is not read then; starts on the album unless `camera=` says otherwise),
 //! `import` (import the mounted card's whole album once listed), `ble=sim` (a simulated Bluetooth adapter with one X5
 //! that scans, connects, pairs, reads its access point and joins `HomeNet` in station mode at once; starts on the
-//! Wireless pane). Under the hook nothing of the user's config or cache is read, written or trimmed (the app's and
-//! the camera's settings, the recent list, the download queue: the run's own; no thumbnail cache), and `dest=` is the
-//! download folder too. AI and Shot Lab:
+//! Wireless pane), `ble=sta` (the same X5 on `HomeNet` from an earlier session: scans, connects, pairs and reads its
+//! station connection, no join). Under the hook nothing of the user's config or cache is read, written or trimmed
+//! (the app's and the camera's settings, the recent list, the download queue: the run's own; no thumbnail cache), and
+//! `dest=` is the download folder too. AI and Shot Lab:
 //! `box=<x0>/<y0>/<x1>/<y1>` (Deep Track in the player: that box, 0..1 of the picture, drawn once the frame shows; the
 //! view follows the subject when the run is over, and an `export=` waits for it and takes the follow view),
 //! `restab=off|free|horizon|direction[/<σ>]` (once that run is over, the player's stabilisation changes to this, as its
@@ -123,7 +124,8 @@ pub struct Test {
     pub help: Option<help::Page>,
     pub mount: Vec<PathBuf>,
     pub import: bool,
-    pub ble: bool,
+    /// the simulated Bluetooth adapter: its camera on HomeNet from an earlier session
+    pub ble: Option<bool>,
     /// the player's Deep Track box, face blur preview, an auto edit (and the preset to export it with)
     pub tbox: Option<[f32; 4]>,
     pub restab: Option<(gyro::Mode, f64)>,
@@ -223,7 +225,12 @@ impl Test {
                 "help" => t.help = Some(help::Page::parse(v).unwrap_or(help::Page::Keys)),
                 "mount" => t.mount.push(v.into()),
                 "import" => t.import = true,
-                "ble" => t.ble = v == "sim",
+                "ble" => {
+                    t.ble = [("sim", false), ("sta", true)]
+                        .into_iter()
+                        .find(|x| x.0 == v)
+                        .map(|x| x.1)
+                }
                 "box" => t.tbox = quad(v),
                 "restab" => {
                     let (m, s) = v.split_once('/').unwrap_or((v, ""));
@@ -467,28 +474,31 @@ impl App {
         });
         let (mount, ble) = test
             .as_ref()
-            .map_or((vec![], false), |t| (t.mount.clone(), t.ble));
+            .map_or((vec![], None), |t| (t.mount.clone(), t.ble));
         let mut disks = disk::Watch::new(mount.clone());
         if test.is_some() {
             // the hook's directories only
             disks.info = PathBuf::new();
         }
-        let first = match ble {
-            true => vec![
-                bt::Cmd::Scan(true),
-                bt::Cmd::Connect(::ble::Dev("sim/X5 SIM001".into())),
-                bt::Cmd::Pair,
+        let mut first = vec![
+            bt::Cmd::Scan(true),
+            bt::Cmd::Connect(::ble::Dev("sim/X5 SIM001".into())),
+            bt::Cmd::Pair,
+        ];
+        match ble {
+            Some(false) => first.extend([
                 bt::Cmd::Ap,
                 bt::Cmd::Join("HomeNet".into(), "correct horse".into()),
-            ],
-            false => vec![],
-        };
+            ]),
+            Some(true) => first.push(bt::Cmd::Sta),
+            None => first.clear(),
+        }
         let open: bt::Open = match ble {
-            true => bt::sim(),
-            false => Box::new(::ble::Ble::open),
+            Some(s) => bt::sim(s),
+            None => Box::new(::ble::Ble::open),
         };
         pane = pane
-            .or(ble.then_some(camera::Pane::Wireless))
+            .or(ble.map(|_| camera::Pane::Wireless))
             .or((!mount.is_empty()).then_some(camera::Pane::Album));
         let mut cam = camera::Cam::new(
             &cc.egui_ctx,
@@ -915,6 +925,11 @@ mod tests {
         );
         assert_eq!(super::Test::parse("stab=off").stab, Some(None));
         assert_eq!(super::Test::parse("play").stab, None);
+        let ble = |v| super::Test::parse(v).ble;
+        assert_eq!(
+            (ble("ble=sim"), ble("ble=sta"), ble("ble=x")),
+            (Some(false), Some(true), None)
+        );
     }
 
     /// The error wgpu 30 reports for `Surface::configure` when another thread submitted during its idle wait, and

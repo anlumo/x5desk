@@ -7,15 +7,15 @@ use std::sync::{Arc, Mutex};
 
 type Log = Arc<Mutex<Vec<(u16, Vec<u8>)>>>;
 
-/// A worker on the simulated X5 that logs what the camera gets; the simulation's control.
-fn spawn(log: &Log) -> (Bt, Arc<Mutex<Option<ble::Sim>>>) {
+/// A worker on the simulated X5 (Wi-Fi as in `w`) that logs what the camera gets; the simulation's control.
+fn spawn_on(log: &Log, w: Net) -> (Bt, Arc<Mutex<Option<ble::Sim>>>) {
     let (l, sim) = (log.clone(), Arc::new(Mutex::new(None)));
     let s2 = sim.clone();
     let open: Open = Box::new(move || {
-        let l = l.clone();
+        let (l, mut w) = (l.clone(), w.clone());
         let (b, ev, s) = Ble::sim(vec![adv()], move |c, q, s| {
             l.lock().unwrap().push((c, q.to_vec()));
-            answer(c, q, s)
+            answer(c, q, s, &mut w)
         })?;
         *s2.lock().unwrap() = Some(s);
         Ok((b, ev))
@@ -24,6 +24,10 @@ fn spawn(log: &Log) -> (Bt, Arc<Mutex<Option<ble::Sim>>>) {
         Bt::new(&egui::Context::default(), open, "client-id".into(), vec![]),
         sim,
     )
+}
+
+fn spawn(log: &Log) -> (Bt, Arc<Mutex<Option<ble::Sim>>>) {
+    spawn_on(log, Net::default())
 }
 
 fn until(b: &mut Bt, secs: f64, f: impl Fn(&St) -> bool) {
@@ -109,12 +113,61 @@ fn flows() {
         .wifi_connection_info
         .unwrap();
     assert_eq!((&*i.ssid, &*i.password), ("HomeNet", "secret pw"));
+    assert_eq!(b.addr, "192.168.1.57");
+    // read back: the camera's mode, then its connection
+    let n = log.lock().unwrap().len();
+    b.tx.send(Cmd::Sta).unwrap();
+    // the second request is sent only after the St that says busy
+    until(&mut b, 3.0, |s| {
+        s.busy.is_none() && log.lock().unwrap().len() == n + 2
+    });
+    assert_eq!(codes(&log)[n..], [code::GET_WIFI_MODE, code::GET_WIFI_CONN]);
+    assert_eq!(b.st.sta, Some((0, "HomeNet".into(), "192.168.1.57".into())));
     b.tx.send(Cmd::Close).unwrap();
     until(&mut b, 3.0, |s| {
         s.conn == Conn::Off && !s.paired && s.ap.is_none()
     });
     assert!(b.idle());
     println!("camera got: {:?}", codes(&log));
+}
+
+/// The camera's existing station connection read over Bluetooth with nothing written: none on a camera in
+/// access-point mode or in station mode without an address; on one that joined HomeNet in an earlier session, the
+/// network and the address, which fills the pane's address in.
+#[test]
+fn station_read() {
+    let none = (msg::STA, msg::WifiConnectionInfo::default());
+    for (w, sta, note) in [
+        (
+            Net::default(),
+            None,
+            "the camera's Wi-Fi is in access-point mode: no station connection",
+        ),
+        (none, None, "the camera reports no station connection"),
+        (
+            home(),
+            Some((5, "HomeNet".into(), "192.168.1.57".into())),
+            "the camera joined HomeNet at 192.168.1.57",
+        ),
+    ] {
+        let log = Log::default();
+        let (mut b, _) = spawn_on(&log, w);
+        b.tx.send(Cmd::Connect(adv().dev)).unwrap();
+        until(&mut b, 3.0, |s| s.conn == Conn::On);
+        let n = log.lock().unwrap().len();
+        b.tx.send(Cmd::Sta).unwrap();
+        until(&mut b, 3.0, |s| {
+            s.note
+                .as_ref()
+                .is_some_and(|n| n.0.starts_with("the camera"))
+        });
+        assert_eq!(
+            (&b.st.sta, b.st.note.clone()),
+            (&sta, Some((note.into(), false)))
+        );
+        assert_eq!(b.addr, sta.map_or("".into(), |s| s.2));
+        assert_eq!(codes(&log)[n..], [code::GET_WIFI_MODE, code::GET_WIFI_CONN]);
+    }
 }
 
 /// Pairing cancelled on this side withdraws the camera's prompt; a lost link resets the state; commands that need a

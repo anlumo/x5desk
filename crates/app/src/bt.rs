@@ -1,7 +1,8 @@
 //! Bluetooth and Wi-Fi in the Camera screen's Wireless pane (crate ble): scan for X5s, connect, pair (the camera asks
 //! its user to allow this computer), wake one from standby, read its access point's name and password, and station
-//! mode (the camera joins the user's network; the camera worker then connects over it, `link::Camera::wifi`). The X5
-//! ignores Bluetooth while it is connected by USB in app mode (2026-10-24): the pane says so and offers USB first.
+//! mode (the camera joins the user's network; the camera worker then connects over it, `link::Camera::wifi`, at the
+//! address the join or a read of the camera's existing station connection reports, or one typed in). The X5 ignores
+//! Bluetooth while it is connected by USB in app mode (2026-10-24): the pane says so and offers USB first.
 //!
 //! A worker thread owns the adapter (opened on first use) and the camera handle and runs one flow at a time; commands
 //! that come meanwhile wait for it. The UI sends commands and draws the state the worker reports.
@@ -32,6 +33,8 @@ pub enum Cmd {
     Ap,
     /// Station mode: SSID, password.
     Join(String, String),
+    /// Read the camera's Wi-Fi mode and station-mode connection (network, address).
+    Sta,
     /// A step of the wake-up, from its thread (boxed: the identity step carries the camera's options).
     Step(Box<Step>),
     Quit,
@@ -85,6 +88,9 @@ enum Flow {
     Wake(Pending<Camera>),
     Ap(Pending<pb::options::WifiInfo>),
     Join(String, Pending<msg::CameraWifiConnectionResult>),
+    /// the station read: the Wi-Fi mode first (the camera kept for the next request), then the connection
+    Mode(Camera, Pending<i32>),
+    Sta(Option<i32>, Pending<msg::WifiConnectionInfo>),
 }
 
 /// How long the camera's user gets to allow the connection, how long a wake-up and a station-mode join may take (the
@@ -285,6 +291,12 @@ impl W {
                     self.st.busy = Some("The camera joins the network");
                 }
             }
+            Cmd::Sta => {
+                if let Some(c) = self.need() {
+                    self.flow = Some(Flow::Mode(c.clone(), c.wifi_mode()));
+                    self.st.busy = Some("Reading the station connection");
+                }
+            }
             Cmd::Quit => {}
         }
     }
@@ -373,6 +385,34 @@ impl W {
                 }
                 Err(e) => (format!("station mode: {}", why(&e)), true),
             }),
+            Flow::Mode(c, p) => match p.poll() {
+                // a mode that cannot be read leaves the connection to tell
+                Some(r) => {
+                    self.flow = Some(Flow::Sta(r.ok(), c.wifi_conn()));
+                    return;
+                }
+                None => None,
+            },
+            Flow::Sta(m, p) => p.poll().map(|r| match r {
+                Ok(i) => {
+                    let ap = *m == Some(msg::AP);
+                    self.st.sta =
+                        (!ap && !i.ip_addr.is_empty()).then_some((i.result, i.ssid, i.ip_addr));
+                    let n = match (ap, &self.st.sta) {
+                        (true, _) => {
+                            "the camera's Wi-Fi is in access-point mode: no station connection"
+                                .into()
+                        }
+                        (_, None) => "the camera reports no station connection".into(),
+                        (_, Some((k, s, ip))) => format!("the camera {} {s} at {ip}", joined(*k)),
+                    };
+                    (
+                        n,
+                        (self.st.sta.as_ref()).is_some_and(|x| !matches!(x.0, 0 | 5)),
+                    )
+                }
+                Err(e) => (format!("station connection: {}", why(&e)), true),
+            }),
         };
         match done {
             Some((s, e)) => {
@@ -429,6 +469,8 @@ pub struct Bt {
     pub st: St,
     ssid: String,
     pw: String,
+    /// the camera's address on the user's network, as joined, read or typed
+    addr: String,
     show: bool,
     ask: bool,
 }
@@ -473,6 +515,7 @@ impl Bt {
             st: St::default(),
             ssid: String::new(),
             pw: String::new(),
+            addr: String::new(),
             show: false,
             ask: false,
         }
@@ -480,6 +523,12 @@ impl Bt {
 
     pub fn tick(&mut self) {
         while let Ok(s) = self.rx.try_recv() {
+            // a new join or read fills the address in
+            if let Some((0 | 5, _, ip)) = &s.sta
+                && s.sta != self.st.sta
+            {
+                self.addr.clone_from(ip)
+            }
             self.st = s
         }
     }
@@ -696,26 +745,46 @@ impl Bt {
                 self.ask = true;
             }
         });
-        if let Some((k, ssid, ip)) = &s.sta {
-            ui.horizontal_wrapped(|ui| {
-                let ok = matches!(k, 0 | 5);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(on && free, egui::Button::new("Read station connection ⚠"))
+                .on_hover_text(
+                    "Asks the camera over Bluetooth for its Wi-Fi mode and the network and address it has in station \
+                     mode (from an earlier join); changes nothing.\n⚠ Not run on an X5 yet: the app's messages, \
+                     tested on a simulated camera",
+                )
+                .clicked()
+            {
+                send(Cmd::Sta);
+            }
+            if let Some((k, ssid, ip)) = &s.sta {
                 let t = format!("The camera {} {ssid}", joined(*k));
-                match ok {
-                    true => ui.label(format!("{t}: its address there is {ip}.")),
-                    false => {
-                        ui.colored_label(ui.visuals().error_fg_color, format!("{t} (result {k})."))
-                    }
+                match k {
+                    0 | 5 => ui.label(format!("{t}: its address there is {ip}.")),
+                    _ => ui.colored_label(ui.visuals().error_fg_color, format!("{t} (result {k}).")),
                 };
-                if let (true, Ok(a)) = (ok, ip.parse::<IpAddr>())
-                    && ui
-                        .button("Connect over Wi-Fi")
-                        .on_hover_text("The Camera screen connects to the camera at this address")
-                        .clicked()
-                {
-                    act = Some(Act::Wifi(a));
-                }
-            });
-        }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Camera address");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.addr)
+                    .hint_text("e.g. 192.168.1.57")
+                    .desired_width(160.0),
+            )
+            .on_hover_text(
+                "Filled in by a join or a read; or type the address your router gave the camera",
+            );
+            let a = self.addr.trim().parse::<IpAddr>();
+            if ui
+                .add_enabled(a.is_ok(), egui::Button::new("Connect over Wi-Fi"))
+                .on_hover_text("The Camera screen connects to the camera at this address")
+                .clicked()
+                && let Ok(a) = a
+            {
+                act = Some(Act::Wifi(a));
+            }
+        });
         if self.ask {
             let mut go = None;
             let r = egui::Modal::new(egui::Id::unique("bt join")).show(ui.ctx(), |ui| {
@@ -750,12 +819,28 @@ impl Bt {
     }
 }
 
-/// A simulated adapter with one X5 that answers like the camera unplugged from USB ([`answer`]; the `ble=sim` hook).
-pub fn sim() -> Open {
-    Box::new(|| {
-        let (b, ev, _) = Ble::sim(vec![adv()], answer)?;
+/// A simulated adapter with one X5 that answers like the camera unplugged from USB ([`answer`]; the `ble=sim` hook);
+/// `sta`: the camera joined [`home`] in an earlier session (`ble=sta`).
+pub fn sim(sta: bool) -> Open {
+    Box::new(move || {
+        let mut w = if sta { home() } else { Net::default() };
+        let (b, ev, _) = Ble::sim(vec![adv()], move |c, q, s| answer(c, q, s, &mut w))?;
         Ok((b, ev))
     })
+}
+
+/// The simulated X5's Wi-Fi: its mode ([`msg::AP`] at first), its station-mode connection.
+type Net = (i32, msg::WifiConnectionInfo);
+
+/// On HomeNet from an earlier session.
+fn home() -> Net {
+    let i = msg::WifiConnectionInfo {
+        ssid: "HomeNet".into(),
+        ip_addr: "192.168.1.57".into(),
+        result: 5,
+        ..Default::default()
+    };
+    (msg::STA, i)
 }
 
 /// The simulated X5's advertisement, both of its kinds merged as BlueZ shows them.
@@ -775,8 +860,8 @@ fn adv() -> ble::Adv {
 }
 
 /// The simulated X5: identity and access point, an authorization its user allows after a second, a station-mode
-/// join that succeeds after a second.
-fn answer(c: u16, q: &[u8], s: &ble::Sim) -> (u16, Vec<u8>) {
+/// join that succeeds after a second and stays in `w` (Wi-Fi mode and connection, read back as asked).
+fn answer(c: u16, q: &[u8], s: &ble::Sim, w: &mut Net) -> (u16, Vec<u8>) {
     let later = |c: u16, b: Vec<u8>| {
         let s = s.clone();
         thread::spawn(move || {
@@ -815,16 +900,28 @@ fn answer(c: u16, q: &[u8], s: &ble::Sim) -> (u16, Vec<u8>) {
                 .ok()
                 .and_then(|m| m.wifi_connection_info)
                 .unwrap_or_default();
+            w.1 = msg::WifiConnectionInfo {
+                ssid: i.ssid,
+                ip_addr: "192.168.1.57".into(),
+                ..Default::default()
+            };
             let r = msg::CameraWifiConnectionResult {
                 wifi_connection_result: 0,
-                wifi_connection_info: Some(msg::WifiConnectionInfo {
-                    ssid: i.ssid,
-                    ip_addr: "192.168.1.57".into(),
-                    ..Default::default()
-                }),
+                wifi_connection_info: Some(w.1.clone()),
             };
             later(code::WIFI_STATUS, r.encode_to_vec());
             (200, vec![])
+        }
+        code::SET_WIFI_MODE => {
+            w.0 = msg::SetWifiMode::decode(q).map_or(w.0, |m| m.wifi_mode);
+            (200, vec![])
+        }
+        code::GET_WIFI_MODE => (200, msg::GetWifiModeResp { wifi_mode: w.0 }.encode_to_vec()),
+        code::GET_WIFI_CONN => {
+            let r = msg::GetWifiConnectionInfoResp {
+                wifi_connection_info: Some(w.1.clone()),
+            };
+            (200, r.encode_to_vec())
         }
         _ => (200, vec![]),
     }

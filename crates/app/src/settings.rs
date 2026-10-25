@@ -504,7 +504,7 @@ mod tests {
             None,
             &p,
             None,
-            (crate::bt::sim(), vec![]),
+            (crate::bt::sim(false), vec![]),
             false,
         );
         let mut exp = export::Exp::new(&g, &cx, &ctx, Some(d.join("out")), false);
