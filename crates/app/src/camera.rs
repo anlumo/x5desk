@@ -524,7 +524,8 @@ impl W {
                 }
                 let m = match e {
                     Error::Silent(_) => format!(
-                        "the X5 is in app mode but does not answer ({e}): it may be asleep or hung. Wake it with                          its power button, or unplug and replug it, then press Connect"
+                        "the X5 is in app mode but does not answer ({e}): it may be asleep or hung. Wake it with \
+                         its power button, or unplug and replug it, then press Connect"
                     ),
                     e => format!("connect: {e}"),
                 };

@@ -330,6 +330,32 @@ fn silent_camera() {
     assert!(c < Duration::from_secs(1) && d < Duration::from_secs(2));
 }
 
+/// The note for a camera that never answered reads as one sentence (it was a literal wrapped without its `\`).
+#[test]
+fn silent_note() {
+    let q = Arc::new(Mutex::new(dl::Queue::load(None)));
+    let auto = Arc::new(AtomicBool::new(false));
+    let connect: Connect = Box::new(|| Err(link::Error::Silent(0)).into());
+    let w = Worker::spawn(
+        connect,
+        q,
+        Cache::at(None),
+        auto,
+        false,
+        Taps::default(),
+        || {},
+    );
+    w.tx.send(Cmd::Connect).unwrap();
+    let s = wait(&w, 5.0, |u| match u {
+        Up::Note(s, true) => Some(s),
+        _ => None,
+    });
+    assert!(
+        s.contains("Wake it with its power button,") && !s.contains("  "),
+        "{s}"
+    );
+}
+
 /// Connect, album with metadata and favourites, thumbnails from the camera and then from the disk cache; battery
 /// and file notifications; an unplug.
 #[test]
