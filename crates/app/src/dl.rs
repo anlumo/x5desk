@@ -173,9 +173,9 @@ impl Queue {
     }
 
     /// Stops the running download until the camera stops capturing (§7.12, as the app does): it goes back to the
-    /// queue with what arrived.
+    /// queue with what arrived. A card import is no camera file: it goes on.
     pub fn hold(&mut self) {
-        for d in self.v.iter_mut().filter(|d| d.st == St::Running) {
+        for d in (self.v.iter_mut()).filter(|d| d.st == St::Running && local(&d.uri).is_none()) {
             d.prog.cancel.store(true, Relaxed);
             d.st = St::Queued
         }
@@ -334,5 +334,24 @@ mod tests {
         assert_ne!(file().metadata().unwrap().modified().unwrap(), old);
         assert_eq!(Queue::load(Some(f)).v[0].st, St::Paused);
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// The camera capturing holds its downloads only: a running card import goes on.
+    #[test]
+    fn hold() {
+        let mut q = Queue::default();
+        q.add("/DCIM/Camera01/a.insv", "/nowhere/a".into());
+        q.add(
+            "file:///run/media/u/X5/DCIM/Camera01/b.insv",
+            "/nowhere/b".into(),
+        );
+        for d in &mut q.v {
+            d.st = St::Running
+        }
+        q.hold();
+        let v: Vec<(St, bool)> = (q.v.iter())
+            .map(|d| (d.st, d.prog.cancel.load(Relaxed)))
+            .collect();
+        assert_eq!(v, [(St::Queued, true), (St::Running, false)]);
     }
 }
