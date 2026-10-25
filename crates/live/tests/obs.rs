@@ -27,11 +27,21 @@ fn open_fds() -> usize {
 
 const W: Duration = Duration::from_millis(500);
 
+/// Removes the test's socket directory when dropped, also when the test fails.
+struct Rm(std::path::PathBuf);
+
+impl Drop for Rm {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn loopback() {
     let base = open_fds();
     let dir = std::env::var_os("XDG_RUNTIME_DIR").unwrap_or("/tmp".into());
-    let p = std::path::Path::new(&dir).join(format!("x5desk-test-{}/obs.sock", std::process::id()));
+    let d = Rm(std::path::Path::new(&dir).join(format!("x5desk-test-{}", std::process::id())));
+    let p = d.0.join("obs.sock");
     let mut s = Server::bind(&p).unwrap();
     assert_eq!(
         Server::bind(&p).err().map(|e| e.kind()),

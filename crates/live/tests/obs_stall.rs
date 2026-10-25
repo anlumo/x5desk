@@ -40,6 +40,15 @@ fn drain(c: &mut Client) -> Vec<u64> {
     }
 }
 
+/// Removes the test's socket directory when dropped, also when the test fails.
+struct Rm(std::path::PathBuf);
+
+impl Drop for Rm {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn frame(i: u64) -> Frame {
     Frame {
         ts: i,
@@ -54,8 +63,8 @@ fn frame(i: u64) -> Frame {
 fn stall() {
     let base = open_fds();
     let dir = std::env::var_os("XDG_RUNTIME_DIR").unwrap_or("/tmp".into());
-    let d = std::path::Path::new(&dir).join(format!("x5desk-stall-{}", std::process::id()));
-    let p = d.join("obs.sock");
+    let d = Rm(std::path::Path::new(&dir).join(format!("x5desk-stall-{}", std::process::id())));
+    let p = d.0.join("obs.sock");
     let mut s = Server::bind(&p).unwrap();
     s.add(1, "360");
     s.add(2, "flat");
@@ -152,7 +161,7 @@ fn stall() {
     s.poll();
 
     // a server that never accepts: the backlog fills and connecting fails instead of blocking
-    let p2 = d.join("hung.sock");
+    let p2 = d.0.join("hung.sock");
     let s2 = Server::bind(&p2).unwrap();
     let mut q = vec![];
     let e = loop {
@@ -170,6 +179,6 @@ fn stall() {
     println!("hung server: {} queued, then WouldBlock", q.len());
 
     drop((q, s2, s, a, b, c, buf, sync));
-    std::fs::remove_dir(&d).unwrap();
+    std::fs::remove_dir(&d.0).unwrap();
     assert_eq!(open_fds(), base, "fd leak");
 }

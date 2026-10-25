@@ -18,6 +18,23 @@ pub(crate) fn gpu() -> &'static Arc<Gpu> {
     G.get_or_init(|| Arc::new(Gpu::new().expect("GPU")))
 }
 
+/// The test's own path in `$XDG_RUNTIME_DIR`, `<name>-<pid><ext>`; dropping it removes it with what it holds, also
+/// when the test fails.
+struct Run(std::path::PathBuf);
+
+impl Run {
+    fn new(name: &str, ext: &str) -> Run {
+        let dir = std::env::var_os("XDG_RUNTIME_DIR").unwrap_or("/tmp".into());
+        Run(std::path::Path::new(&dir).join(format!("{name}-{}{ext}", std::process::id())))
+    }
+}
+
+impl Drop for Run {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0).or_else(|_| std::fs::remove_file(&self.0));
+    }
+}
+
 pub(crate) const U: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
     .union(wgpu::TextureUsages::TEXTURE_BINDING)
     .union(wgpu::TextureUsages::COPY_SRC);
@@ -856,9 +873,8 @@ fn tiled() {
 fn obs_dmabuf() {
     use crate::obs::*;
     let (g, pat) = (gpu(), Pat::new(gpu()));
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").unwrap_or("/tmp".into());
-    let p =
-        std::path::Path::new(&dir).join(format!("x5desk-dmabuf-{}/obs.sock", std::process::id()));
+    let d = Run::new("x5desk-dmabuf", "");
+    let p = d.0.join("obs.sock");
     let mut s = Server::bind(&p).unwrap();
     s.add(1, "360");
     for fmt in [Fmt::Nv12, Fmt::Rgba] {
@@ -959,8 +975,8 @@ fn obs_dmabuf() {
 fn obs_mods() {
     use crate::obs::*;
     let (g, pat) = (gpu(), Pat::new(gpu()));
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").unwrap_or("/tmp".into());
-    let p = std::path::Path::new(&dir).join(format!("x5desk-mods-{}/obs.sock", std::process::id()));
+    let d = Run::new("x5desk-mods", "");
+    let p = d.0.join("obs.sock");
     let mut s = Server::bind(&p).unwrap();
     s.add(1, "360");
     let (fmt, w, h) = (Fmt::Rgba, 1920, 960);
@@ -1524,14 +1540,13 @@ fn pw_gst() {
     // the rate it announces is the one asked for
     let cam = Cam::new(g.clone(), "X5 test gst", &pw::SIZES, 60).unwrap();
     node(&cam);
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").unwrap_or("/tmp".into());
-    let out = std::path::Path::new(&dir).join(format!("x5desk-gst-{}.nv12", std::process::id()));
+    let out = Run::new("x5desk-gst", ".nv12");
     let dcc = modifiers(g, Fmt::Rgba, U, 3840, 1920)[0].0;
     let runs = [
         (
             format!(
                 "video/x-raw,format=NV12,width=1920,height=1080 ! filesink location={}",
-                out.display()
+                out.0.display()
             ),
             None,
         ),
@@ -1572,8 +1587,7 @@ fn pw_gst() {
         );
         assert_eq!(seen.unwrap().modifier, m);
     }
-    let d = std::fs::read(&out).unwrap();
-    std::fs::remove_file(&out).unwrap();
+    let d = std::fs::read(&out.0).unwrap();
     let fs = 1920 * 1080 * 3 / 2;
     assert_eq!(d.len(), 8 * fs);
     for fr in d.chunks_exact(fs) {
