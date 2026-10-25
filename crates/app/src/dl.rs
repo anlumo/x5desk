@@ -53,6 +53,8 @@ impl Dl {
 pub struct Queue {
     pub v: Vec<Dl>,
     file: Option<PathBuf>,
+    /// the file's text as read or last written
+    saved: String,
 }
 
 pub type Shared = Arc<Mutex<Queue>>;
@@ -109,10 +111,11 @@ impl Queue {
                 })
             })
             .collect();
-        Queue { v, file }
+        Queue { v, file, saved: s }
     }
 
-    pub fn save(&self) {
+    /// Writes the file unless it holds this already (every run's end saves).
+    pub fn save(&mut self) {
         let Some(f) = &self.file else { return };
         let mut s = String::new();
         for d in &self.v {
@@ -120,14 +123,18 @@ impl Queue {
             let e = d.err.replace(['\t', '\n', '\r'], " ");
             s += &format!("{st}\t{}\t{e}\t{}\n", d.uri, d.dst.display());
         }
+        if s == self.saved {
+            return;
+        }
         let t = f.with_extension("new");
         let r = f
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|_| std::fs::write(&t, s))
+            .and_then(|_| std::fs::write(&t, &s))
             .and_then(|_| std::fs::rename(&t, f));
-        if let Err(e) = r {
-            eprintln!("{}: {e}", f.display());
+        match r {
+            Ok(()) => self.saved = s,
+            Err(e) => eprintln!("{}: {e}", f.display()),
         }
     }
 
@@ -301,6 +308,31 @@ mod tests {
         q.v[0].st = St::Done;
         q.clear_done();
         assert_eq!(q.v.len(), 2);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A save with nothing changed leaves the file alone, also right after a load (every run's end saves); a change
+    /// is written.
+    #[test]
+    fn unchanged() {
+        let d = std::env::var_os("X5_FIXTURES")
+            .map_or_else(std::env::temp_dir, PathBuf::from)
+            .join(format!("x5desk-q2-{}", std::process::id()));
+        let f = d.join("downloads");
+        let mut q = Queue::load(Some(f.clone()));
+        q.add("/DCIM/Camera01/a.insv", d.join("a"));
+        q.save();
+        let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let file = || std::fs::File::options().write(true).open(&f).unwrap();
+        file().set_modified(old).unwrap();
+        q.save();
+        let mut q = Queue::load(Some(f.clone()));
+        q.save();
+        assert_eq!(file().metadata().unwrap().modified().unwrap(), old);
+        q.cancel(0);
+        q.save();
+        assert_ne!(file().metadata().unwrap().modified().unwrap(), old);
+        assert_eq!(Queue::load(Some(f)).v[0].st, St::Paused);
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

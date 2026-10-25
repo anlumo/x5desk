@@ -1049,8 +1049,9 @@ pub struct Cam {
 impl Cam {
     /// `usb`: follow the bus and connect (off for test-hook runs of other screens); `dls`: camera URIs to queue
     /// (test hook); `sim`: connect to this (a simulated camera) at once instead. `p`: the client id and the
-    /// thumbnail cache's limit; `disks`: where to look for mounted cards; `ble`: the Bluetooth adapter and commands
-    /// to run at once (test hook); `keep`: the camera settings and the download queue persist (not under the hook).
+    /// thumbnail cache ([`Prefs::thumbs`](crate::settings::Prefs::thumbs)); `disks`: where to look for mounted cards;
+    /// `ble`: the Bluetooth adapter and commands to run at once (test hook); `keep`: the camera settings and the
+    /// download queue are the user's (not under the hook: neither read nor written).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &egui::Context,
@@ -1064,26 +1065,21 @@ impl Cam {
         keep: bool,
     ) -> Cam {
         let cfg = crate::xdg("XDG_CONFIG_HOME", ".config").map(|d| d.join("x5desk"));
-        let mut set = Set::load(cfg.as_ref().map(|d| d.join("camera")));
-        // a test-hook run reads the camera settings, writes nothing, and keeps its queue to itself
-        if !keep {
-            set.file = None
-        }
-        let mut q = dl::Queue::load(cfg.filter(|_| keep).map(|d| d.join("downloads")));
+        let cfg = cfg.filter(|_| keep);
+        let set = Set::load(cfg.as_ref().map(|d| d.join("camera")));
+        let mut q = dl::Queue::load(cfg.map(|d| d.join("downloads")));
         for u in dls {
             q.add(u, set.dest.join(album::name(u)));
         }
         let q = Arc::new(Mutex::new(q));
         let s = sim.is_some();
-        let mut cache = Cache::new();
-        cache.cap = p.cache;
         let mut c = Cam::with(
             ctx,
             pane,
             set,
             q,
             sim.unwrap_or_else(|| Box::new(Camera::usb)),
-            cache,
+            p.thumbs(),
             usb && !s,
         );
         if s {

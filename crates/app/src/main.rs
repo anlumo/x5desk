@@ -37,8 +37,9 @@
 //! mounted X5; repeatable; the real mount table is not read then; starts on the album unless `camera=` says otherwise),
 //! `import` (import the mounted card's whole album once listed), `ble=sim` (a simulated Bluetooth adapter with one X5
 //! that scans, connects, pairs, reads its access point and joins `HomeNet` in station mode at once; starts on the
-//! Wireless pane). Under the hook the app's settings are neither read nor written, the camera settings are read but
-//! not written, the download queue is the run's own, and `dest=` is the download folder too. AI and Shot Lab:
+//! Wireless pane). Under the hook nothing of the user's config or cache is read, written or trimmed (the app's and
+//! the camera's settings, the recent list, the download queue: the run's own; no thumbnail cache), and `dest=` is the
+//! download folder too. AI and Shot Lab:
 //! `box=<x0>/<y0>/<x1>/<y1>` (Deep Track in the player: that box, 0..1 of the picture, drawn once the frame shows; the
 //! view follows the subject when the run is over, and an `export=` waits for it and takes the follow view),
 //! `restab=off|free|horizon|direction[/<σ>]` (once that run is over, the player's stabilisation changes to this, as its

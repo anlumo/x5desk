@@ -178,11 +178,11 @@ impl Library {
         still: mpsc::Sender<player::Job>,
         test: Option<Test>,
     ) -> Library {
-        let mut recent = Recent::load();
-        // a test-hook run leaves the user's list as it was
-        if test.is_some() {
-            recent.file = None;
-        }
+        // a test-hook run neither reads nor writes the user's list
+        let recent = match test {
+            Some(_) => Recent::at(None),
+            None => Recent::load(),
+        };
         Library {
             g: g.clone(),
             cx: cx.clone(),

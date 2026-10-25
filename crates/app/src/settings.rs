@@ -119,6 +119,17 @@ impl Prefs {
         }
     }
 
+    /// The thumbnail cache at its limit; none when nothing persists (test hooks: the user's cache is neither read,
+    /// written nor trimmed).
+    pub fn thumbs(&self) -> album::Cache {
+        let mut c = match self.file {
+            Some(_) => album::Cache::new(),
+            None => album::Cache::at(None),
+        };
+        c.cap = self.cache;
+        c
+    }
+
     /// The default preset's index.
     pub fn preset(&self) -> Option<usize> {
         let k = self.preset.as_deref()?;
@@ -196,8 +207,7 @@ impl Settings {
                 },
             ),
         ];
-        let mut cache = album::Cache::new();
-        cache.cap = p.cache;
+        let cache = p.thumbs();
         AUDIO.lock().unwrap().clone_from(&p.audio);
         Settings {
             p,
