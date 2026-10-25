@@ -3,7 +3,9 @@
 //! denoise is on), played on the default output device from a playhead position. The device callback drains a
 //! single-producer / single-consumer ring and counts what it played: that count is the editor's clock while it plays.
 //! An underrun holds the clock. Without a device the clock runs on wall time and nothing is mixed. A mixer that fails
-//! reports why and plays silence on, so the clock (and the picture) keep going.
+//! reports why and plays silence on, so the clock (and the picture) keep going. The device is looked up, opened and
+//! closed on the sound's own thread, one stream at a time: on the UI thread that took 7–8 ms at every Play, seek during
+//! playback and denoise change (and listed every ALSA device for a picked one).
 
 use cpal::traits::{DeviceTrait, StreamTrait};
 use media::{
@@ -17,8 +19,8 @@ use media::{
 use std::{
     path::PathBuf,
     sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::*},
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering::*},
     },
     thread,
     time::{Duration, Instant},
@@ -39,17 +41,20 @@ struct Sh {
     vol: AtomicU32,
     quit: AtomicBool,
     /// the mixer's first error
-    err: std::sync::Mutex<Option<String>>,
+    err: Mutex<Option<String>>,
+    /// the device: 0 being opened (the clock holds), 1 playing, 2 none (the wall clock runs from `wall`)
+    on: AtomicU8,
+    wall: OnceLock<Instant>,
 }
 
-/// Preview playback from one position; dropping it stops.
+/// Held by the thread whose stream is open: the next opens once the last closed (a device without mixing refuses a
+/// second stream).
+static DEV: Mutex<()> = Mutex::new(());
+
+/// Preview playback from one position; dropping it stops (its thread closes the stream).
 pub struct Sound {
     sh: Arc<Sh>,
-    th: Option<thread::JoinHandle<()>>,
-    _out: Option<cpal::Stream>,
     t0: f64,
-    /// no device: the wall clock's start
-    wall: Option<Instant>,
 }
 
 /// What the mixer needs: the timeline and every file's path (the music: its first).
@@ -71,72 +76,45 @@ impl Sound {
             vol: AtomicU32::new(vol.to_bits()),
             quit: AtomicBool::new(false),
             err: Default::default(),
+            on: AtomicU8::new(0),
+            wall: OnceLock::new(),
         });
-        let out = (|| {
-            let dev = crate::settings::output()?;
-            let cfg = cpal::StreamConfig {
-                channels: 2,
-                sample_rate: R as u32,
-                buffer_size: cpal::BufferSize::Default,
-            };
-            let s = sh.clone();
-            let cb = move |o: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                let ts = info.timestamp();
-                let q = ts.playback.duration_since(ts.callback).as_secs_f64();
-                s.lat.store((q * R) as u64, Relaxed);
-                let (r, w) = (s.r.load(Relaxed), s.w.load(Acquire));
-                let k = (w - r).min(o.len()) & !1;
-                let v = f32::from_bits(s.vol.load(Relaxed));
-                for (i, x) in o[..k].iter_mut().enumerate() {
-                    *x = f32::from_bits(s.ring[(r + i) % RING].load(Relaxed)) * v;
-                }
-                o[k..].fill(0.0);
-                s.r.store(r + k, Release);
-                s.played.fetch_add(k as u64 / 2, Relaxed);
-            };
-            let st = dev
-                .build_output_stream(cfg, cb, |e| eprintln!("editor audio: {e}"), None)
-                .ok()?;
-            st.play().ok()?;
-            Some(st)
-        })();
-        let th = out.is_some().then(|| {
-            let s = sh.clone();
-            thread::Builder::new()
-                .name("editor mix".into())
-                .spawn(move || {
-                    if let Err(e) = run(&s, &m, t0) {
-                        eprintln!("editor mix: {e}");
-                        *s.err.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
-                        while !s.quit.load(Relaxed) {
-                            let (r, w) = (s.r.load(Acquire), s.w.load(Relaxed));
-                            for i in w..r + RING {
-                                s.ring[i % RING].store(0, Relaxed);
-                            }
-                            s.w.store(r + RING, Release);
-                            thread::sleep(Duration::from_millis(5));
+        let s = sh.clone();
+        thread::Builder::new()
+            .name("editor sound".into())
+            .spawn(move || {
+                let _dev = DEV.lock().unwrap_or_else(|e| e.into_inner());
+                // a Sound dropped while waiting (playback restarted again) opens nothing
+                let Some(_out) = (!s.quit.load(Relaxed)).then(|| open(&s)).flatten() else {
+                    let _ = s.wall.set(Instant::now());
+                    s.on.store(2, Release);
+                    return;
+                };
+                s.on.store(1, Release);
+                if let Err(e) = run(&s, &m, t0) {
+                    eprintln!("editor mix: {e}");
+                    *s.err.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
+                    while !s.quit.load(Relaxed) {
+                        let (r, w) = (s.r.load(Acquire), s.w.load(Relaxed));
+                        for i in w..r + RING {
+                            s.ring[i % RING].store(0, Relaxed);
                         }
+                        s.w.store(r + RING, Release);
+                        thread::sleep(Duration::from_millis(5));
                     }
-                })
-                .expect("mix thread")
-        });
-        Sound {
-            wall: out.is_none().then(Instant::now),
-            sh,
-            th,
-            _out: out,
-            t0,
-        }
+                }
+            })
+            .expect("sound thread");
+        Sound { sh, t0 }
     }
 
     /// Output time heard now.
     pub fn now(&self) -> f64 {
-        match self.wall {
-            Some(w) => self.t0 + w.elapsed().as_secs_f64(),
-            None => {
-                let (p, l) = (self.sh.played.load(Relaxed), self.sh.lat.load(Relaxed));
-                self.t0 + p.saturating_sub(l) as f64 / R
-            }
+        let sh = &self.sh;
+        match sh.on.load(Acquire) {
+            1 => self.t0 + sh.played.load(Relaxed).saturating_sub(sh.lat.load(Relaxed)) as f64 / R,
+            2 => self.t0 + sh.wall.get().map_or(0.0, |w| w.elapsed().as_secs_f64()),
+            _ => self.t0,
         }
     }
 
@@ -150,17 +128,49 @@ impl Sound {
 
     /// Whether a device plays it.
     pub fn live(&self) -> bool {
-        self.wall.is_none()
+        self.sh.on.load(Acquire) == 1
     }
 }
 
 impl Drop for Sound {
     fn drop(&mut self) {
         self.sh.quit.store(true, Relaxed);
-        if let Some(t) = self.th.take() {
-            let _ = t.join();
-        }
     }
+}
+
+/// The output stream draining `sh`'s ring, playing.
+fn open(sh: &Arc<Sh>) -> Option<cpal::Stream> {
+    let dev = crate::settings::output()?;
+    let cfg = cpal::StreamConfig {
+        channels: 2,
+        sample_rate: R as u32,
+        buffer_size: cpal::BufferSize::Default,
+    };
+    let s = sh.clone();
+    let cb = move |o: &mut [f32], info: &cpal::OutputCallbackInfo| {
+        // stopped: silence until the stream closes
+        if s.quit.load(Relaxed) {
+            o.fill(0.0);
+            return;
+        }
+        let ts = info.timestamp();
+        let q = ts.playback.duration_since(ts.callback).as_secs_f64();
+        s.lat.store((q * R) as u64, Relaxed);
+        let (r, w) = (s.r.load(Relaxed), s.w.load(Acquire));
+        let k = (w - r).min(o.len()) & !1;
+        let v = f32::from_bits(s.vol.load(Relaxed));
+        for (i, x) in o[..k].iter_mut().enumerate() {
+            *x = f32::from_bits(s.ring[(r + i) % RING].load(Relaxed)) * v;
+        }
+        o[k..].fill(0.0);
+        s.r.store(r + k, Release);
+        s.played.fetch_add(k as u64 / 2, Relaxed);
+    };
+    let st = dev
+        .build_output_stream(cfg, cb, |e| eprintln!("editor audio: {e}"), None)
+        .ok()?;
+    st.play().ok()?;
+    Some(st)
 }
 
 /// A clip's audio from output frame `j` on: its AAC decoded in order, fed to the time-stretch one output frame at a
@@ -475,6 +485,8 @@ mod tests {
             vol: AtomicU32::new(1f32.to_bits()),
             quit: AtomicBool::new(false),
             err: Default::default(),
+            on: AtomicU8::new(1),
+            wall: OnceLock::new(),
         };
         let want = 2 * (secs * R) as usize;
         thread::scope(|sc| {
@@ -628,11 +640,15 @@ mod tests {
             denoise: None,
         };
         let s = Sound::start(m, 1.0, 0.0);
+        let t = Instant::now();
+        while s.sh.on.load(Acquire) == 0 {
+            assert!(t.elapsed().as_secs() < 5, "the device never opened");
+            thread::sleep(Duration::from_millis(1));
+        }
         if !s.live() {
             eprintln!("no output device: skipped");
             return;
         }
-        let t = Instant::now();
         let e = loop {
             if let Some(e) = s.err() {
                 break e;
@@ -644,6 +660,48 @@ mod tests {
         thread::sleep(Duration::from_millis(400));
         let b = s.now();
         eprintln!("failed mixer: {e}; the clock went {a:.3} → {b:.3} s in 0.4 s");
+        assert!(b - a > 0.25, "the clock holds at {a}");
+    }
+
+    /// Play, a seek while playing and a denoise change start a Sound and drop the last one: neither waits for the
+    /// device, which the sound's thread opens and closes (on the UI thread a start took 7–8 ms). Of ten started in a
+    /// row (a slider dragged) the last plays (at volume 0) and its clock runs from its start.
+    #[test]
+    fn quick() {
+        let tl = edit::Timeline::new(edit::Rate {
+            num: 30000,
+            den: 1001,
+        });
+        let (mut ms, mut s) = (vec![], None);
+        for _ in 0..10 {
+            let m = Mix {
+                tl: tl.clone(),
+                files: vec![],
+                denoise: None,
+            };
+            let t = Instant::now();
+            // the last one dropped here too
+            s = Some(Sound::start(m, 1.0, 0.0));
+            ms.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        let s = s.unwrap();
+        let t = Instant::now();
+        while s.sh.on.load(Acquire) == 0 {
+            assert!(t.elapsed().as_secs() < 5, "the device never opened");
+            thread::sleep(Duration::from_millis(1));
+        }
+        let open = t.elapsed().as_secs_f64() * 1e3;
+        ms.sort_by(f64::total_cmp);
+        let a = s.now();
+        thread::sleep(Duration::from_millis(400));
+        let b = s.now();
+        eprintln!(
+            "start and drop ms: median {:.3}, max {:.3}; the last on the device {} {open:.1} ms later, its clock {a:.3} → {b:.3} s in 0.4 s",
+            ms[ms.len() / 2],
+            ms[ms.len() - 1],
+            s.live()
+        );
+        assert!(ms[ms.len() / 2] < 2.0, "{ms:?}");
         assert!(b - a > 0.25, "the clock holds at {a}");
     }
 }
