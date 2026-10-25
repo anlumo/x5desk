@@ -2,9 +2,9 @@
 //! viewer; the capture controls generated from the camera's `/CONF` (`conf`) for its current mode, with the values
 //! it reports; the shutter (photo, recording, timelapse, the self-timer the app counts down itself), highlight marks;
 //! the status from the notifications. A worker thread runs the requests on the camera worker's session
-//! (`camera::Tap`). On an X5 (fw v1.13.21, `tests::real_writes` / `real_ilog`) these ran, each read back: mode
-//! switches, the settings in [`CHECKED`], the photo and the normal video shutter, highlight marks. The screen marks
-//! the rest ⚠.
+//! (`camera::Tap`). On an X5 (fw v1.13.21, `tests::real_writes` / `real_ilog`) these ran, each read back: switches
+//! to the modes in [`SWITCHED`], the settings in [`CHECKED`], the photo and the normal video shutter, highlight
+//! marks. The screen marks the rest ⚠.
 
 use crate::{
     camera::{self, Taps},
@@ -41,7 +41,18 @@ const CHECKED: [(&str, &str); 8] = [
     ("VIDEO_NORMAL", "i_log_switch"),
 ];
 
+/// The modes the app's switch to ran on an X5 and read back.
+const SWITCHED: [&str; 2] = ["PHOTO_SINGLE", "VIDEO_NORMAL"];
+
 const UNV: &str = "⚠ Not run on an X5 yet: the app's message, unit-tested";
+
+/// Mode `m` as the camera's app names it, marked ⚠ when the switch to it did not run on an X5.
+fn mlabel(m: &str) -> String {
+    match SWITCHED.contains(&m) {
+        true => conf::label(m).into(),
+        false => format!("{} ⚠", conf::label(m)),
+    }
+}
 
 /// What the test hook asks of this screen (`X5DESK_TEST`).
 #[derive(Clone, Debug, Default)]
@@ -915,7 +926,11 @@ impl Capture {
                 for (h, l) in [("Photo", &b.photo), ("Video", &b.video), ("Live", &b.live)] {
                     ui.label(egui::RichText::new(h).weak());
                     for x in l {
-                        if ui.selectable_label(*x == m, conf::label(x)).clicked() && *x != m {
+                        let mut r = ui.selectable_label(*x == m, mlabel(x));
+                        if !SWITCHED.contains(&&**x) {
+                            r = r.on_hover_text(UNV);
+                        }
+                        if r.clicked() && *x != m {
                             let _ = self.tx.send(Cmd::Mode(x.clone()));
                         }
                     }

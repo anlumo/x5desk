@@ -957,6 +957,13 @@ fn ours_only() {
     assert_eq!((&del[..], &other[..]), (&now[1..5], &now[5..]));
 }
 
+/// The Mode list marks every mode but the two whose switch ran on an X5 (`real_writes`).
+#[test]
+fn modes_marked() {
+    let l = ["PHOTO_SINGLE", "PHOTO_BURST", "VIDEO_NORMAL", "VIDEO_PURE"].map(mlabel);
+    assert_eq!(l, ["Photo", "Burst ⚠", "Video", "PureVideo ⚠"]);
+}
+
 /// The camera's wall clock in a file name (`IMG_20261025_034512_00_123.jpg`) read in this computer's zone, unix s.
 fn named(u: &str) -> Option<i64> {
     let p: Vec<&str> = crate::album::name(u).split('_').collect();
