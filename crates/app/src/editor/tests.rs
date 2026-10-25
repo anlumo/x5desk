@@ -606,6 +606,65 @@ fn drags() {
     assert_eq!(e.pj.tl().clips[0].speed, c0.speed);
 }
 
+/// A clip's move ends when the timeline changes under it (egui input, no samples needed): the clip dragged deleted
+/// mid-drag (Delete), its index another clip's now (the widget's id) or gone, leaves no insertion line, and the release
+/// moves nothing.
+#[test]
+fn move_lost() {
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = stitch::Ctx::new(&g.device, &g.queue);
+    let ctx = egui::Context::default();
+    let mut e = Editor::new(&g, &cx, &ctx, player::still(&g, &cx), None);
+    let btn = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    let mut at = 0.0;
+    for (n, k) in [(3, 0), (2, 1)] {
+        e.take(Project::new(FPS).unwrap(), Extra::default(), None);
+        for i in 0..n {
+            let f = e.pj.file(&format!("/nowhere/{i}.insv"), 20.0).unwrap();
+            e.ed(|p| p.insert(i, Clip::new(f, 0.0, 4.0)));
+        }
+        let files = |e: &Editor| e.pj.tl().clips.iter().map(|c| c.file).collect::<Vec<_>>();
+        at += 1.0;
+        let rect = frame(&mut e, &ctx, at, vec![]);
+        let tl = e.pj.tl();
+        let x = |t: f64| rect.left() + 8.0 + t as f32 * e.zoom;
+        let y = rect.top() + ROWS[0] + ROWS[1] + 6.0 + ROWS[2] / 2.0;
+        let a = egui::pos2(x(tl.out.fps.t(tl.frames(k).start)) + 20.0, y);
+        let end = egui::pos2(x(tl.dur()) + 100.0, y);
+        let mut step = |e: &mut Editor, ev: Vec<egui::Event>| {
+            at += 1.0 / 60.0;
+            frame(e, &ctx, at, ev);
+        };
+        step(&mut e, vec![egui::Event::PointerMoved(a)]);
+        step(&mut e, vec![btn(a, true)]);
+        step(
+            &mut e,
+            vec![egui::Event::PointerMoved(a + egui::vec2(30.0, 0.0))],
+        );
+        assert!(
+            matches!(e.drag, Some(Drag::Move(j)) if j == k),
+            "{n} clips: no move of clip {k}"
+        );
+        e.delete(k);
+        let left = files(&e);
+        step(&mut e, vec![egui::Event::PointerMoved(end)]);
+        let line = matches!(e.drag, Some(Drag::Move(_)));
+        step(&mut e, vec![btn(end, false)]);
+        step(&mut e, vec![]);
+        eprintln!(
+            "{n} clips, clip {k} deleted mid-move: insertion line {line}, files after the release {:?} (left {left:?})",
+            files(&e)
+        );
+        assert!(!line && e.drag.is_none(), "the move went on");
+        assert_eq!(files(&e), left, "the release moved a clip");
+    }
+}
+
 /// The history keeps in step with edit's log (no samples needed): a drag that ends where it started after an undo drops
 /// edit's redo, and so the history's; a Shot Lab replacement that would fail halfway changes nothing (redo kept); no
 /// undo mid-drag; a view key dragged past another (egui input) stays in the drag and ends as one step.

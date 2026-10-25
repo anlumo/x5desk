@@ -401,6 +401,11 @@ impl Editor {
         for d in &mut self.decks {
             d.k = None;
         }
+        // a clip being moved may be gone or have another's index now (its widget's id): the move ends unplaced
+        if matches!(self.drag, Some(Drag::Move(_))) {
+            self.drag = None;
+            self.ctx.stop_dragging();
+        }
         if self.playing {
             self.pause();
         }
