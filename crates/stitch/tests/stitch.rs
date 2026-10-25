@@ -798,6 +798,231 @@ fn synthetic() {
     }
 }
 
+/// A P010 texture (Y, then interleaved Cb Cr; 10-bit codes, stored in the high bits as crate video decodes H.265
+/// Main 10) holding `p`.
+fn slot10(g: &Gpu, p: &[u16], w: u32, h: u32) -> wgpu::Texture {
+    let t = g.dev.create_texture(&wgpu::TextureDescriptor {
+        label: Some("p010"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::P010,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let b: Vec<u8> = p.iter().flat_map(|&v| (v << 6).to_le_bytes()).collect();
+    let n = (w * h) as usize * 2;
+    write(g, &t, wgpu::TextureAspect::Plane0, &b[..n], w, h, 2);
+    write(g, &t, wgpu::TextureAspect::Plane1, &b[n..], w / 2, h / 2, 4);
+    t
+}
+
+/// P010 lens pictures (H.265 Main 10 as crate video decodes it): whole textures, rects of one side-by-side texture and
+/// separate R16 / RG16 plane textures give the same panorama and the same preview in every mode; constant pictures
+/// stitch to full-range BT.709 of their 10-bit codes (d / 1023, chroma zero 512) to within one step of the RGBA16F
+/// output (the store may truncate); a picture and its 8-bit rounding (NV12) stitch and preview alike to within that
+/// rounding.
+#[test]
+fn p010() {
+    let g = gpu();
+    let cx = Ctx::new(&g.dev, &g.q);
+    let cal = Calib::parse(CAL).unwrap();
+    let fr = Frame {
+        w: 64,
+        h: 64,
+        crop: 4600.0, // cuts the image circle: the lenses' edge texels count
+        shift: [0.0; 2],
+    };
+    let wide = Opts {
+        wide: true,
+        colour: None,
+        ..Default::default()
+    };
+    // constant pictures: every output pixel is the picture's colour (outside the image circles too, which sample the
+    // edge texel), so the output checks the 10-bit scale exactly
+    // one f16 step at v (10 fraction bits; normal from 2^-14), and f32 noise
+    let f16 = |v: f64| 2f64.powf(v.max(2f64.powi(-14)).log2().floor() - 10.0) + 1e-6;
+    for [y, cb, cr] in [
+        [64, 512, 512],
+        [1000, 512, 512],
+        [940, 300, 700],
+        [512, 100, 900],
+        [300, 960, 64],
+    ] {
+        let px: Vec<u16> = (0..64 * 96)
+            .map(|i| match i < 64 * 64 {
+                true => y,
+                false => [cb, cr][i % 2],
+            })
+            .collect();
+        let t = slot10(&g, &px, 64, 64);
+        let src = cx.src(&t);
+        let st = Stitcher::new(&cx, &cal, fr, 64, 32, wide).unwrap();
+        let out = rgb_of(&run(&g, &st, [&src, &src]), true);
+        let (l, b, r) = (
+            y as f64 / 1023.0,
+            (cb as f64 - 512.0) / 1023.0,
+            (cr as f64 - 512.0) / 1023.0,
+        );
+        let want = [
+            l + 1.5748 * r,
+            l - 0.187324 * b - 0.468124 * r,
+            l + 1.8556 * b,
+        ]
+        .map(|v| v.clamp(0.0, 1.0));
+        let d = out
+            .iter()
+            .flat_map(|p| (0..3).map(move |k| (p[k] - want[k]).abs() - f16(want[k])))
+            .fold(f64::MIN, f64::max);
+        eprintln!(
+            "P010 constant Y'CbCr ({y}, {cb}, {cr}): R'G'B' {:.5?} (want {want:.5?}), worst |Δ| − one f16 step {d:.2e}",
+            out[0]
+        );
+        assert!(d <= 0.0, "({y}, {cb}, {cr})");
+    }
+
+    let mut s = 0x2545f491u32;
+    let p: [Vec<u16>; 2] = std::array::from_fn(|_| {
+        (0..64 * 96)
+            .map(|i| {
+                s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((i % 64) * 8 + (i / 64 % 64) * 3 + (s >> 26) as usize) as u16
+            })
+            .collect()
+    });
+    let whole = p.each_ref().map(|v| cx.src(&slot10(&g, v, 64, 64)));
+    // both lenses side by side at (4, 2) of a 136 × 68 texture, noise around them
+    let (tw, at) = (136usize, [4usize, 2usize]);
+    let mut sbs: Vec<u16> = (0..tw * 68 * 3 / 2)
+        .map(|_| {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            (s >> 22) as u16
+        })
+        .collect();
+    for (k, v) in p.iter().enumerate() {
+        for y in 0..64 {
+            let x = at[0] + 64 * k;
+            let d = (at[1] + y) * tw + x;
+            sbs[d..d + 64].copy_from_slice(&v[64 * y..][..64]);
+            if y < 32 {
+                let d = tw * 68 + (at[1] / 2 + y) * tw + x;
+                sbs[d..d + 64].copy_from_slice(&v[64 * 64 + 64 * y..][..64]);
+            }
+        }
+    }
+    let t = slot10(&g, &sbs, tw as u32, 68);
+    let rect = [0, 1].map(|k| cx.rect(&t, [(at[0] + 64 * k) as u32, at[1] as u32, 64, 64]));
+    let planes = p.each_ref().map(|v| {
+        let b: Vec<u8> = v.iter().flat_map(|&x| (x << 6).to_le_bytes()).collect();
+        let y = texture(&g, 64, 64, wgpu::TextureFormat::R16Unorm);
+        let uv = texture(&g, 32, 32, wgpu::TextureFormat::Rg16Unorm);
+        write(
+            &g,
+            &y,
+            wgpu::TextureAspect::All,
+            &b[..64 * 64 * 2],
+            64,
+            64,
+            2,
+        );
+        write(
+            &g,
+            &uv,
+            wgpu::TextureAspect::All,
+            &b[64 * 64 * 2..],
+            32,
+            32,
+            4,
+        );
+        cx.planes(
+            &y.create_view(&Default::default()),
+            &uv.create_view(&Default::default()),
+        )
+    });
+    // the 8-bit rounding of the same pictures (full range: chroma about its zero, 512 of 1023, 128 of 255)
+    let nv = p.each_ref().map(|v| {
+        let b: Vec<u8> = (v.iter().enumerate())
+            .map(|(i, &x)| match i < 64 * 64 {
+                true => (x as f64 * 255.0 / 1023.0).round() as u8,
+                false => (128.0 + (x as f64 - 512.0) * 255.0 / 1023.0).round() as u8,
+            })
+            .collect();
+        upload(&g, &cx, &b, 64, 64)
+    });
+    let o = Opts {
+        colour: Some(0.1),
+        ..wide
+    };
+    let [pw, pr, pp, pn] = [&whole, &rect, &planes, &nv].map(|src| {
+        let st = Stitcher::new(&cx, &cal, fr, 256, 128, o).unwrap();
+        rgb_of(&run(&g, &st, [&src[0], &src[1]]), true)
+    });
+    assert!(pw == pr, "P010: rects of one texture vs two textures");
+    assert!(pw == pp, "P010: textures vs R16 / RG16 plane textures");
+    // 8-bit rounding: at most half a code of 255 per sample, through the BT.709 matrix
+    let dn = pw
+        .iter()
+        .zip(&pn)
+        .flat_map(|(a, b)| (0..3).map(move |k| (a[k] - b[k]).abs()))
+        .fold(0.0, f64::max);
+    eprintln!("P010 vs its NV12 rounding: panorama max |ΔR'G'B'| {dn:.4}");
+    assert!(dn < 0.5 / 255.0 * (1.0 + 1.8556) + 1e-3);
+
+    let pv = Preview::new(
+        &cx,
+        &cal,
+        fr,
+        6.0,
+        Some(0.1),
+        wgpu::TextureFormat::Rgba8Unorm,
+    );
+    let t = texture(&g, 128, 64, wgpu::TextureFormat::Rgba8Unorm);
+    let tv = t.create_view(&Default::default());
+    for (mode, planet) in [
+        (Mode::Perspective, 1.0),
+        (Mode::Equirect, 1.0),
+        (Mode::Planet, 1.0),
+        (Mode::Planet, 0.0),
+    ] {
+        let v = View {
+            mode,
+            fov: 120.0,
+            panini: 0.5,
+            planet,
+            ..Default::default()
+        };
+        let [vw, vr, vp, vn] = [&whole, &rect, &planes, &nv].map(|src| {
+            let src = [&src[0], &src[1]];
+            let mut enc = g.dev.create_command_encoder(&Default::default());
+            pv.colour(&mut enc, src);
+            pv.render(&mut enc, &tv, [128, 64], &v, src);
+            g.q.submit([enc.finish()]);
+            stitch::read_texture(&g.dev, &g.q, &t)
+        });
+        let d = vw
+            .iter()
+            .zip(&vn)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        eprintln!("P010 preview {mode:?} (planet {planet}): vs NV12 rounding max |Δ| {d} levels");
+        assert!(
+            vw.chunks(4).any(|p| p[..3] != [0, 0, 0]),
+            "{mode:?} drew nothing"
+        );
+        assert!(
+            vw == vr && vw == vp,
+            "{mode:?}: P010 textures vs rects vs planes"
+        );
+        assert!(d <= 2, "{mode:?}: P010 vs NV12");
+    }
+}
+
 /// Writes the lens images the old stitcher reads, runs it if `X5_OLDREF` is set, returns its panorama.
 fn old(c: &Clip, w: u32, raft: bool) -> Option<Vec<u8>> {
     let fx = fixtures();

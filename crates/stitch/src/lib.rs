@@ -3,8 +3,8 @@
 //! The map-based stitch of the Insta360 app (`bcv::stitcher::MapMakerRender` + `DynamicStitchDoubleFisheyeStitchProgram`)
 //! evaluated per output pixel, with optional RAFT seam flow along the seam belt of its DISFLOW / AI modes
 //! (`ins::stitcher::SeamlessBlenderImpl`), colour matching between the lenses and a per-frame orientation with a
-//! rolling-shutter term. Inputs are the decoder's NV12 textures, one per lens or both lenses side by side in one
-//! (`Ctx::rect`); the preview also draws from an equirect (`Ctx::pano`). Nothing passes through the CPU per frame.
+//! rolling-shutter term. Inputs are the decoder's NV12 or P010 textures, one per lens or both lenses side by side in
+//! one (`Ctx::rect`); the preview also draws from an equirect (`Ctx::pano`). Nothing passes through the CPU per frame.
 //! Maths: `../insta360/re/analysis/stitchmath/*.md`, `PROTOCOL.md` §9.9.
 //!
 //! Every pass that samples the lenses is recorded into the caller's command encoder, so the decoder's semaphores go
@@ -152,8 +152,18 @@ impl Pose {
     }
 }
 
-/// One NV12 lens picture bound for sampling (luma, chroma, its rect, sampler).
+/// One NV12 / P010 lens picture bound for sampling (luma, chroma, its rect and sample scale, sampler).
 pub struct Src(wgpu::BindGroup);
+
+/// Full-range Y'CbCr from the plane views' unorm values: a scale for every sample, then Cb Cr less their zero
+/// (`stitch.wgsl` `Lens::k`). P010's R16Unorm / Rg16Unorm views read a 10-bit code `d` as 64·d / 65535 (the sample in
+/// the high bits), so d / 1023 takes 65535 / 65472 and the chroma zero is 512 / 1023; NV12's R8 / RG8 read d / 255.
+fn scale(deep: bool) -> [f32; 4] {
+    match deep {
+        true => [65535.0 / 65472.0, 512.0 / 1023.0, 0.0, 0.0],
+        false => [1.0, 128.0 / 255.0, 0.0, 0.0],
+    }
+}
 
 /// An RGBA equirect bound for `Preview` (`Input::Pano`).
 pub struct Pano(wgpu::BindGroup);
@@ -249,7 +259,8 @@ fn init(dev: &wgpu::Device, data: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buf
 }
 
 impl Ctx {
-    /// On the app's device (`video::Gpu`); it needs `TEXTURE_FORMAT_NV12` for `src`.
+    /// On the app's device (`video::Gpu`); `src` needs `TEXTURE_FORMAT_NV12`, or for P010 `TEXTURE_FORMAT_P010` and
+    /// `TEXTURE_FORMAT_16BIT_NORM`.
     pub fn new(dev: &wgpu::Device, q: &wgpu::Queue) -> Self {
         use wgpu::BindingType as T;
         let tex = T::Texture {
@@ -340,12 +351,13 @@ impl Ctx {
         }
     }
 
-    /// A whole NV12 texture, through its plane views (`R8Unorm`, `Rg8Unorm`).
+    /// A whole NV12 or P010 texture, through its plane views (`R8Unorm`, `Rg8Unorm`; P010: `R16Unorm`, `Rg16Unorm`).
     pub fn src(&self, nv12: &wgpu::Texture) -> Src {
         self.rect(nv12, [0, 0, nv12.width(), nv12.height()])
     }
 
-    /// The lens picture at `r` = (x, y, w, h) luma pixels (all even) of an NV12 texture, e.g. a decoder output slot:
+    /// The lens picture at `r` = (x, y, w, h) luma pixels (all even) of an NV12 or P010 texture (full range, BT.709,
+    /// as the X5 records), e.g. a decoder output slot:
     /// its display window (`Decoder::view`; the texture may be larger than the picture), or half of it for both
     /// lenses side by side. It samples like a texture of its own: the other half never bleeds in, and the stitch is
     /// identical to one from two separate textures. The `.lrv` proxy (checked against the `.insv`) and the live
@@ -360,33 +372,35 @@ impl Ctx {
             nv12.width(),
             nv12.height()
         );
-        let v = |aspect, format| {
+        use wgpu::{TextureAspect as A, TextureFormat as F};
+        let v = |aspect| {
             nv12.create_view(&wgpu::TextureViewDescriptor {
-                format: Some(format),
                 aspect,
                 ..Default::default()
             })
         };
-        self.sub(
-            &v(wgpu::TextureAspect::Plane0, wgpu::TextureFormat::R8Unorm),
-            &v(wgpu::TextureAspect::Plane1, wgpu::TextureFormat::Rg8Unorm),
-            r,
-        )
+        // each plane's view format is the one wgpu derives from the aspect: R8 / RG8, or R16 / RG16 for P010
+        let deep = nv12.format() == F::P010;
+        self.sub(&v(A::Plane0), &v(A::Plane1), r, deep)
     }
 
-    /// Luma (R8) and chroma (RG8, half size) planes from any two whole views.
+    /// Luma (R8) and chroma (RG8, half size) planes from any two whole views; R16 / RG16 hold P010 samples (10 bits
+    /// at the top): the plane views of a P010 texture, or textures of their own.
     pub fn planes(&self, y: &wgpu::TextureView, uv: &wgpu::TextureView) -> Src {
         let t = y.texture();
-        self.sub(y, uv, [0, 0, t.width(), t.height()])
+        let deep = matches!(
+            t.format(),
+            wgpu::TextureFormat::P010 | wgpu::TextureFormat::R16Unorm
+        );
+        self.sub(y, uv, [0, 0, t.width(), t.height()], deep)
     }
 
-    fn sub(&self, y: &wgpu::TextureView, uv: &wgpu::TextureView, r: [u32; 4]) -> Src {
+    fn sub(&self, y: &wgpu::TextureView, uv: &wgpu::TextureView, r: [u32; 4], deep: bool) -> Src {
         use wgpu::BindingResource as R;
-        let b = init(
-            &self.dev,
-            bytemuck::bytes_of(&r),
-            wgpu::BufferUsages::UNIFORM,
-        );
+        let mut u = [0u8; 32];
+        u[..16].copy_from_slice(bytemuck::bytes_of(&r));
+        u[16..].copy_from_slice(bytemuck::bytes_of(&scale(deep)));
+        let b = init(&self.dev, &u, wgpu::BufferUsages::UNIFORM);
         Src(bind(
             &self.dev,
             &self.lens,

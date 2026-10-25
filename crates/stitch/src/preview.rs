@@ -1,4 +1,4 @@
-//! Player preview: renders straight from the two NV12 lens pictures with the template seam (or a stitcher's RAFT
+//! Player preview: renders straight from the two NV12 / P010 lens pictures with the template seam (or a stitcher's RAFT
 //! flow, `Preview::seam`), or from an equirect (a paused frame's RAFT stitch, the X5 Webcam Mode), at window size, in
 //! a render pass, so it can draw into a texture egui shows (`Rgba8Unorm`, `register_native_texture`) or into egui's
 //! own pass from a paint callback.

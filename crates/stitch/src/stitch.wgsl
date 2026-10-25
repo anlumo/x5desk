@@ -1,5 +1,5 @@
-// Dual fisheye from two NV12 lens pictures (whole textures or rects in them): equirect stitch, seam belt for RAFT, colour
-// statistics, preview; preview from an equirect.
+// Dual fisheye from two NV12 / P010 lens pictures (whole textures or rects in them): equirect stitch, seam belt for
+// RAFT, colour statistics, preview; preview from an equirect.
 // P (offset.rs `pack`, lib.rs): [0..2] out size, [2] half blend angle (deg), [3] half blend angle near the nadir,
 //   [4] flow on, [5] belt cols (across the seam), [6] belt rows (along), [7] A0 (deg), [8] deg/row,
 //   [9] belt px/rad across, [10] belt alpha half-width (deg), [11] flow-region oversampling,
@@ -10,14 +10,16 @@
 // Frames: output ray -> pose -> camera body `w` (calibration world: Z up, lens 0 axis -X) -> lens camera.
 // The seam belt lives in the app's template frame S = (-w.x, -w.y, w.z) (lens 0 on +X_S).
 
-// lens k: NV12 planes and its rect in them (x, y, w, h luma px; a side-by-side half or a decoder's display window)
+// lens k: NV12 / P010 planes; r: its rect in them (x, y, w, h luma px; a side-by-side half or a decoder's display
+// window); k: full-range Y'CbCr = k.x · plane value, Cb Cr less k.y (lib.rs `scale`)
+struct Lens { r: vec4u, k: vec4f }
 @group(0) @binding(0) var y0: texture_2d<f32>;
 @group(0) @binding(1) var u0: texture_2d<f32>;
-@group(0) @binding(2) var<uniform> r0: vec4u;
+@group(0) @binding(2) var<uniform> r0: Lens;
 @group(0) @binding(3) var s0: sampler;
 @group(1) @binding(0) var y1: texture_2d<f32>;
 @group(1) @binding(1) var u1: texture_2d<f32>;
-@group(1) @binding(2) var<uniform> r1: vec4u;
+@group(1) @binding(2) var<uniform> r1: Lens;
 @group(1) @binding(3) var s1: sampler;
 // preview `fe`: an RGBA equirect, sampled with s0 (it repeats across longitude)
 @group(0) @binding(4) var pano: texture_2d<f32>;
@@ -98,7 +100,7 @@ fn look(k: u32, w: vec3f) -> vec3f {
     let q = project(b, m * w);
     let rs = select(pose.rs0, pose.rs1, k == 1u);
     if rs.w == 0.0 || q.z == 0.0 { return q; }
-    let h = f32(select(r0.w, r1.w, k == 1u));
+    let h = f32(select(r0.r.w, r1.r.w, k == 1u));
     return project(b, m * rot(-(q.y / h - 0.5) * rs.xyz, w));
 }
 
@@ -114,13 +116,15 @@ fn foot(t: texture_2d<f32>, o: vec2u, n: vec2u, q: vec2f) -> vec4f {
 // gathered texels (x: (0, 1), y: (1, 1), z: (1, 0), w: (0, 0)) at weights f
 fn lerp4(g: vec4f, f: vec2f) -> f32 { return mix(mix(g.w, g.z, f.x), mix(g.x, g.y, f.x), f.y); }
 
-// full-range BT.709 (X5: yuvj420p, bt709, chroma sited left) at lens px q of rect r
-fn yuv(y: texture_2d<f32>, u: texture_2d<f32>, s: sampler, r: vec4u, q: vec2f) -> vec3f {
+// full-range BT.709 (X5: yuvj420p, bt709, chroma sited left) at lens px q of lens rect n.r
+fn yuv(y: texture_2d<f32>, u: texture_2d<f32>, s: sampler, n: Lens, q: vec2f) -> vec3f {
+    let r = n.r;
     let a = foot(y, r.xy, r.zw, q);
-    let l = lerp4(textureGather(0, y, s, a.xy), a.zw);
+    let l = n.k.x * lerp4(textureGather(0, y, s, a.xy), a.zw);
     // left siting: chroma sample i sits on luma column 2i, half a luma texel left of a centred one
     let b = foot(u, r.xy / 2u, r.zw / 2u, (q + vec2f(0.5, 0.0)) / 2.0);
-    let c = vec2f(lerp4(textureGather(0, u, s, b.xy), b.zw), lerp4(textureGather(1, u, s, b.xy), b.zw)) - 128.0 / 255.0;
+    let c = n.k.x * vec2f(lerp4(textureGather(0, u, s, b.xy), b.zw), lerp4(textureGather(1, u, s, b.xy), b.zw))
+        - n.k.y;
     return clamp(vec3f(l + 1.5748 * c.y, l - 0.187324 * c.x - 0.468124 * c.y, l + 1.8556 * c.x), vec3f(0.0), vec3f(1.0));
 }
 
