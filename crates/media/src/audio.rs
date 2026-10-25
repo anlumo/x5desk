@@ -198,7 +198,21 @@ impl Clock {
     }
 }
 
-/// Plays the first AAC track of an MP4 on the default output device. Starts paused.
+/// The output device with this id (`cpal::DeviceId` as text, as the app's settings keep it from
+/// `output_devices`), else the system default. An id lists the devices (ALSA: every hint and card): resolve it when
+/// the choice changes and keep the device, never per open.
+pub fn device(id: Option<&str>) -> Option<cpal::Device> {
+    let h = cpal::default_host();
+    // an exact match: cpal 0.18's device_by_id rewrites ALSA's `sysdefault:CARD=x` to `...,DEV=0`, which no listed
+    // device has
+    id.and_then(|s| {
+        let id = Some(s.parse().ok()?);
+        h.output_devices().ok()?.find(|d| d.id().ok() == id)
+    })
+    .or_else(|| h.default_output_device())
+}
+
+/// Plays the first AAC track of an MP4 on an output device ([`Player::open`]: the default). Starts paused.
 pub struct Player {
     sh: Arc<Shared>,
     th: Option<thread::JoinHandle<()>>,
@@ -208,6 +222,11 @@ pub struct Player {
 
 impl Player {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Player> {
+        Player::open_on(path, None)
+    }
+
+    /// [`Player::open`] on output device `dev` (from [`device`]; None: the default).
+    pub fn open_on(path: impl AsRef<Path>, dev: Option<cpal::Device>) -> io::Result<Player> {
         let mp4 = Mp4::open(path)?;
         let t = mp4
             .tracks
@@ -220,8 +239,7 @@ impl Player {
         let aac = Aac::new(asc)?;
         let duration = mp4.tracks[t].secs();
         let sh = Shared::new(aac.rate, aac.ch);
-        let dev = cpal::default_host()
-            .default_output_device()
+        let dev = (dev.or_else(|| cpal::default_host().default_output_device()))
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no audio output device"))?;
         let cfg = cpal::StreamConfig {
             channels: aac.ch,
@@ -649,6 +667,51 @@ mod tests {
         assert_eq!(b, b2, "paused clock holds");
         assert_eq!(s, 3.0, "seek target");
         assert!((s2 - 3.0 - sw).abs() < 0.02, "after seek {s2}");
+    }
+
+    /// Ids resolve as the app's settings keep them; a player opened on a device runs its clock there (paused, at
+    /// volume 0: nothing is heard).
+    #[test]
+    fn plays_on_device() {
+        let id = |d: &cpal::Device| d.id().unwrap().to_string();
+        let def = id(&device(None).unwrap());
+        assert_eq!(
+            id(&device(Some("x5desk")).unwrap()),
+            def,
+            "an id that does not parse"
+        );
+        assert_eq!(
+            id(&device(Some("alsa:x5desk-none")).unwrap()),
+            def,
+            "no such device"
+        );
+        let outs: Vec<String> = cpal::default_host()
+            .output_devices()
+            .unwrap()
+            .filter_map(|d| d.id().ok().map(|i| i.to_string()))
+            .collect();
+        println!("default {def}; outputs {outs:?}");
+        for o in &outs {
+            assert_eq!(&id(&device(Some(o)).unwrap()), o);
+        }
+        let Some(d) = samples() else { return };
+        let f = d.join("v635.insv");
+        let p = Player::open_on(&f, device(Some(&def))).unwrap();
+        p.volume(0.0);
+        let (c, t0) = (p.clock(), Instant::now());
+        p.seek(2.0);
+        let s = loop {
+            if let Some(x) = c.get() {
+                break x;
+            }
+            assert!(t0.elapsed().as_millis() < 2000, "the device never ran");
+            thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(s, 2.0);
+        // the player is on the device it was given: ALSA's OSS plugin without /dev/dsp does not open
+        if outs.iter().any(|o| o == "alsa:oss") && !Path::new("/dev/dsp").exists() {
+            assert!(Player::open_on(&f, device(Some("alsa:oss"))).is_err());
+        }
     }
 
     #[test]
