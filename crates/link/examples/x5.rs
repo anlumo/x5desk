@@ -3,7 +3,7 @@
 //! x5 info                     identity, options, capture status, storage
 //! x5 ls                       all files (VIDEO_AND_PHOTO, DNG) and the file info list
 //! x5 conf <out>               the capture-parameter JSON
-//! x5 favs                     favourite flags (GET_EDITINFO_LIST)
+//! x5 favs                     favourite flags (GET_EDITINFO_LIST): path, flag, modify_timestamp
 //! x5 raw <code> [hex]         a request from `RO`, raw
 //! x5 thumb <uri> <out>        trailer thumbnail
 //! x5 burst <n>                thumbnails of the first n files, one by one, then all n in flight at once
@@ -40,7 +40,7 @@ fn main() -> link::Result<()> {
         return Err(link::Error::Http(format!("{} is not in {RO:?}", a[1])));
     }
     let t0 = Instant::now();
-    let (c, ev) = Camera::usb()?;
+    let (c, ev) = Camera::usb().wait()?;
     eprintln!("synced in {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
     let drain = |ev: &std::sync::mpsc::Receiver<Event>| {
         for e in ev.try_iter() {
@@ -138,6 +138,13 @@ fn main() -> link::Result<()> {
                     l.edit_file_info_list.len(),
                     f.count()
                 );
+                for e in &l.edit_file_info_list {
+                    let f = e.favorite_info.unwrap_or_default();
+                    println!(
+                        "{} {} {}",
+                        e.file_path, f.playback_is_favorite, f.modify_timestamp
+                    );
+                }
             }
             "conf" => {
                 let (v, j) = c.conf().wait()?;

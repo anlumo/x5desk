@@ -36,6 +36,16 @@ impl Sim {
         let _ = self.0.send(Msg::Rx(v));
     }
 
+    /// Sends stream packet `kind` (a live-preview packet, [`crate::stream`]) stamped `ts` (camera ms).
+    pub fn frame(&self, kind: u8, ts: u64, data: &[u8]) {
+        let mut v = Vec::with_capacity(16 + data.len());
+        let mut h = [0; 9];
+        h[0] = kind;
+        h[1..].copy_from_slice(&ts.to_le_bytes());
+        ucd::put(&mut v, 1, &h, data);
+        let _ = self.0.send(Msg::Rx(v));
+    }
+
     /// The camera is unplugged: the session ends with [`Error::NoDevice`].
     pub fn unplug(&self) {
         let _ = self.0.send(Msg::Gone(Error::NoDevice));
@@ -136,7 +146,44 @@ impl Link for Cam {
     }
 }
 
+/// A camera that never answers: enumerated in app mode but asleep.
+struct Mute;
+
+impl Link for Mute {
+    fn send(&mut self, _: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn http_open(&mut self, _: u32, _: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn http_ack(&mut self, _: u32, _: u64) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn http_close(&mut self, _: u32) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn busy(&self) -> bool {
+        false
+    }
+
+    fn host(&self) -> &str {
+        "127.0.0.1"
+    }
+
+    fn stop(&mut self) {}
+}
+
 impl Camera {
+    /// A connection to a camera that never answers: it syncs until [`Error::Silent`] after 30 s, or until it is
+    /// dropped.
+    pub fn mute() -> crate::Opening {
+        start(|_, _| Ok(Mute), None)
+    }
+
     /// A session with a simulated camera: `req` answers requests, `files` serves HTTP at `rate` bytes per second
     /// and connection.
     pub fn sim(
@@ -159,7 +206,8 @@ impl Camera {
                 })
             },
             None,
-        )?;
+        )
+        .wait()?;
         let s = srx.recv().map_err(|_| Error::Closed)?;
         Ok((c, ev, Sim(s)))
     }

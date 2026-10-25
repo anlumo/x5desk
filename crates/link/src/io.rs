@@ -115,11 +115,7 @@ impl<L: Link> Io<L> {
         loop {
             let now = Instant::now();
             if now >= end {
-                let m = format!("no sync marker in 30 s, {got} bytes received");
-                return Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    m,
-                )));
+                return Err(Error::Silent(got));
             }
             if now >= self.hb + SEC {
                 self.heartbeat()?
@@ -346,6 +342,7 @@ impl<L: Link> Io<L> {
                     kind,
                     ts,
                     data: data.to_vec(),
+                    at: Instant::now(),
                 }));
             }
             // Camera→host: 0x04 data, 0x02 / 0x10 close (§8.6).

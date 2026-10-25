@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::ucd::Pkt;
-use std::sync::atomic::Ordering::Relaxed;
+use std::{sync::atomic::Ordering::Relaxed, time::Instant};
 
 fn hex(s: &str) -> Vec<u8> {
     s.split_whitespace()
@@ -79,10 +79,16 @@ fn encodings() {
     assert_eq!(wire(k, 12, &b), w);
     let _p = c.live_start();
     assert_eq!(req(&rx), (1, hex("10 01 30 28 38 2c 40 01 48 28 50 22")));
-    let _p = c.start_recording();
+    let _p = c.start_capture(pb::CaptureMode::Normal);
     assert_eq!(req(&rx), (4, hex("08 01")));
-    let _p = c.stop_recording();
+    let _p = c.stop_capture(pb::CaptureMode::Normal);
     assert_eq!(req(&rx), (5, hex("10 01")));
+    let _p = c.start_capture(pb::CaptureMode::PureVideo);
+    assert_eq!(req(&rx), (4, hex("08 0b")));
+    let _p = c.start_timelapse(pb::TimelapseMode::TimelapseIntervalShooting);
+    assert_eq!(req(&rx), (22, hex("08 02")));
+    let _p = c.stop_timelapse(pb::TimelapseMode::MobileTimelapseVideo);
+    assert_eq!(req(&rx), (23, hex("08 01")));
     let _p = c.set_mode(Mode::Video(pb::VideoSubMode::VideoNormal));
     assert_eq!(req(&rx), (7, hex("08 29 12 00")));
     let _p = c.set_mode(Mode::Photo(pb::PhotoSubMode::PhotoSingle));
@@ -91,8 +97,15 @@ fn encodings() {
     assert_eq!(req(&rx), (24, vec![]));
     let _p = c.format(pb::CardLocation::StorClCameraSd);
     assert_eq!(req(&rx), (232, hex("08 03")));
-    let _p = c.take_photo();
+    let _p = c.take_photo(pb::TakePicture::default());
     assert_eq!(req(&rx), (3, vec![]));
+    // burst with PureShot: mode 3, raw_capture_type 3
+    let _p = c.take_photo(pb::TakePicture {
+        mode: pb::take_picture::Mode::Burst as i32,
+        raw_capture_type: pb::RawCaptureType::Pureshot as i32,
+        ..Default::default()
+    });
+    assert_eq!(req(&rx), (3, hex("08 03 20 03")));
     let _p = c.highlight(1500);
     let (k, b) = req(&rx);
     assert_eq!((k, &b[..4]), (60, &hex("08 dc 0b 1a")[..]));
@@ -403,6 +416,7 @@ fn session(direct: bool) {
         },
         None,
     )
+    .wait()
     .unwrap();
 
     let id = c.identify().wait().unwrap();
@@ -620,6 +634,7 @@ fn wifi_sockets() {
         move |tx, pool| tcp::Tcp::open(ca, wa, tx, pool),
         Some("uuid".into()),
     )
+    .wait()
     .unwrap();
     // The 8209s are also delivered to the app.
     for _ in 0..3 {
@@ -649,6 +664,7 @@ fn imu() {
         kind: stream::GYRO,
         ts: 7,
         data,
+        at: Instant::now(),
     };
     let s: Vec<Imu> = f.imu().collect();
     assert_eq!(
@@ -692,4 +708,101 @@ fn watch_reports_now() {
     let p = rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert_eq!(p, scan());
     println!("bus: {p:?}");
+}
+
+/// A transport that never answers: the camera enumerated but asleep. Its `stop` says when the I/O thread let go.
+struct Mute(Arc<Mutex<Option<Instant>>>);
+
+impl Link for Mute {
+    fn send(&mut self, _: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn http_open(&mut self, _: u32, _: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn http_ack(&mut self, _: u32, _: u64) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn http_close(&mut self, _: u32) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn busy(&self) -> bool {
+        false
+    }
+    fn host(&self) -> &str {
+        ""
+    }
+    fn stop(&mut self) {
+        *self.0.lock().unwrap() = Some(Instant::now());
+    }
+}
+
+/// Dropping an [`Opening`] whose camera stays silent ends the sync at once and releases the transport, instead of
+/// after the 30 s sync deadline; a ready one hands out its session once.
+#[test]
+fn opening_cancel() {
+    let stop = Arc::new(Mutex::new(None));
+    let s = stop.clone();
+    let mut o = start(move |_, _| Ok(Mute(s)), None);
+    thread::sleep(Duration::from_millis(300));
+    assert!(o.poll().is_none(), "still syncing");
+    let t = Instant::now();
+    drop(o);
+    let at = loop {
+        if let Some(at) = *stop.lock().unwrap() {
+            break at;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "the I/O thread kept the transport"
+        );
+        thread::sleep(Duration::from_millis(1));
+    };
+    println!(
+        "cancelled sync released the transport after {:.1} ms",
+        (at - t).as_secs_f64() * 1e3
+    );
+    let mut o: Opening = Err(Error::Silent(0)).into();
+    assert!(matches!(o.poll(), Some(Err(Error::Silent(0)))));
+    let (c, _) = fake();
+    let mut o: Opening = Ok((c, mpsc::channel().1)).into();
+    assert!(matches!(o.poll(), Some(Ok(_))));
+    assert!(matches!(o.poll(), Some(Err(Error::Closed))));
+}
+
+/// Stream packets a simulated camera sends arrive as `Event::Frame`, in order, with kind, stamp and payload; and
+/// notification 8214 decodes as `Note::Temp`.
+#[cfg(feature = "sim")]
+#[test]
+fn sim_frames() {
+    let (c, ev, s) = Camera::sim(|_, _| (200, vec![]), |_| None, 1).unwrap();
+    let big: Vec<u8> = (0..600_000u32).map(|i| i as u8).collect();
+    s.frame(stream::VIDEO, 0, &big);
+    s.frame(stream::GYRO, 278164, &[1; 112]);
+    let t = pb::TempState {
+        temp_state: pb::TemperatureState::TempHigh as i32,
+        temp_value: 61,
+        ..Default::default()
+    };
+    s.note(8214, &t.encode_to_vec());
+    let mut got = vec![];
+    while got.len() < 3 {
+        match ev.recv_timeout(Duration::from_secs(2)).unwrap() {
+            Event::Frame(f) => got.push((f.kind, f.ts, f.data.len(), f.data == big)),
+            Event::Note(Note::Temp(x)) => {
+                assert_eq!(x, t);
+                got.push((0, 0, 0, false))
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        got,
+        [
+            (stream::VIDEO, 0, 600_000, true),
+            (stream::GYRO, 278164, 112, false),
+            (0, 0, 0, false)
+        ]
+    );
+    c.close().wait().unwrap();
 }

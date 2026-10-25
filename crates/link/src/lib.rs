@@ -2,10 +2,10 @@
 //! Wi-Fi (TCP), HTTP through the USB socket tunnel or straight to the camera, downloads over several connections
 //! with resume, and a typed API.
 //!
-//! All I/O of one camera runs on its own thread. [`Camera`] is a cheap, cloneable handle; every call returns a
-//! [`Pending`] that the caller can block on or poll. Notifications, live-preview packets and the loss of the link
-//! arrive on the [`Event`] receiver returned with the handle. The session closes when the last handle is dropped
-//! or on [`Camera::close`].
+//! All I/O of one camera runs on its own thread. A connection starts as an [`Opening`] (dropped before it is ready,
+//! it cancels the sync); [`Camera`] is a cheap, cloneable handle; every call returns a [`Pending`] that the caller
+//! can block on or poll. Notifications, live-preview packets and the loss of the link arrive on the [`Event`]
+//! receiver returned with the handle. The session closes when the last handle is dropped or on [`Camera::close`].
 
 mod http;
 mod io;
@@ -52,6 +52,8 @@ pub mod code {
     pub const ERASE_SD: u16 = 24;
     pub const GET_FILEINFO_LIST: u16 = 38;
     pub const CHECK_AUTH: u16 = 39;
+    pub const START_TIMELAPSE: u16 = 22;
+    pub const STOP_TIMELAPSE: u16 = 23;
     pub const KEY_TIME_POINT: u16 = 60;
     pub const GET_FILE: u16 = 83;
     pub const SET_FAVORITE: u16 = 176;
@@ -79,6 +81,8 @@ pub enum Error {
     /// The byte stream lost its framing.
     Desync,
     Timeout,
+    /// No answer to the sync in 30 s (bytes received meanwhile): the camera is enumerated but asleep or hung.
+    Silent(usize),
     Closed,
     /// A response status other than 200, with the camera's error body if it sent one.
     Status(u16, Option<pb::Error>),
@@ -101,6 +105,7 @@ impl fmt::Display for Error {
             Error::Busy => f.write_str("camera busy: another client holds the session"),
             Error::Desync => f.write_str("stream desync"),
             Error::Timeout => f.write_str("timeout"),
+            Error::Silent(n) => write!(f, "no answer to the sync in 30 s ({n} bytes received)"),
             Error::Closed => f.write_str("session closed"),
             Error::Status(s, Some(e)) => write!(f, "status {s}: {:?} {}", e.code(), e.message),
             Error::Status(s, None) => write!(f, "status {s}"),
@@ -140,12 +145,14 @@ pub enum Event {
     Closed(Error),
 }
 
-/// A stream packet (type 1): [`stream`] kind, camera clock in ms, payload. The first video packets after a start
-/// may carry `ts` 0 (0 or 5 of them seen on the X5, fw v1.13.21); exposure records carry their frame's `ts`.
+/// A stream packet (type 1): [`stream`] kind, camera clock in ms, payload, when the I/O thread framed it. The first
+/// video packets after a start may carry `ts` 0 (0 or 5 of them seen on the X5, fw v1.13.21); exposure records carry
+/// their frame's `ts`.
 pub struct Frame {
     pub kind: u8,
     pub ts: u64,
     pub data: Vec<u8>,
+    pub at: std::time::Instant,
 }
 
 /// One sample of a [`stream::GYRO`] packet: camera clock in ms, accelerometer (g; |acc| ≈ 1 at rest), gyroscope.
@@ -173,7 +180,7 @@ impl Frame {
 
 /// Notifications (§6.2), decoded where the schema is known; anything else, or a body that does not decode,
 /// arrives as `Other`.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Note {
     AutoSplit(pb::NotificationCaptureAutoSplit),
     Battery(pb::BatteryInfo),
@@ -185,6 +192,8 @@ pub enum Note {
     PictureState(pb::NotificationTakePictureStateUpdate),
     CaptureStatus(pb::CaptureStatus),
     Auth(pb::NotificationAuthorizationResult),
+    /// Temperature level (8214, `CAM_TEMPERATURE_VALUE`).
+    Temp(pb::TempState),
     WifiStarted,
     Posture(pb::NotificationCameraPostureUpdate),
     RecordStatus(pb::RecordStatus),
@@ -217,6 +226,7 @@ impl Note {
             8202 => d(b, Note::PictureState),
             8208 => d(b, Note::CaptureStatus),
             8209 => d(b, Note::Auth),
+            8214 => d(b, Note::Temp),
             8215 => Some(Note::WifiStarted),
             8219 => d(b, Note::Posture),
             8230 => d(b, Note::RecordStatus),
@@ -247,6 +257,13 @@ impl<T> Pending<T> {
             Err(TryRecvError::Empty) => None,
             Err(TryRecvError::Disconnected) => Some(Err(Error::Closed)),
         }
+    }
+}
+
+/// A result another thread of the caller's delivers, e.g. a local copy that runs among the downloads.
+impl<T> From<Receiver<Result<T>>> for Pending<T> {
+    fn from(r: Receiver<Result<T>>) -> Pending<T> {
+        Pending(r)
     }
 }
 
@@ -370,30 +387,73 @@ fn ident(b: Vec<u8>) -> Result<Ident> {
     })
 }
 
+/// A session being opened: the I/O thread syncs (up to 30 s with a silent camera, [`Error::Silent`]) and, on Wi-Fi,
+/// authorizes. Dropping it before it is ready cancels that at once: its handle's drop closes the I/O thread, which
+/// releases the camera before it ends.
+pub struct Opening {
+    c: Option<(Camera, Receiver<Event>)>,
+    ready: Receiver<Result<()>>,
+}
+
+impl Opening {
+    /// Non-blocking: `None` while the camera syncs; the session once it is ready.
+    pub fn poll(&mut self) -> Option<Result<(Camera, Receiver<Event>)>> {
+        let r = match self.ready.try_recv() {
+            Ok(r) => r,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => Err(Error::Closed),
+        };
+        Some(r.and_then(|_| self.c.take().ok_or(Error::Closed)))
+    }
+
+    pub fn wait(mut self) -> Result<(Camera, Receiver<Event>)> {
+        self.ready.recv().unwrap_or(Err(Error::Closed))?;
+        self.c.take().ok_or(Error::Closed)
+    }
+}
+
+/// One that is already done, e.g. a simulated camera's.
+impl From<Result<(Camera, Receiver<Event>)>> for Opening {
+    fn from(r: Result<(Camera, Receiver<Event>)>) -> Opening {
+        let (tx, ready) = mpsc::sync_channel(1);
+        let (c, r) = match r {
+            Ok(c) => (Some(c), Ok(())),
+            Err(e) => (None, Err(e)),
+        };
+        let _ = tx.send(r);
+        Opening { c, ready }
+    }
+}
+
 fn start<L: Link>(
     open: impl FnOnce(Sender<Msg>, Pool) -> Result<L> + Send + 'static,
     uuid: Option<String>,
-) -> Result<(Camera, Receiver<Event>)> {
+) -> Opening {
     let (tx, ch) = mpsc::channel();
     let (etx, erx) = mpsc::channel();
-    let (rtx, rrx) = mpsc::sync_channel(1);
+    let (rtx, ready) = mpsc::sync_channel(1);
     let t = tx.clone();
-    thread::Builder::new()
+    match thread::Builder::new()
         .name("x5-link".into())
-        .spawn(move || io::run(open, t, ch, etx, uuid, rtx))?;
-    rrx.recv().unwrap_or(Err(Error::Closed))?;
-    Ok((Camera(Arc::new(Inner(tx))), erx))
+        .spawn(move || io::run(open, t, ch, etx, uuid, rtx))
+    {
+        Ok(_) => Opening {
+            c: Some((Camera(Arc::new(Inner(tx))), erx)),
+            ready,
+        },
+        Err(e) => Err(e.into()).into(),
+    }
 }
 
 impl Camera {
     /// Opens the first camera in USB app mode and syncs (no authorization on USB).
-    pub fn usb() -> Result<(Camera, Receiver<Event>)> {
+    pub fn usb() -> Opening {
         start(usb::Usb::open, None)
     }
 
     /// Connects to the camera's access point (`192.168.42.1`), syncs and runs CHECK_AUTHORIZATION with the
     /// client's persistent UUID; if the camera asks, waits up to 60 s for the user to confirm on it.
-    pub fn wifi(ip: IpAddr, uuid: &str) -> Result<(Camera, Receiver<Event>)> {
+    pub fn wifi(ip: IpAddr, uuid: &str) -> Opening {
         start(
             move |tx, pool| tcp::Tcp::open((ip, 6666).into(), (ip, 80).into(), tx, pool),
             Some(uuid.into()),
@@ -696,27 +756,48 @@ impl Camera {
         self.set_options(&[t], o)
     }
 
-    pub fn take_photo(&self) -> Pending<pb::TakePictureResponse> {
-        self.call(code::TAKE_PICTURE, &pb::TakePicture::default(), LONG)
+    /// A photo in the current photo sub-mode (`TakePicture{NORMAL | BURST, raw_capture_type}` as the app sends it).
+    pub fn take_photo(&self, q: pb::TakePicture) -> Pending<pb::TakePictureResponse> {
+        self.call(code::TAKE_PICTURE, &q, LONG)
     }
 
-    /// Starts recording in the current video sub-mode (`StartCapture{NORMAL}`, the app's `startNormalRecord`).
-    pub fn start_recording(&self) -> Pending<()> {
+    /// Starts recording in the current video sub-mode, whose capture mode is `m` (NORMAL: the app's
+    /// `startNormalRecord`).
+    pub fn start_capture(&self, m: pb::CaptureMode) -> Pending<()> {
         let q = pb::StartCapture {
-            mode: pb::CaptureMode::Normal as i32,
+            mode: m as i32,
             ..Default::default()
         };
         self.send(code::START_CAPTURE, q.encode_to_vec(), LONG, unit)
     }
 
     /// The new file's URI.
-    pub fn stop_recording(&self) -> Pending<pb::Video> {
+    pub fn stop_capture(&self, m: pb::CaptureMode) -> Pending<pb::Video> {
         let q = pb::StopCapture {
-            mode: pb::CaptureMode::Normal as i32,
+            mode: m as i32,
             ..Default::default()
         };
         self.send(code::STOP_CAPTURE, q.encode_to_vec(), LONG, |b| {
             Ok(dec::<pb::StopCaptureResp>(b)?.video.unwrap_or_default())
+        })
+    }
+
+    /// Interval photos, Starlapse and timelapse video (msg 22 / 23).
+    pub fn start_timelapse(&self, m: pb::TimelapseMode) -> Pending<()> {
+        let q = pb::StartTimelapse {
+            mode: m as i32,
+            ..Default::default()
+        };
+        self.send(code::START_TIMELAPSE, q.encode_to_vec(), LONG, unit)
+    }
+
+    pub fn stop_timelapse(&self, m: pb::TimelapseMode) -> Pending<pb::Video> {
+        let q = pb::StopTimelapse {
+            mode: m as i32,
+            ..Default::default()
+        };
+        self.send(code::STOP_TIMELAPSE, q.encode_to_vec(), LONG, |b| {
+            Ok(dec::<pb::StopTimelapseResp>(b)?.video.unwrap_or_default())
         })
     }
 
