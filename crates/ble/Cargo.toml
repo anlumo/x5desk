@@ -3,6 +3,10 @@ name = "ble"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# `Ble::sim`: a simulated adapter and camera for tests of the code above the crate.
+sim = []
+
 [dependencies]
 proto.workspace = true
 prost.workspace = true

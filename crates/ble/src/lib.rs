@@ -17,18 +17,24 @@
 //! acknowledges every write and sends nothing (the app's error 4001). Unplugged, its first notification (a heartbeat,
 //! `07 00 00 00 05 00 00`) comes at once, `GET_OPTIONS` and the Wi-Fi query answer, authorization succeeds and
 //! `bt_wakeup_sw` can be set. In standby (short press, screen dark) it keeps advertising `X5 <token>` and answers
-//! `GET_OPTIONS`; a wake advertisement up for the 2 s up to the connect (without the flags Android sends) did not
-//! light the screen. [`Ble::wake_up`] is untested on the camera.
+//! `GET_OPTIONS`. [`Ble::wake_up`] (2026-10-25, camera asleep with Wi-Fi off): found at once, the connect takes about
+//! 35 s (the camera turns its Wi-Fi on just before it completes, against under 1 s while its Wi-Fi still counts down),
+//! then authorized on the first ask (never 7) and 8215; `SET_STANDBY_MODE{WAKE_UP}` (56) answers 400. The screen
+//! stays dark throughout: on an X5 the wake-up brings up its radios and the session, never the display.
 
 #[cfg(target_os = "linux")]
 mod bluez;
 mod io;
 mod sess;
+#[cfg(feature = "sim")]
+mod sim;
 #[cfg(target_os = "linux")]
 mod wake;
 mod wire;
 
 pub use proto as pb;
+#[cfg(feature = "sim")]
+pub use sim::Sim;
 pub use uuid::Uuid;
 pub use wire::{Beacon, Proto};
 
