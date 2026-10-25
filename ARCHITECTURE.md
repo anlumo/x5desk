@@ -48,6 +48,9 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   view re-acquires the same frame each redraw and releases it when it moves on. `release(f)` frees `f` and every
   earlier frame of that ring (one timeline value), so holders release in frame order. There is no flush call: a
   decoder that finds its slot blocked by a release still staged sends it with an empty submit itself.
+- H.264 input may miss whole access units (the live preview drops packets when the decode thread falls behind):
+  frame_num gaps infer non-existing frames (8.2.5.2) that stand in with the pushed-out picture, and an IDR always
+  recovers a full DPB. Loss shows as concealment until the next IDR, never as a refused stream.
 - Anything else that stages a semaphore signal on wgpu's queue (DMA-BUF export, encoder input) stages it only after
   the submit it covers, never before: a signal staged first can be taken by another thread's earlier submit.
 - Stitch sources are whole NV12 textures or rects in one (side by side: `.lrv` and live preview, lens 0 left; the
