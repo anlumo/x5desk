@@ -670,7 +670,7 @@ fn move_lost() {
     }
 }
 
-/// The history keeps in step with edit's log (no samples needed): a drag that ends where it started after an undo drops
+/// The history keeps in step with edit's log (no samples needed): a drag that ends where it started after an undo keeps
 /// edit's redo, and so the history's; a Shot Lab replacement that would fail halfway changes nothing (redo kept); no
 /// undo mid-drag; a view key dragged past another (egui input) stays in the drag and ends as one step.
 #[test]
@@ -703,16 +703,21 @@ fn sync() {
         (e.history(), e.pj.history(), a(&e)),
         ((3, 1), (2, 1), Some(1.0))
     );
-    // out to 3 and back to 1 in one drag: edit drops its redo and keeps no step
+    // out to 3 and back to 1 in one drag: no step, and the trim to 2 stays to redo
     e.begin();
     e.ed(|p| p.trim(0, 3.0, 10.0));
     e.ed(|p| p.trim(0, 1.0, 10.0));
     e.end();
     e.sync();
     state(&e, "drag out and back");
-    assert_eq!((e.history(), e.pj.history()), ((3, 0), (2, 0)));
+    assert_eq!((e.history(), e.pj.history()), ((3, 1), (2, 1)));
     e.redo();
-    assert_eq!((e.history(), a(&e)), ((3, 0), Some(1.0)), "nothing to redo");
+    assert_eq!(
+        (e.history(), a(&e)),
+        ((4, 0), Some(2.0)),
+        "the trim to 2 redone"
+    );
+    e.undo();
     // back in order: the extras step, the trim, the insert
     e.undo();
     state(&e, "undo");
@@ -722,14 +727,14 @@ fn sync() {
     assert_eq!(a(&e), Some(0.0));
     e.undo();
     state(&e, "undo");
-    assert_eq!((a(&e), e.history(), e.pj.history()), (None, (0, 3), (0, 2)));
+    assert_eq!((a(&e), e.history(), e.pj.history()), (None, (0, 4), (0, 3)));
     for _ in 0..3 {
         e.redo();
     }
     state(&e, "redone");
     assert_eq!(
         (a(&e), e.x.denoise, e.history()),
-        (Some(1.0), Some(0.5), (3, 0))
+        (Some(1.0), Some(0.5), (3, 1))
     );
     // a replacement whose second clip is bad: nothing changes, the steps undone stay to redo (edit's trim first)
     e.undo();
@@ -742,12 +747,12 @@ fn sync() {
     assert!(e.err.is_some());
     assert_eq!(
         (e.pj.tl().clips.len(), a(&e), e.history(), e.pj.history()),
-        (1, Some(0.0), (1, 2), (1, 1))
+        (1, Some(0.0), (1, 3), (1, 2))
     );
     e.redo();
     assert_eq!((e.pj.tl().clips.len(), a(&e)), (1, Some(1.0)));
     e.redo();
-    assert_eq!((e.x.denoise, e.history()), (Some(0.5), (3, 0)));
+    assert_eq!((e.x.denoise, e.history()), (Some(0.5), (3, 1)));
     e.shot(0, Ok(vec![Clip::new(f, 0.0, 5.0), Clip::new(f, 5.0, 9.0)]));
     e.sync();
     assert_eq!(

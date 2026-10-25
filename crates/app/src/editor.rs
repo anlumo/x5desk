@@ -186,8 +186,8 @@ pub struct Editor {
     /// the project as last saved or loaded
     saved: String,
     /// undo history: steps done, steps undone; edit's undo and redo depths as last seen, the extras as of its last
-    /// step. Edit's log moves only through `flip` (both depths follow) or a change, which grows its undo or drops its
-    /// redo: a drag that ends where it started drops the redo and leaves no step.
+    /// step. Edit's log moves only through `flip` (both depths follow) or a change, which grows its undo and drops its
+    /// redo: a drag that ends where it started leaves both as they were.
     hist: Vec<Step>,
     fut: Vec<Step>,
     eh: (usize, usize),
@@ -529,7 +529,7 @@ impl Editor {
             return;
         }
         let (u, r) = self.pj.history();
-        if u > self.eh.0 || r < self.eh.1 {
+        if u > self.eh.0 {
             self.fut.clear();
         }
         self.hist.extend((self.eh.0..u).map(|_| Step::Ed));
