@@ -20,6 +20,25 @@ pub(crate) fn samples() -> Option<PathBuf> {
     d
 }
 
+/// A progress note goes once its steps end, also when one fails (the warm-up's note stayed up after a failure).
+#[test]
+fn steps_note() {
+    let m = Models {
+        ai: Mutex::new(None),
+        note: Mutex::new(String::new()),
+    };
+    let mut seen = vec![];
+    let r = m.steps("Warming", 3, None, |i| {
+        seen.push(m.note());
+        match i {
+            1 => Err("out of memory".into()),
+            _ => Ok(()),
+        }
+    });
+    assert_eq!(seen, ["Warming: 1 of 3", "Warming: 2 of 3"]);
+    assert_eq!((r, m.note()), (Err("out of memory".into()), String::new()));
+}
+
 /// Waits for a job to end (at most `secs`).
 pub(crate) fn wait(st: impl Fn() -> St, secs: u64) -> St {
     let t = Instant::now();

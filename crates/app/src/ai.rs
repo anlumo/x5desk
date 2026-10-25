@@ -67,6 +67,22 @@ impl Models {
         }
     }
 
+    /// `n` steps with the progress note `<what>: <i> of <n>`, cleared however they end.
+    fn steps(
+        &self,
+        what: &str,
+        n: usize,
+        ctx: Option<&egui::Context>,
+        mut f: impl FnMut(usize) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let r = (0..n).try_for_each(|i| {
+            self.say(&format!("{what}: {} of {n}", i + 1), ctx);
+            f(i)
+        });
+        self.say("", ctx);
+        r
+    }
+
     /// Runs `f` with the models on this thread, loaded on the run's first use (through `stitch::attach`: main.rs
     /// attached first) and, with `warm`, warmed up first: the tracker, the detector at every batch size and re-ID
     /// compiled and tuned on a black panorama, a network run at a time under `BURN`, with a progress note (seconds
@@ -111,11 +127,7 @@ impl Models {
                 [(Vec3::NEG_X, Vec2::new(10.0, 20.0)); REID],
             );
             let n = 1 + tiles.len() + REID;
-            for i in 0..n {
-                self.say(
-                    &format!("Warming up the AI models (first use): {} of {n}", i + 1),
-                    ctx,
-                );
+            self.steps("Warming up the AI models (first use)", n, ctx, |i| {
                 let _b = BURN.lock();
                 match i {
                     0 => {
@@ -129,8 +141,8 @@ impl Models {
                     _ if i <= tiles.len() => drop(ai.detect(&p, &tiles[..i], 1.0)),
                     _ => drop(ai.embed(&p, &b[..i - tiles.len()])),
                 }
-            }
-            self.say("", ctx);
+                Ok(())
+            })?;
             *warmed = true;
         }
         f(ai)
