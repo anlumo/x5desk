@@ -992,6 +992,17 @@ fn card_album() {
         st.secs * 1e3
     );
     assert_eq!((got, none), if s.is_some() { (1, 1) } else { (0, 2) });
+    // the camera on the bus in a mode other than app mode, its own disk shown: the bar says so
+    w.tx.send(Cmd::Plug(Plug::Other)).unwrap();
+    let i = wait(&w, 5.0, |u| match u {
+        Up::Info(i) if i.plug == Some(Plug::Other) => Some(i),
+        _ => None,
+    });
+    assert_eq!(
+        status(&i),
+        "Camera in U-disk mode: the Album shows its card; choose Android App on its USB menu for the full features \
+         (settings, capture, live preview)"
+    );
 
     // import the proxy and the photo, no camera connected
     let dest = d.join("lib");
@@ -1028,6 +1039,10 @@ fn card_album() {
         _ => None,
     });
     assert!(i.disk.is_empty());
+    assert_eq!(
+        status(&i),
+        "Insta360 camera in another USB mode: choose Android App on its USB menu"
+    );
     assert!(album(&w).is_empty());
     drop(w);
     std::fs::remove_dir_all(&d).unwrap();

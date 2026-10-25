@@ -1047,6 +1047,32 @@ pub struct Cam {
     pub import: bool,
 }
 
+/// The bar's camera state. A camera in another USB mode whose own disk is mounted is the X5 in U-disk mode (Webcam
+/// Mode has no disk).
+fn status(i: &Info) -> String {
+    match (i.conn, i.plug, &i.id) {
+        (Conn::On, _, Some(id)) => format!("{} · firmware {}", id.model, id.firmware),
+        (Conn::Connecting, ..) => match i.since.map_or(0, |t| t.elapsed().as_secs()) {
+            s @ 3.. => format!("Connecting… no answer for {s} s (gives up at 30 s)"),
+            _ => "Connecting…".into(),
+        },
+        (_, Some(Plug::App), _) => "X5 found".into(),
+        (_, Some(Plug::Other), _) => {
+            let app = "choose Android App on its USB menu for the full features (settings, capture, live preview)";
+            match i.disk.iter().find(|v| v.cam.is_some()) {
+                Some(v) if i.src.as_ref() == Some(&v.root) => {
+                    format!("Camera in U-disk mode: the Album shows its card; {app}")
+                }
+                Some(_) => format!("Camera in U-disk mode: pick its card in the Album; {app}"),
+                None => {
+                    "Insta360 camera in another USB mode: choose Android App on its USB menu".into()
+                }
+            }
+        }
+        _ => "No camera: connect the X5 by USB in app mode".into(),
+    }
+}
+
 impl Cam {
     /// `usb`: follow the bus and connect (off for test-hook runs of other screens); `dls`: camera URIs to queue
     /// (test hook); `sim`: connect to this (a simulated camera) at once instead. `p`: the client id and the
@@ -1371,19 +1397,7 @@ impl Cam {
         let i = &self.info;
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
-            let st = match (i.conn, i.plug, &i.id) {
-                (Conn::On, _, Some(id)) => format!("{} · firmware {}", id.model, id.firmware),
-                (Conn::Connecting, ..) => match i.since.map_or(0, |t| t.elapsed().as_secs()) {
-                    s @ 3.. => format!("Connecting… no answer for {s} s (gives up at 30 s)"),
-                    _ => "Connecting…".into(),
-                },
-                (_, Some(Plug::App), _) => "X5 found".into(),
-                (_, Some(Plug::Other), _) => {
-                    "Insta360 camera in another USB mode: choose Android App on its USB menu".into()
-                }
-                _ => "No camera: connect the X5 by USB in app mode".into(),
-            };
-            ui.strong(st);
+            ui.strong(status(i));
             let on = i.conn == Conn::On;
             if i.conn == Conn::Connecting {
                 ui.ctx().request_repaint_after(Duration::from_secs(1));
