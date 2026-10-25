@@ -208,7 +208,10 @@ const MODELS: [Model; 8] = [
         "seam flow (stitch)",
         "BSD-3-Clause",
         "torchvision weights Raft_Small_Weights.C_T_V2, exported to ONNX; Copyright (c) Soumith Chintala 2016",
-        "",
+        "⚠ Trained on FlyingChairs and FlyingThings3D, synthetic datasets the University of Freiburg provides for \
+         research only (\"Any commercial use is prohibited\"); the weights are published under BSD-3-Clause by \
+         torchvision, which notes that pre-trained weights may carry their training data's terms. Check the datasets' \
+         terms before any commercial use.",
         include_str!("../../stitch/models/LICENSE-torchvision"),
     ),
     Model(
@@ -224,7 +227,10 @@ const MODELS: [Model; 8] = [
         "single-subject tracking (track)",
         "Apache-2.0",
         "OpenCV model zoo, object_tracking_vittrack_2023sep (Pengyu Liu, GSoC 2023)",
-        "",
+        "⚠ The zoo does not name its training data; its contributor's training configuration trains on LaSOT, \
+         GOT-10k, COCO 2017 and TrackingNet, and GOT-10k is released under CC BY-NC-SA 4.0 (research use; commercial \
+         use only by arrangement with its authors). The weights are published under Apache-2.0. Check the datasets' \
+         terms before any commercial use.",
         include_str!("../../track/models/LICENSE-vittrack"),
     ),
     Model(
@@ -241,7 +247,8 @@ const MODELS: [Model; 8] = [
         "face detection for the privacy blur (track)",
         "MIT",
         "OpenCV model zoo, face_detection_yunet_2023mar; Copyright (c) 2020 Shiqi Yu",
-        "",
+        "⚠ Trained on WIDER FACE, released under CC BY-NC-ND (non-commercial); the weights are published under MIT \
+         by their authors. Check the dataset's terms before any commercial use.",
         include_str!("../../track/models/LICENSE-yunet"),
     ),
     Model(
