@@ -104,13 +104,20 @@ fn clock(e: Instant) -> u64 {
 
 /// Streams the recording until `stop`, each packet stamped on the camera clock and sent at the recorded time of the
 /// odd one of its pair: the X5 holds every other frame back for the next (half its packet intervals under 17 ms,
-/// measured 2026-10-25). The IMU in packets of 40 samples, each sent once its last sample is due. Packets stamped 0
-/// (right after a boot) go out at once, in the first round only.
+/// measured 2026-10-25). The IMU in packets of 40 samples, each sent once its last sample is due. The packets stamped
+/// 0 that lead a recording (right after a boot, its first IDR among them) go out at once and stamped 0 in the first
+/// round, and a frame apart before the round's first stamped packet in the later ones: every round starts on that IDR.
 fn stream(r: Arc<Replay>, s: Sim, e: Instant, stop: Arc<AtomicBool>) {
     let rec = &r.rec;
     let (c0, t0) = (clock(e), Instant::now());
     let first = rec.aus.iter().map(|a| a.0).find(|&t| t > 0).unwrap_or(0);
-    let lap = rec.span() + 33;
+    let z = rec.aus.iter().take_while(|a| a.0 == 0).count();
+    // the recorded time of packet j, a leading one stamped 0 counted a frame apart before the first stamped one
+    let rt = |j: usize| match rec.aus[j].0 {
+        0 => first.saturating_sub(33 * z.saturating_sub(j) as u64),
+        t => t,
+    };
+    let lap = rec.span() + 33 * (z as u64 + 1);
     let imu = rec.imu.as_chunks::<{ 56 * 40 }>().0;
     let its = |c: &[u8]| i64::from_le_bytes(c[c.len() - 56..][..8].try_into().unwrap()) as u64;
     let note = pb::LiveStreamParamsUpdate {
@@ -130,14 +137,17 @@ fn stream(r: Arc<Replay>, s: Sim, e: Instant, stop: Arc<AtomicBool>) {
     s.note(8234, &note.encode_to_vec());
     for k in 0u64.. {
         let (mut gi, sh) = (0, k * lap);
-        for (j, (t, b)) in rec.aus.iter().enumerate() {
-            if *t == 0 && k > 0 {
-                continue;
-            }
-            let rel = if *t == 0 { 0 } else { t - first + sh };
-            let send = rec.aus.get(j | 1).map_or(rel, |a| a.0.max(*t) - first + sh);
-            if let Some(d) = (t0 + Duration::from_millis(if *t == 0 { 0 } else { send }))
-                .checked_duration_since(Instant::now())
+        // ms after t0 of packet j (lap ≥ 33 (z + 1) keeps it from going negative); None: at once, stamped 0
+        let at = |j: usize| {
+            (rec.aus.get(j))
+                .filter(|a| k > 0 || a.0 > 0)
+                .map(|_| rt(j) + sh - first)
+        };
+        for (j, (_, b)) in rec.aus.iter().enumerate() {
+            let rel = at(j);
+            let send = rel.map_or(0, |r| at(j | 1).map_or(r, |o| o.max(r)));
+            if let Some(d) =
+                (t0 + Duration::from_millis(send)).checked_duration_since(Instant::now())
             {
                 thread::sleep(d);
             }
@@ -145,7 +155,7 @@ fn stream(r: Arc<Replay>, s: Sim, e: Instant, stop: Arc<AtomicBool>) {
                 return;
             }
             // the IMU due by this frame, its stamps moved onto the camera clock as the frame's
-            while gi < imu.len() && its(&imu[gi]) <= (*t).max(first) {
+            while gi < imu.len() && its(&imu[gi]) <= rel.map_or(first, |_| rt(j)) {
                 let mut b = imu[gi];
                 for c in b.as_chunks_mut::<56>().0 {
                     let x = i64::from_le_bytes(c[..8].try_into().unwrap()) as u64;
@@ -156,7 +166,7 @@ fn stream(r: Arc<Replay>, s: Sim, e: Instant, stop: Arc<AtomicBool>) {
                 s.frame(stream::GYRO, 0, &b);
                 gi += 1;
             }
-            let ts = if *t == 0 { 0 } else { c0 + rel };
+            let ts = rel.map_or(0, |r| c0 + r);
             s.frame(stream::VIDEO, ts, &rec.es[b.clone()]);
         }
     }
@@ -272,4 +282,46 @@ pub fn connect(r: Arc<Replay>) -> Connect {
             Err(e) => Err(e).into(),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A recording that starts with packets stamped 0 (after a boot: its first IDR and the frames after it) loops onto
+    /// that IDR: every round sends every packet in order, the first round those stamped 0 at once and stamped 0, the
+    /// later rounds a frame apart before the round's first stamped packet, the stamps rising.
+    #[test]
+    fn rounds() {
+        let ts = [0, 0, 0, 1000, 1033, 1066];
+        let rec = Rec {
+            aus: (ts.iter().enumerate())
+                .map(|(j, &t)| (t, j..j + 1))
+                .collect(),
+            es: (0..ts.len() as u8).collect(),
+            imu: vec![],
+        };
+        let r = Replay {
+            rec,
+            cal: String::new(),
+            crop: (0, [0; 2]),
+            conf: None,
+            log: Mutex::new(vec![]),
+            battery: 80,
+        };
+        let (c, ev) = connect(Arc::new(r))().wait().unwrap();
+        c.live_start().wait().unwrap();
+        let mut got = vec![];
+        while got.len() < 3 * ts.len() {
+            match ev.recv_timeout(Duration::from_secs(5)) {
+                Ok(link::Event::Frame(f)) if f.kind == stream::VIDEO => got.push((f.data[0], f.ts)),
+                Ok(_) => {}
+                Err(e) => panic!("{e}: {got:?}"),
+            }
+        }
+        let ids: Vec<u8> = got.iter().map(|g| g.0).collect();
+        assert_eq!(ids, [[0, 1, 2, 3, 4, 5]; 3].concat(), "{got:?}");
+        assert!(got[..3].iter().all(|g| g.1 == 0), "{got:?}");
+        assert!(got[3..].windows(2).all(|w| w[1].1 > w[0].1), "{got:?}");
+    }
 }
