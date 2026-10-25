@@ -2,6 +2,7 @@
 name = "app"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "x5desk"
@@ -9,12 +10,22 @@ path = "src/main.rs"
 
 [dependencies]
 proto.workspace = true
-link.workspace = true
+# `sim`: the simulated camera that replays a recorded live preview (the `replay=` hook, the capture tests)
+link = { workspace = true, features = ["sim"] }
+prost.workspace = true
 media.workspace = true
 video.workspace = true
 stitch.workspace = true
 stab = { path = "../stab" }
 live.workspace = true
+# the Export screen: render jobs, effects, the face privacy blur; the faces are found on frames of a clip that
+# shotlab's `Clip` decodes and stitches; a job is a one-clip editor timeline
+export.workspace = true
+fx.workspace = true
+track.workspace = true
+edit.workspace = true
+shotlab = { path = "../shotlab" }
+bytemuck.workspace = true
 glam.workspace = true
 eframe.workspace = true
 # egui 0.37 keeps the symbol fonts (★ ☆ ✔ in the camera screen) behind this feature
@@ -23,9 +34,13 @@ wgpu.workspace = true
 pollster.workspace = true
 rfd.workspace = true
 libc.workspace = true
+# the editor's preview mix plays on its own output stream (already in the tree through media)
+cpal.workspace = true
+# the Wireless pane; `sim`: the simulated adapter of the `ble=sim` hook and the pane's tests
+ble = { workspace = true, features = ["sim"] }
+# the Settings screen names the video queues' codec operations
+ash.workspace = true
 
 [dev-dependencies]
-link = { workspace = true, features = ["sim"] }
-prost.workspace = true
 # Already in the tree through eframe: the UI test runs its event loop off the main thread.
 winit = { version = "0.30", default-features = false }

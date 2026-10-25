@@ -1,0 +1,439 @@
+//! Settings screen and the app's preferences, `key=value` lines in `<config>/x5desk/settings`: the default export
+//! preset, the audio output, the thumbnail cache's limit, and this installation's client id (the camera remembers it
+//! once its user allows the connection, over Bluetooth and Wi-Fi). The download folder and auto-connect stay in the
+//! camera screen's own file (`camera`); this page edits them through it. The UI is plain English, dates read
+//! YYYY-MM-DD, sizes in decimal units.
+
+use crate::{album, camera::Cam, export};
+use cpal::traits::{DeviceTrait, HostTrait};
+use eframe::egui;
+use std::{
+    fs::File,
+    io::Read,
+    path::PathBuf,
+    sync::{
+        Mutex,
+        mpsc::{self, Receiver},
+    },
+    thread,
+};
+use video::Gpu;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Prefs {
+    /// export preset key (`export::PRESETS`)
+    pub preset: Option<String>,
+    /// cpal output device id; None: the system default
+    pub audio: Option<String>,
+    /// thumbnail cache limit, bytes
+    pub cache: u64,
+    pub id: String,
+    file: Option<PathBuf>,
+}
+
+/// The output the editor's preview plays on ([`output`]): [`Prefs::audio`], set by the Settings screen.
+static AUDIO: Mutex<Option<String>> = Mutex::new(None);
+
+/// The output device the user picked, else the system default.
+pub fn output() -> Option<cpal::Device> {
+    dev(AUDIO.lock().unwrap().clone())
+}
+
+/// The output device with this id (as [`Prefs::audio`] keeps it), else the system default.
+fn dev(id: Option<String>) -> Option<cpal::Device> {
+    let h = cpal::default_host();
+    id.and_then(|s| h.device_by_id(&s.parse().ok()?))
+        .or_else(|| h.default_output_device())
+}
+
+/// A random (version 4) UUID.
+fn uuid() -> String {
+    let mut b = [0u8; 16];
+    if let Err(e) = File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)) {
+        eprintln!("x5desk: /dev/urandom: {e}");
+    }
+    (b[6], b[8]) = (b[6] & 0x0f | 0x40, b[8] & 0x3f | 0x80);
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
+}
+
+impl Prefs {
+    /// `None`: nothing persists (test hooks); a missing id is made and saved.
+    pub fn load(file: Option<PathBuf>) -> Prefs {
+        let mut p = Prefs {
+            preset: None,
+            audio: None,
+            cache: album::CAP,
+            id: String::new(),
+            file,
+        };
+        let t = p
+            .file
+            .as_ref()
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .unwrap_or_default();
+        for l in t.lines() {
+            match l.split_once('=') {
+                Some(("preset", v)) => p.preset = Some(v.into()),
+                Some(("audio", v)) => p.audio = Some(v.into()),
+                Some(("cache", v)) => p.cache = v.parse().unwrap_or(p.cache),
+                Some(("id", v)) => p.id = v.into(),
+                _ => {}
+            }
+        }
+        if p.id.is_empty() {
+            p.id = uuid();
+            p.save();
+        }
+        p
+    }
+
+    pub fn save(&self) {
+        let Some(f) = &self.file else { return };
+        let mut s = String::new();
+        for (k, v) in [
+            ("preset", self.preset.clone()),
+            ("audio", self.audio.clone()),
+            ("cache", Some(self.cache.to_string())),
+            ("id", Some(self.id.clone())),
+        ] {
+            if let Some(v) = v {
+                s += &format!("{k}={v}\n");
+            }
+        }
+        let t = f.with_extension("new");
+        let r = f
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|_| std::fs::write(&t, s))
+            .and_then(|_| std::fs::rename(&t, f));
+        if let Err(e) = r {
+            eprintln!("{}: {e}", f.display());
+        }
+    }
+
+    /// The default preset's index.
+    pub fn preset(&self) -> Option<usize> {
+        let k = self.preset.as_deref()?;
+        export::PRESETS.iter().position(|p| p.0 == k)
+    }
+}
+
+/// Cache limits offered, MB.
+const CAPS: [u64; 5] = [250, 500, 1000, 2000, 5000];
+
+fn mb(b: u64) -> String {
+    match b {
+        0..1_000_000_000 => format!("{:.1} MB", b as f64 / 1e6),
+        _ => format!("{:.2} GB", b as f64 / 1e9),
+    }
+}
+
+pub struct Settings {
+    pub p: Prefs,
+    /// the shared device: name and value per row
+    gpu: Vec<(&'static str, String)>,
+    cache: album::Cache,
+    /// the thumbnail cache's files and bytes, measured when the page opens
+    usage: Option<(usize, u64)>,
+    /// output devices (id, name), listed on a thread when the page first opens: ALSA takes a while
+    outs: Vec<(String, String)>,
+    listing: Option<Receiver<Vec<(String, String)>>>,
+    listed: bool,
+    shown: u64,
+}
+
+/// Codec operations of a video queue, as text.
+fn ops(f: ash::vk::VideoCodecOperationFlagsKHR) -> String {
+    use ash::vk::VideoCodecOperationFlagsKHR as V;
+    let v: Vec<&str> = [
+        (V::DECODE_H264, "H.264"),
+        (V::DECODE_H265, "H.265"),
+        (V::ENCODE_H264, "H.264"),
+        (V::ENCODE_H265, "H.265"),
+    ]
+    .iter()
+    .filter(|x| f.contains(x.0))
+    .map(|x| x.1)
+    .collect();
+    if v.is_empty() {
+        "none".into()
+    } else {
+        v.join(", ")
+    }
+}
+
+impl Settings {
+    pub fn new(g: &Gpu, p: Prefs) -> Settings {
+        let i = g.adapter.get_info();
+        let gpu = vec![
+            ("Adapter", i.name.clone()),
+            (
+                "Type",
+                format!(
+                    "{:?} ({:04x}:{:04x}), {:?}",
+                    i.device_type, i.vendor, i.device, i.backend
+                ),
+            ),
+            ("Driver", format!("{} {}", i.driver, i.driver_info)),
+            ("Video decode", ops(g.dec.ops)),
+            (
+                "Video encode",
+                g.enc.as_ref().map_or("none".into(), |q| ops(q.ops)),
+            ),
+            (
+                "DMA-BUF export",
+                match g.mem_fd.is_some() {
+                    true => "yes (OBS, PipeWire camera)".into(),
+                    false => "no".into(),
+                },
+            ),
+        ];
+        let mut cache = album::Cache::new();
+        cache.cap = p.cache;
+        AUDIO.lock().unwrap().clone_from(&p.audio);
+        Settings {
+            p,
+            gpu,
+            cache,
+            usage: None,
+            outs: vec![],
+            listing: None,
+            listed: false,
+            shown: 0,
+        }
+    }
+
+    /// `frame`: the UI frame number (a page shown again after a gap is measured again).
+    pub fn ui(&mut self, ui: &mut egui::Ui, frame: u64, cam: &mut Cam, exp: &mut export::Exp) {
+        if self.shown + 1 != frame {
+            self.usage = Some(self.cache.usage());
+        }
+        self.shown = frame;
+        if !self.listed {
+            self.listed = true;
+            let (tx, rx) = mpsc::channel();
+            let c = ui.ctx().clone();
+            thread::spawn(move || {
+                let v = cpal::default_host()
+                    .output_devices()
+                    .map(|d| {
+                        d.filter_map(|d| {
+                            let n = d.description().ok()?.name().to_string();
+                            Some((d.id().ok()?.to_string(), n))
+                        })
+                        .collect()
+                    })
+                    .unwrap_or_default();
+                let _ = tx.send(v);
+                c.request_repaint();
+            });
+            self.listing = Some(rx);
+        }
+        if let Some(v) = self.listing.as_ref().and_then(|r| r.try_recv().ok()) {
+            (self.outs, self.listing) = (v, None);
+        }
+        let grid = |ui: &mut egui::Ui, id: &str, f: &mut dyn FnMut(&mut egui::Ui)| {
+            egui::Grid::new(id)
+                .num_columns(2)
+                .spacing([24.0, 8.0])
+                .min_col_width(160.0)
+                .show(ui, |ui| f(ui));
+        };
+        let weak = ui.visuals().weak_text_color();
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            ui.heading("General");
+            grid(ui, "set general", &mut |ui| {
+                ui.label("Language");
+                ui.label("English. Dates read year-month-day, sizes are in decimal units (1 MB = 1 000 000 bytes).");
+                ui.end_row();
+                ui.label("Download folder");
+                ui.horizontal_wrapped(|ui| {
+                    ui.monospace(cam.dest().display().to_string());
+                    if ui.button("Change…").clicked() {
+                        cam.pick_dest();
+                    }
+                });
+                ui.end_row();
+                ui.label("");
+                ui.colored_label(
+                    weak,
+                    "Camera downloads and card imports go here; the Library lists the recordings in it.",
+                );
+                ui.end_row();
+                ui.label("Default export preset");
+                let cur = self.p.preset();
+                egui::ComboBox::from_id_salt("set preset")
+                    .selected_text(export::PRESETS[cur.unwrap_or(0)].1)
+                    .width(260.0)
+                    .show_ui(ui, |ui| {
+                        for (i, x) in export::PRESETS.iter().enumerate() {
+                            if ui.selectable_label(cur.unwrap_or(0) == i, x.1).clicked() {
+                                self.p.preset = Some(x.0.into());
+                                self.p.save();
+                                // settings that still are a preset's follow; changed ones stay
+                                if exp.set.preset.is_some() {
+                                    exp.set.apply(i)
+                                }
+                            }
+                        }
+                    });
+                ui.end_row();
+            });
+            ui.add_space(12.0);
+            ui.heading("Audio");
+            grid(ui, "set audio", &mut |ui| {
+                ui.label("Output");
+                let name = |id: &Option<String>| match id {
+                    None => "System default".to_string(),
+                    Some(i) => (self.outs.iter().find(|o| o.0 == *i)).map_or(i.clone(), |o| o.1.clone()),
+                };
+                let mut pick = None;
+                egui::ComboBox::from_id_salt("set audio out")
+                    .selected_text(name(&self.p.audio))
+                    .width(320.0)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(self.p.audio.is_none(), "System default").clicked() {
+                            pick = Some(None);
+                        }
+                        for (i, n) in &self.outs {
+                            if ui.selectable_label(self.p.audio.as_ref() == Some(i), n).on_hover_text(i).clicked() {
+                                pick = Some(Some(i.clone()));
+                            }
+                        }
+                        if self.listing.is_some() {
+                            ui.label("Listing devices…");
+                        }
+                    });
+                if let Some(a) = pick {
+                    AUDIO.lock().unwrap().clone_from(&a);
+                    self.p.audio = a;
+                    self.p.save();
+                }
+                ui.end_row();
+                ui.label("");
+                ui.colored_label(
+                    weak,
+                    "The editor's preview plays here from its next start. The player and the live outputs use the \
+                     system default.",
+                );
+                ui.end_row();
+            });
+            ui.add_space(12.0);
+            ui.heading("Thumbnail cache");
+            grid(ui, "set cache", &mut |ui| {
+                ui.label("In use");
+                ui.horizontal(|ui| {
+                    match self.usage {
+                        Some((n, b)) => ui.label(format!("{n} thumbnails, {}", mb(b))),
+                        None => ui.label("no cache folder"),
+                    };
+                    if ui.button("Clear").on_hover_text("Thumbnails come from the camera again").clicked() {
+                        self.cache.trim(0);
+                        self.usage = Some(self.cache.usage());
+                    }
+                });
+                ui.end_row();
+                ui.label("Limit");
+                let mut c = self.p.cache;
+                egui::ComboBox::from_id_salt("set cache cap")
+                    .selected_text(mb(c))
+                    .show_ui(ui, |ui| {
+                        for m in CAPS {
+                            ui.selectable_value(&mut c, m * 1_000_000, mb(m * 1_000_000));
+                        }
+                        // the limit of an older version, or one set by hand
+                        if !CAPS.contains(&(self.p.cache / 1_000_000)) {
+                            ui.selectable_value(&mut c, self.p.cache, mb(self.p.cache));
+                        }
+                    });
+                if c != self.p.cache {
+                    (self.p.cache, self.cache.cap) = (c, c);
+                    self.p.save();
+                    // the least recently used go first
+                    self.cache.trim(c);
+                    self.usage = Some(self.cache.usage());
+                }
+                ui.end_row();
+                ui.label("Folder");
+                ui.monospace(self.cache.dir().map_or("none".into(), |d| d.display().to_string()));
+                ui.end_row();
+            });
+            ui.add_space(12.0);
+            ui.heading("Graphics");
+            grid(ui, "set gpu", &mut |ui| {
+                for (k, v) in &self.gpu {
+                    ui.label(*k);
+                    ui.label(v);
+                    ui.end_row();
+                }
+            });
+            ui.add_space(12.0);
+            ui.heading("Camera link");
+            grid(ui, "set id", &mut |ui| {
+                ui.label("Client id");
+                ui.monospace(&self.p.id);
+                ui.end_row();
+                ui.label("");
+                ui.colored_label(
+                    weak,
+                    "The camera remembers this computer by it once you allow the connection on the camera.",
+                );
+                ui.end_row();
+            });
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Saved and read back; a new file gets an id of its own, kept across loads; unknown lines are skipped.
+    #[test]
+    fn persist() {
+        let d = std::env::var_os("X5_FIXTURES")
+            .map_or_else(std::env::temp_dir, PathBuf::from)
+            .join(format!("x5desk-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let f = d.join("settings");
+        let mut p = Prefs::load(Some(f.clone()));
+        assert_eq!(
+            (p.preset(), p.audio.as_ref(), p.cache),
+            (None, None, album::CAP)
+        );
+        let id = p.id.clone();
+        assert!(id.len() == 36 && id.as_bytes()[14] == b'4', "{id}");
+        assert_ne!(id, Prefs::load(None).id);
+        (p.preset, p.audio, p.cache) = (
+            Some("flat1080".into()),
+            Some("alsa:pipewire".into()),
+            500_000_000,
+        );
+        p.save();
+        std::fs::write(&f, std::fs::read_to_string(&f).unwrap() + "colour=blue\n").unwrap();
+        let q = Prefs::load(Some(f.clone()));
+        assert_eq!(q, p);
+        assert_eq!(q.preset(), Some(4));
+        // an id as the page stores it finds its device again; an unknown one falls back to the default
+        let h = cpal::default_host();
+        let id = |d: Option<cpal::Device>| Some(d?.id().ok()?.to_string());
+        let outs: Vec<String> = (h.output_devices().into_iter().flatten())
+            .filter_map(|d| id(Some(d)))
+            .collect();
+        println!("{} output devices, e.g. {:?}", outs.len(), outs.first());
+        if let Some(i) = outs.last() {
+            assert_eq!(id(dev(Some(i.clone()))).as_ref(), Some(i));
+        }
+        let def = id(h.default_output_device());
+        assert_eq!(id(dev(Some("alsa:no such device".into()))), def);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+}

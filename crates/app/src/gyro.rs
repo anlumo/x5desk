@@ -241,23 +241,28 @@ impl Stab {
             .is_none_or(|k| self.err.is_some() || self.have.as_ref().is_some_and(|h| h.0 == k))
     }
 
+    /// The posed video's frame nearest to the instant of time `t` of a video of this clip whose first frame is at
+    /// `t0` (s) and camera time `ff` (µs).
+    pub fn frame(&self, t: f64, t0: f64, ff: u64) -> usize {
+        let (x, ts) = (
+            t - t0 + (ff as f64 - self.ff as f64) * 1e-6 + self.times[0],
+            &self.times,
+        );
+        let i = ts.partition_point(|&s| s < x).min(ts.len() - 1);
+        if i > 0 && x - ts[i - 1] < ts[i] - x {
+            i - 1
+        } else {
+            i
+        }
+    }
+
     /// The stitch pose of the frame at time `t` of a video of this clip whose first frame is at `t0` (s) and camera
     /// time `ff` (µs): the posed video's frame nearest to the same instant.
     pub fn pose(&self, t: f64, t0: f64, ff: u64) -> stitch::Pose {
         let Some((_, p)) = self.have.as_ref().filter(|_| self.mode.is_some()) else {
             return self.fr;
         };
-        let (x, ts) = (
-            t - t0 + (ff as f64 - self.ff as f64) * 1e-6 + self.times[0],
-            &self.times,
-        );
-        let i = ts.partition_point(|&s| s < x).min(ts.len() - 1);
-        let k = if i > 0 && x - ts[i - 1] < ts[i] - x {
-            i - 1
-        } else {
-            i
-        };
-        let p = p[k.min(p.len() - 1)];
+        let p = p[self.frame(t, t0, ff).min(p.len() - 1)];
         stitch::Pose {
             q: p.q * self.fr.q,
             rs: [p.rs; 2],

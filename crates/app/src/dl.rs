@@ -1,12 +1,16 @@
 //! Downloads: a persistent queue of camera files, run one at a time over four tunnel connections (one connection
 //! is camera-limited to ~18 MB/s, four reach 29–42 MB/s, PLAN.md §1). Data goes to `<dst>.part` with link's sidecar,
-//! so a cancelled or interrupted file resumes where it stopped, also after a restart. The queue is a text file in
-//! the config dir: state, URI, failure reason and destination per line.
+//! so a cancelled or interrupted file resumes where it stopped, also after a restart. Imports from a mounted card
+//! (`file://` sources) run in the same queue as local copies ([`disk::copy`], also resumable), with or without a
+//! camera; one whose card is gone waits for it. The queue is a text file in the config dir: state, URI, failure reason
+//! and destination per line.
 
-use link::{Camera, Error, Pending, Prog};
+use crate::disk;
+use link::{Camera, Download, Error, Pending, Prog};
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, atomic::Ordering::Relaxed},
+    sync::{Arc, Mutex, atomic::Ordering::Relaxed, mpsc},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -52,6 +56,22 @@ pub struct Queue {
 }
 
 pub type Shared = Arc<Mutex<Queue>>;
+
+/// The file of an import from a mounted card (`file://<path>`), None for a camera URI.
+pub fn local(uri: &str) -> Option<&Path> {
+    uri.strip_prefix("file://").map(Path::new)
+}
+
+/// A local copy on a thread of its own, as a download.
+fn import(src: &Path, dst: &Path) -> Download {
+    let (prog, (tx, rx)) = (Arc::new(Prog::default()), mpsc::sync_channel(1));
+    let (p, s, d) = (prog.clone(), src.to_path_buf(), dst.to_path_buf());
+    thread::spawn(move || drop(tx.send(disk::copy(&s, &d, &p))));
+    Download {
+        prog,
+        done: rx.into(),
+    }
+}
 
 fn part(p: &Path, e: &str) -> PathBuf {
     let mut s = p.as_os_str().to_owned();
@@ -200,9 +220,11 @@ pub fn step(q: &Shared, cam: Option<&Camera>, cur: &mut Cur) -> Option<PathBuf> 
                 Err(Error::Cancelled) => {}
                 // the link went away: on with the next session
                 Err(Error::Closed | Error::NoDevice | Error::Timeout) => d.st = St::Queued,
+                // the card went away: on once it is back
+                Err(_) if local(&d.uri).is_some_and(|s| !s.exists()) => d.st = St::Queued,
                 // the partial data was dropped; a new run starts over
                 Err(Error::Changed) => {
-                    (d.st, d.err) = (St::Queued, "changed on the camera, restarted".into())
+                    (d.st, d.err) = (St::Queued, "changed at the source, restarted".into())
                 }
                 Err(e) => (d.st, d.err) = (St::Failed, e.to_string()),
             }
@@ -210,16 +232,22 @@ pub fn step(q: &Shared, cam: Option<&Camera>, cur: &mut Cur) -> Option<PathBuf> 
         *cur = None;
         g.save();
     }
+    // the next one that can run: an import whose card is there, a download while the camera is
     if cur.is_none()
-        && let Some(c) = cam
-        && let Some(d) = g.v.iter_mut().find(|d| d.st == St::Queued)
+        && let Some(d) =
+            g.v.iter_mut()
+                .find(|d| d.st == St::Queued && local(&d.uri).map_or(cam.is_some(), Path::exists))
     {
         if let Some(p) = d.dst.parent() {
             let _ = std::fs::create_dir_all(p);
         }
-        let dl = c.download(&d.uri, &d.dst, CONNS);
-        (d.prog, d.st, d.rate, d.mark) = (dl.prog, St::Running, 0.0, None);
-        *cur = Some((d.dst.clone(), dl.done));
+        if let Some(dl) = local(&d.uri)
+            .map(|s| import(s, &d.dst))
+            .or_else(|| cam.map(|c| c.download(&d.uri, &d.dst, CONNS)))
+        {
+            (d.prog, d.st, d.rate, d.mark) = (dl.prog, St::Running, 0.0, None);
+            *cur = Some((d.dst.clone(), dl.done));
+        }
     }
     let now = Instant::now();
     for d in g.v.iter_mut().filter(|d| d.st == St::Running) {

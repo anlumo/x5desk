@@ -1,10 +1,18 @@
 //! Camera screen: the X5 over USB. A worker thread owns the link: it follows USB hotplug, connects (automatically
-//! if wanted), reads identity, battery, storage, Wi-Fi and clock, lists the album, fetches thumbnails (disk cache
-//! first, the ones on screen first), runs the download queue and the camera commands, and follows the camera's
-//! notifications. The UI sends it commands and draws what it reports.
+//! if wanted; the sync runs on the link's thread and a disconnect or quit cancels it), reads identity, battery,
+//! storage, Wi-Fi and clock, lists the album, fetches thumbnails (disk cache first, the ones on screen first), runs
+//! the download queue and the camera commands, and follows the camera's notifications. The UI sends it commands and
+//! draws what it reports. The Capture screen shares the session through [`Tap`]: the handle, and the live-preview
+//! packets and notifications, which the events thread hands it directly.
+//!
+//! The album can show a mounted card instead (`disk`: the X5 in USB mass-storage mode, or its card in a reader): the
+//! worker watches the mount table, lists the card's DCIM with the same grouping, reads thumbnails from the trailers,
+//! and imports through the download queue. The Wireless pane is Bluetooth and Wi-Fi (`bt`); a camera that joined the
+//! user's network (station mode) connects here over Wi-Fi.
 
 use crate::{
     album::{self, Cache, Item, Kind, Sort, View},
+    bt, disk,
     dl::{self, St},
 };
 use eframe::egui;
@@ -12,7 +20,8 @@ use link::{Camera, Error, Event, Note, Plug, pb};
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
+    net::IpAddr,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering::Relaxed},
@@ -22,7 +31,22 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub type Connect = Box<dyn FnMut() -> link::Result<(Camera, Receiver<Event>)> + Send>;
+pub type Connect = Box<dyn FnMut() -> link::Opening + Send>;
+
+/// What the Capture screen takes from the session: the handle and its session number, and where the events thread
+/// hands the live-preview packets (a full channel drops them, counted) and copies of the notifications.
+#[derive(Default)]
+pub struct Tap {
+    pub cam: Option<Camera>,
+    pub sid: u32,
+    pub frames: Option<mpsc::SyncSender<link::Frame>>,
+    pub lost: u64,
+    pub notes: Option<NoteFn>,
+}
+
+pub type NoteFn = Box<dyn Fn(&Note) + Send>;
+
+pub type Taps = Arc<Mutex<Tap>>;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Conn {
@@ -47,8 +71,13 @@ pub struct Info {
     pub skew: Option<i64>,
     /// capturing: the files are off limits (PROTOCOL.md §7.12)
     pub busy: bool,
-    /// connection attempts that finished
+    /// connection attempts that finished; when the one running began
     pub tries: u32,
+    pub since: Option<Instant>,
+    /// mounted camera disks and cards
+    pub disk: Vec<disk::Vol>,
+    /// the album shows this card (its mount point) instead of the camera
+    pub src: Option<PathBuf>,
 }
 
 /// One album load: listing (files, file info, favourites) and thumbnails (from the camera, from the disk cache).
@@ -73,6 +102,12 @@ pub enum Cmd {
     Format,
     Time,
     Ev(u32, Event),
+    /// Watch for mounted cards.
+    Watch(disk::Watch),
+    /// The album's source: a mounted card, or the camera.
+    Source(Option<PathBuf>),
+    /// Connect over Wi-Fi to the camera at this address with this client id (station mode).
+    Wifi(IpAddr, String),
     Quit,
 }
 
@@ -100,6 +135,7 @@ impl Worker {
         cache: Cache,
         auto: Arc<AtomicBool>,
         usb: bool,
+        tap: Taps,
         wake: impl Fn() + Send + 'static,
     ) -> Worker {
         let (tx, crx) = mpsc::channel();
@@ -122,6 +158,8 @@ impl Worker {
             connect,
             auto,
             cam: None,
+            opening: None,
+            tap,
             sid: 0,
             info: Info::default(),
             sent: HashSet::new(),
@@ -136,6 +174,8 @@ impl Worker {
             relist: None,
             retry: None,
             scan,
+            watch: None,
+            look: None,
         };
         let th = thread::Builder::new()
             .name("x5-camera".into())
@@ -181,6 +221,9 @@ struct W {
     connect: Connect,
     auto: Arc<AtomicBool>,
     cam: Option<Camera>,
+    /// a connection syncing (dropping it cancels the sync)
+    opening: Option<link::Opening>,
+    tap: Taps,
     /// session number: events of an earlier session are dropped
     sid: u32,
     info: Info,
@@ -200,6 +243,9 @@ struct W {
     retry: Option<Instant>,
     /// next look at the bus, without hotplug events
     scan: Option<Instant>,
+    /// where cards get mounted; the next look at the mount table
+    watch: Option<disk::Watch>,
+    look: Option<Instant>,
 }
 
 /// Unix time, the app's favourite timestamp (unix + standard offset: Java's `ZONE_OFFSET`, no DST), offset from UTC
@@ -259,10 +305,11 @@ impl W {
     }
 
     fn run(mut self, rx: Receiver<Cmd>) {
-        self.cache.trim(album::CAP);
+        self.cache.trim(self.cache.cap);
         loop {
             let busy = !self.fly.is_empty()
-                || self.cam.is_some() && !self.todo.is_empty()
+                || self.opening.is_some()
+                || (self.cam.is_some() || self.info.src.is_some()) && !self.todo.is_empty()
                 || self.cur.is_some()
                 || self.relist.is_some()
                 || self.retry.is_some();
@@ -287,12 +334,43 @@ impl W {
     }
 
     fn tick(&mut self) {
+        if let Some(r) = self.opening.as_mut().and_then(link::Opening::poll) {
+            self.opening = None;
+            self.opened(r);
+        }
         let now = Instant::now();
         if self.scan.is_some_and(|t| now >= t) {
             self.scan = Some(now + SCAN);
             let p = link::scan();
             if self.info.plug != Some(p) {
                 self.cmd(Cmd::Plug(p))
+            }
+        }
+        if let Some(w) = &self.watch
+            && self.look.is_none_or(|t| now >= t)
+        {
+            self.look = Some(now + SCAN);
+            let v = w.vols();
+            if v != self.info.disk {
+                let gone =
+                    (self.info.src.as_ref()).is_some_and(|r| !v.iter().any(|x| x.root == *r));
+                // a card that appears while no camera is connected and no other card shown: the album shows it
+                let new = (v.iter())
+                    .find(|x| !self.info.disk.contains(x))
+                    .filter(|_| self.cam.is_none() && self.info.src.is_none())
+                    .map(|x| x.root.clone());
+                self.info.disk = v;
+                match (gone, new) {
+                    (true, _) => {
+                        self.source(None);
+                        self.note("the card was removed", false)
+                    }
+                    (_, Some(r)) => {
+                        self.note(format!("card mounted at {}", r.display()), false);
+                        self.source(Some(r))
+                    }
+                    _ => self.info(),
+                }
             }
         }
         if self.retry.is_some_and(|t| now >= t) {
@@ -323,7 +401,11 @@ impl W {
             }
             Cmd::Connect => self.connect(),
             Cmd::Disconnect => {
-                if self.cam.is_some() {
+                if self.opening.take().is_some() {
+                    (self.info.conn, self.info.since) = (Conn::Off, None);
+                    self.info();
+                    self.note("connection cancelled", false)
+                } else if self.cam.is_some() {
                     self.close();
                     self.note("disconnected", false)
                 }
@@ -343,26 +425,62 @@ impl W {
             }
             Cmd::Ev(s, e) if s == self.sid => self.event(e),
             Cmd::Ev(..) | Cmd::Quit => {}
+            Cmd::Watch(w) => (self.watch, self.look) = (Some(w), None),
+            Cmd::Source(r) => self.source(r),
+            Cmd::Wifi(ip, id) => {
+                if self.cam.is_some() || self.opening.is_some() {
+                    return self.note("disconnect the camera first", true);
+                }
+                self.retry = None;
+                (self.info.conn, self.info.since) = (Conn::Connecting, Some(Instant::now()));
+                self.info();
+                self.note(format!("connecting over Wi-Fi to {ip}"), false);
+                self.opening = Some(Camera::wifi(ip, &id));
+            }
             c => self.act(c),
         }
     }
 
+    /// Starts a connection; [`W::tick`] takes it once the camera synced.
     fn connect(&mut self) {
-        if self.cam.is_some() {
+        if self.cam.is_some() || self.opening.is_some() {
             return;
         }
         self.retry = None;
-        self.info.conn = Conn::Connecting;
+        (self.info.conn, self.info.since) = (Conn::Connecting, Some(Instant::now()));
         self.info();
-        let t = Instant::now();
-        match (self.connect)().and_then(|(c, ev)| Ok((c.identify().wait()?, c, ev))) {
+        self.opening = Some((self.connect)());
+    }
+
+    fn opened(&mut self, r: link::Result<(Camera, Receiver<Event>)>) {
+        let t = self.info.since.take().unwrap_or_else(Instant::now);
+        match r.and_then(|(c, ev)| Ok((c.identify().wait()?, c, ev))) {
             Ok((id, c, ev)) => {
                 self.sid += 1;
-                let (tx, s) = (self.tx.clone(), self.sid);
+                let (tx, s, tap) = (self.tx.clone(), self.sid, self.tap.clone());
                 let _ = thread::Builder::new()
                     .name("x5-events".into())
                     .spawn(move || {
                         for e in ev {
+                            // the live preview's packets go straight to the Capture screen, a copy of each note too
+                            let e = match e {
+                                Event::Frame(f) => {
+                                    let mut t = tap.lock().unwrap();
+                                    if let Some(x) = &t.frames
+                                        && x.try_send(f).is_err()
+                                    {
+                                        t.lost += 1;
+                                    }
+                                    continue;
+                                }
+                                Event::Note(n) => {
+                                    if let Some(f) = &tap.lock().unwrap().notes {
+                                        f(&n)
+                                    }
+                                    Event::Note(n)
+                                }
+                                e => e,
+                            };
                             if tx.send(Cmd::Ev(s, e)).is_err() {
                                 break;
                             }
@@ -376,9 +494,22 @@ impl W {
                     ),
                     false,
                 );
+                if id.battery.as_ref().is_some_and(low) {
+                    self.note(
+                        format!(
+                            "{}: charge the camera",
+                            battery(id.battery.as_ref().unwrap())
+                        ),
+                        true,
+                    );
+                }
                 (self.info.battery, self.info.id) = (id.battery, Some(id));
                 self.info.conn = Conn::On;
                 self.info.tries += 1;
+                {
+                    let mut tp = self.tap.lock().unwrap();
+                    (tp.cam, tp.sid) = (Some(c.clone()), self.sid);
+                }
                 self.cam = Some(c);
                 self.opts();
                 self.album();
@@ -391,13 +522,21 @@ impl W {
                 if matches!(e, Error::Busy) && self.auto.load(Relaxed) {
                     self.retry = Some(Instant::now() + Duration::from_secs(5))
                 }
-                self.note(format!("connect: {e}"), true);
+                let m = match e {
+                    Error::Silent(_) => format!(
+                        "the X5 is in app mode but does not answer ({e}): it may be asleep or hung. Wake it with                          its power button, or unplug and replug it, then press Connect"
+                    ),
+                    e => format!("connect: {e}"),
+                };
+                self.note(m, true);
             }
         }
     }
 
-    /// Ends the session cleanly: a running download keeps its partial data and goes back to the queue.
+    /// Ends the session cleanly (or cancels the connection syncing): a running download keeps its partial data and
+    /// goes back to the queue.
     fn close(&mut self) {
+        self.opening = None;
         if let Some(c) = self.cam.take() {
             let _ = c.close().wait();
         }
@@ -406,16 +545,37 @@ impl W {
 
     fn reset(&mut self) {
         self.cam = None;
+        {
+            let mut t = self.tap.lock().unwrap();
+            t.cam = None;
+            t.sid = t.sid.max(self.sid) + 1;
+        }
         self.sid += 1;
-        (self.todo, self.fly, self.relist, self.t0) = Default::default();
-        self.sent.clear();
-        self.keys.clear();
-        self.info = Info {
-            plug: self.info.plug,
-            tries: self.info.tries,
+        // a card's album stays
+        if self.info.src.is_none() {
+            (self.todo, self.fly, self.relist, self.t0) = Default::default();
+            self.sent.clear();
+            self.keys.clear();
+        }
+        let i = &mut self.info;
+        *i = Info {
+            plug: i.plug,
+            tries: i.tries,
+            disk: std::mem::take(&mut i.disk),
+            src: i.src.take(),
             ..Default::default()
         };
         self.info();
+    }
+
+    /// Shows a card's album (its mount point) or the camera's.
+    fn source(&mut self, r: Option<PathBuf>) {
+        (self.todo, self.fly, self.relist, self.t0) = Default::default();
+        self.sent.clear();
+        self.keys.clear();
+        self.info.src = r;
+        self.info();
+        self.album()
     }
 
     /// Battery, storage, Wi-Fi and clock.
@@ -439,11 +599,20 @@ impl W {
         self.info();
     }
 
-    /// Lists the camera's files (not while it records) and queues the thumbnails not sent yet.
+    /// Lists the card's or the camera's files (not while it records) and queues the thumbnails not sent yet.
     fn album(&mut self) {
         self.relist = None;
-        let Some(c) = self.cam.clone() else { return };
         let t = Instant::now();
+        if let Some(r) = self.info.src.clone() {
+            match disk::list(&r) {
+                Ok(v) => self.show(v, t),
+                Err(e) => self.note(format!("{}: {e}", r.display()), true),
+            }
+            return;
+        }
+        let Some(c) = self.cam.clone() else {
+            return self.send(Up::Album(vec![]));
+        };
         let r = (|| {
             if rec(c.capture_status().wait()?.state) {
                 return Ok(None);
@@ -471,32 +640,41 @@ impl W {
                     self.info.busy = false;
                     self.info()
                 }
-                self.stats = Stats {
-                    list_ms: t.elapsed().as_secs_f64() * 1e3,
-                    ..Default::default()
-                };
-                let sn = self.info.id.as_ref().map_or("", |i| &i.serial);
-                self.keys = v
-                    .iter()
-                    .map(|it| {
-                        (
-                            it.key.clone(),
-                            (it.uris[0].clone(), self.cache.path(sn, it)),
-                        )
-                    })
-                    .collect();
-                self.todo = v
-                    .iter()
-                    .filter(|it| {
-                        !self.sent.contains(&it.key) && !self.fly.iter().any(|f| f.0 == it.key)
-                    })
-                    .map(|it| it.key.clone())
-                    .collect();
-                self.t0 = Some(Instant::now());
-                self.send(Up::Album(v));
+                self.show(v, t)
             }
             Err(e) => self.note(format!("album: {e}"), true),
         }
+    }
+
+    /// Hands a listing listed since `t` to the UI and queues the thumbnails it does not have yet: a card's from
+    /// its files (keyed by their path), the camera's by URI.
+    fn show(&mut self, v: Vec<Item>, t: Instant) {
+        self.stats = Stats {
+            list_ms: t.elapsed().as_secs_f64() * 1e3,
+            ..Default::default()
+        };
+        let (sn, r) = match &self.info.src {
+            // cards have no serial: the cache key's path, size and date tell their files apart
+            Some(r) => ("card", Some(r)),
+            None => (self.info.id.as_ref().map_or("", |i| &i.serial[..]), None),
+        };
+        self.keys = v
+            .iter()
+            .map(|it| {
+                let u = match r {
+                    Some(r) => r.join(&it.uris[0][1..]).to_string_lossy().into_owned(),
+                    None => it.uris[0].clone(),
+                };
+                (it.key.clone(), (u, self.cache.path(sn, it)))
+            })
+            .collect();
+        self.todo = v
+            .iter()
+            .filter(|it| !self.sent.contains(&it.key) && !self.fly.iter().any(|f| f.0 == it.key))
+            .map(|it| it.key.clone())
+            .collect();
+        self.t0 = Some(Instant::now());
+        self.send(Up::Album(v));
     }
 
     /// Cache hits (a batch per turn), then the camera with [`FLY`] requests in flight.
@@ -514,6 +692,16 @@ impl W {
                 n += 1;
                 self.sent.insert(k.clone());
                 self.send(Up::Thumb(k, Some(t)));
+            } else if self.info.src.is_some() {
+                // a card: the trailer's picture, read here (a few ms), four a turn
+                let t = disk::thumb(Path::new(u));
+                if let (Some((w, h, px)), Some(p)) = (&t, p) {
+                    Cache::put(p, *w, *h, px)
+                }
+                self.stats.cam += 1;
+                n += 4;
+                self.sent.insert(k.clone());
+                self.send(Up::Thumb(k, t));
             } else if let Some(c) = &self.cam {
                 self.fly.push((k, p.clone(), c.thumbnail(u)));
             } else {
@@ -551,7 +739,18 @@ impl W {
     fn event(&mut self, e: Event) {
         let soon = Some(Instant::now() + Duration::from_millis(800));
         match e {
-            Event::Note(Note::Battery(b) | Note::BatteryLow(b)) => {
+            Event::Note(Note::Battery(b)) => {
+                self.info.battery = Some(b);
+                self.info()
+            }
+            Event::Note(Note::BatteryLow(b)) => {
+                self.note(
+                    format!(
+                        "{}: charge the camera, it shuts down when empty",
+                        battery(&b)
+                    ),
+                    true,
+                );
                 self.info.battery = Some(b);
                 self.info()
             }
@@ -728,6 +927,7 @@ pub enum Pane {
     Album,
     Downloads,
     Settings,
+    Wireless,
 }
 
 impl Pane {
@@ -736,6 +936,7 @@ impl Pane {
             "" | "album" => Pane::Album,
             "downloads" => Pane::Downloads,
             "settings" => Pane::Settings,
+            "wireless" => Pane::Wireless,
             _ => return None,
         })
     }
@@ -765,14 +966,35 @@ fn dur(ms: u64) -> String {
     }
 }
 
-fn battery(b: &pb::BatteryInfo) -> String {
-    // the X5 reports level 0..100 with scale 0
+/// Level in % (the X5 reports 0..100 with scale 0) and whether it charges.
+pub fn level(b: &pb::BatteryInfo) -> (u32, bool) {
     let l = match b.battery_scale {
         0 => b.battery_level,
         s => b.battery_level * 100 / s,
     };
-    let c = b.power_type == pb::battery_info::PowerType::Adapter as i32;
-    format!("{l} %{}", if c { ", charging" } else { "" })
+    (
+        l,
+        b.power_type == pb::battery_info::PowerType::Adapter as i32,
+    )
+}
+
+/// Low enough to warn, on every screen: 20 % or less and not charging. The X5 shut down at level 9 (2026-10-23), so
+/// its gauge's last tenth is not to be trusted; twice that leaves time to stop or plug it in.
+pub fn low(b: &pb::BatteryInfo) -> bool {
+    let (l, c) = level(b);
+    l <= 20 && !c
+}
+
+pub fn battery(b: &pb::BatteryInfo) -> String {
+    let (l, c) = level(b);
+    format!(
+        "{l} %{}",
+        match (c, low(b)) {
+            (true, _) => ", charging",
+            (_, true) => ", low",
+            _ => "",
+        }
+    )
 }
 
 fn storage(s: &pb::StorageState) -> String {
@@ -789,10 +1011,11 @@ fn storage(s: &pb::StorageState) -> String {
 
 pub struct Cam {
     w: Worker,
+    pub tap: Taps,
     q: dl::Shared,
     auto: Arc<AtomicBool>,
     set: Set,
-    info: Info,
+    pub info: Info,
     items: Vec<Item>,
     shown: Vec<usize>,
     view: View,
@@ -813,20 +1036,95 @@ pub struct Cam {
     dlg: Option<Receiver<Option<PathBuf>>>,
     wanted: Vec<String>,
     ctx: egui::Context,
+    /// the Wireless pane (none in tests of the rest)
+    pub bt: Option<bt::Bt>,
+    /// the client id the camera authorizes
+    id: String,
+    /// the worker follows the bus
+    usb: bool,
+    /// test hook: import a card's whole album once it is listed
+    pub import: bool,
 }
 
 impl Cam {
     /// `usb`: follow the bus and connect (off for test-hook runs of other screens); `dls`: camera URIs to queue
-    /// (test hook).
-    pub fn new(ctx: &egui::Context, pane: Option<Pane>, dls: &[String], usb: bool) -> Cam {
+    /// (test hook); `sim`: connect to this (a simulated camera) at once instead. `p`: the client id and the
+    /// thumbnail cache's limit; `disks`: where to look for mounted cards; `ble`: the Bluetooth adapter and commands
+    /// to run at once (test hook); `keep`: the camera settings and the download queue persist (not under the hook).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        ctx: &egui::Context,
+        pane: Option<Pane>,
+        dls: &[String],
+        usb: bool,
+        sim: Option<Connect>,
+        p: &crate::settings::Prefs,
+        disks: Option<disk::Watch>,
+        ble: (bt::Open, Vec<bt::Cmd>),
+        keep: bool,
+    ) -> Cam {
         let cfg = crate::xdg("XDG_CONFIG_HOME", ".config").map(|d| d.join("x5desk"));
-        let set = Set::load(cfg.as_ref().map(|d| d.join("camera")));
-        let mut q = dl::Queue::load(cfg.map(|d| d.join("downloads")));
+        let mut set = Set::load(cfg.as_ref().map(|d| d.join("camera")));
+        // a test-hook run reads the camera settings, writes nothing, and keeps its queue to itself
+        if !keep {
+            set.file = None
+        }
+        let mut q = dl::Queue::load(cfg.filter(|_| keep).map(|d| d.join("downloads")));
         for u in dls {
             q.add(u, set.dest.join(album::name(u)));
         }
         let q = Arc::new(Mutex::new(q));
-        Cam::with(ctx, pane, set, q, Box::new(Camera::usb), Cache::new(), usb)
+        let s = sim.is_some();
+        let mut cache = Cache::new();
+        cache.cap = p.cache;
+        let mut c = Cam::with(
+            ctx,
+            pane,
+            set,
+            q,
+            sim.unwrap_or_else(|| Box::new(Camera::usb)),
+            cache,
+            usb && !s,
+        );
+        if s {
+            let _ = c.w.tx.send(Cmd::Plug(Plug::App));
+            let _ = c.w.tx.send(Cmd::Connect);
+        }
+        if let Some(d) = disks {
+            let _ = c.w.tx.send(Cmd::Watch(d));
+        }
+        c.id.clone_from(&p.id);
+        c.bt = Some(bt::Bt::new(ctx, ble.0, p.id.clone(), ble.1));
+        c
+    }
+
+    pub fn dest(&self) -> &Path {
+        &self.set.dest
+    }
+
+    /// `save`: also in the camera settings file (not for the test hook's folder).
+    pub fn set_dest(&mut self, d: PathBuf, save: bool) {
+        self.set.dest = d;
+        if save {
+            self.set.save()
+        } else {
+            self.set.file = None
+        }
+        self.have();
+    }
+
+    /// Asks for another download folder (the portal dialog blocks: off the UI thread); [`Cam::tick`] takes it.
+    pub fn pick_dest(&mut self) {
+        if self.dlg.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let (ctx, d) = (self.ctx.clone(), self.set.dest.clone());
+        thread::spawn(move || {
+            let _ = tx.send(rfd::FileDialog::new().set_directory(d).pick_folder());
+            ctx.request_repaint();
+        });
+        self.dlg = Some(rx);
     }
 
     fn with(
@@ -839,12 +1137,19 @@ impl Cam {
         usb: bool,
     ) -> Cam {
         let auto = Arc::new(AtomicBool::new(set.auto));
-        let c = ctx.clone();
-        let w = Worker::spawn(connect, q.clone(), cache, auto.clone(), usb, move || {
-            c.request_repaint()
-        });
+        let (c, tap) = (ctx.clone(), Taps::default());
+        let w = Worker::spawn(
+            connect,
+            q.clone(),
+            cache,
+            auto.clone(),
+            usb,
+            tap.clone(),
+            move || c.request_repaint(),
+        );
         Cam {
             w,
+            tap,
             q,
             auto,
             set,
@@ -867,6 +1172,10 @@ impl Cam {
             dlg: None,
             wanted: vec![],
             ctx: ctx.clone(),
+            bt: None,
+            id: String::new(),
+            usb,
+            import: false,
         }
     }
 
@@ -902,11 +1211,13 @@ impl Cam {
         v.into_iter().rev().map(|x| x.1).collect()
     }
 
-    /// Nothing pending: the bus was looked at, an automatic connection was tried, an album has its thumbnails
-    /// (test hook).
+    /// Nothing pending: the bus was looked at, an automatic connection was tried, an album has its thumbnails, a
+    /// card's too, the Wireless pane's flows are done (test hook).
     pub fn idle(&self) -> bool {
         let i = &self.info;
-        i.plug.is_some()
+        (i.plug.is_some() || !self.usb)
+            && (i.src.is_none() || self.stats.is_some())
+            && (self.pane != Pane::Wireless || self.bt.as_ref().is_none_or(bt::Bt::idle))
             && match i.conn {
                 Conn::Connecting => false,
                 Conn::On => i.busy || self.stats.is_some(),
@@ -938,7 +1249,10 @@ impl Cam {
         while let Ok(u) = self.w.rx.try_recv() {
             match u {
                 Up::Info(i) => {
-                    if i.conn != Conn::On && self.info.conn == Conn::On {
+                    // a card's album stays when the camera goes, another source's goes
+                    if i.conn != Conn::On && self.info.conn == Conn::On && i.src.is_none()
+                        || i.src != self.info.src
+                    {
                         (self.items, self.stats) = (vec![], None);
                         self.tex.clear();
                         self.wanted.clear();
@@ -952,6 +1266,15 @@ impl Cam {
                         .retain(|k| self.items.iter().any(|it| it.key == *k));
                     self.dirty = true;
                     self.have();
+                    if let Some(r) = self.info.src.as_ref().filter(|_| self.import) {
+                        self.import = false;
+                        let mut q = self.q.lock().unwrap();
+                        for u in self.items.iter().flat_map(|it| &it.uris) {
+                            let src = format!("file://{}", r.join(&u[1..]).display());
+                            q.add(&src, self.set.dest.join(album::name(u)));
+                        }
+                        q.save();
+                    }
                 }
                 Up::Thumb(k, t) => {
                     // a big card: the ones off screen wait until they are shown, the worker sends them again then
@@ -999,13 +1322,14 @@ impl Cam {
         {
             self.dlg = None;
             if let Some(p) = p {
-                self.set.dest = p;
-                self.set.save();
-                self.have();
+                self.set_dest(p, true)
             }
         }
         if self.q.lock().unwrap().v.iter().any(|d| d.st == St::Running) {
             self.ctx.request_repaint_after(Duration::from_millis(250));
+        }
+        if let Some(b) = &mut self.bt {
+            b.tick()
         }
         done
     }
@@ -1019,8 +1343,31 @@ impl Cam {
             Pane::Album => open = self.album(ui),
             Pane::Downloads => open = self.downloads(ui),
             Pane::Settings => self.settings(ui),
+            Pane::Wireless => self.wireless(ui),
         });
         open
+    }
+
+    fn wireless(&mut self, ui: &mut egui::Ui) {
+        let usb = self.info.plug == Some(Plug::App);
+        let Some(b) = &mut self.bt else { return };
+        let a = egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| b.ui(ui, usb))
+            .inner;
+        match a {
+            Some(bt::Act::Usb) => {
+                self.pane = Pane::Album;
+                if self.info.conn == Conn::Off && usb {
+                    let _ = self.w.tx.send(Cmd::Connect);
+                }
+            }
+            Some(bt::Act::Wifi(ip)) => {
+                let _ = self.w.tx.send(Cmd::Wifi(ip, self.id.clone()));
+                self.pane = Pane::Album;
+            }
+            None => {}
+        }
     }
 
     fn bar(&mut self, ui: &mut egui::Ui) {
@@ -1029,7 +1376,10 @@ impl Cam {
         ui.horizontal_wrapped(|ui| {
             let st = match (i.conn, i.plug, &i.id) {
                 (Conn::On, _, Some(id)) => format!("{} · firmware {}", id.model, id.firmware),
-                (Conn::Connecting, ..) => "Connecting…".into(),
+                (Conn::Connecting, ..) => match i.since.map_or(0, |t| t.elapsed().as_secs()) {
+                    s @ 3.. => format!("Connecting… no answer for {s} s (gives up at 30 s)"),
+                    _ => "Connecting…".into(),
+                },
                 (_, Some(Plug::App), _) => "X5 found".into(),
                 (_, Some(Plug::Other), _) => {
                     "Insta360 camera in another USB mode: choose Android App on its USB menu".into()
@@ -1038,8 +1388,14 @@ impl Cam {
             };
             ui.strong(st);
             let on = i.conn == Conn::On;
-            if on {
-                if ui.button("Disconnect").clicked() {
+            if i.conn == Conn::Connecting {
+                ui.ctx().request_repaint_after(Duration::from_secs(1));
+            }
+            if on || i.conn == Conn::Connecting {
+                if ui
+                    .button(if on { "Disconnect" } else { "Cancel" })
+                    .clicked()
+                {
                     let _ = self.w.tx.send(Cmd::Disconnect);
                 }
             } else if ui
@@ -1061,7 +1417,15 @@ impl Cam {
             }
             if let Some(b) = &i.battery {
                 ui.separator();
-                ui.label(format!("Battery {}", battery(b)));
+                let s = format!("Battery {}", battery(b));
+                match low(b) {
+                    true => ui
+                        .colored_label(ui.visuals().warn_fg_color, s)
+                        .on_hover_text(
+                            "Charge the camera: it shuts down when the battery is empty",
+                        ),
+                    false => ui.label(s),
+                };
             }
             if let Some(s) = &i.storage {
                 ui.separator();
@@ -1086,6 +1450,7 @@ impl Cam {
                 (Pane::Album, format!("Album ({})", self.items.len())),
                 (Pane::Downloads, format!("Downloads ({n})")),
                 (Pane::Settings, "Camera".into()),
+                (Pane::Wireless, "Wireless".into()),
             ] {
                 ui.selectable_value(&mut self.pane, p, s);
             }
@@ -1101,7 +1466,9 @@ impl Cam {
     }
 
     fn album(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
-        let on = self.info.conn == Conn::On;
+        // the camera's commands work on the camera's album only
+        let card = self.info.src.clone();
+        let on = self.info.conn == Conn::On && card.is_none();
         let v0 = (
             self.view.sort,
             self.view.desc,
@@ -1110,7 +1477,30 @@ impl Cam {
             self.view.find.clone(),
         );
         ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(on, egui::Button::new("Refresh")).clicked() {
+            if !self.info.disk.is_empty() {
+                let name = |r: &Option<PathBuf>| match r {
+                    Some(r) => (self.info.disk.iter().find(|v| v.root == *r))
+                        .map_or("Card".into(), disk::Vol::name),
+                    None => "Camera".into(),
+                };
+                let mut pick = card.clone();
+                egui::ComboBox::from_id_salt("album src")
+                    .selected_text(name(&card))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut pick, None, "Camera");
+                        for v in &self.info.disk {
+                            ui.selectable_value(&mut pick, Some(v.root.clone()), v.name())
+                                .on_hover_text(format!("{} on {}", v.root.display(), v.dev));
+                        }
+                    });
+                if pick != card {
+                    let _ = self.w.tx.send(Cmd::Source(pick));
+                }
+            }
+            if ui
+                .add_enabled(on || card.is_some(), egui::Button::new("Refresh"))
+                .clicked()
+            {
                 let _ = self.w.tx.send(Cmd::Refresh);
             }
             let k = &mut self.view.kind;
@@ -1165,10 +1555,19 @@ impl Cam {
                 .iter()
                 .filter(|it| self.sel.contains(&it.key))
                 .collect();
-            if ui.add_enabled(any, egui::Button::new("Download")).clicked() {
+            let b = egui::Button::new(if card.is_some() { "Import" } else { "Download" });
+            if ui
+                .add_enabled(any, b)
+                .on_hover_text("Copy the selected items into the download folder")
+                .clicked()
+            {
                 let mut q = self.q.lock().unwrap();
                 for u in picked.iter().flat_map(|it| &it.uris) {
-                    q.add(u, self.set.dest.join(album::name(u)));
+                    let dst = self.set.dest.join(album::name(u));
+                    match &card {
+                        Some(r) => q.add(&format!("file://{}", r.join(&u[1..]).display()), dst),
+                        None => q.add(u, dst),
+                    }
                 }
                 q.save();
             }
@@ -1205,9 +1604,11 @@ impl Cam {
         if self.items.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.label(match self.info.conn {
+                    _ if card.is_some() => "No camera files on this card.",
                     Conn::On if self.info.busy => "The camera is capturing.",
                     Conn::On => "No files on the camera.",
-                    _ => "Connect the camera to see its files.",
+                    _ => "Connect the camera to see its files: by USB in app mode, by USB as a disk (mass storage), \
+                          or over Wi-Fi (the Wireless tab).",
                 })
             });
             return None;
@@ -1243,9 +1644,13 @@ impl Cam {
                             );
                             if resp.double_clicked()
                                 && it.kind == Kind::Video
-                                && self.have.contains(&it.key)
+                                && (self.have.contains(&it.key) || card.is_some())
                             {
-                                open = Some(self.set.dest.join(album::name(&it.uris[0])));
+                                // what was downloaded, else straight from the card
+                                open = Some(match (&card, self.have.contains(&it.key)) {
+                                    (Some(r), false) => r.join(&it.uris[0][1..]),
+                                    _ => self.set.dest.join(album::name(&it.uris[0])),
+                                });
                             } else if resp.clicked() {
                                 click = Some(k);
                             }
@@ -1392,15 +1797,8 @@ impl Cam {
         ui.horizontal_wrapped(|ui| {
             ui.label("Destination");
             ui.monospace(self.set.dest.display().to_string());
-            if ui.button("Change…").clicked() && self.dlg.is_none() {
-                let (tx, rx) = mpsc::channel();
-                let (ctx, d) = (self.ctx.clone(), self.set.dest.clone());
-                // the portal dialog blocks: off the UI thread
-                thread::spawn(move || {
-                    let _ = tx.send(rfd::FileDialog::new().set_directory(d).pick_folder());
-                    ctx.request_repaint();
-                });
-                self.dlg = Some(rx);
+            if ui.button("Change…").clicked() {
+                self.pick_dest();
             }
             if ui.button("Clear finished").clicked() {
                 let mut q = self.q.lock().unwrap();
@@ -1411,7 +1809,9 @@ impl Cam {
         ui.separator();
         let mut q = self.q.lock().unwrap();
         if q.v.is_empty() {
-            ui.label("Nothing queued. Select files in the album and press Download.");
+            ui.label(
+                "Nothing queued. Select files in the album and press Download (Import for a card).",
+            );
             return None;
         }
         let (mut act, on) = (None, self.info.conn == Conn::On);
@@ -1433,8 +1833,11 @@ impl Cam {
                                     format!("{} of {} · {:.1} MB/s", mb(n), mb(t), d.rate / 1e6)
                                 }
                                 St::Running => "starting…".into(),
-                                St::Queued if on => "queued".into(),
-                                St::Queued => "queued: waiting for the camera".into(),
+                                St::Queued => match dl::local(&d.uri) {
+                                    Some(p) if !p.exists() => "queued: waiting for the card".into(),
+                                    None if !on => "queued: waiting for the camera".into(),
+                                    _ => "queued".into(),
+                                },
                                 St::Paused if t > 0 => format!("stopped at {} of {}", mb(n), mb(t)),
                                 St::Paused => "stopped".into(),
                                 St::Done => "done".into(),
@@ -1458,7 +1861,7 @@ impl Cam {
                                     St::Done => {
                                         let v = matches!(
                                             album::name(&d.uri).rsplit('.').next(),
-                                            Some("insv" | "lrv" | "mp4")
+                                            Some("insv" | "lrv" | "mp4" | "jpg" | "insp")
                                         );
                                         if ui.add_enabled(v, egui::Button::new("Open")).clicked() {
                                             open = Some(d.dst.clone())
@@ -1515,10 +1918,12 @@ impl Cam {
                 );
                 row(
                     "Clock",
-                    i.skew.map_or("unknown".into(), |s| match s {
-                        -2..=2 => "in sync with this computer".into(),
-                        s => format!("{s:+} s from this computer"),
-                    }),
+                    // the X5 leaves LOCAL_TIME out of its answer (fw v1.13.21)
+                    i.skew
+                        .map_or("not reported by the camera".into(), |s| match s {
+                            -2..=2 => "in sync with this computer".into(),
+                            s => format!("{s:+} s from this computer"),
+                        }),
                 );
             });
         ui.add_space(8.0);

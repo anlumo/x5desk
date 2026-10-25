@@ -1,38 +1,86 @@
 //! x5desk: desktop app for the Insta360 X5. One eframe window on the shared Vulkan device (`video::Gpu`); a side
 //! panel switches screens. `x5desk [file]` opens a file.
 //!
-//! Test hooks: `X5DESK_SHOT=<file.png>` (with `X5DESK_SHOT_AFTER=<s>`, default 1) saves a screenshot once that
-//! time has passed and the player has nothing pending, then exits. `X5DESK_TEST=<tokens>` (comma separated) sets up
-//! the first file opened: `play`, `loop`, `vol=<0..1>` (default 0.1 under the hook), `view=perspective|panini|
-//! equirect|planet`, `seek=<frame>`, `proxy`, `stats=<s>` (play, print pacing statistics after s seconds, exit),
-//! `novsync` (present without waiting for vblank, repaint on a 60 Hz timer: for a compositor that sends no frame
-//! callbacks, e.g. with the display off), `full` (no automatic switch to the proxy), `stab=off|free|horizon|direction`
-//! (default horizon), `smooth=<s>` (the stabilisation's σ, default 0.5), `camera[=album|downloads|settings]` (start on
-//! the Camera screen; with `X5DESK_SHOT` the shot waits for the album's thumbnails), `dl=<camera URI>` (queue a
-//! download, repeatable), `live` (start on the Live screen), `rtmp=<url>` (stream there once the file shows a
-//! picture; the key is the URL's last segment), `res=1080|1440|360`, `fps=<n>`, `kbps=<n>`, `obs` (serve the OBS
-//! source), `pwcam` (publish the PipeWire camera), `grab=<file.png>` (once the player is idle, e.g. a paused
-//! frame's RAFT stitch done: save the live outputs' `view` and `360` pictures as `<file>-view.png`,
+//! Test hooks: `X5DESK_SHOT=<file.png>` (with `X5DESK_SHOT_AFTER=<s>`, default 1) saves a screenshot once that time has
+//! passed and the player has nothing pending, then exits. `X5DESK_TEST=<tokens>` (comma separated) sets up the first
+//! file opened: `play`, `loop`, `vol=<0..1>` (default 0.1 under the hook), `view=perspective|panini|equirect|planet`,
+//! `seek=<frame>`, `proxy`, `stats=<s>` (play, print pacing statistics after s seconds, exit), `novsync` (present
+//! without waiting for vblank, repaint on a 60 Hz timer: for a compositor that sends no frame callbacks, e.g. with the
+//! display off), `full` (no automatic switch to the proxy), `stab=off|free|horizon|direction` (default horizon),
+//! `smooth=<s>` (the stabilisation's σ, default 0.5), `camera[=album|downloads|settings|wireless]` (start on the Camera screen;
+//! with `X5DESK_SHOT` the shot waits for the album's thumbnails), `dl=<camera URI>` (queue a download, repeatable),
+//! `live` (start on the Live screen), `end` (show the Live screen scrolled to its end), `rtmp=<url>` (stream there once
+//! the file shows a picture; the key is the URL's last segment), `res=1080|1440|360`, `fps=<n>`, `kbps=<n>`, `obs`
+//! (serve the OBS source), `pwcam` (publish the PipeWire camera), `grab=<file.png>` (once the player is idle, e.g. a
+//! paused frame's RAFT stitch done: save the live outputs' `view` and `360` pictures as `<file>-view.png`,
 //! `<file>-360.png`), `min=<s>` (minimise the window after s seconds: the compositor stops drawing it, the live outputs
-//! run on). Under the hook the Live screen neither reads nor writes the user's live settings, and the live output
-//! thread prints its state every 5 s.
+//! run on), `max` (maximise the window: a tiling compositor gives it some size of its own otherwise). Under the hook the Live screen neither reads nor writes the user's live settings, and the live output
+//! thread prints its state every 5 s. Capture: `capture` (start on the Capture screen with the live preview running),
+//! `replay=<rec.h264>` (a simulated camera streaming that `x5 live` recording in real time instead of the X5, with
+//! the calibration of `$X5_SAMPLES/v635.insv` and `/CONF` from `conf=<file>` or `$X5_CONF`; `battery=<%>`: the level it
+//! reports), `webcam[=1920|<file.mjpg>]`
+//! (the Webcam Mode instead, 2880 × 1440, 1920 × 1080 or a capture replayed), `cstats=<s>` (print the preview's
+//! statistics after s seconds of pictures, exit), `view=` / `yaw=<deg>` (its view), `level=off`, `pace=off` (the viewer shows the newest
+//! picture instead of going at the camera's pace; the live outputs keep it), `src=preview|webcam`
+//! (the Live screen's source). Export: `export=<preset>[:<look>][:faces][:noraft][:qp=<n>]` (repeatable; queue an
+//! export of the first file once it shows, from the player's view and stabilisation; presets by key, e.g. `pano57`,
+//! `flat1080`; looks by their first word: vivid, warm, cool, film, black, teal), `frame=360|flat` (a frame grab of the
+//! frame shown, repeatable), `dest=<dir>` (where they go), `aim=<yaw>/<pitch>[/<fov>]` (the first file's view, degrees); the Export screen shows, each job's end is printed, and the run ends
+//! (or takes its screenshot) once the queue is done. Editor: `editor` (start on the Editor screen), `project=<file>`
+//! (load a project), `clip=<file>` (append a recording, repeatable), `undo=<n>`, `redo=<n>`, `at=<s>` (the playhead),
+//! `sel=<clip>`, `etab=clip|reframe|colour|audio|overlays`, `e360` (preview the 360 frame), `epreset=<preset>` (the
+//! export preset the viewer frames for), `esave=<file>` (save the project), `tlexport=<preset>[:noraft][:qp=<n>]` (hand
+//! the timeline to the Export screen; the run ends with the queue), `eplay` (play once the editor is idle, at `vol=`;
+//! prints the frames shown when it stops). Settings and help: `settings` (start on the Settings screen),
+//! `help[=<page>]` (the Help screen at `keys`, `about`, or a screen's guide, e.g. `camera`). Other camera links:
+//! `camera=wireless` (the Bluetooth and Wi-Fi pane), `mount=<dir>` (a directory with a camera's `DCIM` counts as a
+//! mounted X5; repeatable; the real mount table is not read then; starts on the album unless `camera=` says otherwise),
+//! `import` (import the mounted card's whole album once listed), `ble=sim` (a simulated Bluetooth adapter with one X5
+//! that scans, connects, pairs, reads its access point and joins `HomeNet` in station mode at once; starts on the
+//! Wireless pane). Under the hook the app's settings are neither read nor written, the camera settings are read but
+//! not written, the download queue is the run's own, and `dest=` is the download folder too. AI and Shot Lab:
+//! `box=<x0>/<y0>/<x1>/<y1>` (Deep Track in the player: that box, 0..1 of the picture, drawn once the frame shows; the
+//! view follows the subject when the run is over, and an `export=` waits for it and takes the follow view),
+//! `restab=off|free|horizon|direction[/<σ>]` (once that run is over, the player's stabilisation changes to this, as its
+//! controls would: the follow view turns into the new frame), `blur`
+//! (the player's face blur preview), `autoedit[=<preset>]` (an auto edit of the first file onto the editor's
+//! timeline; with a preset key exported once made, the run ending with the queue), `ebox=<x0>/<y0>/<x1>/<y1>` (Deep
+//! Track in the editor's viewer at the playhead once it is set up), `lab=<effect>` (start on Shot Lab with that
+//! effect, e.g. `trails`, `shadow`, `center`), `lrange=<a>/<b>` (its range, s), `lpre` (make its preview),
+//! `lexp=<preset>[:faces]` (export it with that preset, and the face blur, once the clip, and for the subject effects the `box=` run, is there;
+//! the run ends with the queue).
 
+mod ai;
 mod album;
+mod bt;
 mod camera;
+mod capture;
 mod clip;
+mod conf;
+mod disk;
 mod dl;
+mod editor;
+mod export;
+mod feed;
 mod gyro;
+mod help;
+mod lab;
 mod library;
 mod live;
+mod movie;
+mod photo;
 mod player;
 mod png;
+mod replay;
+mod settings;
+mod webcam;
 
 use eframe::{egui, egui_wgpu};
 use std::{
     cell::RefCell,
     path::PathBuf,
     sync::{
-        Arc, PoisonError, RwLock, RwLockWriteGuard,
+        Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard,
         atomic::{AtomicBool, Ordering::Relaxed},
     },
     time::{Duration, Instant},
@@ -54,9 +102,39 @@ pub struct Test {
     pub camera: Option<camera::Pane>,
     pub dl: Vec<String>,
     pub live: bool,
+    pub end: bool,
     pub out: live::Hook,
     pub grab: Option<PathBuf>,
     pub min: Option<f64>,
+    pub max: bool,
+    pub cap: Option<capture::Hook>,
+    pub replay: Option<PathBuf>,
+    pub conf: Option<PathBuf>,
+    pub battery: Option<u32>,
+    pub export: Vec<String>,
+    pub frame: Vec<bool>,
+    /// the player's (or photo's) view: yaw, pitch, field of view (°)
+    pub aim: Option<[f32; 3]>,
+    pub dest: Option<PathBuf>,
+    /// the editor's tokens
+    pub ed: editor::Hook,
+    pub settings: bool,
+    pub help: Option<help::Page>,
+    pub mount: Vec<PathBuf>,
+    pub import: bool,
+    pub ble: bool,
+    /// the player's Deep Track box, face blur preview, an auto edit (and the preset to export it with)
+    pub tbox: Option<[f32; 4]>,
+    pub restab: Option<(gyro::Mode, f64)>,
+    pub blur: bool,
+    pub autoedit: Option<String>,
+    pub lab: lab::Hook,
+}
+
+/// `x0/y0/x1/y1`.
+fn quad(v: &str) -> Option<[f32; 4]> {
+    let a: Vec<f32> = v.split('/').filter_map(|x| x.parse().ok()).collect();
+    a.try_into().ok()
 }
 
 impl Test {
@@ -68,6 +146,25 @@ impl Test {
         for w in s.split(',').map(str::trim).filter(|w| !w.is_empty()) {
             let (k, v) = w.split_once('=').unwrap_or((w, ""));
             match k {
+                "capture" => t.cap.get_or_insert_default().on = true,
+                "webcam" => {
+                    let c = t.cap.get_or_insert_default();
+                    (c.on, c.webcam) = (true, Some(capture::webcam_input(v)))
+                }
+                "cstats" => t.cap.get_or_insert_default().stats = v.parse().ok(),
+                "yaw" => t.cap.get_or_insert_default().yaw = v.parse().ok(),
+                "level" => t.cap.get_or_insert_default().level = Some(v != "off"),
+                "pace" => t.cap.get_or_insert_default().pace = Some(v != "off"),
+                "replay" => t.replay = Some(v.into()),
+                "conf" => t.conf = Some(v.into()),
+                "battery" => t.battery = v.parse().ok(),
+                "src" => {
+                    t.out.pick = match v {
+                        "preview" => live::Pick::Preview,
+                        "webcam" => live::Pick::Webcam,
+                        _ => live::Pick::Player,
+                    }
+                }
                 "play" => t.play = true,
                 "loop" => t.looping = true,
                 "proxy" => t.proxy = true,
@@ -76,12 +173,18 @@ impl Test {
                 "vol" => t.vol = v.parse().ok(),
                 "seek" => t.seek = v.parse().ok(),
                 "stats" => t.stats = v.parse().ok(),
-                "view" => t.look = player::Look::parse(v),
+                "view" => {
+                    t.look = player::Look::parse(v);
+                    if let Some(h) = &mut t.cap {
+                        h.look = t.look
+                    }
+                }
                 "stab" => t.stab = gyro::parse(v),
                 "smooth" => t.smooth = v.parse().ok(),
                 "camera" => t.camera = camera::Pane::parse(v),
                 "dl" => t.dl.push(v.into()),
                 "live" => t.live = true,
+                "end" => t.end = true,
                 "rtmp" => t.out.rtmp = Some(v.into()),
                 "res" => t.out.res = ["1080", "1440", "360"].iter().position(|r| *r == v),
                 "fps" => t.out.fps = v.parse().ok(),
@@ -90,6 +193,51 @@ impl Test {
                 "pwcam" => t.out.cam = true,
                 "grab" => t.grab = Some(v.into()),
                 "min" => t.min = v.parse().ok(),
+                "max" => t.max = true,
+                "export" => t.export.push(v.into()),
+                "frame" => t.frame.push(v != "flat"),
+                "aim" => {
+                    let a: Vec<f32> = v.split('/').filter_map(|x| x.parse().ok()).collect();
+                    t.aim =
+                        (a.len() >= 2).then(|| [a[0], a[1], a.get(2).copied().unwrap_or(f32::NAN)]);
+                }
+                "dest" => t.dest = Some(v.into()),
+                "editor" => t.ed.on = true,
+                "project" => (t.ed.on, t.ed.project) = (true, Some(v.into())),
+                "clip" => {
+                    t.ed.on = true;
+                    t.ed.add.push(v.into())
+                }
+                "at" => t.ed.at = v.parse().ok(),
+                "sel" => t.ed.sel = v.parse().ok(),
+                "etab" => t.ed.tab = editor::Tab::parse(v),
+                "undo" => t.ed.undo = v.parse().unwrap_or(1),
+                "redo" => t.ed.redo = v.parse().unwrap_or(1),
+                "esave" => t.ed.save = Some(v.into()),
+                "tlexport" => t.ed.export = Some(v.into()),
+                "eplay" => t.ed.play = true,
+                "e360" => t.ed.pano = true,
+                "epreset" => t.ed.preset = Some(v.into()),
+                "settings" => t.settings = true,
+                "help" => t.help = Some(help::Page::parse(v).unwrap_or(help::Page::Keys)),
+                "mount" => t.mount.push(v.into()),
+                "import" => t.import = true,
+                "ble" => t.ble = v == "sim",
+                "box" => t.tbox = quad(v),
+                "restab" => {
+                    let (m, s) = v.split_once('/').unwrap_or((v, ""));
+                    t.restab = gyro::parse(m).map(|m| (m, s.parse().unwrap_or(gyro::SMOOTH)));
+                }
+                "ebox" => t.ed.tbox = quad(v),
+                "blur" => t.blur = true,
+                "autoedit" => t.autoedit = Some(v.into()),
+                "lab" => (t.lab.on, t.lab.fx) = (true, lab::Fx::parse(v)),
+                "lrange" => {
+                    let a: Vec<f64> = v.split('/').filter_map(|x| x.parse().ok()).collect();
+                    t.lab.range = a.try_into().ok()
+                }
+                "lpre" => t.lab.pre = true,
+                "lexp" => t.lab.exp = Some(v.into()),
                 _ => eprintln!("X5DESK_TEST: unknown token {w}"),
             }
         }
@@ -107,18 +255,26 @@ pub fn xdg(var: &str, home: &str) -> Option<PathBuf> {
 
 /// wgpu-core's `Surface::configure` waits for the queue to go idle and fails (`GpuWaitTimeout`) when another thread
 /// submits meanwhile. egui-wgpu then draws the new window size into the old swapchain, and on native Wayland nothing
-/// reports that swapchain `Outdated`. So the app retries it: the threads of its own that submit on their own (the
-/// live outputs, the RAFT worker) hold this shared for their GPU work, and after a failed configure the UI thread
-/// holds it exclusively from the end of its next frame's UI until egui has configured the surface again and acquired
-/// that frame ([`Retry`]). The decoder's empty flush submit stays outside: a decoder waiting for a slot would wait
-/// for the UI's next submit.
+/// reports that swapchain `Outdated`. So the app retries it: the threads of its own that submit on their own hold
+/// this shared around each piece of GPU work (the live outputs per pass, the RTMP encoder per frame, the export's
+/// threads and decoders through `::export::locks`, the export screen's face pass and photos), and after a failed
+/// configure the UI thread holds it and [`BURN`] exclusively from the end of its next frame's UI until egui has
+/// configured the surface again and acquired that frame ([`Retry`]). The player's decoders' empty flush submits stay
+/// outside: a decoder waiting for a slot would wait for the UI's next submit (the export's renderer releases its
+/// decoders' slots without the lock).
 pub static GATE: RwLock<()> = RwLock::new(());
+/// Held for a whole job by the threads whose GPU work runs through burn (the RAFT worker): burn submits throughout
+/// it. Apart from [`GATE`], because a waiting writer closes GATE to new readers: a retry waits for the job here first
+/// (≈ 70 ms; ≈ 9 s for the first, while burn compiles and tunes its kernels), then for GATE, so the outputs wait for
+/// the configure only, never for a job.
+pub static BURN: Mutex<()> = Mutex::new(());
 /// a configure failed that way; the next frame retries it
 static RACE: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
-    /// the UI thread's hold on [`GATE`] during a retry
-    static HELD: RefCell<Option<RwLockWriteGuard<'static, ()>>> = const { RefCell::new(None) };
+    /// the UI thread's hold on [`BURN`] and [`GATE`] during a retry
+    static HELD: RefCell<Option<(MutexGuard<'static, ()>, RwLockWriteGuard<'static, ()>)>> =
+        const { RefCell::new(None) };
 }
 
 /// The device's error policy: a surface configure that ran while another thread submitted is retried (above),
@@ -169,23 +325,27 @@ fn race(e: &wgpu::Error) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Library,
+    Editor,
+    Lab,
     Camera,
     Capture,
     Live,
     Export,
+    Settings,
+    Help,
 }
 
-/// Screens: name, and for the ones not built yet the milestone that brings them (PLAN.md §4).
-const TABS: [(Tab, &str, &str); 5] = [
-    (Tab::Library, "Library", ""),
-    (Tab::Camera, "Camera", ""),
-    (
-        Tab::Capture,
-        "Capture",
-        "Live preview, capture controls and the shutter come with milestone 3.",
-    ),
-    (Tab::Live, "Live", ""),
-    (Tab::Export, "Export", "Export comes with milestone 5."),
+/// Screens and their names.
+const TABS: [(Tab, &str); 9] = [
+    (Tab::Library, "Library"),
+    (Tab::Editor, "Editor"),
+    (Tab::Lab, "Shot Lab"),
+    (Tab::Camera, "Camera"),
+    (Tab::Capture, "Capture"),
+    (Tab::Live, "Live"),
+    (Tab::Export, "Export"),
+    (Tab::Settings, "Settings"),
+    (Tab::Help, "Help"),
 ];
 
 struct Shot {
@@ -197,15 +357,26 @@ struct Shot {
 
 struct App {
     tab: Tab,
+    // dropped first: the outputs stop on the source's last picture instead of repeating it while the sources shut down
+    live: live::Live,
     lib: library::Library,
     cam: camera::Cam,
-    live: live::Live,
+    cap: capture::Capture,
+    exp: export::Exp,
+    ed: editor::Editor,
+    lab: lab::Lab,
+    set: settings::Settings,
+    help: help::Help,
+    /// test hook: the exports and the frame grab (360?) to queue once the first file shows
+    auto: Option<(Vec<String>, Vec<bool>)>,
     shot: Option<Shot>,
     /// the test hook ends the run once the player is idle
     exit: bool,
     /// the test hook saves the live outputs' pictures once the player is idle, and minimises the window after `min` s
     grab: Option<PathBuf>,
     min: Option<f64>,
+    /// the test hook shows the Live screen scrolled to its end
+    end: bool,
     t0: Instant,
 }
 
@@ -217,23 +388,141 @@ impl App {
         test: Option<Test>,
     ) -> App {
         let cx = stitch::Ctx::new(&g.device, &g.queue);
-        let exit = test.as_ref().is_some_and(|t| t.stats.is_some());
-        let (pane, dls) = test
+        let ch = test.as_ref().and_then(|t| t.cap.clone());
+        let auto = test
+            .as_ref()
+            .filter(|t| !t.export.is_empty() || !t.frame.is_empty())
+            .map(|t| (t.export.clone(), t.frame.clone()));
+        let hook = (test.as_ref())
+            .map(|t| editor::Hook {
+                vol: t.vol,
+                ..t.ed.clone()
+            })
+            .filter(|h| h.on);
+        let exit = auto.is_some()
+            || hook.as_ref().is_some_and(|h| h.export.is_some())
+            || test.as_ref().is_some_and(|t| {
+                t.autoedit.as_ref().is_some_and(|a| !a.is_empty()) || t.lab.exp.is_some()
+            })
+            || test.as_ref().is_some_and(|t| {
+                t.stats.is_some() || ch.as_ref().is_some_and(|h| h.stats.is_some())
+            });
+        let mut exp = export::Exp::new(
+            &g,
+            &cx,
+            &cc.egui_ctx,
+            test.as_ref().and_then(|t| t.dest.clone()),
+            test.is_some(),
+        );
+        // a test-hook run leaves the user's settings alone
+        let prefs = settings::Prefs::load(match test {
+            Some(_) => None,
+            None => {
+                crate::xdg("XDG_CONFIG_HOME", ".config").map(|d| d.join("x5desk").join("settings"))
+            }
+        });
+        if let Some(i) = prefs.preset() {
+            exp.set.apply(i)
+        }
+        let (mut pane, dls) = test
             .as_ref()
             .map_or((None, vec![]), |t| (t.camera, t.dl.clone()));
         // a test-hook run of another screen leaves the camera alone
-        let usb = test.is_none() || pane.is_some();
-        let cam = camera::Cam::new(&cc.egui_ctx, pane, &dls, usb);
+        let preview = test.as_ref().is_some_and(|t| {
+            t.out.pick == live::Pick::Preview
+                || ch.as_ref().is_some_and(|h| h.on && h.webcam.is_none())
+        });
+        let usb = test.is_none() || pane.is_some() || preview;
+        let sim = test.as_ref().and_then(|t| t.replay.as_ref()).and_then(|r| {
+            let s = std::env::var_os("X5_SAMPLES").map(PathBuf::from)?;
+            let c = test
+                .as_ref()
+                .and_then(|t| t.conf.clone())
+                .or_else(|| std::env::var_os("X5_CONF").map(PathBuf::from));
+            match replay::Replay::open(r, &s.join("v635.insv"), c.as_deref()) {
+                Ok(mut x) => {
+                    x.battery = test.as_ref().and_then(|t| t.battery).unwrap_or(x.battery);
+                    Some(replay::connect(Arc::new(x)))
+                }
+                Err(e) => {
+                    eprintln!("x5desk: replay: {e}");
+                    None
+                }
+            }
+        });
+        let (mount, ble) = test
+            .as_ref()
+            .map_or((vec![], false), |t| (t.mount.clone(), t.ble));
+        let mut disks = disk::Watch::new(mount.clone());
+        if test.is_some() {
+            // the hook's directories only
+            disks.info = PathBuf::new();
+        }
+        let first = match ble {
+            true => vec![
+                bt::Cmd::Scan(true),
+                bt::Cmd::Connect(::ble::Dev("sim/X5 SIM001".into())),
+                bt::Cmd::Pair,
+                bt::Cmd::Ap,
+                bt::Cmd::Join("HomeNet".into(), "correct horse".into()),
+            ],
+            false => vec![],
+        };
+        let open: bt::Open = match ble {
+            true => bt::sim(),
+            false => Box::new(::ble::Ble::open),
+        };
+        pane = pane
+            .or(ble.then_some(camera::Pane::Wireless))
+            .or((!mount.is_empty()).then_some(camera::Pane::Album));
+        let mut cam = camera::Cam::new(
+            &cc.egui_ctx,
+            pane,
+            &dls,
+            usb,
+            sim,
+            &prefs,
+            (usb || !mount.is_empty()).then_some(disks),
+            (open, first),
+            test.is_none(),
+        );
+        if let Some(t) = &test {
+            cam.import = t.import;
+            if let Some(d) = &t.dest {
+                cam.set_dest(d.clone(), false)
+            }
+        }
+        let cap = capture::Capture::new(&g, &cx, &cc.egui_ctx, cam.tap.clone(), ch.clone());
         let live = live::Live::new(&g, &cx, &cc.egui_ctx, test.as_ref().map(|t| t.out.clone()));
+        // the RAFT worker the player and the editor share
+        let still = player::still(&g, &cx);
+        let mut ed = editor::Editor::new(&g, &cx, &cc.egui_ctx, still.clone(), hook);
+        ed.autox = (test.as_ref())
+            .and_then(|t| t.autoedit.clone())
+            .filter(|a| !a.is_empty());
+        let lab = lab::Lab::new(
+            &g,
+            &cx,
+            &cc.egui_ctx,
+            test.as_ref().map(|t| t.lab.clone()).filter(|h| h.on),
+        );
         let tab = match &test {
             Some(t) if t.live => Tab::Live,
+            Some(t) if t.settings => Tab::Settings,
+            Some(t) if t.help.is_some() => Tab::Help,
+            _ if ed.first() => Tab::Editor,
+            // a Deep Track box is drawn in the player's view: the Library first, Shot Lab once its preview starts
+            _ if lab.first() && test.as_ref().is_none_or(|t| t.tbox.is_none()) => Tab::Lab,
+            _ if ch.as_ref().is_some_and(|h| h.on) => Tab::Capture,
             _ if pane.is_some() => Tab::Camera,
             _ => Tab::Library,
         };
-        let (grab, min) = test
+        let (grab, min, end) = test
             .as_ref()
-            .map_or((None, None), |t| (t.grab.clone(), t.min));
-        let mut lib = library::Library::new(&g, &cx, &cc.egui_ctx, test);
+            .map_or((None, None, false), |t| (t.grab.clone(), t.min, t.end));
+        let help = help::Help::new(&g, test.as_ref().and_then(|t| t.help));
+        let set = settings::Settings::new(&g, prefs);
+        let mut lib = library::Library::new(&g, &cx, &cc.egui_ctx, still, test);
         for p in cam.done() {
             lib.downloaded(&p);
         }
@@ -255,11 +544,19 @@ impl App {
             tab,
             lib,
             cam,
+            cap,
+            exp,
+            ed,
+            lab,
+            set,
+            help,
+            auto,
             live,
             shot,
             exit,
             grab,
             min,
+            end,
             t0: Instant::now(),
         }
     }
@@ -276,14 +573,90 @@ impl eframe::App for App {
                 .collect()
         });
         if let Some(p) = dropped.first() {
-            self.tab = Tab::Library;
-            self.lib.open(p);
+            match self.tab {
+                Tab::Editor => {
+                    for p in &dropped {
+                        if let Err(e) = self.ed.add(p, None) {
+                            self.ed.err = Some(e);
+                        }
+                    }
+                }
+                _ => {
+                    self.tab = Tab::Library;
+                    self.lib.open(p);
+                }
+            }
         }
         self.lib.tick();
         for p in self.cam.tick() {
             self.lib.downloaded(&p);
         }
-        self.live.tick(self.lib.source());
+        self.cap.tick();
+        self.exp.tick();
+        self.ed.tick(self.tab == Tab::Editor);
+        self.lab.tick(self.lib.spec(), self.lib.track());
+        if std::mem::take(&mut self.lab.show) {
+            self.tab = Tab::Lab;
+        }
+        if let Some(a) = self.lab.ask.take() {
+            match lab::send(a, &mut self.exp, &mut self.ed) {
+                Ok(true) => self.tab = Tab::Editor,
+                Ok(false) => self.tab = Tab::Export,
+                Err(e) => {
+                    eprintln!("x5desk lab: {e}");
+                    self.lab.err = Some(e);
+                }
+            }
+        }
+        if let Some((p, st)) = self.lib.auto.take() {
+            self.tab = Tab::Editor;
+            self.ed.auto(&p, st);
+        }
+        if let Some(p) = self.lib.add.take() {
+            self.tab = Tab::Editor;
+            if let Err(e) = self.ed.add(&p, None) {
+                self.ed.err = Some(e);
+            }
+        }
+        if let Some((j, tok)) = self.ed.ask.take() {
+            match export::parse(self.exp.set, &tok).and_then(|x| self.exp.timeline(j, x)) {
+                Ok(()) => self.tab = Tab::Export,
+                Err(e) => {
+                    eprintln!("x5desk editor: export: {e}");
+                    self.ed.err = Some(e);
+                }
+            }
+        }
+        if let Some((s, grab)) = self.lib.ask.take() {
+            self.exp.source(s);
+            if let Some(Err(e)) = grab.map(|p| self.exp.grab(p)) {
+                self.exp.err = Some(e);
+            }
+            self.tab = Tab::Export;
+        }
+        if self.auto.is_some()
+            && self.lib.idle()
+            && let Some(s) = self.lib.spec()
+            && let Some((ex, fr)) = self.auto.take()
+        {
+            self.exp.source(s);
+            for e in ex {
+                if let Err(x) = self.exp.auto(&e) {
+                    eprintln!("x5desk: export={e}: {x}");
+                }
+            }
+            for p in fr {
+                if let Err(e) = self.exp.grab(p) {
+                    eprintln!("x5desk: frame: {e}");
+                }
+            }
+            self.tab = Tab::Export;
+        }
+        self.live.tick(match self.live.pick {
+            live::Pick::Player => self.lib.source(),
+            live::Pick::Preview => self.cap.source(capture::Src::Preview),
+            live::Pick::Webcam => self.cap.source(capture::Src::Webcam),
+        });
         egui::Panel::left("nav")
             .resizable(false)
             .exact_size(110.0)
@@ -291,8 +664,24 @@ impl eframe::App for App {
                 ui.add_space(8.0);
                 ui.heading("x5desk");
                 ui.add_space(8.0);
-                for (t, name, _) in TABS {
+                for (t, name) in TABS {
+                    if t == Tab::Settings {
+                        ui.separator();
+                    }
                     ui.selectable_value(&mut self.tab, t, name);
+                }
+                // the X5 shut down at 9 % with no word from the app (2026-10-23): a low battery shows on every screen,
+                // the capture worker's level first (it polls every 10 s)
+                if let Some(b) =
+                    (self.cap.st.o.battery_info.as_ref()).or(self.cam.info.battery.as_ref())
+                    && camera::low(b)
+                {
+                    ui.add_space(16.0);
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("⚠ Camera battery {} %", camera::level(b).0),
+                    )
+                    .on_hover_text("Charge the X5: it shuts down when the battery is empty");
                 }
             });
         egui::CentralPanel::default_margins().show(ui, |ui| {
@@ -304,7 +693,12 @@ impl eframe::App for App {
                     }
                 },
                 Some((Tab::Live, ..)) => match frame.wgpu_render_state() {
-                    Some(rs) => self.live.ui(ui, rs),
+                    Some(rs) => {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink(false)
+                            .stick_to_bottom(self.end)
+                            .show(ui, |ui| self.live.ui(ui, rs));
+                    }
                     None => {
                         ui.label("No wgpu renderer.");
                     }
@@ -315,17 +709,47 @@ impl eframe::App for App {
                         self.lib.open(&p);
                     }
                 }
-                Some((_, name, note)) => {
-                    ui.heading(*name);
-                    ui.label(*note);
+                Some((Tab::Capture, ..)) => match frame.wgpu_render_state() {
+                    Some(rs) => self.cap.ui(ui, rs),
+                    None => {
+                        ui.label("No wgpu renderer.");
+                    }
+                },
+                Some((Tab::Lab, ..)) => self.lab.ui(ui, self.exp.set),
+                Some((Tab::Editor, ..)) => match frame.wgpu_render_state() {
+                    Some(rs) => {
+                        let media = self.lib.videos();
+                        self.ed.ui(ui, rs, &media);
+                    }
+                    None => {
+                        ui.label("No wgpu renderer.");
+                    }
+                },
+                Some((Tab::Export, ..)) => {
+                    if let Some(p) = self.exp.ui(ui) {
+                        self.tab = Tab::Library;
+                        self.lib.open(&p);
+                    }
                 }
+                Some((Tab::Settings, ..)) => {
+                    let n = ui.ctx().cumulative_pass_nr();
+                    self.set.ui(ui, n, &mut self.cam, &mut self.exp)
+                }
+                Some((Tab::Help, ..)) => self.help.ui(ui),
                 None => {}
             }
         });
         // test hooks
         let ready = self.t0.elapsed() >= self.shot.as_ref().map_or(Duration::ZERO, |s| s.after)
             && self.lib.idle()
-            && (self.tab != Tab::Camera || self.cam.idle());
+            && (self.tab != Tab::Camera || self.cam.idle())
+            && self.cap.idle()
+            && (self.tab != Tab::Editor || self.ed.idle())
+            && self.ed.ask.is_none()
+            && self.auto.is_none()
+            && self.lab.idle()
+            && self.lib.auto.is_none()
+            && self.exp.idle();
         if self.lib.idle() && self.grab.is_some() {
             self.live.grab = self.grab.take();
         }
@@ -338,8 +762,11 @@ impl eframe::App for App {
                 false => ctx.request_repaint_after(Duration::from_millis(100)),
             }
         }
-        // a player that never settles still ends the run
-        let late = self.t0.elapsed() > Duration::from_secs(120);
+        // a player that never settles still ends the run (exports take their time)
+        let late = self.t0.elapsed() > Duration::from_secs(120)
+            && self.auto.is_none()
+            && self.ed.ask.is_none()
+            && self.exp.idle();
         match &mut self.shot {
             Some(s) if s.done.load(Relaxed) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Some(s) if !s.sent && (ready || late) => {
@@ -378,7 +805,9 @@ impl eframe::App for App {
                 None => Some(2),
             };
             frame.set_wgpu_surface_config(c);
-            HELD.set(Some(GATE.write().unwrap_or_else(PoisonError::into_inner)));
+            let b = BURN.lock().unwrap_or_else(PoisonError::into_inner);
+            let w = GATE.write().unwrap_or_else(PoisonError::into_inner);
+            HELD.set(Some((b, w)));
             let r = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1.0, 1.0));
             ui.painter()
                 .add(egui_wgpu::Callback::new_paint_callback(r, Retry));
@@ -399,6 +828,7 @@ fn main() -> eframe::Result {
         eprintln!("x5desk: {e}");
     }
     errors(&g.device);
+    ::export::locks(&GATE, &BURN);
     let setup = egui_wgpu::WgpuSetupExisting {
         instance: g.instance.clone(),
         adapter: g.adapter.clone(),
@@ -419,6 +849,7 @@ fn main() -> eframe::Result {
             ..Default::default()
         },
         viewport: egui::ViewportBuilder::default()
+            .with_maximized(test.as_ref().is_some_and(|t| t.max))
             .with_inner_size([1600.0, 900.0])
             .with_title("x5desk")
             .with_app_id("x5desk")
@@ -437,6 +868,28 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use wgpu::wgc::{error::ContextError, present::ConfigureSurfaceError};
+
+    #[test]
+    fn capture_tokens() {
+        let t = super::Test::parse(
+            "replay=/r/live.h264,capture,view=equirect,yaw=90,cstats=30,src=preview",
+        );
+        let h = t.cap.unwrap();
+        assert_eq!(
+            t.replay.as_deref(),
+            Some(std::path::Path::new("/r/live.h264"))
+        );
+        assert_eq!(
+            (h.on, h.look, h.yaw, h.stats),
+            (
+                true,
+                Some(super::player::Look::Equirect),
+                Some(90.0),
+                Some(30.0)
+            )
+        );
+        assert_eq!(t.out.pick, super::live::Pick::Preview);
+    }
 
     #[test]
     fn test_tokens() {

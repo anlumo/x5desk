@@ -1,9 +1,12 @@
 //! Library: local files opened from the dialog, drag and drop or the command line; the recent list (config dir);
 //! pairing of a recording's files by name (lens files `_00_` / `_10_`, proxies `_01_` / `_11_`); the player of the
-//! open work, shared with the live output thread.
+//! open work, shared with the live output thread, the viewer of the open photo, or of a plain video (an export). Export
+//! jobs start here: from the player or the photo (its view), or from a file's menu in the lists.
 
 use crate::{
-    Test, gyro,
+    Test,
+    export::Spec,
+    gyro, movie, photo,
     player::{self, Player},
 };
 use eframe::{egui, egui_wgpu::RenderState};
@@ -150,6 +153,14 @@ pub struct Library {
     /// downloaded recordings (from the camera screen), newest first, one file per work
     down: Vec<PathBuf>,
     player: Option<Arc<Mutex<Player>>>,
+    photo: Option<photo::Photo>,
+    movie: Option<movie::Movie>,
+    /// for the export screen: a source, and a frame grab of it (360 or the view) or None (show the settings)
+    pub ask: Option<(Spec, Option<bool>)>,
+    /// for the editor: a recording to append to its timeline; one to make an auto edit of, with the player's
+    /// stabilisation
+    pub add: Option<PathBuf>,
+    pub auto: Option<(PathBuf, (crate::gyro::Mode, f64))>,
     still: mpsc::Sender<player::Job>,
     gyro: mpsc::Sender<gyro::Req>,
     dlg: Option<mpsc::Receiver<Option<PathBuf>>>,
@@ -159,15 +170,32 @@ pub struct Library {
 }
 
 impl Library {
-    pub fn new(g: &Arc<Gpu>, cx: &stitch::Ctx, ctx: &egui::Context, test: Option<Test>) -> Library {
+    /// `still`: the app's RAFT worker (`player::still`).
+    pub fn new(
+        g: &Arc<Gpu>,
+        cx: &stitch::Ctx,
+        ctx: &egui::Context,
+        still: mpsc::Sender<player::Job>,
+        test: Option<Test>,
+    ) -> Library {
+        let mut recent = Recent::load();
+        // a test-hook run leaves the user's list as it was
+        if test.is_some() {
+            recent.file = None;
+        }
         Library {
             g: g.clone(),
             cx: cx.clone(),
             ctx: ctx.clone(),
-            recent: Recent::load(),
+            recent,
             down: vec![],
             player: None,
-            still: player::still(g, cx),
+            photo: None,
+            movie: None,
+            ask: None,
+            add: None,
+            auto: None,
+            still,
             gyro: gyro::worker(),
             dlg: None,
             err: None,
@@ -179,7 +207,45 @@ impl Library {
     pub fn open(&mut self, p: &Path) {
         let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         // the old player goes first: its decoders free their memory before the new ones allocate
-        self.player = None;
+        (self.player, self.photo, self.movie) = (None, None, None);
+        if photo::is(&p) {
+            let t = self.test.take();
+            let mut ph = photo::Photo::open(
+                &self.g,
+                &self.cx,
+                &p,
+                &self.ctx,
+                t.as_ref().and_then(|t| t.look),
+            );
+            if let Some([y, x, f]) = t.and_then(|t| t.aim) {
+                (ph.view.yaw, ph.view.pitch) = (y, x);
+                ph.view.fov = if f.is_nan() { ph.view.fov } else { f };
+            }
+            self.photo = Some(ph);
+            self.recent.add(&p);
+            self.err = None;
+            return;
+        }
+        // no trailer: a plain video, e.g. one of our exports
+        if ext(&p) == "mp4" && media::insv::Trailer::open(&p).is_err() {
+            let t = self.test.take();
+            match movie::Movie::open(
+                &self.g,
+                &self.cx,
+                &p,
+                &self.ctx,
+                t.as_ref().and_then(|t| t.look),
+            ) {
+                Ok(mut m) => {
+                    m.vol(t.and_then(|t| t.vol).unwrap_or(1.0));
+                    self.movie = Some(m);
+                    self.recent.add(&p);
+                    self.err = None;
+                }
+                Err(e) => self.err = Some(format!("{}: {e}", p.display())),
+            }
+            return;
+        }
         let w = pair(&p);
         // one entry per recording, whichever of its files was opened
         let r = w.main.first().or(w.lrv.as_ref()).unwrap_or(&p).clone();
@@ -201,12 +267,16 @@ impl Library {
         }
     }
 
-    /// A file the camera screen downloaded: its recording joins the downloaded list (photos have no viewer yet).
+    /// A file the camera screen downloaded: its recording or the photo joins the downloaded list.
     pub fn downloaded(&mut self, p: &Path) {
-        if !matches!(ext(p).as_str(), "insv" | "lrv" | "mp4") {
-            return;
-        }
-        let w = pair(p);
+        let w = match ext(p).as_str() {
+            "insv" | "lrv" | "mp4" => pair(p),
+            _ if photo::is(p) => Work {
+                main: vec![p.to_path_buf()],
+                lrv: None,
+            },
+            _ => return,
+        };
         let Some(r) = w.main.first().or(w.lrv.as_ref()) else {
             return;
         };
@@ -226,8 +296,47 @@ impl Library {
             }
         }
         if let Some(p) = &self.player {
-            p.lock().unwrap().tick(true);
+            let mut p = p.lock().unwrap();
+            p.tick(true);
+            if std::mem::take(&mut p.auto)
+                && let Some(f) = p.work.main.first()
+            {
+                self.auto = Some((f.clone(), p.stab()));
+            }
         }
+        if let Some(p) = &mut self.photo {
+            p.tick();
+        }
+        if let Some(m) = &mut self.movie {
+            m.tick(&self.ctx);
+        }
+    }
+
+    /// The open work or photo as the export screen takes it (None: nothing open, or a proxy without its main file).
+    pub fn spec(&self) -> Option<Spec> {
+        match (&self.player, &self.photo) {
+            (Some(p), _) => p.lock().unwrap().spec(),
+            (_, Some(p)) => Some(p.spec()),
+            _ => None,
+        }
+    }
+
+    /// The videos of the recent and downloaded lists (the editor's media), one per recording.
+    pub fn videos(&self) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = vec![];
+        for p in self.down.iter().chain(&self.recent.list) {
+            if matches!(ext(p).as_str(), "insv" | "lrv" | "mp4")
+                && !v.iter().any(|q| key(name(q)) == key(name(p)))
+            {
+                v.push(p.clone());
+            }
+        }
+        v
+    }
+
+    /// The open player's Deep Track run.
+    pub fn track(&self) -> Option<Arc<crate::ai::Track>> {
+        self.player.as_ref()?.lock().unwrap().trk.clone()
     }
 
     /// The open player, for the live outputs.
@@ -240,6 +349,8 @@ impl Library {
         self.player
             .as_ref()
             .is_none_or(|p| p.lock().unwrap().idle())
+            && self.photo.as_ref().is_none_or(|p| p.idle())
+            && self.movie.as_ref().is_none_or(|m| m.idle())
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, rs: &RenderState) {
@@ -251,7 +362,10 @@ impl Library {
                     // the portal dialog blocks: off the UI thread
                     thread::spawn(move || {
                         let p = rfd::FileDialog::new()
-                            .add_filter("X5 video", &["insv", "lrv", "mp4"])
+                            .add_filter(
+                                "X5 video or photo",
+                                &["insv", "lrv", "mp4", "jpg", "jpeg", "insp"],
+                            )
                             .pick_file();
                         let _ = tx.send(p);
                         ctx.request_repaint();
@@ -259,6 +373,34 @@ impl Library {
                     self.dlg = Some(rx);
                 }
                 ui.toggle_value(&mut self.side, "Files");
+                let spec = self.spec();
+                if (self.player.is_some() || self.photo.is_some())
+                    && ui
+                        .add_enabled(spec.is_some(), egui::Button::new("Export…"))
+                        .on_hover_text("Export settings for this file and view")
+                        .on_disabled_hover_text(
+                            "The proxy alone does not export: open the main file",
+                        )
+                        .clicked()
+                {
+                    self.ask = spec.clone().map(|s| (s, None));
+                }
+                if let Some(s) = spec.filter(|s| !s.photo) {
+                    if ui
+                        .button("Grab 360")
+                        .on_hover_text("This frame as a 360 JPEG")
+                        .clicked()
+                    {
+                        self.ask = Some((s.clone(), Some(true)));
+                    }
+                    if ui
+                        .button("Grab view")
+                        .on_hover_text("This view as a JPEG")
+                        .clicked()
+                    {
+                        self.ask = Some((s, Some(false)));
+                    }
+                }
                 if let Some(p) = &self.player {
                     let p = p.lock().unwrap();
                     let w = &p.work;
@@ -268,13 +410,19 @@ impl Library {
                     }
                     ui.label(s.join(" + "));
                 }
+                if let Some(p) = &self.photo {
+                    ui.label(name(&p.path));
+                }
+                if let Some(m) = &self.movie {
+                    ui.label(name(&m.path));
+                }
             });
             if let Some(e) = &self.err {
                 ui.colored_label(ui.visuals().error_fg_color, e);
             }
         });
         if self.side {
-            let mut pick = None;
+            let (mut pick, mut exp, mut add) = (None, None, None);
             egui::Panel::left("recent")
                 .default_size(240.0)
                 .show(ui, |ui| {
@@ -285,13 +433,20 @@ impl Library {
                             .max_height(ui.available_height() / 2.0)
                             .show(ui, |ui| {
                                 for p in l {
-                                    if ui
+                                    let r = ui
                                         .selectable_label(false, name(p))
-                                        .on_hover_text(p.to_string_lossy())
-                                        .clicked()
-                                    {
+                                        .on_hover_text(p.to_string_lossy());
+                                    if r.clicked() {
                                         pick = Some(p.clone());
                                     }
+                                    r.context_menu(|ui| {
+                                        if ui.button("Export…").clicked() {
+                                            exp = Some(p.clone());
+                                        }
+                                        if !photo::is(p) && ui.button("Add to editor").clicked() {
+                                            add = Some(p.clone());
+                                        }
+                                    });
                                 }
                             });
                         ui.add_space(8.0);
@@ -300,12 +455,23 @@ impl Library {
             if let Some(p) = pick {
                 self.open(&p);
             }
+            if add.is_some() {
+                self.add = add;
+            }
+            if let Some(p) = exp {
+                match Spec::of(&p) {
+                    Ok(s) => self.ask = Some((s, None)),
+                    Err(e) => self.err = Some(e),
+                }
+            }
         }
-        egui::CentralPanel::no_frame().show(ui, |ui| match &self.player {
-            Some(p) => p.lock().unwrap().ui(ui, rs),
-            None => {
+        egui::CentralPanel::no_frame().show(ui, |ui| match (&self.player, &mut self.photo, &mut self.movie) {
+            (Some(p), ..) => p.lock().unwrap().ui(ui, rs),
+            (_, Some(p), _) => p.ui(ui, rs),
+            (.., Some(m)) => m.ui(ui, rs),
+            _ => {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Open an X5 video (.insv, .lrv) or drop one here.")
+                    ui.label("Open an X5 video (.insv, .lrv) or photo (.jpg, .insp), or drop one here.")
                 });
             }
         });

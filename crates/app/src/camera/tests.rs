@@ -209,12 +209,16 @@ fn spawn(
             *c.opens.entry(u.into()).or_default() += 1;
             c.data.get(u).cloned()
         };
-        let (c, ev, s) = Camera::sim(handler(f2.clone()), files, rate)?;
-        *s2.lock().unwrap() = Some(s);
-        Ok((c, ev))
+        Camera::sim(handler(f2.clone()), files, rate)
+            .map(|(c, ev, s)| {
+                *s2.lock().unwrap() = Some(s);
+                (c, ev)
+            })
+            .into()
     });
     let auto = Arc::new(AtomicBool::new(true));
-    (Worker::spawn(connect, q, cache, auto, false, || {}), sim)
+    let w = Worker::spawn(connect, q, cache, auto, false, Taps::default(), || {});
+    (w, sim)
 }
 
 fn wait<T>(w: &Worker, secs: f64, mut f: impl FnMut(Up) -> Option<T>) -> T {
@@ -288,6 +292,43 @@ const NAMES: [&str; 8] = [
     "LRV_20260117_141148_01_635.lrv",
     "LRV_20260503_190639_01_710.lrv",
 ];
+
+/// A camera enumerated in app mode that never answers (the hardware run of 2026-10-23): the connection shows as
+/// connecting, Disconnect cancels it at once, and the worker (the app closing) ends at once instead of after the
+/// 30 s sync deadline.
+#[test]
+fn silent_camera() {
+    let q = Arc::new(Mutex::new(dl::Queue::load(None)));
+    let auto = Arc::new(AtomicBool::new(true));
+    let w = Worker::spawn(
+        Box::new(Camera::mute),
+        q,
+        Cache::at(None),
+        auto,
+        false,
+        Taps::default(),
+        || {},
+    );
+    w.tx.send(Cmd::Connect).unwrap();
+    assert!(conn(&w, Conn::Connecting).since.is_some());
+    thread::sleep(Duration::from_millis(300));
+    let t = Instant::now();
+    w.tx.send(Cmd::Disconnect).unwrap();
+    conn(&w, Conn::Off);
+    let c = t.elapsed();
+    w.tx.send(Cmd::Connect).unwrap();
+    conn(&w, Conn::Connecting);
+    thread::sleep(Duration::from_millis(300));
+    let t = Instant::now();
+    drop(w);
+    let d = t.elapsed();
+    println!(
+        "silent camera: cancelled in {:.1} ms, worker gone in {:.1} ms",
+        c.as_secs_f64() * 1e3,
+        d.as_secs_f64() * 1e3
+    );
+    assert!(c < Duration::from_secs(1) && d < Duration::from_secs(2));
+}
 
 /// Connect, album with metadata and favourites, thumbnails from the camera and then from the disk cache; battery
 /// and file notifications; an unplug.
@@ -375,6 +416,53 @@ fn album_and_cache() {
     });
     drop(w);
     std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// A low battery warns (20 % or less, not charging): the battery-low notification gives an error note and the level
+/// the screens show; 21 % and a charging camera do not.
+#[test]
+fn low_battery() {
+    use pb::battery_info::PowerType::{self, *};
+    let f = card(&NAMES[..1]);
+    let q = Arc::new(Mutex::new(dl::Queue::load(None)));
+    let (w, sim) = spawn(&f, 50_000_000, q, Cache::at(None));
+    w.tx.send(Cmd::Connect).unwrap();
+    assert!(!low(conn(&w, Conn::On).battery.as_ref().unwrap()));
+    let sim = sim.lock().unwrap().clone().unwrap();
+    let b = |l, p: PowerType| {
+        Some(pb::BatteryInfo {
+            battery_level: l,
+            power_type: p as i32,
+            ..Default::default()
+        })
+    };
+    let n = pb::NotificationBatteryLow {
+        battery_status: b(9, Battery),
+    };
+    sim.note(8196, &n.encode_to_vec());
+    let s = wait(&w, 2.0, |u| match u {
+        Up::Note(s, true) => Some(s),
+        _ => None,
+    });
+    assert!(s.starts_with("9 %, low: charge the camera"), "{s}");
+    let i = conn(&w, Conn::On);
+    assert!(low(i.battery.as_ref().unwrap()));
+    for (l, p, want) in [
+        (20, Battery, true),
+        (21, Battery, false),
+        (9, Adapter, false),
+    ] {
+        let n = pb::NotificationBatteryUpdate {
+            battery_status: b(l, p),
+        };
+        sim.note(8195, &n.encode_to_vec());
+        let i = wait(&w, 2.0, |u| match u {
+            Up::Info(i) if i.battery == b(l, p) => Some(i),
+            _ => None,
+        });
+        assert_eq!(low(i.battery.as_ref().unwrap()), want, "{l} % {p:?}");
+    }
+    drop(w);
 }
 
 /// A download over four tunnel connections, cancelled, resumed after a restart of the worker from the queue file,
@@ -661,7 +749,7 @@ fn headless(dest: PathBuf, q: dl::Shared) -> (Cam, Sender<Up>, Receiver<Cmd>) {
         auto: false,
         file: None,
     };
-    let none: Connect = Box::new(|| Err(Error::NoDevice));
+    let none: Connect = Box::new(|| Err(Error::NoDevice).into());
     let ctx = egui::Context::default();
     let mut c = Cam::with(&ctx, None, set, q, none, Cache::at(None), false);
     let ((tx, crx), (utx, rx)) = (mpsc::channel(), mpsc::channel());
@@ -771,6 +859,112 @@ fn library_list() {
     std::fs::remove_dir_all(&d).unwrap();
 }
 
+/// A mounted card (a fake mount: a DCIM tree, with the samples of `X5_SAMPLES` as a recording when set) through
+/// the worker: found and shown with no camera connected, the camera's grouping, thumbnails from the trailers, an
+/// import through the queue without a camera, the card's removal.
+#[test]
+fn card_album() {
+    let d = dir("cardalbum");
+    let (r, c) = (d.join("X5"), d.join("X5/DCIM/Camera01"));
+    std::fs::create_dir_all(&c).unwrap();
+    let s = std::env::var_os("X5_SAMPLES").map(PathBuf::from);
+    for (n, f) in [
+        ("VID_20260117_141148_00_635.insv", "v635.insv"),
+        ("LRV_20260117_141148_01_635.lrv", "v635.lrv"),
+    ] {
+        match &s {
+            Some(s) => std::os::unix::fs::symlink(s.join(f), c.join(n)).unwrap(),
+            None => std::fs::write(c.join(n), vec![7u8; 300_000]).unwrap(),
+        }
+    }
+    std::fs::write(c.join("IMG_20260118_124432_00_659.jpg"), vec![9u8; 200_000]).unwrap();
+    let q = Arc::new(Mutex::new(dl::Queue::load(None)));
+    let (w, _) = spawn(
+        &card(&[]),
+        50_000_000,
+        q.clone(),
+        Cache::at(Some(d.join("thumbs"))),
+    );
+    let watch = disk::Watch {
+        info: PathBuf::new(),
+        sys: "/sys".into(),
+        media: vec![],
+        fake: vec![r.clone()],
+    };
+    w.tx.send(Cmd::Watch(watch)).unwrap();
+    let i = wait(&w, 5.0, |u| match u {
+        Up::Info(i) if i.src.is_some() => Some(i),
+        _ => None,
+    });
+    assert_eq!(
+        (i.src.as_ref(), i.disk.len(), i.conn),
+        (Some(&r), 1, Conn::Off)
+    );
+    let v = album(&w);
+    assert_eq!(v.len(), 2);
+    let rec = v.iter().find(|i| i.kind == Kind::Video).unwrap();
+    assert_eq!(rec.uris.len(), 2);
+    let (mut got, mut none) = (0, 0);
+    let st = wait(&w, 10.0, |u| match u {
+        Up::Thumb(_, Some((320, 160, _))) => {
+            got += 1;
+            None
+        }
+        Up::Thumb(_, None) => {
+            none += 1;
+            None
+        }
+        Up::Stats(s) => Some(s),
+        _ => None,
+    });
+    println!(
+        "card: {} items listed in {:.1} ms, thumbnails {got} from the trailers, {none} without one, in {:.1} ms",
+        v.len(),
+        st.list_ms,
+        st.secs * 1e3
+    );
+    assert_eq!((got, none), if s.is_some() { (1, 1) } else { (0, 2) });
+
+    // import the proxy and the photo, no camera connected
+    let dest = d.join("lib");
+    let uris = [
+        &rec.uris[1],
+        &v.iter().find(|i| i.kind == Kind::Photo).unwrap().uris[0],
+    ];
+    {
+        let mut g = q.lock().unwrap();
+        for u in uris {
+            g.add(
+                &format!("file://{}", r.join(&u[1..]).display()),
+                dest.join(album::name(u)),
+            );
+        }
+    }
+    let mut done = vec![];
+    while done.len() < 2 {
+        done.push(wait(&w, 20.0, |u| match u {
+            Up::Done(p) => Some(p),
+            _ => None,
+        }));
+    }
+    for u in uris {
+        let p = dest.join(album::name(u));
+        assert!(done.contains(&p));
+        assert!(std::fs::read(&p).unwrap() == std::fs::read(r.join(&u[1..])).unwrap());
+    }
+
+    // the card goes: the album empties, the source is the camera again
+    std::fs::rename(r.join("DCIM"), r.join("gone")).unwrap();
+    let i = wait(&w, 5.0, |u| match u {
+        Up::Info(i) if i.src.is_none() => Some(i),
+        _ => None,
+    });
+    assert!(i.disk.is_empty());
+    assert!(album(&w).is_empty());
+    drop(w);
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
 /// The real X5 over USB, through the worker and queue the UI uses. `X5_CAMERA=<scratch dir>`,
 /// `X5_CAMERA_DL=<uri>[,<uri>…]` (full downloads, the first one also cancelled and resumed after a restart),
 /// `X5_CAMERA_REF=<dir>` (reference copies by file name). Read-only on the camera apart from the HTTP downloads.
@@ -793,7 +987,15 @@ fn real_camera() {
         let q = Arc::new(Mutex::new(q));
         let cache = Cache::at(Some(d.join("thumbs")));
         let auto = Arc::new(AtomicBool::new(false));
-        let w = Worker::spawn(Box::new(Camera::usb), q.clone(), cache, auto, true, || {});
+        let w = Worker::spawn(
+            Box::new(Camera::usb),
+            q.clone(),
+            cache,
+            auto,
+            true,
+            Taps::default(),
+            || {},
+        );
         (w, q)
     };
     let (w, q) = new(dl::Queue::load(Some(qf.clone())));
@@ -1021,8 +1223,9 @@ fn ui_sim() {
                 let connect: Connect = Box::new(move || {
                     let f2 = ff.clone();
                     let files = move |u: &str| f2.lock().unwrap().data.get(u).cloned();
-                    let (c, ev, _) = Camera::sim(handler(ff.clone()), files, 1_500_000)?;
-                    Ok((c, ev))
+                    Camera::sim(handler(ff.clone()), files, 1_500_000)
+                        .map(|(c, ev, _)| (c, ev))
+                        .into()
                 });
                 let c = Cam::with(
                     &ctx,

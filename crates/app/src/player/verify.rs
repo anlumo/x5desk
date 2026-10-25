@@ -84,7 +84,7 @@ impl Rig {
     fn next(&self, s: &Src, k: usize) -> Pic {
         let t0 = Instant::now();
         let p = loop {
-            if let (Some(p), _) = s.v.take(s.v.times[k]) {
+            if let (Some(p), _) = s.v.take(s.v.times[k], false) {
                 break p;
             }
             assert!(t0.elapsed().as_secs() < 10, "frame {k} stalled");

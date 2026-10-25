@@ -187,20 +187,28 @@ impl Video {
     }
 
     /// Takes the newest queued frame due at `now` and how many due ones it skipped. The caller samples it and
-    /// releases the frame it held with `release_before`.
-    pub fn take(&self, now: f64) -> (Option<Pic>, usize) {
+    /// releases the frame it held with `release_before`. `done`: only frames fully decoded, so sampling one never
+    /// makes the GPU queue (and a UI thread presenting behind it) wait for the decoder; a due frame still decoding
+    /// waits for a later call.
+    pub fn take(&self, now: f64, done: bool) -> (Option<Pic>, usize) {
         let mut q = self.sh.q();
         let (mut p, mut n) = (None, 0);
         // frames of an older epoch wait for the media thread to drop or keep them
         while let Some(&x) = q.pics.front()
             && x.e == self.epoch
             && x.t <= now + EPS
+            && (!done || self.rings.iter().zip(&x.f).all(|(r, &f)| r.ready() > f))
         {
             n += p.is_some() as usize;
             p = Some(x);
             q.pics.pop_front();
         }
         (p, n)
+    }
+
+    /// Whether a frame of the current position waits in the queue (decoded or not).
+    pub fn queued(&self) -> bool {
+        self.sh.q().pics.front().is_some_and(|x| x.e == self.epoch)
     }
 
     /// Shows sample `k` next: the first frame `take` returns from now on is `k`. `held` (the frame the caller
@@ -513,8 +521,10 @@ mod tests {
         for k in [0, 59, 60, 100, 174, 100, 101, 102, 60, 59, 0] {
             let t0 = Instant::now();
             v.seek(&g, k, held.take());
+            // seeks to odd frames take decoded frames only
+            let done = k % 2 == 1;
             let x = loop {
-                if let (Some(x), _) = v.take(v.times[k]) {
+                if let (Some(x), _) = v.take(v.times[k], done) {
                     break x;
                 }
                 assert!(t0.elapsed().as_secs() < 10, "seek {k} stalled");
@@ -527,8 +537,9 @@ mod tests {
             );
             assert_eq!(x.k, k);
             assert_eq!(x.t, v.times[k]);
+            assert!(!done || v.rings.iter().zip(&x.f).all(|(r, &f)| r.ready() > f));
             // nothing later is due at the target's time
-            assert_eq!(v.take(v.times[k]).0, None);
+            assert_eq!(v.take(v.times[k], false).0, None);
             if k == 100 && !checked {
                 checked = true;
                 for (r, ring) in v.rings.iter().enumerate() {

@@ -268,21 +268,38 @@ pub fn thumb(b: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 }
 
 /// Thumbnails on disk, one file per item and camera: `u32 w, h` (LE), then RGBA. Least recently used first out
-/// (the modification time is the last use).
-pub struct Cache(Option<PathBuf>);
+/// (the modification time is the last use) once they take more than `cap` bytes.
+pub struct Cache {
+    dir: Option<PathBuf>,
+    pub cap: u64,
+}
 
-/// Disk cache size: about 5000 thumbnails.
-pub const CAP: u64 = 1 << 30;
+/// Default disk cache size: about 5000 thumbnails.
+pub const CAP: u64 = 1_000_000_000;
 
 impl Cache {
     /// `<cache dir>/x5desk/thumbs`.
     pub fn new() -> Cache {
-        Cache(crate::xdg("XDG_CACHE_HOME", ".cache").map(|d| d.join("x5desk").join("thumbs")))
+        Cache::at(crate::xdg("XDG_CACHE_HOME", ".cache").map(|d| d.join("x5desk").join("thumbs")))
     }
 
-    #[cfg(test)]
-    pub fn at(d: Option<PathBuf>) -> Cache {
-        Cache(d)
+    pub fn at(dir: Option<PathBuf>) -> Cache {
+        Cache { dir, cap: CAP }
+    }
+
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
+    }
+
+    /// Entries and their bytes.
+    pub fn usage(&self) -> (usize, u64) {
+        let Some(d) = &self.dir else { return (0, 0) };
+        std::fs::read_dir(d)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok()?.metadata().ok())
+            .filter(|m| m.is_file())
+            .fold((0, 0), |(n, b), m| (n + 1, b + m.len()))
     }
 
     /// FNV-1a of serial, URI, size and date: a file replaced under the same name gets a new entry.
@@ -292,7 +309,7 @@ impl Cache {
         for b in s.bytes() {
             x = (x ^ b as u64).wrapping_mul(0x100_0000_01b3);
         }
-        Some(self.0.as_ref()?.join(format!("{x:016x}")))
+        Some(self.dir.as_ref()?.join(format!("{x:016x}")))
     }
 
     /// `None` unless the file is a whole entry of a size [`thumb`] makes: a short or damaged one (a crash between
@@ -330,7 +347,7 @@ impl Cache {
 
     /// Drops the least recently used entries until the rest fit in `cap` bytes.
     pub fn trim(&self, cap: u64) {
-        let Some(d) = &self.0 else { return };
+        let Some(d) = &self.dir else { return };
         let mut v: Vec<(SystemTime, u64, PathBuf)> = std::fs::read_dir(d)
             .into_iter()
             .flatten()

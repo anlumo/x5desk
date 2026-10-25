@@ -1,6 +1,6 @@
 //! Live screen (milestone 4): a live source's picture and audio out as RTMP, as sources of our OBS plugin and as the
-//! PipeWire camera. The source is pluggable ([`Source`]): today the player (its reframed view or the 360 equirect);
-//! the capture stage adds the camera's live preview and Webcam Mode.
+//! PipeWire camera. The source is pluggable ([`Source`], picked with [`Pick`]): the player (its reframed view or the
+//! 360 equirect), the camera's live preview (`feed`), its Webcam Mode (`webcam`).
 //!
 //! The outputs run on a thread of their own ([`Outs::step`]) on one frame clock at the output rate: at each tick the
 //! source takes the picture due ([`Source::tick`]) and draws it into each output's target at that output's size
@@ -8,6 +8,7 @@
 //! with the UI only the settings and a copy of their state, and the source, which it locks just to draw (targets
 //! made ready before, the rest after). So neither waits for the other's work: a window the compositor throttles
 //! (hidden, minimised, display off) stalls no output, and an output waiting for the GPU or PipeWire stalls no UI.
+//! The one exception is a surface configure the UI retries (`crate::GATE`): it waits for a pass, the next pass for it.
 //! - RTMP: target → NV12 (`stitch::Yuv`) → copy into the encoder's input (acquire / release) → the encoder thread
 //!   (H.264 CBR, 100 ms rate control buffer) → `live::rtmp`; a tick without a picture (a seek) repeats the last one;
 //!   an IDR when a session goes live after lost video. Audio: the source's AAC decoded, laid on the same clock as it
@@ -52,8 +53,9 @@ use video::{Encoder, Gpu, Input, Packet, Rate};
 pub trait Source {
     /// For the UI: what is playing.
     fn name(&self) -> &str;
-    /// Takes the picture due now. The output thread calls it before each frame: the UI may not run.
-    fn tick(&mut self);
+    /// Takes the picture due at `at`, the tick's scheduled CLOCK_MONOTONIC ns. The output thread calls it before each
+    /// frame: the UI may not run.
+    fn tick(&mut self, at: u64);
     /// Has a picture to draw.
     fn ready(&self) -> bool;
     /// Draws the picture shown now into `t` (`Rgba8Unorm`, `size`) and submits: the reframed view (`pano` false)
@@ -259,9 +261,19 @@ impl Set {
     }
 }
 
-/// What the test hook asks for (`X5DESK_TEST`): stream to `rtmp`, serve OBS, publish the camera.
+/// Which source the outputs show.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Pick {
+    #[default]
+    Player,
+    Preview,
+    Webcam,
+}
+
+/// What the test hook asks for (`X5DESK_TEST`): stream to `rtmp`, serve OBS, publish the camera, the source.
 #[derive(Clone, Debug, Default)]
 pub struct Hook {
+    pub pick: Pick,
     pub rtmp: Option<String>,
     pub res: Option<usize>,
     pub fps: Option<u32>,
@@ -448,13 +460,17 @@ fn encode(
             _ => rx.try_recv(),
         };
         match m {
-            Ok(ms) => match e.encode(&g, ms as i64) {
-                Ok(_) => {
-                    t = if n == 0 { Instant::now() } else { t };
-                    n += 1;
+            // its flush submits on wgpu's queue: a surface configure the UI retries waits for it
+            Ok(ms) => {
+                let _g = crate::GATE.read();
+                match e.encode(&g, ms as i64) {
+                    Ok(_) => {
+                        t = if n == 0 { Instant::now() } else { t };
+                        n += 1;
+                    }
+                    Err(x) => break format!("encoder: {x}"),
                 }
-                Err(x) => break format!("encoder: {x}"),
-            },
+            }
             Err(Disconnected) if n == 0 => return,
             // nothing new: the oldest packet, looking at the channel every 2 ms
             Err(_) => match e.packet(&mut p, 2_000_000) {
@@ -715,6 +731,7 @@ pub struct Live {
     pv: Option<Pv>,
     /// test hook: save the next frame's `view` and `360` pictures as `<stem>-view.png`, `<stem>-360.png`
     pub grab: Option<PathBuf>,
+    pub pick: Pick,
 }
 
 impl Live {
@@ -740,6 +757,7 @@ impl Live {
             .as_ref()
             .and_then(|h| h.sock.clone())
             .or_else(|| obs::path().ok());
+        let pick = hook.as_ref().map_or(Pick::Player, |h| h.pick);
         let sh = Arc::new(Mutex::new(Sh {
             set: set.clone(),
             ..Default::default()
@@ -772,6 +790,7 @@ impl Live {
             show_key: false,
             pv: None,
             grab: None,
+            pick,
         }
     }
 
@@ -794,11 +813,23 @@ impl Live {
         };
         let (was, mut go) = (self.set.clone(), false);
         ui.heading("Live");
-        match &st.name {
-            Some(n) => ui.label(format!(
-                "Source: the player, {n} (its view, or the 360° picture)"
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Source");
+            for (p, n) in [
+                (Pick::Player, "Player"),
+                (Pick::Preview, "Camera live preview"),
+                (Pick::Webcam, "Webcam Mode"),
+            ] {
+                ui.selectable_value(&mut self.pick, p, n);
+            }
+        });
+        match (&st.name, self.pick) {
+            (Some(n), Pick::Player) => ui.label(format!("{n}: its view, or the 360° picture")),
+            (Some(n), _) => ui.label(format!(
+                "{n}: the Capture screen's view, or the 360° picture"
             )),
-            None => ui.label("Source: nothing playing. Open a video in the Library."),
+            (None, Pick::Player) => ui.label("Nothing playing. Open a video in the Library."),
+            (None, _) => ui.label("Off: start it on the Capture screen."),
         };
         ui.add_space(6.0);
         // the picture the RTMP resolution asks for, smaller
@@ -1490,8 +1521,8 @@ impl Outs {
                     *asc = a.map(<[u8]>::to_vec);
                     ac = true;
                 }
-                if due.is_some() {
-                    s.tick();
+                if let Some(d) = due {
+                    s.tick(d);
                 }
                 ready = s.ready();
                 for (v, size, pano) in tg.iter().flatten().filter(|_| ready) {
@@ -1953,7 +1984,7 @@ mod tests {
             "pattern"
         }
 
-        fn tick(&mut self) {}
+        fn tick(&mut self, _: u64) {}
 
         fn ready(&self) -> bool {
             true

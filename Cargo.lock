@@ -370,8 +370,15 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "ash",
+ "ble",
+ "bytemuck",
+ "cpal",
+ "edit",
  "eframe",
  "egui",
+ "export",
+ "fx",
  "glam",
  "libc",
  "link",
@@ -381,8 +388,10 @@ dependencies = [
  "prost",
  "proto",
  "rfd",
+ "shotlab",
  "stab",
  "stitch",
+ "track",
  "video",
  "wgpu",
  "winit",

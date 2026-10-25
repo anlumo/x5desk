@@ -4,12 +4,17 @@
 //! (`gyro`) turns each frame's view by its pose: the preview applies orientation and rolling shutter; the RAFT stitch
 //! applies the rolling shutter and the preview turns the resulting body-frame equirect.
 //!
+//! Deep Track (`ai`): with Deep Track armed, a box dragged around a subject in the perspective view starts a run from
+//! the frame shown; the run's states show under the seek bar, the box on the picture, and once it is over the view
+//! follows the subject (the follow view the export takes). Privacy preview: the faces of the paused frame blurred as
+//! the export blurs them. Auto edit hands the clip to the editor.
+//!
 //! The library shares the player with the live output thread (`Arc<Mutex<Player>>`), which takes the frame due and
 //! draws it on its own clock while the UI may not run (a hidden window); the audio player sits on a thread of its own
 //! for that ([`Aud`]).
 
 use crate::{
-    Test,
+    Test, ai,
     clip::{self, Pic, Video},
     gyro::{self, Stab},
     library::Work,
@@ -35,7 +40,7 @@ use video::Gpu;
 
 const OUT: u64 = video::decode::OUT as u64;
 /// The viewer's texture: egui samples it as sRGB values, which is what the preview writes into a non-sRGB target.
-const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+pub const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Look {
@@ -46,7 +51,7 @@ pub enum Look {
 }
 
 impl Look {
-    const ALL: [(Look, &str); 4] = [
+    pub const ALL: [(Look, &str); 4] = [
         (Look::Perspective, "Perspective"),
         (Look::Panini, "Panini"),
         (Look::Equirect, "Equirect"),
@@ -63,7 +68,7 @@ impl Look {
         })
     }
 
-    fn view(self) -> View {
+    pub fn view(self) -> View {
         let v = View::default();
         match self {
             Look::Perspective => View { fov: 100.0, ..v },
@@ -86,7 +91,7 @@ impl Look {
     }
 
     /// Field of view range for scrolling.
-    fn fov(self) -> (f32, f32) {
+    pub fn fov(self) -> (f32, f32) {
         match self {
             Look::Perspective => (20.0, 160.0),
             Look::Panini => (60.0, 300.0),
@@ -94,16 +99,58 @@ impl Look {
             Look::Planet => (90.0, 350.0),
         }
     }
+
+    /// The picture's rect in `rect`: the equirect keeps its 2:1.
+    pub fn fit(self, rect: egui::Rect) -> egui::Rect {
+        match self {
+            Look::Equirect => {
+                let w = rect.width().min(rect.height() * 2.0);
+                egui::Rect::from_center_size(rect.center(), egui::vec2(w, w / 2.0))
+            }
+            _ => rect,
+        }
+    }
+
+    /// A drag turns `v` with the pointer, scrolling zooms within the look's limits, a double click resets it; true
+    /// if it changed. `r`: the picture's rect.
+    pub fn steer(self, ui: &egui::Ui, resp: &egui::Response, r: egui::Rect, v: &mut View) -> bool {
+        let mut ch = false;
+        if resp.dragged() {
+            let d = resp.drag_delta();
+            // degrees per point: the picture follows the pointer
+            let k = if self == Look::Equirect {
+                360.0
+            } else {
+                v.fov.min(180.0)
+            } / r.width().max(1.0);
+            v.yaw = (v.yaw - d.x * k).rem_euclid(360.0);
+            v.pitch = (v.pitch + d.y * k).clamp(-90.0, 90.0);
+            ch = true;
+        }
+        if resp.hovered() {
+            let y = ui.input(|i| i.smooth_scroll_delta().y);
+            if y != 0.0 {
+                let (a, b) = self.fov();
+                v.fov = (v.fov * (-y * 0.002).exp()).clamp(a, b);
+                ch = true;
+            }
+        }
+        if resp.double_clicked() {
+            *v = self.view();
+            ch = true;
+        }
+        ch
+    }
 }
 
 static SRC_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A playable video (the full-resolution files or the proxy): media thread, preview renderer, the lens bind groups
 /// of every ring slot.
-struct Src {
-    id: u64,
-    v: Video,
-    pv: Preview,
+pub(crate) struct Src {
+    pub(crate) id: u64,
+    pub(crate) v: Video,
+    pub(crate) pv: Preview,
     /// per lens: ring and rect in its pictures
     lens: [(usize, [u32; 4]); 2],
     bg: [Vec<stitch::Src>; 2],
@@ -118,7 +165,7 @@ struct Src {
 
 impl Src {
     /// `iw`: lens picture width of the full-resolution files (the proxy's window shift depends on it).
-    fn open(
+    pub(crate) fn open(
         g: &Arc<Gpu>,
         cx: &Ctx,
         files: &[PathBuf],
@@ -184,14 +231,14 @@ impl Src {
         })
     }
 
-    fn src(&self, p: &Pic) -> [&stitch::Src; 2] {
+    pub(crate) fn src(&self, p: &Pic) -> [&stitch::Src; 2] {
         [0, 1].map(|i| &self.bg[i][(p.f[self.lens[i].0] % OUT) as usize])
     }
 
     /// A RAFT job for `p`: its lens pictures copied into `snap` (made or remade to fit), stitched with the rolling-shutter
     /// term `rs`.
     #[allow(clippy::too_many_arguments)]
-    fn job(
+    pub(crate) fn job(
         &self,
         g: &Gpu,
         p: &Pic,
@@ -313,8 +360,11 @@ impl Src {
 }
 
 /// Source id, frame, rolling-shutter term on.
-type Key = (u64, usize, bool);
-type Reply = Result<(Key, wgpu::Texture), String>;
+pub(crate) type Key = (u64, usize, bool);
+/// The faces of a frame of the main file under a stabilisation (lock, σ bits).
+type FaceKey = (usize, gyro::Mode, u64);
+type Faces = Result<Vec<track::Region>, String>;
+pub(crate) type Reply = Result<(Key, wgpu::Texture), String>;
 
 /// A RAFT stitch request: copies of the paused frame's lens pictures and what to stitch them with.
 pub struct Job {
@@ -376,9 +426,9 @@ pub fn still(g: &Arc<Gpu>, cx: &Ctx) -> mpsc::Sender<Job> {
                 g.queue.submit([e.finish()]);
                 Ok((j.key, s.out.clone()))
             };
-            // a surface configure the UI retries waits for the job (burn submits throughout)
+            // a surface configure the UI retries waits for the job (burn submits throughout); the outputs do not
             let r = {
-                let _g = crate::GATE.read();
+                let _g = crate::BURN.lock();
                 go()
             };
             let _ = j.reply.send(r);
@@ -393,7 +443,7 @@ pub fn still(g: &Arc<Gpu>, cx: &Ctx) -> mpsc::Sender<Job> {
 }
 
 /// Lens picture copies for a RAFT job: luma and chroma per lens, through one staging buffer.
-struct Snap {
+pub(crate) struct Snap {
     y: [wgpu::Texture; 2],
     uv: [wgpu::Texture; 2],
     buf: wgpu::Buffer,
@@ -401,12 +451,63 @@ struct Snap {
     h: u32,
 }
 
-/// The viewer's texture, registered with egui.
-struct Tgt {
-    tex: wgpu::Texture,
-    view: wgpu::TextureView,
-    id: egui::TextureId,
+/// A viewer's texture, registered with egui.
+pub struct Tgt {
+    pub tex: wgpu::Texture,
+    pub view: wgpu::TextureView,
+    pub id: egui::TextureId,
     rs: RenderState,
+}
+
+impl Tgt {
+    /// Makes `t` `size` (a new texture under the same egui id when it was another size); true if it did.
+    pub fn fit(t: &mut Option<Tgt>, g: &Gpu, rs: &RenderState, size: [u32; 2]) -> bool {
+        if t.as_ref()
+            .is_some_and(|t| [t.tex.width(), t.tex.height()] == size)
+        {
+            return false;
+        }
+        let tex = g.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("viewer"),
+            size: wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FMT,
+            // storage: the editor's effects write it
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&Default::default());
+        let mut r = rs.renderer.write();
+        match t {
+            Some(t) => {
+                r.update_egui_texture_from_wgpu_texture(
+                    &g.device,
+                    &view,
+                    wgpu::FilterMode::Linear,
+                    t.id,
+                );
+                (t.tex, t.view) = (tex, view);
+            }
+            None => {
+                let id = r.register_native_texture(&g.device, &view, wgpu::FilterMode::Linear);
+                *t = Some(Tgt {
+                    tex,
+                    view,
+                    id,
+                    rs: rs.clone(),
+                });
+            }
+        }
+        true
+    }
 }
 
 impl Drop for Tgt {
@@ -509,7 +610,7 @@ impl Stats {
 }
 
 /// Audio player commands.
-enum Cmd {
+pub(crate) enum Cmd {
     Play,
     Pause,
     Seek(f64),
@@ -519,13 +620,13 @@ enum Cmd {
 /// The audio player on a thread of its own: cpal's stream stays on the thread that made it, while the player (its
 /// seeks and loops) runs on the UI thread and on the live output thread. A command returns once the audio player
 /// has it, so after a seek `audio::Clock::get` reads None until the device takes it, on whichever thread asks.
-struct Aud {
+pub(crate) struct Aud {
     tx: mpsc::Sender<Cmd>,
     ack: mpsc::Receiver<()>,
 }
 
 impl Aud {
-    fn cmd(&self, c: Cmd) {
+    pub(crate) fn cmd(&self, c: Cmd) {
         if self.tx.send(c).is_ok() {
             let _ = self.ack.recv();
         }
@@ -534,7 +635,7 @@ impl Aud {
 
 /// The audio player of `p`, or the silent clock when it has no AAC track or there is no output device; its clock;
 /// the audio track's presentation offset (edit list) in seconds; whether it has sound.
-fn audio(p: &Path, end: f64) -> (Aud, audio::Clock, f64, bool) {
+pub(crate) fn audio(p: &Path, end: f64) -> (Aud, audio::Clock, f64, bool) {
     let off = Mp4::open(p)
         .ok()
         .and_then(|m| {
@@ -626,6 +727,24 @@ pub struct Player {
     note: Option<String>,
     /// the AAC track for live outputs, opened on first use
     tap: Option<Option<crate::live::Tap>>,
+    /// Deep Track: the run on this clip; a box drawn in the view starts one (armed); the view follows the subject;
+    /// the box being drawn; the picture's aspect
+    pub trk: Option<Arc<ai::Track>>,
+    arm: bool,
+    pub follow: bool,
+    from: Option<egui::Pos2>,
+    aspect: f32,
+    /// privacy preview: the paused frame's faces blurred; the faces found, a search out, the unblurred picture and the
+    /// pass
+    pub blur: bool,
+    regs: Option<(FaceKey, Vec<track::Region>)>,
+    fq: Option<(FaceKey, mpsc::Receiver<Faces>)>,
+    bt: Option<(wgpu::Texture, wgpu::TextureView, crate::export::Blur)>,
+    /// the editor is to make an auto edit of this clip
+    pub auto: bool,
+    /// test hook: the box to draw once the frame shows; the stabilisation to switch to once its run is over
+    tbox: Option<[f32; 4]>,
+    restab: Option<(gyro::Mode, f64)>,
 }
 
 impl Player {
@@ -716,12 +835,31 @@ impl Player {
             done: false,
             note: None,
             tap: None,
+            trk: None,
+            arm: false,
+            follow: false,
+            from: None,
+            aspect: 16.0 / 9.0,
+            blur: false,
+            regs: None,
+            fq: None,
+            bt: None,
+            auto: false,
+            tbox: None,
+            restab: None,
         };
         if let Some(t) = test {
+            (p.tbox, p.restab) = (t.tbox, t.restab);
+            p.blur = t.blur;
+            p.auto = t.autoedit.is_some();
             p.vol = t.vol.unwrap_or(p.vol).clamp(0.0, 1.0);
             p.audio.cmd(Cmd::Vol(p.vol));
             if let Some(l) = t.look {
                 (p.look, p.view) = (l, l.view());
+            }
+            if let Some([y, x, f]) = t.aim {
+                (p.view.yaw, p.view.pitch) = (y, x);
+                p.view.fov = if f.is_nan() { p.view.fov } else { f };
             }
             p.looping = t.looping;
             p.tick = t.novsync.then(|| Duration::from_secs_f64(1.0 / 60.0));
@@ -822,6 +960,51 @@ impl Player {
         self.seek(k);
     }
 
+    /// The main file's frame at `p` (a frame of the current source).
+    fn main_k(&self, p: &Pic) -> usize {
+        let s = self.s();
+        self.stab.frame(p.t, s.v.times[0], s.ff)
+    }
+
+    /// The stabilisation shown: lock and σ.
+    pub fn stab(&self) -> (gyro::Mode, f64) {
+        (self.stab.mode, self.stab.smooth)
+    }
+
+    fn fkey(&self) -> Option<FaceKey> {
+        let p = self.held?;
+        Some((self.main_k(&p), self.stab.mode, self.stab.smooth.to_bits()))
+    }
+
+    /// Deep Track of the subject in box `b` (0..1 of the picture) of the perspective view, from the frame shown to the
+    /// clip's end; the view follows it once the run is over.
+    pub fn track(&mut self, b: [f32; 4]) -> Result<(), String> {
+        let f = (self.work.main.first().cloned())
+            .ok_or("Deep Track needs the main file, not the proxy alone")?;
+        if self.look != Look::Perspective {
+            return Err("Deep Track: draw the box in the perspective view".into());
+        }
+        let p = self.held.ok_or("no frame shown yet")?;
+        if let Some(t) = &self.trk {
+            t.stop.store(true, Relaxed);
+        }
+        let k0 = self.main_k(&p);
+        let s = ai::subject(&self.view, self.aspect, b);
+        let st = (self.stab.mode, self.stab.smooth);
+        self.trk = Some(ai::Track::start(
+            &self.g,
+            &self.cx,
+            &self.ctx,
+            f,
+            st,
+            k0,
+            usize::MAX,
+            s,
+        ));
+        (self.follow, self.arm) = (true, false);
+        Ok(())
+    }
+
     /// The stitch pose of `p` (a frame of the current source) and the key of its RAFT stitch.
     fn pose(&self, p: &Pic) -> (Pose, Key) {
         let s = self.s();
@@ -878,7 +1061,7 @@ impl Player {
             }
             return;
         }
-        let (p, skip) = s.v.take(now);
+        let (p, skip) = s.v.take(now, false);
         let d = clip::frame_at(&s.v.times, now);
         let measuring = self.playing && self.want.is_none();
         if let Some(p) = p {
@@ -959,6 +1142,64 @@ impl Player {
                 self.use_src(1);
             }
         }
+        if let Some(m) = self.restab
+            && self.trk.as_ref().is_some_and(|t| t.st().over())
+        {
+            (self.restab, (self.stab.mode, self.stab.smooth)) = (None, m);
+            self.stab.ask();
+            self.dirty = true;
+        }
+        // the view follows the tracked subject, turned from the track's frame into the frame shown (the stabilisation
+        // may have changed since)
+        if let (true, Some(t), Some(p)) = (self.follow, &self.trk, self.held)
+            && let k = self.main_k(&p)
+            && let Some((d, r)) = t.dir(k).zip(t.turn(k, self.pose(&p).0.q))
+        {
+            let [yaw, pitch] = track::yaw_pitch(r * d);
+            if (yaw - self.view.yaw).abs() + (pitch - self.view.pitch).abs() > 1e-3 {
+                (self.view.yaw, self.view.pitch, self.dirty) = (yaw, pitch, true);
+            }
+        }
+        if let Some((k, r)) = &self.fq
+            && let Ok(x) = r.try_recv()
+        {
+            match x {
+                Ok(v) => self.regs = Some((*k, v)),
+                Err(e) => (self.note, self.blur) = (Some(format!("Face blur preview: {e}")), false),
+            }
+            (self.fq, self.dirty) = (None, true);
+        }
+        if self.blur
+            && !self.playing
+            && self.want.is_none()
+            && self.fq.is_none()
+            && self.stab.ready()
+            && let (Some(k), Some(f)) = (self.fkey(), self.work.main.first())
+            && self.regs.as_ref().is_none_or(|r| r.0 != k)
+        {
+            let (tx, rx) = mpsc::channel();
+            let (g, cx, ctx, f, st) = (
+                self.g.clone(),
+                self.cx.clone(),
+                self.ctx.clone(),
+                f.clone(),
+                (k.1, f64::from_bits(k.2)),
+            );
+            thread::spawn(move || {
+                let _ = tx.send(crate::export::scoped(&g.device, || {
+                    ai::faces(&g, &cx, &f, st, k.0)
+                }));
+                ctx.request_repaint();
+            });
+            self.fq = Some((k, rx));
+        }
+        if self.tbox.is_some() && self.held.is_some() && self.want.is_none() && self.stab.ready() {
+            let b = self.tbox.take().unwrap();
+            if let Err(e) = self.track(b) {
+                eprintln!("x5desk: box: {e}");
+                self.note = Some(e);
+            }
+        }
         // paused on a frame for a moment: RAFT stitch of it
         if let Some(p) = self.held
             && !self.playing
@@ -1003,23 +1244,57 @@ impl Player {
             || self
                 .held
                 .is_some_and(|p| self.pano.as_ref().is_some_and(|x| x.0 == self.pose(&p).1));
+        let faces = !self.blur
+            || self.playing
+            || (self.fkey()).is_some_and(|k| self.regs.as_ref().is_some_and(|r| r.0 == k));
         self.want.is_none()
             && self.held.is_some()
             && self.stab.ready()
             && raft
             && self.measure.is_none_or(|_| self.done)
+            && self.tbox.is_none()
+            && self.restab.is_none()
+            && self.trk.as_ref().is_none_or(|t| t.st().over())
+            && faces
+    }
+
+    /// What the export screen takes: the main files, the frame shown, the view, the stabilisation; None while only the
+    /// proxy is there.
+    pub fn spec(&self) -> Option<crate::export::Spec> {
+        let s = self.s();
+        let k = self.want.or(self.held.map(|p| p.k)).unwrap_or(0);
+        (!self.work.main.is_empty()).then(|| crate::export::Spec {
+            files: self.work.main.clone(),
+            photo: false,
+            dur: s.v.end,
+            t: s.v.times[k],
+            view: self.view,
+            look: self.look,
+            stab: self.stab.mode,
+            smooth: self.stab.smooth,
+            follow: (self.trk.clone()).filter(|t| self.follow && t.st() == ai::St::Done),
+            faces: self.blur,
+        })
     }
 
     fn render(&mut self, rs: &RenderState, size: [u32; 2]) {
         let g = &self.g;
-        if self.tgt.is_none() || self.size != size {
-            let tex = g.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("viewer"),
-                size: wgpu::Extent3d {
-                    width: size[0],
-                    height: size[1],
-                    depth_or_array_layers: 1,
-                },
+        Tgt::fit(&mut self.tgt, g, rs, size);
+        self.size = size;
+        let Some(p) = self.held else { return };
+        // the privacy preview: the picture into a texture of its own, blurred from there into the viewer's
+        let regs = (self.regs.as_ref())
+            .filter(|r| self.blur && !self.playing && Some(r.0) == self.fkey())
+            .map(|r| &r.1);
+        let mut bt = self.bt.take();
+        if regs.is_some()
+            && bt
+                .as_ref()
+                .is_none_or(|b| b.0.size() != self.tgt.as_ref().unwrap().tex.size())
+        {
+            let t = g.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("viewer before blur"),
+                size: self.tgt.as_ref().unwrap().tex.size(),
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -1028,49 +1303,35 @@ impl Player {
                     | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
-            let view = tex.create_view(&Default::default());
-            let mut r = rs.renderer.write();
-            match &mut self.tgt {
-                Some(t) => {
-                    r.update_egui_texture_from_wgpu_texture(
-                        &g.device,
-                        &view,
-                        wgpu::FilterMode::Linear,
-                        t.id,
-                    );
-                    (t.tex, t.view) = (tex, view);
-                }
-                None => {
-                    let id = r.register_native_texture(&g.device, &view, wgpu::FilterMode::Linear);
-                    self.tgt = Some(Tgt {
-                        tex,
-                        view,
-                        id,
-                        rs: rs.clone(),
-                    });
-                }
-            }
-            self.size = size;
+            let v = t.create_view(&Default::default());
+            bt = Some((t, v, crate::export::Blur::new(&g.device, FMT)));
         }
-        let Some(p) = self.held else { return };
         let ((o, key), s, t) = (self.pose(&p), self.s(), self.tgt.as_ref().unwrap());
+        let dst = match (regs, &bt) {
+            (Some(_), Some(b)) => &b.1,
+            _ => &t.view,
+        };
         // the lenses take orientation and rolling shutter, the RAFT stitch (body frame) the orientation
         s.pv.pose(&o);
         let mut e = g.device.create_command_encoder(&Default::default());
         let mut tint = self.tinted;
         match self.pano.as_ref().filter(|x| !self.playing && x.0 == key) {
-            Some((_, pano)) => s.pv.render(&mut e, &t.view, size, &self.view, pano),
+            Some((_, pano)) => s.pv.render(&mut e, dst, size, &self.view, pano),
             None => {
                 let src = s.src(&p);
                 if !tint {
                     s.pv.colour(&mut e, src);
                     tint = true;
                 }
-                s.pv.render(&mut e, &t.view, size, &self.view, src);
+                s.pv.render(&mut e, dst, size, &self.view, src);
                 s.v.acquire(g, &p);
             }
         }
+        if let (Some(r), Some(b)) = (regs, &mut bt) {
+            b.2.run(&g.device, &g.queue, &mut e, &b.1, &t.view, &self.view, r);
+        }
         g.queue.submit([e.finish()]);
+        self.bt = bt;
         (self.fresh, self.dirty, self.tinted) = (false, false, tint);
     }
 
@@ -1103,14 +1364,23 @@ impl Player {
         let mut t = s.v.times[k];
         ui.add_space(4.0);
         ui.spacing_mut().slider_width = ui.available_width();
-        if ui
-            .add(egui::Slider::new(&mut t, 0.0..=end).show_value(false))
-            .changed()
-        {
+        let sr = ui.add(egui::Slider::new(&mut t, 0.0..=end).show_value(false));
+        if sr.changed() {
             let j = clip::frame_at(&self.s().v.times, t);
             if j != k {
                 self.seek(j);
             }
+        }
+        // the Deep Track run's states under the bar (the rail sits a handle's radius in from the ends)
+        if let Some(tr) = &self.trk
+            && let Some(ts) = tr.times.get()
+        {
+            let (r, _) =
+                ui.allocate_exact_size(egui::vec2(sr.rect.width(), 5.0), egui::Sense::hover());
+            let (x0, w) = (r.left() + r.height(), r.width() - 2.0 * r.height());
+            ai::strip(ui.painter(), tr, r.y_range(), |k| {
+                Some(x0 + w * (ts.get(k).copied().unwrap_or(end) / end.max(1e-6)) as f32)
+            });
         }
         ui.spacing_mut().slider_width = 90.0;
         ui.horizontal_wrapped(|ui| {
@@ -1138,6 +1408,10 @@ impl Player {
             ));
             ui.separator();
             ui.checkbox(&mut self.looping, "Loop");
+            // the slider sits in a horizontal of its own, which never wraps (the stabilisation pair below too)
+            if ui.available_size_before_wrap().x < 160.0 {
+                ui.end_row();
+            }
             ui.label(if self.sound { "Volume" } else { "No audio" });
             if ui
                 .add_enabled(
@@ -1168,6 +1442,48 @@ impl Player {
                     };
                     self.dirty = true;
                 }
+            }
+            ui.separator();
+            let main = !self.work.main.is_empty();
+            match self.trk.as_ref().map(|t| t.st()) {
+                Some(st) if !st.over() => {
+                    if ui.button("Cancel track").clicked() {
+                        self.trk.as_ref().unwrap().stop.store(true, Relaxed);
+                    }
+                }
+                over => {
+                    ui.add_enabled_ui(main && self.look == Look::Perspective, |ui| {
+                        ui.toggle_value(&mut self.arm, "Deep Track")
+                            .on_hover_text("Drag a box around a subject in the view: it is tracked from this frame on")
+                            .on_disabled_hover_text("Deep Track needs the main file and the perspective view");
+                    });
+                    if over.is_some() {
+                        if ui
+                            .checkbox(&mut self.follow, "Follow")
+                            .on_hover_text("The view follows the tracked subject (and so does a flat export)")
+                            .changed()
+                        {
+                            self.dirty = true;
+                        }
+                        if ui.button("Clear track").clicked() {
+                            (self.trk, self.follow) = (None, false);
+                        }
+                    }
+                }
+            }
+            if ui
+                .toggle_value(&mut self.blur, "Blur faces")
+                .on_hover_text("Preview the export's face blur on the paused frame (the export starts with it on)")
+                .changed()
+            {
+                self.dirty = true;
+            }
+            if ui
+                .add_enabled(main, egui::Button::new("Auto edit"))
+                .on_hover_text("Highlights of this clip, framed automatically, as an editor timeline")
+                .clicked()
+            {
+                self.auto = true;
             }
             ui.separator();
             let st = &mut self.stab;
@@ -1223,35 +1539,20 @@ impl Player {
     fn viewer(&mut self, ui: &mut egui::Ui, rs: &RenderState) {
         let (rect, resp) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-        let r = if self.look == Look::Equirect {
-            let w = rect.width().min(rect.height() * 2.0);
-            egui::Rect::from_center_size(rect.center(), egui::vec2(w, w / 2.0))
-        } else {
-            rect
-        };
-        let v = &mut self.view;
-        if resp.dragged() {
-            let d = resp.drag_delta();
-            // degrees per point: the picture follows the pointer
-            let k = if self.look == Look::Equirect {
-                360.0
-            } else {
-                v.fov.min(180.0)
-            } / r.width().max(1.0);
-            v.yaw = (v.yaw - d.x * k).rem_euclid(360.0);
-            v.pitch = (v.pitch + d.y * k).clamp(-90.0, 90.0);
-            self.dirty = true;
-        }
-        if resp.hovered() {
-            let y = ui.input(|i| i.smooth_scroll_delta().y);
-            if y != 0.0 {
-                let (a, b) = self.look.fov();
-                v.fov = (v.fov * (-y * 0.002).exp()).clamp(a, b);
-                self.dirty = true;
+        let r = self.look.fit(rect);
+        self.aspect = r.aspect_ratio();
+        let mut live = None;
+        if self.arm && self.look == Look::Perspective {
+            let (l, b) = ai::drag_box(ui, &resp, r, &mut self.from);
+            live = l;
+            if let Some(b) = b
+                && let Err(e) = self.track(b)
+            {
+                self.note = Some(e);
             }
-        }
-        if resp.double_clicked() {
-            *v = self.look.view();
+        } else if self.look.steer(ui, &resp, r, &mut self.view) {
+            // a hand on the view takes over from the follow view
+            self.follow &= !resp.dragged();
             self.dirty = true;
         }
         let ppp = ui.ctx().pixels_per_point();
@@ -1265,9 +1566,41 @@ impl Player {
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             p.image(t.id, r, uv, egui::Color32::WHITE);
         }
+        if let Some(b) = live {
+            ai::paint_box(&p, b);
+        }
+        if let (Some(t), Some(h), Look::Perspective) = (&self.trk, self.held, self.look)
+            && let k = self.main_k(&h)
+            && let Some((s, q)) = t.at(k).zip(t.turn(k, self.pose(&h).0.q))
+            && let Some(o) = ai::outline(&self.view, r, q * s.raw, s.size)
+        {
+            p.add(egui::Shape::closed_line(
+                o.to_vec(),
+                egui::Stroke::new(2.0, ai::colour(s.state)),
+            ));
+        }
         let mut lines = vec![];
         if self.held.is_none() || self.want.is_some() {
             lines.push("Decoding…".to_string());
+        }
+        if self.arm {
+            lines.push("Deep Track: drag a box around the subject".into());
+        }
+        if let Some(t) = &self.trk {
+            lines.push(match t.st() {
+                ai::St::Done if self.follow => "Deep Track: following the subject".into(),
+                st => st.line("Deep Track"),
+            });
+        }
+        if self.blur {
+            let n = (self.regs.as_ref())
+                .filter(|r| Some(r.0) == self.fkey())
+                .map(|r| r.1.len());
+            lines.push(match (self.playing, n) {
+                (true, _) => "Face blur preview: pause on a frame".into(),
+                (_, Some(n)) => format!("Face blur preview: {n} faces"),
+                _ => "Face blur preview: finding faces…".into(),
+            });
         }
         if let Some(h) = self.held
             && !self.playing
@@ -1318,7 +1651,7 @@ impl crate::live::Source for Player {
         f.and_then(|p| p.file_name()?.to_str()).unwrap_or("")
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self, _: u64) {
         Player::tick(self, false)
     }
 
@@ -1401,6 +1734,10 @@ impl Drop for Player {
         if let (Some(h), Some(s)) = (self.held.take(), &self.src[self.cur]) {
             s.v.release(&self.g, &h);
         }
+        // a run on this clip would hold the models to its end
+        if let Some(t) = &self.trk {
+            t.stop.store(true, Relaxed);
+        }
     }
 }
 
@@ -1410,6 +1747,55 @@ mod verify;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The controls in narrow panels (the hardware run's COSMIC-tiled window, 753 px with the side panels, cut the
+    /// volume slider off at its right edge: a slider sits in a horizontal of its own, which a wrapping row does not
+    /// wrap): the slider, which follows its label, ends inside the panel.
+    #[test]
+    fn narrow_controls() {
+        let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+            eprintln!("X5_SAMPLES not set: skipping");
+            return;
+        };
+        let g = Arc::new(Gpu::new().unwrap());
+        let cx = Ctx::new(&g.device, &g.queue);
+        let ctx = egui::Context::default();
+        let w = crate::library::pair(&d.join("v635.insv"));
+        let mut p = Player::open(&g, &cx, w, &ctx, &still(&g, &cx), &gyro::worker(), None).unwrap();
+        for width in (420..=760).step_by(20).map(|w| w as f32) {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 900.0),
+                )),
+                ..Default::default()
+            };
+            // twice: egui sizes some widgets from the frame before
+            let mut o = None;
+            for _ in 0..2 {
+                o = Some(ctx.run_ui(input.clone(), |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| p.controls(ui));
+                }));
+            }
+            // a label in a wrapping row is laid out from the row's start, its galley from there
+            let r = o
+                .unwrap()
+                .shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    egui::Shape::Text(t) if t.galley.text() == "Volume" => {
+                        Some(t.galley.rect.translate(t.pos.to_vec2()))
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let end = r.right() + 4.0 + 90.0;
+            assert!(
+                end <= width - 8.0,
+                "{width} px: the slider ends at {end}, past the panel"
+            );
+        }
+    }
 
     /// A file without an AAC track plays on the silent clock: held at open, wall time while playing, exactly on a
     /// seek target.
