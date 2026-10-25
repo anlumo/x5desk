@@ -385,13 +385,13 @@ impl Exp {
         }
     }
 
-    /// Makes `s` the source: the whole clip, its stabilisation.
+    /// Makes `s` the source: the whole clip, its stabilisation, its face blur.
     pub fn source(&mut self, s: Spec) {
         self.range = [0.0, s.dur];
         if !s.photo {
             (self.set.stab, self.set.smooth) = (s.stab, s.smooth);
         }
-        self.set.faces |= s.faces;
+        self.set.faces = s.faces;
         self.src = Some(s);
         self.err = None;
     }

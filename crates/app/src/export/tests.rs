@@ -144,6 +144,35 @@ fn presets() {
     );
 }
 
+/// A source brings its face blur: one the player previewed blurred turns it on, the next one turns it off again.
+#[test]
+fn source_faces() {
+    let (_l, g, cx) = gpu();
+    let mut e = Exp::new(
+        &g,
+        &cx,
+        &egui::Context::default(),
+        Some(fixture("sf")),
+        false,
+    );
+    let s = Spec {
+        files: vec!["v.insv".into()],
+        photo: false,
+        dur: 5.0,
+        t: 1.0,
+        view: View::default(),
+        look: Look::Perspective,
+        stab: None,
+        smooth: 0.5,
+        follow: None,
+        faces: true,
+    };
+    e.source(s.clone());
+    assert!(e.set.faces);
+    e.source(Spec { faces: false, ..s });
+    assert!(!e.set.faces, "the blur stayed on for the next source");
+}
+
 /// One device for the GPU tests, one test at a time.
 fn gpu() -> (std::sync::MutexGuard<'static, ()>, Arc<Gpu>, Ctx) {
     static G: std::sync::OnceLock<(Mutex<()>, Arc<Gpu>, Ctx)> = std::sync::OnceLock::new();
