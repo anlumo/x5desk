@@ -1461,6 +1461,71 @@ fn drags_coalesce() {
 }
 
 #[test]
+fn noop_drags_keep_redo() {
+    let mut p = base();
+    p.insert(0, Clip::new(0, 1.0, 5.0)).unwrap();
+    p.key(On::Clip(0), 1.0, View::default(), Ease::Smooth)
+        .unwrap();
+    p.insert(1, Clip::new(1, 0.0, 20.0)).unwrap();
+    let full = p.tl().clone();
+    assert!(p.undo());
+    let less = p.tl().clone();
+    let music = |g: f32| {
+        move |o: &mut Out| {
+            o.music = (g > 0.0).then_some(Music {
+                file: 1,
+                offset: 0.0,
+                gain: g,
+                duck: false,
+            })
+        }
+    };
+    // a trim drag, a settings drag and a key drag that end where they started, and an empty one: the redo step stays
+    for d in 0..4 {
+        p.begin();
+        match d {
+            0 => {
+                p.trim(0, 1.5, 5.0).unwrap();
+                p.trim(0, 1.0, 5.0).unwrap();
+            }
+            1 => {
+                p.edit_out(music(0.5)).unwrap();
+                p.edit_out(music(0.0)).unwrap();
+            }
+            2 => {
+                p.mv_key(On::Clip(0), 0, 2.0).unwrap();
+                p.mv_key(On::Clip(0), 0, 1.0).unwrap();
+            }
+            _ => {}
+        }
+        p.end();
+        assert_eq!((p.tl(), p.history()), (&less, (2, 1)), "drag {d}");
+    }
+    // while the drag is held, the redo step's clip keeps its file from shrinking
+    p.begin();
+    p.trim(0, 1.5, 5.0).unwrap();
+    assert!(p.file("/media/b.insv", 10.0).is_err());
+    p.trim(0, 1.0, 5.0).unwrap();
+    p.end();
+    assert!(p.redo());
+    assert_eq!(p.tl(), &full);
+    // a drag that ends elsewhere drops it
+    assert!(p.undo());
+    p.begin();
+    p.trim(0, 1.5, 5.0).unwrap();
+    p.end();
+    assert_eq!(p.history(), (3, 0));
+    // undone in the middle of a drag: the drag's step is the redo step
+    p.begin();
+    p.trim(0, 1.25, 5.0).unwrap();
+    assert!(p.undo());
+    p.end();
+    assert_eq!(p.history(), (3, 1));
+    assert!(p.redo());
+    assert_eq!(p.tl().clips[0].a, 1.25);
+}
+
+#[test]
 fn key_drags() {
     let mut p = base();
     p.insert(0, Clip::new(0, 0.0, 10.0)).unwrap();

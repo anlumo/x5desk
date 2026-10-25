@@ -27,6 +27,9 @@ pub struct Project {
     /// The key move under way in drag group g: (g, track, its keys before the move's first step, the key's index
     /// there, its index now). Any other edit ends it.
     mv: Option<(u64, On, Vec<Key>, usize, usize)>,
+    /// The redo list the open drag group's first change cleared, while that change's entry is on top: back if the
+    /// drag ends where it started.
+    stash: Option<Vec<Entry>>,
 }
 
 impl Project {
@@ -45,6 +48,7 @@ impl Project {
             g: 0,
             gn: 0,
             mv: None,
+            stash: None,
         })
     }
 
@@ -74,11 +78,15 @@ impl Project {
             });
             fs.len() - 1
         });
-        let logged =
-            (self.undo.iter().chain(&self.redo).flat_map(|e| &e.ops)).flat_map(|op| match op {
-                Op::Clips { put, .. } => &put[..],
-                Op::Out(_) => &[],
-            });
+        let log = self
+            .undo
+            .iter()
+            .chain(&self.redo)
+            .chain(self.stash.iter().flatten());
+        let logged = log.flat_map(|e| &e.ops).flat_map(|op| match op {
+            Op::Clips { put, .. } => &put[..],
+            Op::Out(_) => &[],
+        });
         if dur < fs[i].dur
             && self
                 .tl
@@ -102,6 +110,7 @@ impl Project {
 
     /// Ends a drag; a drag that ended where it started leaves no undo step.
     pub fn end(&mut self) {
+        let stash = self.stash.take();
         if let Some(e) = self.undo.last().filter(|e| self.g != 0 && e.g == self.g) {
             let same = match &e.ops[..] {
                 [Op::Clips { at, n, put }] => self.tl.clips[*at..*at + *n] == put[..],
@@ -110,6 +119,8 @@ impl Project {
             };
             if same {
                 self.undo.pop();
+                // nothing else touched redo since the group's first change emptied it
+                self.redo = stash.unwrap_or_default();
             }
         }
         (self.g, self.mv) = (0, None);
@@ -135,7 +146,7 @@ impl Project {
         e.ops.iter_mut().rev().for_each(|op| self.flip(op));
         self.tl.fix();
         self.redo.push(e);
-        self.g = 0;
+        (self.g, self.stash) = (0, None);
         true
     }
 
@@ -146,7 +157,7 @@ impl Project {
         e.ops.iter_mut().for_each(|op| self.flip(op));
         self.tl.fix();
         self.undo.push(e);
-        self.g = 0;
+        (self.g, self.stash) = (0, None);
         true
     }
 
@@ -169,7 +180,7 @@ impl Project {
 
     fn commit(&mut self, ops: Vec<Op>) {
         self.tl.fix();
-        self.redo.clear();
+        let redo = std::mem::take(&mut self.redo);
         self.mv = None;
         match self.undo.last_mut() {
             Some(e) if self.g != 0 && e.g == self.g => {
@@ -186,7 +197,10 @@ impl Project {
                     }
                 }
             }
-            _ => self.undo.push(Entry { ops, g: self.g }),
+            _ => {
+                self.stash = (self.g != 0).then_some(redo);
+                self.undo.push(Entry { ops, g: self.g })
+            }
         }
     }
 
