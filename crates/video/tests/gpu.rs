@@ -1,5 +1,5 @@
-//! `Gpu::new` and drop on many threads at once, as the app's player, thumbnails, export and capture threads (and the
-//! test harness) do. `X5_GPU_ITERS` sets the iterations per thread.
+//! `Gpu::new` and drop on many threads at once, as parallel tests do (the app itself opens one `Gpu` at startup).
+//! `X5_GPU_ITERS` sets the iterations per thread.
 use video::Gpu;
 
 #[test]
