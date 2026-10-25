@@ -522,6 +522,8 @@ struct Real {
     cnote: Option<(String, bool)>,
     /// (mode, setting, value before the first change), in the order of the changes
     undo: Vec<(String, String, String)>,
+    /// the captures the test made, as the camera reported them
+    made: Vec<String>,
     _g: Arc<Gpu>,
 }
 
@@ -567,6 +569,7 @@ impl Real {
             said: vec![],
             cnote: None,
             undo: vec![],
+            made: vec![],
             _g: g,
         }
     }
@@ -748,6 +751,7 @@ impl Real {
             .trim_start_matches("photo taken ")
             .to_string();
         println!("  photo {u} in {:.1} s", t.elapsed().as_secs_f64());
+        self.made.push(u.clone());
         Ok(u)
     }
 
@@ -797,6 +801,7 @@ impl Real {
             .0
             .trim_start_matches("recorded ")
             .to_string();
+        self.made.push(u.clone());
         println!(
             "  recorded {u}, stopped {:.1} s after the shutter",
             t.elapsed().as_secs_f64()
@@ -844,20 +849,28 @@ impl Real {
         Ok(())
     }
 
-    /// The camera as the test found it, however the test ended: a running capture stopped, files it made deleted,
-    /// the settings it changed set back (latest first, each in its mode), the mode. Returns what failed.
+    /// The camera as the test found it, however the test ended: a running capture stopped, files it made deleted
+    /// (only those: [`ours`]), the settings it changed set back (latest first, each in its mode), the mode. Returns
+    /// what failed.
     fn restore(&mut self, files0: &[String], mode0: &str) -> Vec<String> {
         let mut bad = vec![];
         if let Ok(s) = self.cam.capture_status().wait()
             && running(s.state)
         {
             bad.push(format!("a capture still ran ({:?}): stopped", s.state()));
-            let _ = self.cam.stop_capture(pb::CaptureMode::Normal).wait();
+            if let Ok(v) = self.cam.stop_capture(pb::CaptureMode::Normal).wait() {
+                self.made.push(v.uri)
+            }
             self.pump(3.0, |_| false);
         }
         match self.files() {
             Ok(v) => {
-                let left: Vec<String> = v.into_iter().filter(|u| !files0.contains(u)).collect();
+                let (left, other) = ours(v, files0, &self.made);
+                if !other.is_empty() {
+                    bad.push(format!(
+                        "new files the test did not make, left alone: {other:?}"
+                    ));
+                }
                 if !left.is_empty() {
                     bad.push(format!("files left by the test, deleted: {left:?}"));
                     if let Err(e) = self.cam.delete(left).wait() {
@@ -887,6 +900,45 @@ impl Real {
         }
         bad
     }
+}
+
+/// Of the camera's files `now`, the ones a real-camera test may delete: new since `files0` and of a capture it made
+/// (`made`, the URIs the camera reported; their recording's other files by the recording key: the proxy, a photo's
+/// DNG); and the other new ones, someone else's (a clip shot on the camera meanwhile), which stay.
+fn ours(now: Vec<String>, files0: &[String], made: &[String]) -> (Vec<String>, Vec<String>) {
+    let key = |u: &str| crate::library::key(crate::album::name(u));
+    let ks: HashSet<String> = (made.iter())
+        .filter(|u| !u.is_empty())
+        .map(|u| key(u))
+        .collect();
+    (now.into_iter())
+        .filter(|u| !files0.contains(u))
+        .partition(|u| ks.contains(&key(u)))
+}
+
+/// What a real-camera test deletes: the files of the photo and the clip it made, not a clip that appeared meanwhile.
+#[test]
+fn ours_only() {
+    let d = |n: &str| format!("/DCIM/Camera01/{n}");
+    let f0 = vec![d("VID_20261025_100000_00_001.insv")];
+    let now: Vec<String> = [
+        "VID_20261025_100000_00_001.insv",
+        "IMG_20261025_101010_00_002.insp",
+        "IMG_20261025_101010_00_002.dng",
+        "VID_20261025_101100_00_003.insv",
+        "LRV_20261025_101100_01_003.lrv",
+        "VID_20261025_101200_00_004.insv",
+        "LRV_20261025_101200_01_004.lrv",
+    ]
+    .map(d)
+    .into();
+    let made = [
+        d("IMG_20261025_101010_00_002.insp"),
+        d("VID_20261025_101100_00_003.insv"),
+        String::new(),
+    ];
+    let (del, other) = ours(now.clone(), &f0, &made);
+    assert_eq!((&del[..], &other[..]), (&now[1..5], &now[5..]));
 }
 
 /// The camera's wall clock in a file name (`IMG_20261025_034512_00_123.jpg`) read in this computer's zone, unix s.
@@ -1057,12 +1109,10 @@ fn real_writes() {
         if after.abs() > 2 {
             return Err(format!("clock skew {after:+} s after the sync"));
         }
-        let new: Vec<String> = r
-            .files()?
-            .into_iter()
-            .filter(|u| !files0.contains(u))
-            .collect();
-        println!("  new files: {new:?} (the screen showed the clip after {shown:.2} s)");
+        let (new, other) = ours(r.files()?, &files0, &r.made);
+        println!(
+            "  new files: {new:?}, not the test's: {other:?} (the screen showed the clip after {shown:.2} s)"
+        );
         let h = r.cam.file_extra(&v, 10).wait();
         println!(
             "  HIGHLIGHT record of the clip: {:?}",
@@ -1175,7 +1225,7 @@ fn real_ilog() {
             }
             r.pump(1.0, |_| false);
             let (u, _) = r.record(3.0, None)?;
-            let new: Vec<String> = r.files()?.into_iter().filter(|u| !f0.contains(u)).collect();
+            let new = ours(r.files()?, &f0, &r.made).0;
             let h = r
                 .cam
                 .file_extra(&u, 10)
