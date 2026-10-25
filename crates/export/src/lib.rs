@@ -10,7 +10,8 @@
 //!
 //! Output goes to `<path>.part` and is renamed to `path` once complete; an error or a cancel removes it. wgpu errors and
 //! panics on the job's threads (render, decode, encode) are caught (error scopes, `catch_unwind`) and fail the job
-//! instead of reaching the device's handler or hanging the other threads.
+//! instead of reaching the device's handler or hanging the other threads. A host that reconfigures a surface on the
+//! device hands the job's threads its locks around their GPU work (`locks`).
 
 pub mod jpeg;
 
@@ -29,7 +30,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard,
         atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
         mpsc,
     },
@@ -45,6 +46,31 @@ const CANCELLED: &str = "cancelled";
 /// The soundtrack's rate (the mixer's; the X5 records at it) and mixing block, frames.
 const R: f64 = mix::RATE;
 const BLOCK: u64 = 1024;
+
+/// The host's locks (`locks`): gate, burn.
+static LOCKS: OnceLock<(&'static RwLock<()>, &'static Mutex<()>)> = OnceLock::new();
+
+/// Makes every job take a host's locks around its GPU work; call once, before the first job. wgpu fails a surface
+/// configure while another thread submits, so a host that retries it holds `gate` exclusively, after `burn` (the app,
+/// `GATE` and `BURN` in its main.rs). The job's threads hold `gate` shared around each submit of their own and `burn`
+/// around the RAFT model's loading and each flow (burn submits throughout). They never wait for another thread while
+/// holding `gate` (a decoder's wait for a slot, ≤ 50 ms, is for a release the renderer makes without it) and take
+/// nothing while holding it.
+pub fn locks(gate: &'static RwLock<()>, burn: &'static Mutex<()>) {
+    let _ = LOCKS.set((gate, burn));
+}
+
+fn gate() -> Option<RwLockReadGuard<'static, ()>> {
+    LOCKS
+        .get()
+        .map(|l| l.0.read().unwrap_or_else(PoisonError::into_inner))
+}
+
+fn burn() -> Option<MutexGuard<'static, ()>> {
+    LOCKS
+        .get()
+        .map(|l| l.1.lock().unwrap_or_else(PoisonError::into_inner))
+}
 
 /// A span of one clip.
 #[derive(Clone, Debug)]
@@ -189,6 +215,9 @@ pub struct Job {
     pub stab: Option<(stab::Lock, f64)>,
     /// Effects on each frame before it is encoded (crate fx).
     pub fx: Option<Hook>,
+    /// A `Out::Pano` picture that is not a sphere (a flat 2:1 picture a 360 hook made): no `sv3d` / `st3d`, no GPano,
+    /// no wrapping across longitude in the effects. False for 360 output.
+    pub flat: bool,
 }
 
 /// `Job::fx`: called once per frame on the render thread.
@@ -846,7 +875,13 @@ fn decode(
             let mut au = [&[][..]; 64];
             let n = nals(&buf, nal[l], &mut au);
             f[l] = loop {
-                match d[l].decode(g, &au[..n]) {
+                // its flush submits on wgpu's queue; the slot it waits for (≤ 50 ms) the renderer releases without
+                // the gate
+                let r = {
+                    let _g = gate();
+                    d[l].decode(g, &au[..n])
+                };
+                match r {
                     Ok(x) => break x,
                     Err(video::Error::Full) if !quit.load(Relaxed) => {}
                     Err(video::Error::Full) => return Ok(()),
@@ -950,7 +985,12 @@ fn mux(
     let err = |x: video::Error| format!("encoder: {x}");
     for n in rx {
         loop {
-            match e.encode(g, n as i64) {
+            // its flush submits on wgpu's queue
+            let r = {
+                let _g = gate();
+                e.encode(g, n as i64)
+            };
+            match r {
                 Ok(_) => break,
                 Err(video::Error::Full) => {
                     if e.packet(&mut p, 50_000_000).map_err(err)? {
@@ -1099,6 +1139,7 @@ pub fn run(
             return Err(format!("output {w}x{h} outside 1..={max}"));
         }
         if job.raft && raft.is_none() {
+            let _b = burn();
             *raft = Some(Raft::new(&g.instance, &g.adapter, &g.device, &g.queue)?);
         }
         render(
@@ -1191,7 +1232,7 @@ fn render(
                 | U::COPY_DST,
         )
     });
-    let sph = matches!(job.out, Out::Pano(_));
+    let sph = matches!(job.out, Out::Pano(_)) && !job.flat;
     let ed = match &job.cut {
         Cut::Edit(e) => Some(&**e),
         Cut::Segs(_) => None,
@@ -1333,6 +1374,7 @@ fn render(
                             let src = [0, 1].map(|l| &bg[l][(f[l] % OUT as u64) as usize]);
                             dr.pose(&c.pose(k));
                             if let (Some(st), Some(r), true) = (&mut dr.st, raft, fresh) {
+                                let _b = burn();
                                 let mut e = g.device.create_command_encoder(&Default::default());
                                 st.belt(&mut e, src, r);
                                 acquire();
@@ -1374,17 +1416,21 @@ fn render(
                             }
                             let (Some(i), Some(y)) = (&input, &dr.yuv) else {
                                 // a frame grab
-                                acquire();
-                                g.queue.submit([e.finish()]);
+                                let px = {
+                                    let _g = gate();
+                                    acquire();
+                                    g.queue.submit([e.finish()]);
+                                    stitch::read_texture(&g.device, &g.queue, &dr.tex)
+                                };
                                 release();
                                 let Enc::Jpeg(q) = job.enc else { return Ok(()) };
-                                let px = stitch::read_texture(&g.device, &g.queue, &dr.tex);
                                 let xmp = sph.then(|| jpeg::gpano(w, h));
                                 let b = jpeg::encode(&px, w, h, q, xmp.as_deref())?;
                                 return std::fs::write(part, b)
                                     .map_err(|e| format!("{}: {e}", part.display()));
                             };
                             y.encode(&mut e);
+                            // outside the gate: the encoder thread takes it to free a slot
                             while let Err(x) = i.acquire(g, n) {
                                 if quit.load(Relaxed) || stop.load(Relaxed) {
                                     return Err(CANCELLED.into());
@@ -1396,8 +1442,11 @@ fn render(
                             let cb = i
                                 .copy_buffer(g, &y.buf, 0, y.pitch, n)
                                 .map_err(|x| x.to_string())?;
-                            acquire();
-                            g.queue.submit([e.finish(), cb]);
+                            {
+                                let _g = gate();
+                                acquire();
+                                g.queue.submit([e.finish(), cb]);
+                            }
                             if last {
                                 release();
                             }

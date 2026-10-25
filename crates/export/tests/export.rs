@@ -217,6 +217,7 @@ fn pano_main10() {
         raft,
         colour: Some(0.1),
         stab: Some((stab::Lock::Horizon, 0.5)),
+        flat: false,
         fx,
     };
     let (fx, got) = capture(&g, &ks);
@@ -380,6 +381,7 @@ fn fidelity() {
                 raft: false,
                 colour: Some(0.1),
                 stab: None,
+                flat: false,
                 fx: Some(fx),
             },
         );
@@ -459,6 +461,7 @@ fn flat_h264() {
         raft: false,
         colour: Some(0.1),
         stab: Some((stab::Lock::Horizon, 1.0)),
+        flat: false,
         fx: None,
     };
     let (p, secs) = export(&g, &cx, job);
@@ -542,6 +545,7 @@ fn trim_sync() {
         raft: false,
         colour: None,
         stab: None,
+        flat: false,
         fx: None,
     };
     let enc = Enc::Video {
@@ -674,6 +678,7 @@ fn segments() {
         raft: false,
         colour: Some(0.1),
         stab: None,
+        flat: false,
         fx: None,
     };
     let path = out("segments.mp4");
@@ -820,6 +825,7 @@ fn queue() {
             raft,
             colour: Some(0.1),
             stab: None,
+            flat: false,
             fx,
         });
         ids.push((id, name, path, want));
@@ -897,6 +903,7 @@ fn cancel() {
         raft: true,
         colour: Some(0.1),
         stab: None,
+        flat: false,
         fx: None,
     });
     let t = Instant::now();
@@ -975,6 +982,7 @@ fn grab() {
                 raft: pano,
                 colour: Some(0.1),
                 stab: None,
+                flat: false,
                 fx: Some(fx),
             },
         );
@@ -1052,6 +1060,7 @@ fn flat_sharpness() {
                 raft,
                 colour: Some(0.1),
                 stab: None,
+                flat: false,
                 fx: Some(fx),
             },
         );
@@ -1214,6 +1223,7 @@ fn edit_job(tl: edit::Timeline, path: PathBuf, out: Out, enc: Enc, fx: Option<Ho
         raft: false,
         colour: None,
         stab: None,
+        flat: false,
         fx,
     }
 }
@@ -1657,4 +1667,56 @@ fn planet_transition() {
     let md = a.iter().zip(&b).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
     eprintln!("perspective vs Planet(0): max difference {md}");
     assert!(md <= 1);
+}
+
+/// `Job::flat`: a 2:1 `Out::Pano` picture that is not a sphere goes out without spherical metadata (no GPano in a
+/// grab, no `sv3d` / `st3d` in video); the same job without the flag has both.
+#[test]
+fn flat_flag() {
+    let Some(src) = sample("v635.insv") else {
+        return;
+    };
+    let (_l, g, cx) = gpu();
+    for flat in [false, true] {
+        let job = |path: &Path, enc| Job {
+            cut: Cut::Segs(vec![Seg {
+                files: vec![src.clone()],
+                t: [0.0, 0.1],
+            }]),
+            path: path.to_path_buf(),
+            out: Out::Pano(2048),
+            enc,
+            raft: false,
+            colour: None,
+            stab: None,
+            flat,
+            fx: None,
+        };
+        let (j, v) = (
+            out(&format!("flag_{flat}.jpg")),
+            out(&format!("flag_{flat}.mp4")),
+        );
+        export(&g, &cx, job(&j, Enc::Jpeg(90)));
+        let enc = Enc::Video {
+            codec: Codec::H264,
+            deep: false,
+            rate: Rate::Cbr(4_000_000),
+            gop: 30,
+        };
+        export(&g, &cx, job(&v, enc));
+        let b = std::fs::read(&j).unwrap();
+        let gpano = b.windows(5).any(|w| w == b"GPano");
+        let s = probe(
+            &v,
+            &[
+                "-show_entries",
+                "stream=width,height,nb_frames:stream_side_data",
+            ],
+        );
+        eprintln!("flat {flat}: GPano {gpano}; ffprobe:\n{}", s.trim());
+        assert_eq!(gpano, !flat);
+        assert_eq!(s.contains("Spherical Mapping"), !flat);
+        assert_eq!(s.contains("Stereo 3D"), !flat);
+        assert!(s.contains("width=2048") && s.contains("height=1024"));
+    }
 }

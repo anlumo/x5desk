@@ -497,6 +497,7 @@ fn export(
         colour: Some(0.1),
         stab,
         fx: Some(fx),
+        flat: false,
     };
     let t0 = Instant::now();
     let p = export::run(g, sx, &mut None, job, &AtomicBool::new(false), &mut |_| {}).unwrap();
@@ -1325,6 +1326,7 @@ fn render(
         colour: Some(0.1),
         stab: Some((lock, 0.0)),
         fx: None,
+        flat: false,
     };
     let t0 = Instant::now();
     let p = export::run(g, sx, &mut None, job, &AtomicBool::new(false), &mut |_| {}).unwrap();
