@@ -39,13 +39,15 @@ pub enum Codec {
     H265,
 }
 
-/// The picture in a DPB slot. `num`: H.264 FrameNum, or LongTermFrameIdx when `long`.
+/// The picture in a DPB slot. `num`: H.264 FrameNum, or LongTermFrameIdx when `long`. `none`: an H.264
+/// "non-existing" frame (8.2.5.2) with no picture in its slot, never a reference slot of a decode.
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct Ref {
     pub live: bool,
     pub long: bool,
     pub num: u32,
     pub poc: [i32; 2],
+    pub none: bool,
 }
 
 /// Picture management's answer: the current picture's slot, how many reference slots it listed, its coded size

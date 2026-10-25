@@ -1,6 +1,6 @@
 //! H.264 parameter sets and slice headers as Vulkan Video decode needs them (progressive 4:2:0 8-bit up to High,
-//! POC types 0 and 2, no scaling matrices), plus POC (8.2.1) and reference marking (8.2.5: sliding window and
-//! MMCO 1-6).
+//! POC types 0 and 2, no scaling matrices), plus POC (8.2.1) and reference marking (8.2.5: gaps in frame_num,
+//! sliding window and MMCO 1-6).
 use crate::{
     Error::Bad,
     Result,
@@ -176,6 +176,7 @@ pub struct State {
     prev_lsb: i32,
     prev_fn: u32,
     prev_fno: u32,
+    prev_ref: u32,       // PrevRefFrameNum
     max_lt: Option<u32>, // MaxLongTermFrameIdx, None = "no long-term frame indices"
 }
 
@@ -190,6 +191,7 @@ impl Default for State {
             prev_lsb: 0,
             prev_fn: 0,
             prev_fno: 0,
+            prev_ref: 0,
             max_lt: None,
         }
     }
@@ -331,9 +333,9 @@ impl State {
         Ok(s)
     }
 
-    /// POC and reference marking for the picture in `au`: fills `p`, lists the reference slots active for its
-    /// decode in `act`, then marks (sliding window or MMCO) and puts the picture in a free slot (`Pic::setup`). On
-    /// an error nothing has changed.
+    /// POC and reference marking for the picture in `au`: infers the frames of a frame_num gap, fills `p`, lists
+    /// the reference slots active for its decode in `act`, then marks (sliding window or MMCO) and puts the picture
+    /// in a free slot (`Pic::setup`). On an error nothing has changed.
     pub(crate) fn picture(
         &mut self,
         au: &[&[u8]],
@@ -352,13 +354,59 @@ impl State {
         }
         let s = first.ok_or(Bad("no slice"))?;
         let (pps, sps) = self.sets(s.pps_id as u32).map(|(p, s)| (*p, *s))?;
-        let setup = refs.iter().position(|r| !r.live).ok_or(Bad("DPB full"))?;
-        let (max_fn, w, h) = (
+        let (fnum, refpic) = (s.frame_num, s.nri != 0);
+        let setup = match refs.iter().position(|r| !r.live) {
+            Some(i) => i,
+            // an IDR references nothing and empties the DPB
+            None if refpic && s.idr => 0,
+            None => return Err(Bad("DPB full")),
+        };
+        let (max_fn, mx, w, h) = (
             1u32 << sps.log2_max_frame_num,
+            (sps.max_num_ref_frames as usize).max(1),
             sps.width_mbs * 16,
             sps.height_mbs * 16,
         );
-        let (fnum, refpic) = (s.frame_num, s.nri != 0);
+        // FrameNumWrap of frame_num `n` seen from the frame with frame_num `f`
+        let wrap = |n: u32, f: u32| n as i64 - if n > f { max_fn as i64 } else { 0 };
+        // 8.2.5.3 for the frame `f`: with `mx` references, the oldest short-term one goes; returns its slot
+        let slide = |refs: &mut [Ref], f: u32| {
+            if refs.iter().filter(|r| r.live).count() < mx {
+                return None;
+            }
+            let i = (refs.iter().enumerate())
+                .filter(|r| r.1.live && !r.1.long)
+                .min_by_key(|r| wrap(r.1.num, f))?
+                .0;
+            refs[i].live = false;
+            Some(i)
+        };
+        // 8.2.5.2: frame_num values skipped since PrevRefFrameNum. Without gaps allowed they are pictures lost on the
+        // way (the spec has decoders infer that), handled the same: each becomes a "non-existing" short-term reference
+        // through the sliding window, so the MMCO 1 meant for a lost picture still unmarks one (the camera drops its
+        // one reference only that way: without this the reference before a loss stays for good). Only the last `mx`
+        // can survive. One that pushes a picture out takes its slot, whose picture stands in for the missing one
+        // (FFmpeg's concealment too); one in a free slot has none.
+        if !s.idr && fnum != self.prev_ref {
+            let n = fnum.wrapping_sub(self.prev_ref + 1) % max_fn;
+            for u in (1..=n.min(mx as u32))
+                .rev()
+                .map(|d| fnum.wrapping_sub(d) % max_fn)
+            {
+                let i = match slide(refs, u) {
+                    Some(i) => i,
+                    None => {
+                        let Some(j) = (0..refs.len()).find(|&j| !refs[j].live && j != setup) else {
+                            continue;
+                        };
+                        refs[j].none = true;
+                        j
+                    }
+                };
+                (refs[i].live, refs[i].long, refs[i].num) = (true, false, u);
+            }
+            self.prev_ref = fnum.wrapping_sub(1) % max_fn;
+        }
         // 8.2.1
         let (mut top, mut bot) = if sps.poc_type == 0 {
             if s.idr {
@@ -400,18 +448,12 @@ impl State {
         (p.seq_parameter_set_id, p.pic_parameter_set_id) = (sps.id, pps.id);
         (p.frame_num, p.idr_pic_id, p.PicOrderCnt) = (fnum as u16, s.idr_id, [top, bot]);
         let mut na = 0;
-        for (i, _) in refs.iter().enumerate().filter(|r| r.1.live) {
+        for (i, _) in (refs.iter().enumerate()).filter(|r| r.1.live && !r.1.none && !s.idr) {
             (act[na], na) = (i as u8, na + 1);
         }
         // 8.2.5, for frames: PicNum = FrameNumWrap, LongTermPicNum = LongTermFrameIdx
         let (mut long, mut num, mut mmco5) = (false, fnum, false);
-        let pic = |r: &Ref| {
-            if r.num > fnum {
-                r.num as i64 - max_fn as i64
-            } else {
-                r.num as i64
-            }
-        };
+        let pic = |r: &Ref| wrap(r.num, fnum);
         if refpic && s.idr {
             refs.iter_mut().for_each(|r| r.live = false);
             (long, num, self.max_lt) = (s.long_ref, 0, s.long_ref.then_some(0));
@@ -455,30 +497,24 @@ impl State {
                 }
             }
         } else if refpic {
-            // sliding window: at most max_num_ref_frames references once the current one is added
-            let full =
-                refs.iter().filter(|r| r.live).count() >= (sps.max_num_ref_frames as usize).max(1);
-            let old = refs
-                .iter()
-                .enumerate()
-                .filter(|r| r.1.live && !r.1.long)
-                .min_by_key(|r| pic(r.1))
-                .map(|r| r.0);
-            if let (true, Some(i)) = (full, old) {
-                refs[i].live = false;
-            }
+            // at most max_num_ref_frames references once the current one is added
+            slide(refs, fnum);
+        }
+        if refpic {
+            self.prev_ref = fnum;
         }
         if mmco5 {
             // after decoding, the picture counts as frame_num 0 with its POC rebased to 0
             let m = top.min(bot);
             (top, bot, num, self.prev_fn, self.prev_fno) = (top - m, bot - m, 0, 0, 0);
-            (self.prev_msb, self.prev_lsb) = (0, top);
+            (self.prev_msb, self.prev_lsb, self.prev_ref) = (0, top, 0);
         }
         refs[setup] = Ref {
             live: refpic,
             long,
             num,
             poc: [top, bot],
+            none: false,
         };
         Ok(Pic {
             setup,
@@ -558,5 +594,95 @@ impl Pps {
         (p.chroma_qp_index_offset, p.second_chroma_qp_index_offset) =
             (self.chroma_qp, self.chroma_qp2);
         p
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bitw::W;
+
+    /// SPS and PPS shaped like the X5's live preview: High 2656 × 1328, 16-bit frame_num and POC LSB, one reference
+    /// frame, no gaps allowed.
+    fn sets() -> [Vec<u8>; 2] {
+        let mut s = W::default();
+        s.u(8, 0x67).u(8, 100).u(8, 0).u(8, 50).ue(0);
+        s.ue(1).ue(0).ue(0).f(false).f(false);
+        s.ue(12).ue(0).ue(12).ue(1).f(false);
+        s.ue(165).ue(82).f(true).f(true).f(false).f(false);
+        let mut p = W::default();
+        p.u(8, 0x68).ue(0).ue(0).f(true).f(false).ue(0);
+        p.ue(0).ue(0).f(false).u(2, 0);
+        p.ue(0).ue(0).ue(0).f(false).f(false).f(false);
+        [s.nal(), p.nal()]
+    }
+
+    /// The camera's slice header: 0 an IDR, 1 a non-reference P picture, 2 a reference P picture whose MMCO 1
+    /// unmarks the previous frame_num (its only way to drop the reference before it).
+    fn slice(kind: u8, fnum: u32, poc: u32) -> Vec<u8> {
+        let mut w = W::default();
+        w.u(8, [0x65, 0x01, 0x61][kind as usize]).ue(0);
+        w.ue(if kind == 0 { 7 } else { 5 }).ue(0).u(16, fnum);
+        if kind == 0 {
+            w.ue(0);
+        }
+        w.u(16, poc);
+        if kind != 0 {
+            w.f(false).f(false);
+        }
+        match kind {
+            0 => _ = w.f(false).f(false),
+            2 => _ = w.f(true).ue(1).ue(0).ue(0),
+            _ => {}
+        }
+        w.nal()
+    }
+
+    /// The live preview as the link drops it when the decode thread falls behind: whole access units, two
+    /// reference pictures among them in one GOP. The reference after each loss unmarks (MMCO 1) the lost
+    /// picture's frame_num; without the frame_num gap's "non-existing" frame (8.2.5.2) standing in for it, the
+    /// picture before the loss stays a reference for good and the second loss fills the 3 slots.
+    #[test]
+    fn loss() {
+        let mut st = State::default();
+        for n in sets() {
+            st.put(&n).unwrap();
+        }
+        // max_num_ref_frames + 2, as Decoder::new sizes it
+        let mut refs = vec![Ref::default(); 3];
+        let (mut p, mut act) = (unsafe { std::mem::zeroed() }, [0; MAXS]);
+        // GOPs of 30 as the camera sends them; lost: references 4 and 10, non-references 5 and 33
+        for k in (0..90).filter(|k| ![4, 5, 10, 33].contains(k)) {
+            let i = k % 30;
+            let kind = [0, 1, 2][(i > 0) as usize + (i > 0 && i % 2 == 0) as usize];
+            let n = slice(kind, (i as u32 + 1) / 2, 2 * i as u32);
+            let pic = st.picture(&[&n], &mut refs, &mut p, &mut act);
+            let pic = pic.unwrap_or_else(|e| panic!("access unit {k}: {e}"));
+            let live = refs.iter().filter(|r| r.live).count();
+            assert!(live <= 1, "access unit {k}: {live} references");
+            // a P picture predicts from a slot with a picture in it: after a loss, the one before stands in
+            assert_eq!(pic.n, (i > 0) as usize, "access unit {k}");
+        }
+    }
+
+    /// An IDR decodes into a DPB whose slots are all references (a stream that broke the limits before): it
+    /// references nothing and empties the DPB.
+    #[test]
+    fn idr_empties() {
+        let mut st = State::default();
+        for n in sets() {
+            st.put(&n).unwrap();
+        }
+        let mut refs = vec![
+            Ref {
+                live: true,
+                ..Default::default()
+            };
+            3
+        ];
+        let (mut p, mut act) = (unsafe { std::mem::zeroed() }, [0; MAXS]);
+        let pic = st.picture(&[&slice(0, 0, 0)], &mut refs, &mut p, &mut act);
+        let pic = pic.unwrap();
+        assert_eq!((pic.n, refs.iter().filter(|r| r.live).count()), (0, 1));
     }
 }

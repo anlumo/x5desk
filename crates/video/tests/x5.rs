@@ -832,6 +832,63 @@ fn live_matches_ffmpeg() {
     assert_eq!(ff.read(&mut want).unwrap(), 0, "FFmpeg has more frames");
 }
 
+/// The live preview (`X5_LIVE`) as the link drops it when the decode thread falls behind: whole access units, two
+/// reference pictures in one GOP and a burst in the next. The camera unmarks its one reference with MMCO 1 only, so
+/// each lost reference is a frame_num gap whose "non-existing" frame must take the old reference out; the picture
+/// before the loss stands in for the lost one, as in FFmpeg: every frame byte-identical to FFmpeg's decode of the
+/// same stream.
+#[test]
+fn live_loss() {
+    let Some(path) = std::env::var_os("X5_LIVE") else {
+        println!("X5_LIVE unset: skipped");
+        return;
+    };
+    if !ffmpeg() {
+        return;
+    }
+    let _l = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    let es = std::fs::read(&path).unwrap();
+    let lost = [4, 5, 10, 41, 42, 43, 44];
+    let aus: Vec<_> = (annexb(Codec::H264, &es).into_iter().enumerate())
+        .filter(|(k, _)| !lost.contains(k))
+        .map(|a| a.1)
+        .collect();
+    let mut ff = ffdecode(
+        Codec::H264,
+        aus.iter()
+            .flatten()
+            .flat_map(|n| [&[0, 0, 1], *n].concat())
+            .collect(),
+    );
+    let g = Gpu::new().unwrap();
+    let params: Vec<_> = (aus[0].iter().copied())
+        .filter(|n| is_param(Codec::H264, n))
+        .collect();
+    let mut d = Decoder::new(&g, Codec::H264, &params, 0, 0).unwrap();
+    let [_, _, w, h] = d.view;
+    let mut want = vec![0; (w * h * 3 / 2) as usize];
+    let mut bad = 0;
+    for au in &aus {
+        let f = decode(&g, &mut d, au);
+        d.acquire(&g, f);
+        let got = read(&g, &d, d.view, f);
+        d.release(&g, f);
+        ff.read_exact(&mut want).unwrap();
+        let n = got.iter().zip(&want).filter(|(x, y)| x != y).count();
+        if n != 0 {
+            println!("live frame {f}: {n} differing bytes");
+            bad += 1;
+        }
+    }
+    println!(
+        "live, {} access units lost: {} frames, {bad} differing",
+        lost.len(),
+        aus.len()
+    );
+    assert_eq!(bad, 0);
+    assert_eq!(ff.read(&mut want).unwrap(), 0, "FFmpeg has more frames");
+}
+
 /// x264 / x265 streams for what the camera never sends, every frame byte-identical to FFmpeg (compared as sets:
 /// FFmpeg outputs in display order, the decoder in decode order):
 /// - x264 P only: POC type 2, a sliding window of 4 references, weighted prediction, cropping (404 of 416 rows)

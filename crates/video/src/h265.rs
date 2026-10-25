@@ -720,6 +720,7 @@ impl State {
             long: false,
             num: 0,
             poc: [poc; 2],
+            none: false,
         };
         Ok(Pic {
             setup,
