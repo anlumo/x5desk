@@ -1753,38 +1753,48 @@ impl Editor {
         }
         let ppp = ui.ctx().pixels_per_point();
         let size = [r.width(), r.height()].map(|x| ((x * ppp).round() as u32).max(1));
-        let tl = self.pj.tl();
-        let e = tl.at(self.t.min(tl.dur() - 0.5 * tl.out.fps.t(1)).max(0.0));
         if self.fresh || self.dirty || size != self.size {
-            let (look, amt, adj) = e.map_or((String::new(), 1.0, fx::Params::default()), |e| {
-                (e.clip.look.clone(), e.clip.amt, e.clip.adj)
-            });
+            // decks as of this edit: a change unbinds them (`changed`), and drawn unbound the frame went black for good
+            // when it stayed the same (no new frame to set `fresh` once bound again)
+            self.schedule();
+            let tl = self.pj.tl();
+            let e = tl.at(self.t.min(tl.dur() - 0.5 * tl.out.fps.t(1)).max(0.0));
             let c = self.cur();
-            let seam = (c.as_ref())
-                .and_then(|c| self.seam.as_ref().filter(|s| !self.playing && s.0 == c.2))
-                .map(|s| &s.1);
-            let vv = if self.pano {
-                View {
-                    mode: Mode::Equirect,
-                    ..View::default()
-                }
-            } else {
-                v
-            };
-            let d = c.map(|(i, o, _)| (&mut self.decks[i], o));
-            self.vw.render(
-                rs,
-                size,
-                d,
-                seam,
-                &vv,
-                self.pano,
-                &adj,
-                (&look, amt),
-                &self.x.over,
-                self.t,
-            );
-            (self.fresh, self.dirty, self.size) = (false, false, size);
+            // the playhead's frame on its way (a seek, a cut): the picture shown stays until it comes
+            let wait = c.is_none()
+                && e.is_some_and(|e| {
+                    (self.decks.iter()).any(|d| d.k == Some((e.k, self.ver)) && d.want.is_some())
+                });
+            if !wait {
+                let (look, amt, adj) = e.map_or((String::new(), 1.0, fx::Params::default()), |e| {
+                    (e.clip.look.clone(), e.clip.amt, e.clip.adj)
+                });
+                let seam = (c.as_ref())
+                    .and_then(|c| self.seam.as_ref().filter(|s| !self.playing && s.0 == c.2))
+                    .map(|s| &s.1);
+                let vv = if self.pano {
+                    View {
+                        mode: Mode::Equirect,
+                        ..View::default()
+                    }
+                } else {
+                    v
+                };
+                let d = c.map(|(i, o, _)| (&mut self.decks[i], o));
+                self.vw.render(
+                    rs,
+                    size,
+                    d,
+                    seam,
+                    &vv,
+                    self.pano,
+                    &adj,
+                    (&look, amt),
+                    &self.x.over,
+                    self.t,
+                );
+                (self.fresh, self.dirty, self.size) = (false, false, size);
+            }
         }
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 0.0, egui::Color32::BLACK);

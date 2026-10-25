@@ -768,6 +768,149 @@ fn overs() {
     assert!(v.ov.len() == 1 && v.ov[0].is_none() && v.err.is_some());
 }
 
+/// A render state on the shared device as eframe makes one: the viewer registers its texture there.
+fn rs(g: &Gpu) -> RenderState {
+    let f = wgpu::TextureFormat::Bgra8Unorm;
+    RenderState {
+        adapter: g.adapter.clone(),
+        available_adapters: vec![],
+        instance: g.instance.clone(),
+        device: g.device.clone(),
+        queue: g.queue.clone(),
+        target_format: f,
+        renderer: Arc::new(egui::mutex::RwLock::new(eframe::egui_wgpu::Renderer::new(
+            &g.device,
+            f,
+            Default::default(),
+        ))),
+    }
+}
+
+/// The viewer's picture: luma's standard deviation (a cleared frame has none) and the mean RGB difference to `b`.
+fn look_at(a: &[u8], b: &[u8]) -> (f64, f64) {
+    let y: Vec<f64> = (a.chunks(4))
+        .map(|p| (2 * p[0] as u32 + 5 * p[1] as u32 + p[2] as u32) as f64 / 8.0)
+        .collect();
+    let m = y.iter().sum::<f64>() / y.len() as f64;
+    let sd = (y.iter().map(|v| (v - m).powi(2)).sum::<f64>() / y.len() as f64).sqrt();
+    let d = (a.chunks(4).zip(b.chunks(4)))
+        .map(|(p, q)| (0..3).map(|i| p[i].abs_diff(q[i]) as u32).sum::<u32>())
+        .sum::<u32>() as f64
+        / (3 * y.len()) as f64;
+    (sd, d)
+}
+
+/// An edit while paused shows at once on the frame under the playhead and stays (`X5_SAMPLES`, v635 with the Teal &
+/// Orange look, the playhead at 2 s, the whole screen each frame, the edits made between the tick and the viewer as the
+/// inspector and the keys make them): the look's intensity at 0.3 changes the picture, a mute and a key at the playhead
+/// leave it, undo brings the first back. Never black, also frames on (the frame stays the same: no new one comes).
+#[test]
+fn paused_edit() {
+    let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+        eprintln!("X5_SAMPLES unset: skipped");
+        return;
+    };
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = stitch::Ctx::new(&g.device, &g.queue);
+    let (ctx, rs) = (egui::Context::default(), rs(&g));
+    let mut e = Editor::new(&g, &cx, &ctx, player::still(&g, &cx), None);
+    e.add(&d.join("v635.insv"), None).unwrap();
+    e.ed(|p| p.edit(0, |c| c.look = "Teal & Orange".into()));
+    e.seek(2.0);
+    let mut n = 0.0;
+    let mut frame = |e: &mut Editor, f: &mut dyn FnMut(&mut Editor)| {
+        e.tick(true);
+        f(e);
+        n += 1.0 / 60.0;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1400.0, 900.0),
+            )),
+            time: Some(n),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| e.ui(ui, &rs, &[]));
+        thread::sleep(Duration::from_millis(5));
+    };
+    let pic = |e: &Editor| {
+        let t = &e.vw.tgt.as_ref().expect("a picture").tex;
+        stitch::read_texture(&g.device, &g.queue, t)
+    };
+    let t = Instant::now();
+    while !e.idle() {
+        assert!(t.elapsed().as_secs() < 120, "never idle");
+        frame(&mut e, &mut |_| {});
+    }
+    assert!(e.err.is_none(), "{:?}", e.err);
+    let a = pic(&e);
+    let raft = e.seam.is_some();
+    eprintln!(
+        "first picture ({}): luma sd {:.1}",
+        if raft { "RAFT stitch" } else { "template seam" },
+        look_at(&a, &a).0
+    );
+    // the edit, then 30 frames on: the picture against `x` (the same, else changed)
+    let mut step = |e: &mut Editor,
+                    w: &str,
+                    f: &mut dyn FnMut(&mut Editor),
+                    same: bool,
+                    x: &[u8]| {
+        frame(e, f);
+        let p0 = pic(e);
+        for _ in 0..30 {
+            frame(e, &mut |_| {});
+        }
+        let p = pic(e);
+        let ((s0, d0), (s, d), (_, da)) = (look_at(&p0, &p), look_at(&p, x), look_at(&p, &a));
+        eprintln!(
+            "{w}: luma sd {s0:.1} at once, {s:.1} 30 frames on (diff {d0:.2}); diff {d:.2} to the picture expected {}, {da:.2} to the first",
+            if same { "the same" } else { "changed" }
+        );
+        assert!(s0 > 10.0 && s > 10.0, "{w}: black");
+        assert!(d0 < 0.5, "{w}: the picture changed frames after the edit");
+        assert!(if same { d < 0.5 } else { d > 1.0 }, "{w}: diff {d}");
+        p
+    };
+    let b = step(
+        &mut e,
+        "intensity 0.3",
+        &mut |e| {
+            e.ed(|p| p.edit(0, |c| c.amt = 0.3));
+        },
+        false,
+        &a,
+    );
+    step(
+        &mut e,
+        "mute",
+        &mut |e| {
+            e.ed(|p| p.edit(0, |c| c.mute = true));
+        },
+        true,
+        &b,
+    );
+    step(
+        &mut e,
+        "key at the playhead",
+        &mut |e| e.key_here(),
+        true,
+        &b,
+    );
+    step(
+        &mut e,
+        "undo the key and the mute",
+        &mut |e| {
+            e.undo();
+            e.undo();
+        },
+        true,
+        &b,
+    );
+    step(&mut e, "undo the intensity", &mut |e| e.undo(), true, &a);
+    assert!(e.err.is_none(), "{:?}", e.err);
+}
+
 /// Music whose container gives no length (of a 6 s chord encoded by the ffmpeg CLI into a pipe: AAC, MP3, Vorbis, FLAC;
 /// those the reader knows the length of anyway are left out) is counted on a thread: the import returns at once
 /// and the music goes in, 6 s long, once counted; an import meanwhile supersedes it.

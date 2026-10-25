@@ -478,10 +478,11 @@ impl Tgt {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: FMT,
-            // storage: the editor's effects write it
+            // storage: the editor's effects write it; copy: tests read the picture back
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::STORAGE_BINDING,
+                | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = tex.create_view(&Default::default());
