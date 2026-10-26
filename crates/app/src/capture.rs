@@ -69,7 +69,8 @@ pub struct Hook {
 }
 
 enum Cmd {
-    Cam(Option<Camera>),
+    /// the session (`camera::Tap::sid`) and its handle
+    Cam(u32, Option<Camera>),
     Live(bool),
     Mode(String),
     Set(String, String),
@@ -127,14 +128,16 @@ fn running(s: i32) -> bool {
 
 struct W {
     cam: Option<Camera>,
+    /// the session `cam` belongs to: its reports carry it
+    sid: u32,
     st: St,
-    up: Sender<St>,
+    up: Sender<(u32, St)>,
     wake: Box<dyn Fn() + Send>,
 }
 
 impl W {
     fn send(&self) {
-        let _ = self.up.send(self.st.clone());
+        let _ = self.up.send((self.sid, self.st.clone()));
         (self.wake)()
     }
 
@@ -166,25 +169,20 @@ impl W {
     }
 
     fn cmd(&mut self, c: Cmd) {
-        let Some(cam) = self.cam.clone() else {
-            if let Cmd::Cam(Some(c)) = c {
-                self.cam = Some(c);
-                self.st = St {
-                    on: true,
+        if let Cmd::Cam(s, c) = c {
+            let on = c.is_some();
+            (self.sid, self.cam, self.st) = (
+                s,
+                c,
+                St {
+                    on,
                     ..Default::default()
-                };
-                self.load();
-            }
-            return;
-        };
+                },
+            );
+            return self.load();
+        }
+        let Some(cam) = self.cam.clone() else { return };
         let r: link::Result<()> = match c {
-            Cmd::Cam(c) => {
-                (self.cam, self.st) = (None, St::default());
-                if c.is_some() {
-                    return self.cmd(Cmd::Cam(c));
-                }
-                Ok(())
-            }
             Cmd::Live(true) => self.live(&cam),
             Cmd::Live(false) => cam.live_stop().wait().map(|_| self.st.live = false),
             Cmd::Mode(m) => match conf::sub(&m) {
@@ -206,7 +204,7 @@ impl W {
                 self.on(n);
                 Ok(())
             }
-            Cmd::Quit => Ok(()),
+            Cmd::Cam(..) | Cmd::Quit => Ok(()),
         };
         if let Err(e) = r {
             self.note(format!("{e}"), true);
@@ -450,7 +448,7 @@ pub struct Capture {
     ctx: egui::Context,
     tap: Taps,
     tx: Sender<Cmd>,
-    rx: Receiver<St>,
+    rx: Receiver<(u32, St)>,
     th: Option<thread::JoinHandle<()>>,
     pub st: St,
     sid: u32,
@@ -479,6 +477,7 @@ impl Capture {
         let c = ctx.clone();
         let w = W {
             cam: None,
+            sid: 0,
             st: St::default(),
             up: utx,
             wake: Box::new(move || c.request_repaint()),
@@ -557,9 +556,13 @@ impl Capture {
             // a new session: a preview of the old one starts again on it
             (self.sid, self.feed, self.st) = (sid, None, St::default());
             self.tap.lock().unwrap().frames = None;
-            let _ = self.tx.send(Cmd::Cam(cam.clone()));
+            let _ = self.tx.send(Cmd::Cam(sid, cam.clone()));
         }
-        while let Ok(s) = self.rx.try_recv() {
+        // a report of an earlier session (sent before the worker took the new one) is stale
+        while let Ok((n, s)) = self.rx.try_recv() {
+            if n != self.sid {
+                continue;
+            }
             if let Some(f) = &self.feed {
                 let mut f = f.lock().unwrap();
                 if s.cal != self.st.cal

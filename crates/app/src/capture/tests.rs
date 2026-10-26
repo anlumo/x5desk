@@ -477,6 +477,34 @@ fn real_camera() {
     );
 }
 
+/// A new session takes no report of the one before: the old session's report still in the channel when the session
+/// changes (here after a note on it) leaves the new one not ready (it used to be taken and mark it ready early). The
+/// new session's camera never answers, so it reports nothing meanwhile.
+#[test]
+fn stale_report() {
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = Ctx::new(&g.device, &g.queue);
+    let tap = Taps::default();
+    let mut c = Capture::new(&g, &cx, &egui::Context::default(), tap.clone(), None);
+    let sim = |s: u16| Camera::sim(move |_, _| (s, vec![]), |_| None, 1).unwrap();
+    let set = |c: &Camera, s: u32| {
+        let mut t = tap.lock().unwrap();
+        (t.cam, t.sid) = (Some(c.clone()), s);
+    };
+    let (a, _ea, _sa) = sim(200);
+    set(&a, 1);
+    until(&mut c, 10.0, |c| c.st.on);
+    c.tx.send(Cmd::Note(Note::StorageFull)).unwrap();
+    thread::sleep(Duration::from_millis(300));
+    let (b, _eb, _sb) = sim(0);
+    set(&b, 2);
+    c.tick();
+    let (on, note, idle) = (c.st.on, c.st.note.clone(), c.idle());
+    // the new session's requests end with its session, so the screen's worker can quit
+    b.close().wait().unwrap();
+    assert!(!on && note.is_none() && !idle, "{on} {note:?} {idle}");
+}
+
 /// The notifications the status shows: capture state and time, battery (low), temperature, a stopped capture.
 #[test]
 fn notes() {
@@ -484,6 +512,7 @@ fn notes() {
     let (tx, _rx) = mpsc::channel();
     let mut w = W {
         cam: None,
+        sid: 0,
         st: St::default(),
         up: tx,
         wake: Box::new(|| {}),
