@@ -336,7 +336,7 @@ impl W {
             if self.cur.is_none() {
                 break;
             }
-            dl::step(&self.q, None, &mut self.cur);
+            dl::step(&self.q, None, &[], &mut self.cur);
             thread::sleep(Duration::from_millis(10));
         }
         self.q.lock().unwrap().save();
@@ -394,7 +394,7 @@ impl W {
         self.thumbs();
         // no new download while the camera captures (§7.12)
         let c = self.cam.as_ref().filter(|_| !self.info.busy);
-        if let Some(p) = dl::step(&self.q, c, &mut self.cur) {
+        if let Some(p) = dl::step(&self.q, c, &self.info.disk, &mut self.cur) {
             self.send(Up::Done(p))
         }
     }

@@ -2,8 +2,8 @@
 //! is camera-limited to ~18 MB/s, four reach 29–42 MB/s, PLAN.md §1). Data goes to `<dst>.part` with link's sidecar,
 //! so a cancelled or interrupted file resumes where it stopped, also after a restart. Imports from a mounted card
 //! (`file://` sources) run in the same queue as local copies ([`disk::copy`], also resumable), with or without a
-//! camera; one whose card is gone waits for it. The queue is a text file in the config dir: state, URI, failure reason
-//! and destination per line.
+//! camera; one whose card is gone waits for it, one whose card is there without its file fails. The queue is a text
+//! file in the config dir: state, URI, failure reason and destination per line.
 
 use crate::disk;
 use link::{Camera, Download, Error, Pending, Prog};
@@ -207,9 +207,15 @@ impl Queue {
 /// The running download: its destination and the link's result.
 pub type Cur = Option<(PathBuf, Pending<u64>)>;
 
-/// One turn of the runner: collects the end of the running download, starts the next queued one when `cam` is up,
-/// updates rates. Returns the file that just finished.
-pub fn step(q: &Shared, cam: Option<&Camera>, cur: &mut Cur) -> Option<PathBuf> {
+/// One turn of the runner: collects the end of the running download, starts the next queued one when `cam` is up or
+/// its file is there, fails an import whose card is among the mounted `vols` without its file, updates rates.
+/// Returns the file that just finished.
+pub fn step(
+    q: &Shared,
+    cam: Option<&Camera>,
+    vols: &[disk::Vol],
+    cur: &mut Cur,
+) -> Option<PathBuf> {
     let mut g = q.lock().unwrap();
     let mut fin = None;
     if let Some((dst, p)) = cur.as_ref()
@@ -239,12 +245,27 @@ pub fn step(q: &Shared, cam: Option<&Camera>, cur: &mut Cur) -> Option<PathBuf> 
         *cur = None;
         g.save();
     }
-    // the next one that can run: an import whose card is there, a download while the camera is
-    if cur.is_none()
-        && let Some(d) =
-            g.v.iter_mut()
-                .find(|d| d.st == St::Queued && local(&d.uri).map_or(cam.is_some(), Path::exists))
-    {
+    // the next one that can run: an import whose file is there, a download while the camera is. An import whose card
+    // is mounted without its file fails; the file is looked at before the card, so one unmounted in between waits.
+    let mut failed = false;
+    for d in g.v.iter_mut().filter(|d| d.st == St::Queued) {
+        if cur.is_some() {
+            break;
+        }
+        let ok = match local(&d.uri).map(|s| (s.try_exists(), s)) {
+            None => cam.is_some(),
+            Some((Ok(false), s))
+                if (vols.iter())
+                    .any(|v| s.starts_with(&v.root) && v.root.join("DCIM").is_dir()) =>
+            {
+                (d.st, d.err, failed) = (St::Failed, "not on the card".into(), true);
+                false
+            }
+            Some((e, _)) => e.unwrap_or(false),
+        };
+        if !ok {
+            continue;
+        }
         if let Some(p) = d.dst.parent() {
             let _ = std::fs::create_dir_all(p);
         }
@@ -255,6 +276,9 @@ pub fn step(q: &Shared, cam: Option<&Camera>, cur: &mut Cur) -> Option<PathBuf> 
             (d.prog, d.st, d.rate, d.mark) = (dl.prog, St::Running, 0.0, None);
             *cur = Some((d.dst.clone(), dl.done));
         }
+    }
+    if failed {
+        g.save()
     }
     let now = Instant::now();
     for d in g.v.iter_mut().filter(|d| d.st == St::Running) {

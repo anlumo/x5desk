@@ -234,7 +234,8 @@ fn card() {
 }
 
 /// The copy resumes from a partial file whose end matches the source, starts over otherwise, and keeps the source's
-/// modification time; through the queue an import runs without a camera and waits while its card is gone.
+/// modification time; through the queue an import runs without a camera, waits while its card is gone and fails when
+/// its card is there without it.
 #[test]
 fn import() {
     let d = dir("import");
@@ -294,21 +295,30 @@ fn import() {
 
     let q: dl::Shared = Arc::new(Mutex::new(dl::Queue::load(None)));
     let gone = lib.join("IMG_20260118_124432_00_659.jpg");
+    // mounted: the card, and one unmounted since the last look at the mount table (its mount point is empty)
+    let vols: Vec<Vol> = ["card", "old"]
+        .map(|r| Vol {
+            root: d.join(r),
+            dev: "fake".into(),
+            cam: None,
+        })
+        .into();
     {
         let mut g = q.lock().unwrap();
-        g.add(
-            &format!(
-                "file://{}",
-                d.join("away/IMG_20260118_124432_00_659.jpg").display()
-            ),
-            gone.clone(),
-        );
+        for (s, n) in [
+            ("away", "IMG_20260118_124432_00_659.jpg"),
+            ("card", "IMG_20260118_124432_00_660.jpg"),
+            ("old", "IMG_20260118_124432_00_661.jpg"),
+        ] {
+            let u = d.join(s).join("DCIM/Camera01").join(n);
+            g.add(&format!("file://{}", u.display()), lib.join(n));
+        }
         g.add(&format!("file://{}", src.display()), dst.clone());
     }
     let mut cur = None;
     let end = Instant::now() + Duration::from_secs(20);
     let f = loop {
-        if let Some(f) = dl::step(&q, None, &mut cur) {
+        if let Some(f) = dl::step(&q, None, &vols, &mut cur) {
             break f;
         }
         assert!(Instant::now() < end, "stuck");
@@ -317,10 +327,22 @@ fn import() {
     assert_eq!(f, dst);
     assert!(fs::read(&dst).unwrap() == data);
     for _ in 0..5 {
-        assert!(dl::step(&q, None, &mut cur).is_none() && cur.is_none());
+        assert!(dl::step(&q, None, &vols, &mut cur).is_none() && cur.is_none());
     }
-    let st: Vec<St> = q.lock().unwrap().v.iter().map(|x| x.st).collect();
-    assert_eq!(st, [St::Queued, St::Done]);
+    // the card is there without the file: failed, not queued for ever; the other two wait for their cards
+    let st: Vec<(St, String)> = (q.lock().unwrap().v.iter())
+        .map(|x| (x.st, x.err.clone()))
+        .collect();
+    let q0 = (St::Queued, String::new());
+    assert_eq!(
+        st,
+        [
+            q0.clone(),
+            (St::Failed, "not on the card".into()),
+            q0,
+            (St::Done, String::new())
+        ]
+    );
     assert!(!gone.exists());
     fs::remove_dir_all(&d).unwrap();
 }
