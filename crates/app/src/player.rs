@@ -651,6 +651,12 @@ impl Aud {
     }
 }
 
+/// Whether `open_on` failed in the output stream (cpal's error inside: building or starting it), not in the file or
+/// its decoder: media maps symphonia's errors to `ErrorKind::Other` too, and such a file fails on the default again.
+fn lost(e: &std::io::Error) -> bool {
+    e.get_ref().is_some_and(|x| x.is::<cpal::Error>())
+}
+
 /// The audio player of `p` on the output picked in Settings, or the silent clock when it has no AAC track or there
 /// is no output device; its clock; the audio track's presentation offset (edit list) in seconds; whether it has sound.
 pub(crate) fn audio(p: &Path, end: f64) -> (Aud, audio::Clock, f64, bool) {
@@ -673,7 +679,7 @@ pub(crate) fn audio(p: &Path, end: f64) -> (Aud, audio::Clock, f64, bool) {
             // here, not on the UI thread (which waits for the open): `output` waits for a lookup under way
             let r = match audio::Player::open_on(&p, crate::settings::output()) {
                 // the stream failed: the device picked may be gone since, the system default then
-                Err(e) if e.kind() == std::io::ErrorKind::Other => {
+                Err(e) if lost(&e) => {
                     eprintln!("{}: {e}: the default output", p.display());
                     audio::Player::open(&p)
                 }
@@ -1825,6 +1831,35 @@ mod tests {
                 "{width} px: the slider ends at {end}, past the panel"
             );
         }
+    }
+
+    /// The audio goes to the default output only when the stream on the picked device failed (media hands cpal's
+    /// error over inside an `Other`): a 5.1 AAC-LC file, which symphonia's decoder refuses (`Other` as well), is no
+    /// stream failure and goes to the silent clock without a second open, nor is a file without an AAC track.
+    #[test]
+    fn fallback_kind() {
+        let f = std::env::var_os("X5_FIXTURES")
+            .map_or_else(std::env::temp_dir, PathBuf::from)
+            .join(format!("x5desk-six-{}.mp4", std::process::id()));
+        let o = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=1"])
+            .args(["-ac", "6", "-c:a", "aac"])
+            .arg(&f)
+            .status()
+            .expect("ffmpeg");
+        assert!(o.success());
+        let r = audio::Player::open_on(&f, None).map(|_| ());
+        let (_, _, _, sound) = audio(&f, 1.0);
+        std::fs::remove_file(&f).unwrap();
+        let e = r.unwrap_err();
+        println!("5.1 AAC: {e} ({:?}), sound {sound}", e.kind());
+        assert!(e.kind() == std::io::ErrorKind::Other && !lost(&e) && !sound);
+        let dev = cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable);
+        assert!(lost(&std::io::Error::other(dev)));
+        assert!(!lost(&std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no AAC track"
+        )));
     }
 
     /// A file without an AAC track plays on the silent clock: held at open, wall time while playing, exactly on a
