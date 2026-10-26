@@ -1,11 +1,14 @@
 //! FLV and RTMP against FFmpeg (a test tool only): H.264 + AAC from `v635.lrv` ($X5_SAMPLES) and an
 //! x264 re-encode with B-frames, written as FLV and published to `ffmpeg -listen 1`, then checked
-//! with ffprobe. Outputs go to $X5_OUT (default: a temp dir); what a listener received goes with it.
+//! with ffprobe. Outputs go to $X5_OUT (default: a temp dir): the fixtures under fixed names, each
+//! renamed into place whole (concurrent runs share them); what a listener received is named per
+//! process and removed with it.
 
 use live::{flv, rtmp};
 use std::{
     env, fs,
-    io::BufWriter,
+    io::{BufWriter, Write},
+    net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::OnceLock,
@@ -34,11 +37,34 @@ fn have_ffmpeg() -> bool {
     ok
 }
 
-fn out(name: &str) -> PathBuf {
+fn dir() -> PathBuf {
     let d =
         env::var_os("X5_OUT").map_or_else(|| env::temp_dir().join("x5desk-live"), PathBuf::from);
     fs::create_dir_all(&d).unwrap();
-    d.join(name)
+    d
+}
+
+/// A file of this process's: concurrent runs share the dir.
+fn out(name: &str) -> PathBuf {
+    dir().join(format!("{}-{name}", std::process::id()))
+}
+
+/// A file of this process's: dropping it removes it, also when the test fails.
+struct Rm(PathBuf);
+
+impl Drop for Rm {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Fixture `name`, shared by concurrent runs and made again by each: `w` writes it under a name of
+/// this process's, and it is renamed into place whole, so no run reads it half written.
+fn fixture(name: &str, w: impl FnOnce(&Path)) -> PathBuf {
+    let (p, t) = (dir().join(name), Rm(out(name)));
+    w(&t.0);
+    fs::rename(&t.0, &p).unwrap();
+    p
 }
 
 // ---- a tiny MP4 reader, enough for these files ----
@@ -355,19 +381,19 @@ fn check(file: &Path, want: &[P], t0: i64) {
 fn bframes(d: &Path) -> PathBuf {
     static B: OnceLock<PathBuf> = OnceLock::new();
     B.get_or_init(|| {
-        let o = out("bframes.mp4");
-        let s = Command::new("ffmpeg")
-            .args(["-v", "error", "-y", "-i"])
-            .arg(d.join("v635.lrv"))
-            .args([
-                "-t", "3", "-c:v", "libx264", "-preset", "veryfast", "-bf", "3", "-g", "30",
-                "-c:a", "copy",
-            ])
-            .arg(&o)
-            .status()
-            .unwrap();
-        assert!(s.success());
-        o
+        fixture("bframes.mp4", |o| {
+            let s = Command::new("ffmpeg")
+                .args(["-v", "error", "-y", "-i"])
+                .arg(d.join("v635.lrv"))
+                .args([
+                    "-t", "3", "-c:v", "libx264", "-preset", "veryfast", "-bf", "3", "-g", "30",
+                    "-c:a", "copy",
+                ])
+                .arg(o)
+                .status()
+                .unwrap();
+            assert!(s.success());
+        })
     })
     .clone()
 }
@@ -394,39 +420,41 @@ fn flv_file() {
     check(&bf, &b.p, b.t0);
     assert_eq!((s.t0, b.t0), (0, -67));
     for (name, s) in [("lrv.flv", s), ("bframes.flv", b)] {
-        let path = out(name);
-        let mut w =
-            flv::Writer::new(BufWriter::new(fs::File::create(&path).unwrap()), true, true).unwrap();
-        let mut b = vec![];
-        flv::meta(&mut b, &cfg(&s, 0).meta);
-        w.tag(flv::DATA, 0, &b).unwrap();
-        b.clear();
-        flv::avc_seq(&mut b, &s.avcc);
-        w.tag(flv::VIDEO, 0, &b).unwrap();
-        b.clear();
-        flv::aac_seq(&mut b, &s.asc);
-        w.tag(flv::AUDIO, 0, &b).unwrap();
-        let mut ab = vec![];
-        for p in &s.p {
+        let path = fixture(name, |f| {
+            let mut w =
+                flv::Writer::new(BufWriter::new(fs::File::create(f).unwrap()), true, true).unwrap();
+            let mut b = vec![];
+            flv::meta(&mut b, &cfg(&s, 0).meta);
+            w.tag(flv::DATA, 0, &b).unwrap();
             b.clear();
-            let x = &s.f[p.off..p.off + p.len];
-            if p.video {
-                // through Annex-B, the form the Vulkan encoder emits
-                ab.clear();
-                avcc_nals(x).for_each(|n| ab.extend_from_slice(&[&[0, 0, 0, 1][..], n].concat()));
-                flv::avc(&mut b, p.key, p.cts, flv::nals(&ab));
-                assert_eq!(&b[5..], x);
-            } else {
-                flv::aac(&mut b, x);
+            flv::avc_seq(&mut b, &s.avcc);
+            w.tag(flv::VIDEO, 0, &b).unwrap();
+            b.clear();
+            flv::aac_seq(&mut b, &s.asc);
+            w.tag(flv::AUDIO, 0, &b).unwrap();
+            let mut ab = vec![];
+            for p in &s.p {
+                b.clear();
+                let x = &s.f[p.off..p.off + p.len];
+                if p.video {
+                    // through Annex-B, the form the Vulkan encoder emits
+                    ab.clear();
+                    avcc_nals(x)
+                        .for_each(|n| ab.extend_from_slice(&[&[0, 0, 0, 1][..], n].concat()));
+                    flv::avc(&mut b, p.key, p.cts, flv::nals(&ab));
+                    assert_eq!(&b[5..], x);
+                } else {
+                    flv::aac(&mut b, x);
+                }
+                w.tag(
+                    if p.video { flv::VIDEO } else { flv::AUDIO },
+                    p.dts as u32,
+                    &b,
+                )
+                .unwrap();
             }
-            w.tag(
-                if p.video { flv::VIDEO } else { flv::AUDIO },
-                p.dts as u32,
-                &b,
-            )
-            .unwrap();
-        }
-        drop(w);
+            w.w.flush().unwrap();
+        });
         if name == "bframes.flv" {
             assert!(
                 s.p.iter().any(|p| p.cts > 0),
@@ -470,8 +498,9 @@ impl Drop for Kid {
     }
 }
 
-fn listen(port: u16, file: &Path) -> Kid {
-    let c = Kid::new(
+/// `ffmpeg -listen` on `port` into `file`; None when it ends before it listens (the port is taken).
+fn listen(port: u16, file: &Path) -> Option<Kid> {
+    let mut c = Kid::new(
         Command::new("ffmpeg")
             .args([
                 "-hide_banner",
@@ -489,23 +518,60 @@ fn listen(port: u16, file: &Path) -> Kid {
             .stdin(Stdio::null()),
         file,
     );
-    // wait until it listens; a probe connection would be taken as the publisher
-    let hex = format!("0100007F:{port:04X}");
+    // wait until it listens, on a socket of its own: another run's listener may hold the port. A
+    // probe connection would be taken as the publisher.
+    let (hex, pid) = (format!("0100007F:{port:04X}"), c.0.id());
+    let own = |i: &str| {
+        let s = format!("socket:[{i}]");
+        fs::read_dir(format!("/proc/{pid}/fd"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| fs::read_link(e.path()).is_ok_and(|l| l.as_os_str() == &*s))
+    };
     let t = Instant::now();
     while !fs::read_to_string("/proc/net/tcp")
         .unwrap()
         .lines()
-        .any(|l| {
-            l.split_whitespace().nth(1) == Some(&hex) && l.split_whitespace().nth(3) == Some("0A")
-        })
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .any(|l| l.len() > 9 && l[1] == hex && l[3] == "0A" && own(l[9]))
     {
+        if c.0.try_wait().unwrap().is_some() {
+            return None;
+        }
         assert!(
             t.elapsed() < Duration::from_secs(10),
             "ffmpeg isn't listening"
         );
         thread::sleep(Duration::from_millis(20));
     }
-    c
+    Some(c)
+}
+
+/// A listener into `file` on a port the kernel found free, and that port; should another process
+/// take it before ffmpeg does, on another.
+fn serve(file: &Path) -> (Kid, u16) {
+    (0..5)
+        .find_map(|_| {
+            let p = TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            listen(p, file).map(|k| (k, p))
+        })
+        .expect("no port ffmpeg could listen on")
+}
+
+/// A socket already listening on the port is not taken for ffmpeg's: `listen` waits for ffmpeg to
+/// give up.
+#[test]
+fn port_taken() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    assert!(listen(l.local_addr().unwrap().port(), &out("taken.flv")).is_none());
 }
 
 fn wait(c: &mut Child) {
@@ -544,13 +610,13 @@ fn rtmp_ffmpeg() {
     if !have_ffmpeg() {
         return;
     }
-    for (port, src, name) in [
-        (19350, d.join("v635.lrv"), "rtmp_out.flv"),
-        (19351, bframes(&d), "rtmp_bframes.flv"),
+    for (src, name) in [
+        (d.join("v635.lrv"), "rtmp_out.flv"),
+        (bframes(&d), "rtmp_bframes.flv"),
     ] {
         let s = mp4(&src);
         let file = out(name);
-        let mut ff = listen(port, &file);
+        let (mut ff, port) = serve(&file);
         let t = Instant::now();
         let r = rtmp::Rtmp::start(
             &format!("rtmp://127.0.0.1:{port}/live"),
@@ -583,8 +649,9 @@ fn rtmp_late_key() {
     }
     let s = mp4(&bframes(&d));
     let file = out("rtmp_late_key.flv");
-    let mut ff = listen(19356, &file);
-    let r = rtmp::Rtmp::start("rtmp://127.0.0.1:19356/live/test", "", cfg(&s, 60_000)).unwrap();
+    let (mut ff, port) = serve(&file);
+    let u = format!("rtmp://127.0.0.1:{port}/live/test");
+    let r = rtmp::Rtmp::start(&u, "", cfg(&s, 60_000)).unwrap();
     let t = Instant::now();
     while r.stats().state != rtmp::State::Live {
         assert!(t.elapsed() < Duration::from_secs(10), "{:?}", r.stats());
@@ -629,8 +696,9 @@ fn rtmp_ext_ts() {
     }
     let s = mp4(&d.join("v635.lrv"));
     let file = out("rtmp_ext.flv");
-    let mut ff = listen(19355, &file);
-    let r = rtmp::Rtmp::start("rtmp://127.0.0.1:19355/live/test", "", cfg(&s, 60_000)).unwrap();
+    let (mut ff, port) = serve(&file);
+    let u = format!("rtmp://127.0.0.1:{port}/live/test");
+    let r = rtmp::Rtmp::start(&u, "", cfg(&s, 60_000)).unwrap();
     let want: Vec<P> = s.p[..1]
         .iter()
         .copied()
@@ -661,8 +729,9 @@ fn rtmp_stop() {
         return;
     }
     let s = mp4(&d.join("v635.lrv"));
-    let ff = listen(19354, &out("rtmp_frozen.flv"));
-    let r = rtmp::Rtmp::start("rtmp://127.0.0.1:19354/live/test", "", cfg(&s, 600_000)).unwrap();
+    let (ff, port) = serve(&out("rtmp_frozen.flv"));
+    let u = format!("rtmp://127.0.0.1:{port}/live/test");
+    let r = rtmp::Rtmp::start(&u, "", cfg(&s, 600_000)).unwrap();
     let t = Instant::now();
     s.p.iter().for_each(|p| send(&r, &s, p, 0));
     until_sent(&r, s.p.len(), t);
@@ -691,9 +760,10 @@ fn rtmp_backpressure() {
     }
     let s = mp4(&d.join("v635.lrv"));
     let file = out("rtmp_stall.flv");
-    let mut ff = listen(19352, &file);
+    let (mut ff, port) = serve(&file);
     let pid = ff.0.id() as i32;
-    let r = rtmp::Rtmp::start("rtmp://127.0.0.1:19352/live/test", "", cfg(&s, 500)).unwrap();
+    let u = format!("rtmp://127.0.0.1:{port}/live/test");
+    let r = rtmp::Rtmp::start(&u, "", cfg(&s, 500)).unwrap();
     // freeze the receiver for 3 s while publishing 4 loops of the clip at 4× real time
     let stall = thread::spawn(move || {
         thread::sleep(Duration::from_secs(1));
@@ -750,8 +820,9 @@ fn rtmp_reconnect() {
     }
     let s = mp4(&d.join("v635.lrv"));
     let (f1, f2) = (out("rtmp_cut.flv"), out("rtmp_resumed.flv"));
-    let mut ff = listen(19353, &f1);
-    let r = rtmp::Rtmp::start("rtmp://127.0.0.1:19353/live/test", "", cfg(&s, 2000)).unwrap();
+    let (mut ff, port) = serve(&f1);
+    let u = format!("rtmp://127.0.0.1:{port}/live/test");
+    let r = rtmp::Rtmp::start(&u, "", cfg(&s, 2000)).unwrap();
     // publish 3 loops at 4× real time; the server dies after 1 s and a new one takes the port (on this thread: a
     // listener dies with the thread that spawned it)
     let len = s.p.iter().map(|p| p.dts).max().unwrap() as u32 + 40;
@@ -765,7 +836,7 @@ fn rtmp_reconnect() {
             }
             if !cut && t.elapsed() > Duration::from_secs(1) {
                 drop(ff);
-                ff = listen(19353, &f2);
+                ff = listen(port, &f2).expect("the port was taken");
                 cut = true;
             }
             send(&r, &s, p, i * len);
