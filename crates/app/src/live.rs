@@ -1916,6 +1916,15 @@ mod tests {
             .join(format!("x5desk-{}-{name}", std::process::id()))
     }
 
+    /// A directory of the test's: dropping it removes it with what it holds, also when the test fails.
+    struct Rm(PathBuf);
+
+    impl Drop for Rm {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// A test tool's process and the file it writes: dropping it kills and reaps the one, then removes the other,
     /// also when the test fails.
     struct Kid(std::process::Child, PathBuf);
@@ -2470,8 +2479,8 @@ mod tests {
         let cx = stitch::Ctx::new(&g.device, &g.queue);
         let run_dir =
             std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
-        let dir = run_dir.join(format!("x5desk-live-obs-{}", std::process::id()));
-        let sock = dir.join("obs.sock");
+        let dir = Rm(run_dir.join(format!("x5desk-live-obs-{}", std::process::id())));
+        let sock = dir.0.join("obs.sock");
         let hook = Hook {
             obs: true,
             sock: Some(sock.clone()),
@@ -2588,6 +2597,6 @@ mod tests {
         });
         assert_eq!(p.lock().unwrap().n, n, "rendered without a watcher");
         drop((c, l));
-        std::fs::remove_dir(&dir).unwrap();
+        std::fs::remove_dir(&dir.0).unwrap();
     }
 }
