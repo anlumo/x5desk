@@ -18,6 +18,8 @@ struct Card {
     /// files DELETE_FILES has trouble with: 1 a request of several with it fails, 2 a request of several answers
     /// but leaves it, 3 every request with it fails
     stuck: HashMap<String, u8>,
+    /// request codes answered with status 500
+    refuse: Vec<u16>,
 }
 
 type Fake = Arc<Mutex<Card>>;
@@ -63,6 +65,9 @@ fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'static
     move |code, b| {
         let mut c = f.lock().unwrap();
         c.log.push((Instant::now(), code, b.to_vec()));
+        if c.refuse.contains(&code) {
+            return (500, vec![]);
+        }
         let ok = |m: &dyn Fn() -> Vec<u8>| (200, m());
         match code {
             link::code::GET_OPTIONS => ok(&|| {
@@ -491,6 +496,89 @@ fn low_battery() {
     drop(w);
 }
 
+/// Every connect sets the camera clock once, as the app does (§5.1 step 5, §5.3): its two SET_OPTIONS right after the
+/// identity, before anything else; the note says so. A camera that refuses it still connects and lists its album,
+/// the refusal in an error note.
+#[test]
+fn connect_time() {
+    let f = card(&NAMES[..2]);
+    let q = Arc::new(Mutex::new(dl::Queue::load(None)));
+    let (w, _) = spawn(&f, 50_000_000, q, Cache::at(None));
+    let run = || {
+        let n0 = f.lock().unwrap().log.len();
+        w.tx.send(Cmd::Connect).unwrap();
+        let mut notes = vec![];
+        let v = wait(&w, 10.0, |u| match u {
+            Up::Note(s, e) => {
+                notes.push((s, e));
+                None
+            }
+            Up::Album(v) => Some(v),
+            _ => None,
+        });
+        let l: Vec<(u16, Vec<u8>)> = (f.lock().unwrap().log[n0..].iter())
+            .map(|l| (l.1, l.2.clone()))
+            .collect();
+        (notes, v.len(), l)
+    };
+    let (t, _, off, tz, _) = clock();
+    for i in 0..2 {
+        let (notes, n, l) = run();
+        let k: Vec<u16> = l.iter().map(|l| l.0).collect();
+        let s: Vec<usize> = (0..k.len())
+            .filter(|&i| k[i] == link::code::SET_OPTIONS)
+            .collect();
+        println!("connect {i}: requests {k:?}; notes {notes:?}");
+        assert_eq!(n, 1);
+        assert!(s.len() == 2 && s[1] == s[0] + 1, "{k:?}");
+        assert!(
+            s[0] > 0 && k[..s[0]].iter().all(|&c| c == link::code::GET_OPTIONS),
+            "only the identity before: {k:?}"
+        );
+        let set: Vec<pb::SetOptions> = (s.iter())
+            .map(|&i| pb::SetOptions::decode(&l[i].1[..]).unwrap())
+            .collect();
+        assert_eq!(
+            (&set[0].option_types[..], &set[1].option_types[..]),
+            (&[12, 13, 175][..], &[175][..])
+        );
+        let o = set[0].value.as_ref().unwrap();
+        assert!(o.local_time.abs_diff(t) <= 5);
+        assert_eq!(
+            (o.time_zone_seconds_from_gmt, &*o.geographic_time_zone),
+            (off, &*tz)
+        );
+        assert_eq!(set[1].value.as_ref().unwrap().geographic_time_zone, tz);
+        assert!(
+            notes.len() == 1
+                && !notes[0].1
+                && notes[0].0.starts_with("connected to Insta360 X5 in ")
+                && notes[0].0.contains("; camera clock set to ")
+                && notes[0].0.ends_with(&format!("({tz})")),
+            "{notes:?}"
+        );
+        w.tx.send(Cmd::Disconnect).unwrap();
+        wait(&w, 5.0, |u| {
+            matches!(u, Up::Note(s, _) if s == "disconnected").then_some(())
+        });
+    }
+    f.lock().unwrap().refuse = vec![link::code::SET_OPTIONS];
+    let (notes, n, l) = run();
+    println!("refused: notes {notes:?}");
+    assert_eq!(n, 1, "listed all the same");
+    assert!(l.iter().any(|l| l.0 == link::code::GET_FILE_LIST));
+    assert!(
+        notes.len() == 2
+            && !notes[0].1
+            && notes[0].0.starts_with("connected to Insta360 X5 in ")
+            && !notes[0].0.contains("clock")
+            && notes[1].1
+            && notes[1].0.starts_with("time sync: status 500"),
+        "{notes:?}"
+    );
+    drop(w);
+}
+
 /// A download over four tunnel connections, cancelled, resumed after a restart of the worker from the queue file,
 /// cut by an unplug, resumed after reconnecting; byte-identical at the end.
 #[test]
@@ -718,9 +806,10 @@ fn commands() {
             .any(|l| l.1 == link::code::ERASE_SD && l.2.is_empty())
     );
 
+    let n0 = f.lock().unwrap().log.len();
     w.tx.send(Cmd::Time).unwrap();
     after(&w);
-    let l = f.lock().unwrap().log.clone();
+    let l = f.lock().unwrap().log[n0..].to_vec();
     let set: Vec<pb::SetOptions> = l
         .iter()
         .filter(|l| l.1 == link::code::SET_OPTIONS)
@@ -1050,7 +1139,8 @@ fn card_album() {
 
 /// The real X5 over USB, through the worker and queue the UI uses. `X5_CAMERA=<scratch dir>`,
 /// `X5_CAMERA_DL=<uri>[,<uri>…]` (full downloads, the first one also cancelled and resumed after a restart),
-/// `X5_CAMERA_REF=<dir>` (reference copies by file name). Read-only on the camera apart from the HTTP downloads.
+/// `X5_CAMERA_REF=<dir>` (reference copies by file name). Read-only on the camera apart from the HTTP downloads and
+/// the clock, which every connect sets to this computer's (the connect notes say whether the camera took it).
 #[test]
 fn real_camera() {
     let Some(d) = std::env::var_os("X5_CAMERA").map(PathBuf::from) else {
@@ -1089,7 +1179,21 @@ fn real_camera() {
     println!("hotplug watch: X5 in app mode");
     let t = Instant::now();
     w.tx.send(Cmd::Connect).unwrap();
-    let i = conn(&w, Conn::On);
+    let mut notes = vec![];
+    let i = wait(&w, 5.0, |u| match u {
+        Up::Note(s, e) => {
+            println!("note: {s}");
+            notes.push((s, e));
+            None
+        }
+        Up::Info(i) if i.conn == Conn::On => Some(i),
+        _ => None,
+    });
+    assert!(
+        notes.iter().any(|n| n.0.contains("; camera clock set to "))
+            && !notes.iter().any(|n| n.0.starts_with("time sync")),
+        "the clock not set on connect: {notes:?}"
+    );
     let id = i.id.unwrap();
     println!(
         "connected in {:.0} ms: {} {}, battery {}, storage {}, Wi-Fi {}, clock skew {:?} s",

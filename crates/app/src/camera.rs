@@ -1,9 +1,10 @@
 //! Camera screen: the X5 over USB. A worker thread owns the link: it follows USB hotplug, connects (automatically
-//! if wanted; the sync runs on the link's thread and a disconnect or quit cancels it), reads identity, battery,
-//! storage, Wi-Fi and clock, lists the album, fetches thumbnails (disk cache first, the ones on screen first), runs
-//! the download queue and the camera commands, and follows the camera's notifications. The UI sends it commands and
-//! draws what it reports. The Capture screen shares the session through [`Tap`]: the handle, and the live-preview
-//! packets and notifications, which the events thread hands it directly.
+//! if wanted; the sync runs on the link's thread and a disconnect or quit cancels it), reads identity, sets the
+//! camera clock (on every connect, as the app does), reads battery, storage, Wi-Fi and clock, lists the album,
+//! fetches thumbnails (disk cache first, the ones on screen first), runs the download queue and the camera commands,
+//! and follows the camera's notifications. The UI sends it commands and draws what it reports. The Capture screen
+//! shares the session through [`Tap`]: the handle, and the live-preview packets and notifications, which the events
+//! thread hands it directly.
 //!
 //! The album can show a mounted card instead (`disk`: the X5 in USB mass-storage mode, or its card in a reader): the
 //! worker watches the mount table, lists the card's DCIM with the same grouping, reads thumbnails from the trailers,
@@ -290,6 +291,14 @@ fn clock() -> (u64, i64, i32, String, String) {
     (t, t as i64 + std, off, tz, s)
 }
 
+/// Sets the camera clock and zone to this computer's with the app's two SET_OPTIONS (PROTOCOL.md §5.3).
+fn set_time(c: &Camera) -> link::Result<String> {
+    let (t, _, off, tz, s) = clock();
+    c.set_time(t, off, &tz)
+        .wait()
+        .map(|_| format!("camera clock set to {s} ({tz})"))
+}
+
 impl W {
     fn send(&self, u: Up) {
         let _ = self.up.send(u);
@@ -486,14 +495,12 @@ impl W {
                             }
                         }
                     });
-                self.note(
-                    format!(
-                        "connected to {} in {:.0} ms",
-                        id.model,
-                        t.elapsed().as_secs_f64() * 1e3
-                    ),
-                    false,
-                );
+                let ms = t.elapsed().as_secs_f64() * 1e3;
+                // as the app on every USB and Wi-Fi connect, before anything else is asked (§5.1 step 5); a failure
+                // leaves the session up
+                let clk = set_time(&c);
+                let s = clk.as_ref().map_or(String::new(), |s| format!("; {s}"));
+                self.note(format!("connected to {} in {ms:.0} ms{s}", id.model), false);
                 if id.battery.as_ref().is_some_and(low) {
                     self.note(
                         format!(
@@ -502,6 +509,9 @@ impl W {
                         ),
                         true,
                     );
+                }
+                if let Err(e) = clk {
+                    self.note(format!("time sync: {e}"), true)
                 }
                 (self.info.battery, self.info.id) = (id.battery, Some(id));
                 self.info.conn = Conn::On;
@@ -861,12 +871,7 @@ impl W {
                 .format(pb::CardLocation::StorClCamera)
                 .wait()
                 .map(|_| "SD card formatted".into()),
-            Cmd::Time => {
-                let (t, _, off, tz, s) = clock();
-                cam.set_time(t, off, &tz)
-                    .wait()
-                    .map(|_| format!("camera clock set to {s} ({tz})"))
-            }
+            Cmd::Time => set_time(&cam),
             _ => return,
         };
         match r {
