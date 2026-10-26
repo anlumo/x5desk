@@ -111,7 +111,7 @@ No model: person re-identification (src/reid.rs)
     subject with X5_BLANK (v627 yaw 64.5 none and 5 gaps, 2 runs each; v606 none and 3 gaps, 1 run each): on the
     subject 93.6 to 100 % of the frames from the gap's end before, 96.2 to 100 % after (v606 100 % either way), never
     a wrong find (the rest without a box).
-    v627 yaw 21, a woman of a couple in a dark coat and a beanie (the reference corrected by eye from frame 507, where
+    v627 yaw 21, a woman of a couple in a brown coat and a beanie (the reference corrected by eye from frame 507, where
     the tracker run it was made from had jumped to the man beside her): on her without a gap 45.3 to 91.6 % before,
     77.8 to 78.1 % after, with a 2 s gap at frame 150 19.6 to 87.2 % / 67.2 to 87.2 %; most runs either way follow the
     man from frame 507 (130 frames), VitTrack drifting onto him. Before, find() took a figure 34° off by the pillars at
