@@ -6,6 +6,7 @@
 //! - Timeline `done`: the decode of frame f signals f + 1. Timeline `free`: each wgpu submit that samples f waits for
 //!   `done ≥ f + 1` (`Ring::acquire`), the next submit after the last of them signals f + 1 (`Ring::release`); the
 //!   decode into a slot waits for `free` and `done` from the frame that used the slot before.
+//! - A dropped decoder's memory is kept for the next decoder of its shape (`Bin`) instead of freed.
 use crate::{
     Error::{self, Bad},
     Gpu, Result, h264, h265,
@@ -13,8 +14,9 @@ use crate::{
 use ash::vk::{self, native::*};
 use std::{
     ffi::c_void,
+    mem::take,
     ptr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 use wgpu_hal::api::Vulkan as Vk;
 
@@ -24,6 +26,7 @@ pub const OUT: usize = 4;
 pub const MAXS: usize = 17;
 const BS: u64 = 8 << 20; // bitstream bytes per access unit
 const WAIT: u64 = 50_000_000; // ns decode() waits for its slot before returning Full
+const PARK: usize = 2; // parked bodies and rings per shape: a deck's two lenses, while another deck opens
 const NV12: vk::Format = vk::Format::G8_B8R8_2PLANE_420_UNORM;
 const P010: vk::Format = vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
 const RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
@@ -33,6 +36,101 @@ const RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     base_array_layer: 0,
     layer_count: 1,
 };
+
+/// What decoders that can share memory have in common: codec, profile, 10-bit, texture size, DPB slots.
+type Shape = (Codec, u32, bool, u32, u32, usize);
+
+/// A decoder's session (with its memory), DPB, bitstream buffer and command buffers.
+struct Body {
+    dpb: Vec<(vk::Image, vk::ImageView)>,
+    mem: Vec<vk::DeviceMemory>,
+    session: vk::VideoSessionKHR,
+    bs: vk::Buffer,
+    map: *mut u8,
+    pool: vk::CommandPool,
+    cbs: Vec<vk::CommandBuffer>,
+}
+
+// `map` points into host-coherent memory that only its decoder touches
+unsafe impl Send for Body {}
+
+impl Body {
+    /// Destroys it; nothing of it is in flight.
+    unsafe fn free(self, d: &ash::Device, vq: &ash::khr::video_queue::Device) {
+        unsafe {
+            (vq.fp().destroy_video_session_khr)(d.handle(), self.session, ptr::null());
+            for &(img, v) in &self.dpb {
+                d.destroy_image_view(v, None);
+                d.destroy_image(img, None);
+            }
+            d.destroy_buffer(self.bs, None);
+            d.destroy_command_pool(self.pool, None);
+            for &m in &self.mem {
+                d.free_memory(m, None);
+            }
+        }
+    }
+}
+
+/// A ring's textures and their decode views. The next ring gets new timelines and numbers its frames from 0: a slot's
+/// first decode then leaves `UNDEFINED`, which any layout may.
+struct Out {
+    tex: Vec<wgpu::Texture>,
+    imgs: Vec<vk::Image>,
+    views: Vec<vk::ImageView>,
+}
+
+impl Out {
+    /// Destroys it; nothing samples or decodes into it any more.
+    unsafe fn free(self, d: &ash::Device) {
+        for &v in &self.views {
+            unsafe { d.destroy_image_view(v, None) };
+        }
+        // the textures go after their views
+    }
+}
+
+/// Decoder memory parked for reuse (`Gpu::bin`), at most `PARK` bodies and rings per shape. amdgpu makes the
+/// page-table update that unmaps freed memory wait for every submission queued in the process's VM, decodes included,
+/// and graphics submissions after it wait for that update. During playback the decode queue never drains (two 3840²
+/// lenses keep a VCN busy), so memory freed then held the UI's frames back by the backlog: 40–190 ms at the editor's
+/// cuts, where a deck is dropped while the next one decodes from its keyframe. Another process's decodes are not in
+/// our VM. So a dropped decoder parks its body here, a dropped ring its textures, and the next decoder of the shape
+/// takes them (timelines are no memory: each ring makes its own): once a deck's worth is parked, a cut frees and
+/// allocates nothing.
+#[derive(Default)]
+pub struct Bin {
+    body: Vec<(Shape, Body)>,
+    out: Vec<(Shape, Out)>,
+}
+
+impl Bin {
+    /// Parks `t` unless `PARK` of its shape are parked; else hands it back.
+    fn park<T>(v: &mut Vec<(Shape, T)>, s: Shape, t: T) -> Option<T> {
+        match v.iter().filter(|x| x.0 == s).count() < PARK {
+            true => {
+                v.push((s, t));
+                None
+            }
+            false => Some(t),
+        }
+    }
+
+    fn take<T>(v: &mut Vec<(Shape, T)>, s: Shape) -> Option<T> {
+        let i = v.iter().position(|x| x.0 == s)?;
+        Some(v.swap_remove(i).1)
+    }
+
+    /// Destroys everything parked.
+    pub(crate) unsafe fn free(self, d: &ash::Device, vq: &ash::khr::video_queue::Device) {
+        for (_, b) in self.body {
+            unsafe { b.free(d, vq) };
+        }
+        for (_, o) in self.out {
+            unsafe { o.free(d) };
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Codec {
@@ -103,6 +201,9 @@ pub struct Ring {
     // `free` values: the highest staged, the highest a submit has taken. Staging under the lock keeps at most one,
     // rising, value in wgpu's list.
     rel: Mutex<[u64; 2]>,
+    // its shape once whole, and where it parks
+    shape: Option<Shape>,
+    bin: Weak<Mutex<Bin>>,
     dev: ash::Device,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -182,9 +283,19 @@ impl Drop for Ring {
             let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
             self.dev.destroy_semaphore(self.done, None);
             self.dev.destroy_semaphore(self.free, None);
-            // the textures (fields) go after their views
-            for &v in &self.views {
-                self.dev.destroy_image_view(v, None);
+            let o = Out {
+                tex: take(&mut self.tex),
+                imgs: take(&mut self.imgs),
+                views: take(&mut self.views),
+            };
+            let left = match (self.shape, self.bin.upgrade()) {
+                (Some(s), Some(b)) => {
+                    Bin::park(&mut b.lock().unwrap_or_else(|e| e.into_inner()).out, s, o)
+                }
+                _ => Some(o),
+            };
+            if let Some(o) = left {
+                o.free(&self.dev);
             }
         }
     }
@@ -217,6 +328,9 @@ pub struct Decoder {
     cbs: Vec<vk::CommandBuffer>,
     offs: Vec<u32>,
     reset: bool,
+    // its shape once whole, and where its body parks
+    shape: Option<Shape>,
+    bin: Weak<Mutex<Bin>>,
     dev: ash::Device,
     vq: ash::khr::video_queue::Device,
 }
@@ -360,6 +474,8 @@ impl Decoder {
             }
             let slots = slots.min(caps.max_dpb_slots as usize).min(MAXS);
             let hd = g.device.as_hal::<Vk>().ok_or(Bad("not a Vulkan device"))?;
+            let shape = (codec, idc, deep, w, h, slots);
+            let bin = || g.bin.lock().unwrap_or_else(|e| e.into_inner());
 
             // from here every object belongs to `ring`, `d` or wgpu as soon as it exists: an error drops it
             let image = |usage, flags, fams: &[u32]| -> Result<(vk::Image, vk::DeviceMemory)> {
@@ -418,13 +534,20 @@ impl Decoder {
                 g.dev
                     .create_semaphore(&vk::SemaphoreCreateInfo::default().push_next(&mut t), None)
             };
-            let mut ring = Ring {
+            let o = Bin::take(&mut bin().out, shape).unwrap_or(Out {
                 tex: vec![],
                 imgs: vec![],
                 views: vec![],
+            });
+            let mut ring = Ring {
+                tex: o.tex,
+                imgs: o.imgs,
+                views: o.views,
                 done: vk::Semaphore::null(),
                 free: vk::Semaphore::null(),
                 rel: Mutex::new([0; 2]),
+                shape: None,
+                bin: Arc::downgrade(&g.bin),
                 dev: g.dev.clone(),
                 device: g.device.clone(),
                 queue: g.queue.clone(),
@@ -436,7 +559,7 @@ impl Decoder {
                 height: h,
                 depth_or_array_layers: 1,
             };
-            for _ in 0..OUT {
+            while ring.tex.len() < OUT {
                 let (img, m) = image(
                     vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR
                         | vk::ImageUsageFlags::SAMPLED
@@ -481,6 +604,7 @@ impl Decoder {
                 ring.views
                     .push(iv(img, vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR)?);
             }
+            ring.shape = Some(shape);
 
             let mut d = Decoder {
                 ring: Arc::new(ring),
@@ -504,9 +628,18 @@ impl Decoder {
                 cbs: vec![],
                 offs: vec![],
                 reset: true,
+                shape: None,
+                bin: Arc::downgrade(&g.bin),
                 dev: g.dev.clone(),
                 vq: g.vq.clone(),
             };
+            if let Some(b) = Bin::take(&mut bin().body, shape) {
+                (d.dpb, d.mem, d.session, d.bs, d.map, d.pool, d.cbs) =
+                    (b.dpb, b.mem, b.session, b.bs, b.map, b.pool, b.cbs);
+                d.params(g)?;
+                d.shape = Some(shape);
+                return Ok(d);
+            }
             let info = vk::VideoSessionCreateInfoKHR::default()
                 .queue_family_index(g.dec.family)
                 .video_profile(&pr[0])
@@ -579,8 +712,37 @@ impl Decoder {
                 .command_buffer_count(OUT as u32);
             d.cbs = g.dev.allocate_command_buffers(&info)?;
             d.params(g)?;
+            d.warm(g)?;
+            d.shape = Some(shape);
             Ok(d)
         }
+    }
+
+    /// Grows the command buffers' upload memory before any decode: RADV starts it at 16 KB on a buffer's first use
+    /// and doubles it whenever a command does not fit (a coding control and a decode take `embedded_size` there each,
+    /// over 16 KB on VCN), freeing the outgrown ones at the buffer's next reset, i.e. during the first `2 · OUT`
+    /// decodes while the decoder runs ahead (`Bin`). Recorded, never submitted: as many coding controls as a first
+    /// decode makes uploads (reset, decode) and one more; the reset here frees the outgrown ones.
+    unsafe fn warm(&self, g: &Gpu) -> Result<()> {
+        let (vq, d) = (g.vq.fp(), &self.dev);
+        let begin = vk::VideoBeginCodingInfoKHR::default()
+            .video_session(self.session)
+            .video_session_parameters(self.params);
+        let reset =
+            vk::VideoCodingControlInfoKHR::default().flags(vk::VideoCodingControlFlagsKHR::RESET);
+        unsafe {
+            for &cb in &self.cbs {
+                d.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default())?;
+                (vq.cmd_begin_video_coding_khr)(cb, &begin);
+                for _ in 0..3 {
+                    (vq.cmd_control_video_coding_khr)(cb, &reset);
+                }
+                (vq.cmd_end_video_coding_khr)(cb, &vk::VideoEndCodingInfoKHR::default());
+                d.end_command_buffer(cb)?;
+            }
+            d.reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())?;
+        }
+        Ok(())
     }
 
     /// Waits until every semaphore in `s` reaches `v`.
@@ -863,18 +1025,31 @@ impl Drop for Decoder {
     fn drop(&mut self) {
         unsafe {
             // every submitted decode can finish: decode() submits only once its slot is released
-            let _ = self.wait(&[self.ring.done], self.frame, u64::MAX);
-            let (d, vq, dh) = (&self.dev, self.vq.fp(), self.dev.handle());
-            (vq.destroy_video_session_parameters_khr)(dh, self.params, ptr::null());
-            (vq.destroy_video_session_khr)(dh, self.session, ptr::null());
-            for &(img, v) in &self.dpb {
-                d.destroy_image_view(v, None);
-                d.destroy_image(img, None);
-            }
-            d.destroy_buffer(self.bs, None);
-            d.destroy_command_pool(self.pool, None);
-            for &m in &self.mem {
-                d.free_memory(m, None);
+            let idle = self.wait(&[self.ring.done], self.frame, u64::MAX);
+            (self.vq.fp().destroy_video_session_parameters_khr)(
+                self.dev.handle(),
+                self.params,
+                ptr::null(),
+            );
+            let b = Body {
+                dpb: take(&mut self.dpb),
+                mem: take(&mut self.mem),
+                session: self.session,
+                bs: self.bs,
+                map: self.map,
+                pool: self.pool,
+                cbs: take(&mut self.cbs),
+            };
+            let left = match (self.shape, self.bin.upgrade()) {
+                (Some(s), Some(bin)) if idle.is_ok_and(|x| x) => Bin::park(
+                    &mut bin.lock().unwrap_or_else(|e| e.into_inner()).body,
+                    s,
+                    b,
+                ),
+                _ => Some(b),
+            };
+            if let Some(b) = left {
+                b.free(&self.dev, &self.vq);
             }
         }
     }

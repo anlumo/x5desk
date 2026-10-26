@@ -41,6 +41,15 @@ pub struct Gpu {
     pub veq: khr::video_encode_queue::Device,
     pub mem_fd: Option<khr::external_memory_fd::Device>,
     pub sem_fd: Option<khr::external_semaphore_fd::Device>,
+    /// decoder memory parked for reuse, freed with the `Gpu`
+    pub(crate) bin: Arc<Mutex<crate::decode::Bin>>,
+}
+
+impl Drop for Gpu {
+    fn drop(&mut self) {
+        let b = std::mem::take(&mut *self.bin.lock().unwrap_or_else(|e| e.into_inner()));
+        unsafe { b.free(&self.dev, &self.vq) };
+    }
 }
 
 const EXT: [&CStr; 13] = [
@@ -212,6 +221,7 @@ impl Gpu {
                 .then(|| khr::external_memory_fd::Device::new(&inst, &dev)),
             sem_fd: has(khr::external_semaphore_fd::NAME)
                 .then(|| khr::external_semaphore_fd::Device::new(&inst, &dev)),
+            bin: Default::default(),
             mem: unsafe { inst.get_physical_device_memory_properties(pd) },
             dec,
             enc,

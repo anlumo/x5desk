@@ -667,6 +667,89 @@ fn full_and_drop() {
     drop(d);
 }
 
+/// The process's GPU memory as amdgpu counts it (KiB over our DRM clients, each once); None without one.
+fn gpu_kib() -> Option<u64> {
+    let (mut n, mut seen) = (None, vec![]);
+    for e in std::fs::read_dir("/proc/self/fdinfo").ok()?.flatten() {
+        let s = std::fs::read_to_string(e.path()).unwrap_or_default();
+        let Some(id) = s.lines().find(|l| l.starts_with("drm-client-id:")) else {
+            continue;
+        };
+        if !s.contains("drm-driver:\tamdgpu") || seen.iter().any(|x| x == id) {
+            continue;
+        }
+        seen.push(id.to_string());
+        for l in s.lines() {
+            if let Some(v) = l
+                .strip_prefix("drm-total-vram:")
+                .or(l.strip_prefix("drm-total-gtt:"))
+            {
+                *n.get_or_insert(0) += v.trim().trim_end_matches(" KiB").parse::<u64>().unwrap();
+            }
+        }
+    }
+    n
+}
+
+/// Nothing is freed or allocated while a decoder decodes, nor when it goes and the next one of its shape comes:
+/// amdgpu holds graphics submissions back behind the decode queue for memory freed meanwhile (`decode::Bin`). The
+/// next decoder takes the first one's textures, numbers its frames from 0 again, and decodes the stream as it did.
+#[test]
+fn recycle() {
+    let Some(path) = sample_file("v635.lrv") else {
+        return;
+    };
+    let _l = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    let g = Gpu::new().unwrap();
+    let (mut file, tracks) = mp4::read(&path).unwrap();
+    let t = &tracks[0];
+    let mut buf = vec![];
+    // frame hashes of samples 0..n; the memory after the first one's read-back (wgpu's staging memory then exists)
+    // and after decoding through 3 · OUT
+    let mut run = |d: &mut Decoder, n: usize| {
+        let (mut h, mut kib) = (vec![], [None; 2]);
+        for i in 0..n {
+            mp4::sample(&mut file, t, i, &mut buf);
+            let f = decode(&g, d, &mp4::nals(&buf, t.nal_len));
+            if i == 3 * video::decode::OUT {
+                kib[1] = gpu_kib();
+            }
+            if i % 7 == 0 {
+                d.acquire(&g, f);
+                h.push(hash(&read(&g, d, d.view, f)));
+            }
+            d.release(&g, f);
+            if i == 0 {
+                kib[0] = gpu_kib();
+            }
+        }
+        (h, kib)
+    };
+    let mut a = Decoder::new(&g, t.codec, &t.params, t.width, t.height).unwrap();
+    let (ha, ka) = run(&mut a, 40);
+    if ka[0].is_none() {
+        println!("no amdgpu fdinfo: memory not checked");
+    }
+    assert_eq!(
+        ka[0], ka[1],
+        "memory changed while the first decoder decoded"
+    );
+    let tex = a.ring.texture(0).clone();
+    let kib = gpu_kib();
+    drop(a);
+    assert_eq!(gpu_kib(), kib, "the dropped decoder's memory was freed");
+    let mut b = Decoder::new(&g, t.codec, &t.params, t.width, t.height).unwrap();
+    assert_eq!(gpu_kib(), kib, "the next decoder allocated");
+    assert!(*b.ring.texture(0) == tex && b.frame == 0);
+    let (hb, kb) = run(&mut b, 40);
+    assert_eq!(
+        kb[0], kb[1],
+        "memory changed while the next decoder decoded"
+    );
+    assert_eq!(hb, ha);
+    println!("{} frames checked, {kib:?} KiB throughout", ha.len());
+}
+
 /// Bit writer for re-encoding a parameter set (no emulation prevention: the caller checks none is needed).
 struct W(Vec<u8>, u32);
 
