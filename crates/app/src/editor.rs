@@ -401,11 +401,8 @@ impl Editor {
         for d in &mut self.decks {
             d.k = None;
         }
-        // a clip being moved may be gone or have another's index now (its widget's id): the move ends unplaced
-        if matches!(self.drag, Some(Drag::Move(_))) {
-            self.drag = None;
-            self.ctx.stop_dragging();
-        }
+        // a change that is not the drag's own ends it, also one that skipped `ed`'s halt (a moved clip ends unplaced)
+        self.halt();
         if self.playing {
             self.pause();
         }
@@ -448,13 +445,34 @@ impl Editor {
         }
     }
 
-    /// An edit of the project; on success the timeline changed.
+    /// An edit of the project; on success the timeline changed. An open drag ends first (`halt`).
     fn ed<T>(&mut self, f: impl FnOnce(&mut Project) -> edit::Result<T>) -> Option<T> {
+        self.halt();
         let r = f(&mut self.pj);
         self.did(r)
     }
 
+    /// Ends the open drag and its undo step, before an edit that is not its own (Delete or S mid-drag, a Deep Track's
+    /// keys): it names its clip, key or point by index, which may be another's afterwards (its widget's id too).
+    fn halt(&mut self) {
+        if self.drag.take().is_some() {
+            self.ctx.stop_dragging();
+            if self.grp {
+                self.end();
+            }
+        }
+    }
+
+    /// `f` as the open drag's own work (its undo group, its edits): the drag goes on through it.
+    fn own<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let d = self.drag.take();
+        let r = f(self);
+        self.drag = d;
+        r
+    }
+
     fn begin(&mut self) {
+        self.halt();
         self.pj.begin();
         self.grp = true;
     }
@@ -936,16 +954,18 @@ impl Editor {
     /// Puts music file `p` of `dur` s on the timeline.
     fn song(&mut self, p: &Path, dur: f64) -> Result<(), String> {
         let f = self.pj.file(&p.to_string_lossy(), dur).map_err(|e| e.0)?;
-        let r = self.pj.edit_out(|o| {
-            o.music = Some(edit::Music {
-                file: f,
-                offset: 0.0,
-                gain: 1.0,
-                duck: true,
+        // a count may end mid-drag: through `ed`, which ends the drag first
+        self.ed(|pj| {
+            pj.edit_out(|o| {
+                o.music = Some(edit::Music {
+                    file: f,
+                    offset: 0.0,
+                    gain: 1.0,
+                    duck: true,
+                })
             })
-        });
-        self.did(r)
-            .ok_or_else(|| self.err.clone().unwrap_or_default())
+        })
+        .ok_or_else(|| self.err.clone().unwrap_or_default())
     }
 
     /// Imports `.cube` file `p` as the selected clip's look (its path is the look's id).
@@ -1994,15 +2014,15 @@ impl Editor {
             Act::Sel(k) => self.sel = Some(k),
             Act::Mv(a, b) => self.mv(a, b),
             Act::Trim(k, a, b) => {
-                self.ed(|p| p.trim(k, a, b));
+                self.own(|e| e.ed(|p| p.trim(k, a, b)));
             }
             Act::Hold(k, h) => {
-                self.ed(|p| p.edit(k, |c| c.hold = h));
+                self.own(|e| e.ed(|p| p.edit(k, |c| c.hold = h)));
             }
-            Act::Begin => self.begin(),
+            Act::Begin => self.own(Editor::begin),
             Act::End => self.end(),
             Act::MvKey(on, i, t) => {
-                if let Some(j) = self.ed(|p| p.mv_key(on, i, t)) {
+                if let Some(j) = self.own(|e| e.ed(|p| p.mv_key(on, i, t))) {
                     self.key = Some((on, j));
                     if let Some(Drag::Key(_, n, _)) = &mut self.drag {
                         *n = j;
@@ -2027,10 +2047,10 @@ impl Editor {
                 }
             }
             Act::Speed(k, v) => {
-                self.ed(|p| p.speed(k, v));
+                self.own(|e| e.ed(|p| p.speed(k, v)));
             }
             Act::Vol(k, v) => {
-                self.ed(|p| p.edit(k, |c| c.vol = v));
+                self.own(|e| e.ed(|p| p.edit(k, |c| c.vol = v)));
             }
         }
     }

@@ -533,14 +533,25 @@ fn btn(pos: egui::Pos2, pressed: bool) -> egui::Event {
     }
 }
 
-/// A drag from `a` to `b` through egui's input, frame by frame.
-fn drag(e: &mut Editor, ctx: &egui::Context, a: egui::Pos2, b: egui::Pos2) {
+/// A drag from `a` to `b` through egui's input, frame by frame; `mid` runs halfway.
+fn drag_with(
+    e: &mut Editor,
+    ctx: &egui::Context,
+    a: egui::Pos2,
+    b: egui::Pos2,
+    mid: &mut dyn FnMut(&mut Editor),
+) {
     frame(e, ctx, vec![egui::Event::PointerMoved(a)]);
     frame(e, ctx, vec![btn(a, true)]);
     frame(e, ctx, vec![egui::Event::PointerMoved(a + (b - a) * 0.5)]);
+    mid(e);
     frame(e, ctx, vec![egui::Event::PointerMoved(b)]);
     frame(e, ctx, vec![btn(b, false)]);
     frame(e, ctx, vec![]);
+}
+
+fn drag(e: &mut Editor, ctx: &egui::Context, a: egui::Pos2, b: egui::Pos2) {
+    drag_with(e, ctx, a, b, &mut |_| {});
 }
 
 /// Speed keys and volume points drag on the timeline (egui input, no samples needed): a speed key moves in source time
@@ -658,6 +669,115 @@ fn move_lost() {
         );
         assert!(!line && e.drag.is_none(), "the move went on");
         assert_eq!(files(&e), left, "the release moved a clip");
+    }
+}
+
+/// Index-based drags end when the timeline changes under them (egui input, no samples needed): a trim handle, a speed
+/// key, a volume point and a view key of clip 1 of 3, each dragged while clip 1 is deleted (Delete) or split at the
+/// playhead (S) halfway. The drag ends before the edit as an undo step of its own, the edit is one too, and the rest
+/// of the drag changes nothing (a trim went on onto the clip that took the index, with the deleted clip's in and out).
+#[test]
+fn drag_lost() {
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = stitch::Ctx::new(&g.device, &g.queue);
+    let ctx = egui::Context::default();
+    let mut e = Editor::new(&g, &cx, &ctx, player::still(&g, &cx), None);
+    let v = edit::View::default();
+    for kind in ["trim", "speed", "volume", "key"] {
+        for split in [false, true] {
+            e.take(Project::new(FPS).unwrap(), Extra::default(), None);
+            for i in 0..3 {
+                let f = e.pj.file(&format!("/nowhere/{i}.insv"), 20.0).unwrap();
+                let mut c = Clip::new(f, 2.0, 10.0);
+                c.speed = vec![(2.0, 1.0), (6.0, 2.0), (10.0, 1.0)];
+                c.vol = vec![(4.0, 1.0), (8.0, 0.5)];
+                c.view = [4.0, 7.0]
+                    .map(|t| Key {
+                        t,
+                        v,
+                        e: Ease::Smooth,
+                    })
+                    .into();
+                e.ed(|p| p.insert(i, c));
+            }
+            e.sync();
+            let s0 = e.pj.tl().clone();
+            let rect = frame(&mut e, &ctx, vec![]);
+            let (z, x0) = (e.zoom, rect.left() + 8.0);
+            let xt = |t: f64| x0 + t as f32 * z;
+            let top = |i: usize| rect.top() + ROWS[..i].iter().map(|h| h + 3.0).sum::<f32>();
+            let (vt, vb, at, ab) = (top(2), top(2) + ROWS[2], top(3), top(3) + ROWS[3]);
+            let (lo, hi) = (edit::MIN_SPEED.ln(), edit::MAX_SPEED.ln());
+            let ys = |v: f64| vb - 4.0 - ((v.ln() - lo) / (hi - lo)) as f32 * (vb - vt - 8.0);
+            let gy = |g: f32| ab - 2.0 - (g / 2.0).clamp(0.0, 1.0) * (ab - at - 4.0);
+            let x = |s: f64| xt(s0.from_track(On::Clip(1), s).unwrap());
+            let n = s0.frames(1);
+            let (a, d) = match kind {
+                "trim" => (
+                    // above the speed keys: one at the next clip's start sits on the edge
+                    egui::pos2(xt(s0.out.fps.t(n.end)) - 3.0, vt + 6.0),
+                    egui::vec2(-60.0, 0.0),
+                ),
+                "speed" => (egui::pos2(x(6.0), ys(2.0)), egui::vec2(60.0, -10.0)),
+                "volume" => (egui::pos2(x(8.0), gy(0.5)), egui::vec2(-40.0, -8.0)),
+                _ => (
+                    egui::pos2(x(4.0), top(1) + ROWS[1] / 2.0),
+                    egui::vec2(40.0, 0.0),
+                ),
+            };
+            e.seek(s0.out.fps.t((n.start + n.end) / 2));
+            let (mut pre, mut post, mut on) = (None, None, "nothing");
+            drag_with(&mut e, &ctx, a, a + d, &mut |e| {
+                on = match (&e.drag, e.grp) {
+                    (Some(Drag::Trim(1, true, ..)), true) => "trim",
+                    (Some(Drag::Speed(1, 1, ..)), true) => "speed",
+                    (Some(Drag::Vol(1, 1)), true) => "volume",
+                    (Some(Drag::Key(On::Clip(1), ..)), true) => "key",
+                    _ => "another",
+                };
+                pre = Some(e.pj.tl().clone());
+                if split {
+                    e.split();
+                } else {
+                    e.delete(1);
+                }
+                post = Some(e.pj.tl().clone());
+            });
+            let (pre, post, w) = (
+                pre.unwrap(),
+                post.unwrap(),
+                if split { "split" } else { "delete" },
+            );
+            e.sync();
+            eprintln!(
+                "{kind} drag, {w} halfway: {on} dragged then, {} clips after, drag over {}, history {:?}",
+                post.clips.len(),
+                e.drag.is_none() && !e.grp,
+                e.history()
+            );
+            assert!(e.err.is_none(), "{kind}, {w}: {:?}", e.err);
+            assert!(on == kind && pre.clips != s0.clips, "{kind}: {on} dragged");
+            assert_eq!(
+                post.clips.len(),
+                if split { 4 } else { 2 },
+                "{kind}: no {w}"
+            );
+            assert!(
+                e.pj.tl().clips == post.clips,
+                "{kind}, {w}: the drag went on"
+            );
+            assert!(e.drag.is_none() && !e.grp, "{kind}, {w}: the drag is open");
+            e.undo();
+            assert!(
+                e.pj.tl().clips == pre.clips,
+                "{kind}, {w}: not a step of its own"
+            );
+            e.undo();
+            assert!(
+                e.pj.tl().clips == s0.clips,
+                "{kind}, {w}: the drag not a step"
+            );
+        }
     }
 }
 
