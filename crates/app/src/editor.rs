@@ -139,6 +139,8 @@ enum Drag {
     Speed(usize, usize, Clip, f32),
     /// a volume point: clip, index
     Vol(usize, usize),
+    /// an inspector slider (or the Colour tab's adjustments, as one): its id; it edits the selected clip
+    Slider(egui::Id),
 }
 
 /// What the timeline's widgets ask for, applied after drawing.
@@ -1131,8 +1133,18 @@ impl Editor {
                 }
             }
         }
-        if self.grp && !self.ctx.input(|i| i.pointer.any_down()) {
-            self.end();
+        // a drag whose widget went away saw no end: it ends after the button's release (the release's frame still
+        // reports a widget's end to it)
+        if !self
+            .ctx
+            .input(|i| i.pointer.any_down() || i.pointer.any_released())
+        {
+            if matches!(self.drag, Some(Drag::Slider(_))) {
+                self.drag = None;
+            }
+            if self.grp {
+                self.end();
+            }
         }
         self.sync();
         while let Ok((p, k, r)) = self.pq.1.try_recv() {
@@ -2582,14 +2594,26 @@ impl Editor {
 
     /// One undo step per drag of the widget whose response is `r`; `f` edits when it changed.
     fn step(&mut self, r: &egui::Response, f: impl FnOnce(&mut Project) -> edit::Result<()>) {
+        self.slide(r, r.changed(), |e| {
+            let x = f(&mut e.pj);
+            e.did(x);
+        });
+    }
+
+    /// A drag of the slider (or sliders) whose response is `r` as one undo step and a drag of the editor's: `f` edits
+    /// when `ch`, as the drag's own work. A drag that another edit ended (`halt`: Delete or S mid-drag) edits no more,
+    /// also not in the frame egui reports its end: the clip it names by index may be another's now.
+    fn slide(&mut self, r: &egui::Response, ch: bool, f: impl FnOnce(&mut Self)) {
         if r.drag_started() {
             self.begin();
+            self.drag = Some(Drag::Slider(r.id));
         }
-        if r.changed() {
-            let x = f(&mut self.pj);
-            self.did(x);
+        let mine = matches!(self.drag, Some(Drag::Slider(id)) if id == r.id);
+        if ch && (mine || !(r.dragged() || r.drag_stopped())) {
+            self.own(f);
         }
-        if r.drag_stopped() {
+        if mine && r.drag_stopped() {
+            self.drag = None;
             self.end();
         }
     }
@@ -3137,22 +3161,17 @@ impl Editor {
                 let mut a = c.adj;
                 let r = (doc::ADJ.iter().zip(doc::adj(&mut a)))
                     .map(|((_, n, lo, hi), v)| ui.add(egui::Slider::new(v, *lo..=*hi).text(*n)))
-                    .reduce(|p, q| p | q);
-                // the picture changes, the clips stay: no `changed` (playback goes on)
-                if r.as_ref().is_some_and(|r| r.drag_started()) {
-                    self.begin();
-                }
+                    .reduce(|p, q| p | q)
+                    .expect("adjustments");
                 if ui.button("Reset").clicked() {
                     a = fx::Params::default();
                 }
-                if a != c.adj {
-                    let x = self.pj.edit(k, |c| c.adj = a);
-                    self.err = x.err().map(|e| e.0);
-                    self.dirty = true;
-                }
-                if r.is_some_and(|r| r.drag_stopped()) {
-                    self.end();
-                }
+                // the picture changes, the clips stay: no `changed` (playback goes on)
+                self.slide(&r, a != c.adj, |e| {
+                    let x = e.pj.edit(k, |c| c.adj = a);
+                    e.err = x.err().map(|e| e.0);
+                    e.dirty = true;
+                });
                 if ui.button("Adjustments on every clip").clicked() {
                     self.begin();
                     for j in 0..self.pj.tl().clips.len() {

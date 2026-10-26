@@ -835,6 +835,171 @@ fn drag_lost() {
     }
 }
 
+/// Inspector sliders are drags of the editor's (egui input, each slider found through AccessKit, no samples needed):
+/// Delete or S halfway through a drag of Hold, In, Out, Speed, a speed key, Intensity, an adjustment, Volume, a volume
+/// point or the music's Gain ends it with its undo step, and it edits no more, also not the clip that took its index.
+/// The edit runs in a frame before the inspector draws (Editor::ui handles the keys there; egui then reports the
+/// drag's end to the slider with the pointer on it), or between two frames.
+#[test]
+fn slider_lost() {
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = stitch::Ctx::new(&g.device, &g.queue);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut e = Editor::new(&g, &cx, &ctx, player::still(&g, &cx), None);
+    // the tab, the slider's label or (unlabelled, in a list) its value
+    for (kind, tab, label, value) in [
+        ("hold", Tab::Clip, "Hold (s)", 0.0),
+        ("in", Tab::Clip, "In (s)", 0.0),
+        ("out", Tab::Clip, "Out (s)", 0.0),
+        ("speed", Tab::Clip, "×", 0.0),
+        ("speed key", Tab::Clip, "", 2.0),
+        ("intensity", Tab::Colour, "Intensity", 0.0),
+        ("exposure", Tab::Colour, "Exposure (EV)", 0.0),
+        ("volume", Tab::Audio, "Volume", 0.0),
+        ("volume point", Tab::Audio, "", 0.5),
+        ("gain", Tab::Audio, "Gain", 0.0),
+    ] {
+        for (split, inpass) in [(false, true), (true, true), (false, false)] {
+            // a freeze frame does not split
+            if split && kind == "hold" {
+                continue;
+            }
+            e.take(Project::new(FPS).unwrap(), Extra::default(), None);
+            for i in 0..3 {
+                let f = e.pj.file(&format!("/nowhere/{i}.insv"), 20.0).unwrap();
+                let mut c = match (kind, i) {
+                    ("hold", 1) => Clip::still(f, 4.0, 2.0),
+                    _ => Clip::new(f, 2.0, 10.0),
+                };
+                c.look = "Teal & Orange".into();
+                if kind == "speed key" {
+                    c.speed = vec![(2.0, 1.0), (6.0, 2.0), (10.0, 1.0)];
+                }
+                if kind == "volume point" {
+                    c.vol = vec![(4.0, 1.0), (8.0, 0.5)];
+                }
+                e.ed(|p| p.insert(i, c));
+            }
+            let m = e.pj.file("/nowhere/music.m4a", 60.0).unwrap();
+            e.ed(|p| {
+                p.edit_out(|o| {
+                    o.music = Some(edit::Music {
+                        file: m,
+                        offset: 0.0,
+                        gain: 1.0,
+                        duck: false,
+                    })
+                })
+            });
+            let tl = e.pj.tl();
+            let n = tl.frames(1);
+            e.seek(tl.out.fps.t((n.start + n.end) / 2));
+            (e.sel, e.tab) = (Some(1), tab);
+            e.sync();
+            let s0 = e.pj.tl().clone();
+            // one frame of the tab with `ev` as the input; `mid` runs first, once (egui runs a frame's ui again when a
+            // pass asks to discard it, without the input's events)
+            let frame = |e: &mut Editor, ev: Vec<egui::Event>, mid: &mut dyn FnMut(&mut Editor)| {
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 1400.0),
+                    )),
+                    time: Some(ctx.input(|i| i.time) + 1.0 / 60.0),
+                    events: ev,
+                    ..Default::default()
+                };
+                let mut once = Some(mid);
+                let mut o = ctx.run_ui(raw, |ui| {
+                    if let Some(f) = once.take() {
+                        f(e);
+                    }
+                    match e.tab {
+                        Tab::Clip => e.clip_ui(ui),
+                        Tab::Colour => e.colour_ui(ui),
+                        _ => e.audio_ui(ui),
+                    }
+                });
+                o.textures_delta.clear();
+                e.sync();
+                o.platform_output.accesskit_update
+            };
+            let u = frame(&mut e, vec![], &mut |_| {}).expect("AccessKit is on");
+            let l = (u.nodes.iter())
+                .find(|(_, n)| n.role() == egui::Role::Label && n.value() == Some(label))
+                .map(|x| x.0);
+            let r = (u.nodes.iter())
+                .find(|(_, n)| {
+                    n.role() == egui::Role::Slider
+                        && match l {
+                            Some(l) => n.labelled_by().contains(&l),
+                            None => label.is_empty() && n.numeric_value() == Some(value),
+                        }
+                })
+                .and_then(|(_, n)| n.bounds())
+                .unwrap_or_else(|| panic!("{kind}: no slider"));
+            let y = ((r.y0 + r.y1) / 2.0) as f32;
+            let at = |f: f64| egui::pos2((r.x0 + f * (r.x1 - r.x0)) as f32, y);
+            let w = if split { "split" } else { "delete" };
+            // whether the slider's drag was open, the timeline before and after
+            let cut = |e: &mut Editor| {
+                let on = matches!(e.drag, Some(Drag::Slider(_))) && e.grp;
+                let pre = e.pj.tl().clone();
+                if split {
+                    e.split();
+                } else {
+                    e.delete(1);
+                }
+                (on, pre, e.pj.tl().clone())
+            };
+            let mut res = None;
+            for (i, ev) in [
+                vec![egui::Event::PointerMoved(at(0.3))],
+                vec![btn(at(0.3), true)],
+                vec![egui::Event::PointerMoved(at(0.35))],
+                vec![egui::Event::PointerMoved(at(0.4))],
+                vec![egui::Event::PointerMoved(at(0.45))],
+                vec![btn(at(0.45), false)],
+                vec![],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if i == 3 && !inpass {
+                    res = Some(cut(&mut e));
+                }
+                frame(&mut e, ev, &mut |e| {
+                    if i == 3 && inpass {
+                        res = Some(cut(e));
+                    }
+                });
+            }
+            let (on, pre, post) = res.unwrap();
+            eprintln!(
+                "{kind} slider, {w} halfway{}: dragged then {on}, {} clips after, drag over {}, history {:?}",
+                if inpass { " in the frame" } else { "" },
+                post.clips.len(),
+                e.drag.is_none() && !e.grp,
+                e.history()
+            );
+            assert!(e.err.is_none(), "{kind}, {w}: {:?}", e.err);
+            assert!(on && pre != s0, "{kind}: not dragged");
+            assert_eq!(
+                post.clips.len(),
+                if split { 4 } else { 2 },
+                "{kind}: no {w}"
+            );
+            assert!(*e.pj.tl() == post, "{kind}, {w}: the drag went on");
+            assert!(e.drag.is_none() && !e.grp, "{kind}, {w}: the drag is open");
+            e.undo();
+            assert!(*e.pj.tl() == pre, "{kind}, {w}: not a step of its own");
+            e.undo();
+            assert!(*e.pj.tl() == s0, "{kind}, {w}: the drag not a step");
+        }
+    }
+}
+
 /// The playhead stays on a timeline that gets shorter (no samples needed): paused at 14 s, the last clip deleted
 /// leaves it at the new end (it read "0:14.00 / 0:09.41" over the new last frame), and so does undoing the clips.
 #[test]
