@@ -153,12 +153,15 @@ impl Rtmp {
     /// Publishes to `url` (`rtmp://host[:port]/app`) as stream `key`; an empty key takes the last
     /// path segment of `url`. Connects, and reconnects with backoff, on its own thread.
     pub fn start(url: &str, key: &str, cfg: Cfg) -> io::Result<Self> {
-        let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidInput, format!("{m}: {url}"));
+        let bad =
+            |m: &str, u: &str| io::Error::new(io::ErrorKind::InvalidInput, format!("{m}: {u}"));
         let (tc, key) = if key.is_empty() {
-            url.rsplit_once('/').ok_or_else(|| bad("no key"))?
+            url.rsplit_once('/').ok_or_else(|| bad("no key", url))?
         } else {
             (url.trim_end_matches('/'), key)
         };
+        // past here the URL may hold the key: errors quote tc only
+        let bad = |m: &str| bad(m, tc);
         let r = tc
             .strip_prefix("rtmp://")
             .ok_or_else(|| bad("only rtmp:// is supported"))?;
@@ -926,6 +929,26 @@ mod tests {
         let r = Rtmp::start("rtmp://127.0.0.1:9/live/test", "", cfg()).unwrap();
         r.video(0, 0, true, [&[0x65u8][..]]);
         drop(r);
+    }
+
+    /// A failing start quotes the URL without the stream key, from its last path segment or given apart.
+    #[test]
+    fn hides_key() {
+        let cfg = || Cfg {
+            meta: Default::default(),
+            avcc: vec![],
+            asc: vec![],
+            lag: 0,
+        };
+        for (u, k) in [
+            ("rtmps://a.example/app/s3cr3t", ""),
+            ("rtmp://a.example:x/app/s3cr3t", ""),
+            ("rtmp://a.example/s3cr3t", ""),
+            ("rtmps://a.example/app/", "s3cr3t"),
+        ] {
+            let e = Rtmp::start(u, k, cfg()).err().unwrap().to_string();
+            assert!(!e.contains("s3cr3t") && e.contains("a.example"), "{e}");
+        }
     }
 
     /// Dropping never waits for a pending connect or a silent server.

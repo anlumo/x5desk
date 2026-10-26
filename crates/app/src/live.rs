@@ -1262,7 +1262,7 @@ impl Outs {
             asc: enc.asc().to_vec(),
             lag: 1000,
         };
-        // a key in the URL goes as the key: crate live's errors quote the URL
+        // a key in the URL goes as the key, never inside the URL
         let (url, key) = (s.url.trim(), s.key.trim());
         let (url, key) = match kat(url).filter(|_| key.is_empty()) {
             Some(k) => (&url[..k - 1], &url[k..]),
