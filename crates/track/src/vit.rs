@@ -4,10 +4,13 @@
 //! tangent plane), scored against both. Out of a 16² grid come a confidence (peak after a Hann window, as OpenCV),
 //! the box centre offset and its size relative to the search crop. When the confidence drops, the detector checks the
 //! box; when the subject is lost, it searches around its last direction and then the whole horizon. A person is
-//! found again by appearance (`reid`): its features from the pick and from frames where it was tracked with
-//! certainty against those of the people seen next to it; anything else by the pick's template. Either only within
-//! the subject's reach ([`Seen::prior`]): the speed it needs to be a candidate ([`Seen::speed`]) since it was last
-//! seen for sure, in its own heights a second (its box height gives its distance), from where it was heading.
+//! found again by appearance (`reid`: its features from the pick and from frames where it was tracked with certainty
+//! against those of the people seen next to it), and only with the pick's template's box on them at VitTrack's
+//! confidence `LO` (0.25), `HI` (0.5) for one who looks no less like a person found and lost again before VitTrack
+//! was sure of them ([`Tried`]) than like the subject; whoever the tracker takes on its own after a gap passes the same
+//! rule. Anything else is found by the pick's template alone (`HI`). Either only within the subject's reach
+//! ([`Seen::prior`]): the speed it needs to be a candidate ([`Seen::speed`]) since it was last seen for sure, in its
+//! own heights a second (its box height gives its distance), from where it was heading.
 
 use crate::reid::{self, Emb, Gallery};
 use crate::{Ai, Cam, Crops, Det, In, Job, Norm, Pano, deg, iou, read, sphere, tan};
