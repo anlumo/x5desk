@@ -519,7 +519,8 @@ impl Tracker {
     /// Detects candidates of the subject's class near its last direction (over `sphere()` once it has been gone
     /// `WIDE` frames) and returns, of the `FIND` within its reach that need the least speed (`Seen::prior`), the one
     /// the pick's template likes best (confidence ≥ `HI`, its box on the detection) as the tracker's box and
-    /// confidence. The best, not the first: VitTrack's confidence passes `HI` on other people too, so the nearest
+    /// confidence; a person: the one most like the subject (`Gallery`), if the template's box is on it (confidence
+    /// ≥ `LO`). The best, not the first: VitTrack's confidence passes `HI` on other people too, so the nearest
     /// confirmed one is often someone else.
     fn find(&mut self, ai: &mut Ai, p: &Pano) -> Option<Det> {
         let tiles = if self.miss >= WIDE {
@@ -549,30 +550,30 @@ impl Tracker {
         let keep = self.sz;
         if let Some(g) = &self.gal {
             // the candidate most like the subject, less the prior of the speed it needed, and clearly less like anyone
-            // seen next to it; its box from the tracker if that agrees, else the detector's
+            // seen next to it, if the tracker's box is on it: taken on its look alone, the next search misses it too
+            // or takes whoever VitTrack likes there, unlooked at (the gap is over)
             let e = ai.embed(p, &c.iter().map(|x| x.1.on()).collect::<Vec<_>>());
-            let (m, x) = c
+            let x = c
                 .iter()
                 .zip(&e)
                 .map(|((q, x), e)| {
                     let s = g.score(e);
-                    ((s.0 - q, s.1), s.0, x)
+                    ((s.0 - q, s.1), x)
                 })
-                .filter(|(s, ..)| g.is(*s))
+                .filter(|(s, _)| g.is(*s))
                 .max_by(|a, b| a.0.0.total_cmp(&b.0.0))
-                .map(|(_, m, x)| (m, *x))?;
+                .map(|(_, x)| *x)?;
             self.sz = tan(x.size);
             let (sc, d, sz) = self.search(ai, p, x.dir, 1);
             self.sz = keep;
-            return Some(if sc >= LO && iou((d, deg(sz)), x.on(), false) > 0.3 {
-                Det {
-                    dir: d,
-                    size: deg(sz),
-                    score: sc,
-                    ..x
-                }
-            } else {
-                Det { score: m, ..x }
+            if sc < LO || iou((d, deg(sz)), x.on(), false) <= 0.3 {
+                return None;
+            }
+            return Some(Det {
+                dir: d,
+                size: deg(sz),
+                score: sc,
+                ..x
             });
         }
         let mut best: Option<Det> = None;
