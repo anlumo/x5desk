@@ -1725,7 +1725,14 @@ impl Cam {
         match t {
             Some(Some(t)) => {
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                p.image(t.id(), img, uv, egui::Color32::WHITE);
+                // flat photos (4096 × 4096, 5056 × 2144) keep their aspect inside the 2:1 box
+                let s = t.size_vec2();
+                let fit = egui::Rect::from_center_size(
+                    img.center(),
+                    s * (img.width() / s.x).min(img.height() / s.y),
+                );
+                p.rect_filled(img, 4.0, v.faint_bg_color);
+                p.image(t.id(), fit, uv, egui::Color32::WHITE);
             }
             t => {
                 p.rect_filled(img, 4.0, v.faint_bg_color);

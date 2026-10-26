@@ -930,6 +930,88 @@ fn texture_cap() {
     std::fs::remove_dir_all(&d).unwrap();
 }
 
+/// A card's album tiles: a flat photo's thumbnail (square, or wider than 2:1) keeps its aspect centred in the 2:1 box,
+/// a 360 one fills it.
+#[test]
+fn tiles() {
+    let d = dir("tiles");
+    let card = d.join("X5");
+    let (mut c, up, _cmd) = headless(d.join("dl"), Arc::new(Mutex::new(dl::Queue::load(None))));
+    c.info.src = Some(card.clone());
+    let it = |k: &str, kind, n: &str, date| Item {
+        key: k.into(),
+        kind,
+        uris: vec![format!("/DCIM/Camera01/{n}")],
+        date,
+        ..Default::default()
+    };
+    c.items = vec![
+        it("sq", Kind::Photo, "IMG_20260118_124432_00_659.jpg", 3),
+        it("wide", Kind::Photo, "IMG_20260118_124433_00_660.jpg", 2),
+        it("pano", Kind::Video, "VID_20260118_124434_00_661.insv", 1),
+    ];
+    c.dirty = true;
+    for (k, w, h) in [("sq", 160, 160), ("wide", 320, 135), ("pano", 320, 160)] {
+        up.send(Up::Thumb(
+            k.into(),
+            Some((w, h, vec![200u8; (w * h * 4) as usize])),
+        ))
+        .unwrap();
+    }
+    c.tick();
+    let mut t = 0.0;
+    let mut frame = |c: &mut Cam, ev: Vec<egui::Event>| {
+        t += 0.05;
+        let i = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            time: Some(t),
+            events: ev,
+            ..Default::default()
+        };
+        let mut open = None;
+        let mut o = c.ctx.clone().run_ui(i, |ui| open = c.album(ui));
+        o.textures_delta.clear();
+        (o.shapes, open)
+    };
+    fn meshes(s: &egui::Shape, v: &mut Vec<(egui::TextureId, egui::Rect)>) {
+        match s {
+            egui::Shape::Mesh(m) => v.push((
+                m.texture_id,
+                egui::Rect::from_points(&m.vertices.iter().map(|x| x.pos).collect::<Vec<_>>()),
+            )),
+            egui::Shape::Vec(x) => x.iter().for_each(|s| meshes(s, v)),
+            _ => {}
+        }
+    }
+    let (shapes, _) = frame(&mut c, vec![]);
+    let mut m = vec![];
+    shapes.iter().for_each(|x| meshes(&x.shape, &mut m));
+    let at = |k: &str| {
+        let id = c.tex[k].0.as_ref().unwrap().id();
+        m.iter().find(|x| x.0 == id).expect(k).1
+    };
+    let (sq, wide, pano) = (at("sq"), at("wide"), at("pano"));
+    println!("thumbnails drawn at: square {sq:?}, wide {wide:?}, 360 {pano:?}");
+    // the tiles are 200 wide, the box 200 × 100
+    let near = |a: f32, b: f32| (a - b).abs() < 0.5;
+    assert!(near(pano.width(), 200.0) && near(pano.height(), 100.0));
+    assert!(near(sq.width(), 100.0) && near(sq.height(), 100.0));
+    assert!(near(wide.width(), 200.0) && near(wide.height(), 200.0 * 135.0 / 320.0));
+    // centred in a box of the same top as the 360 one's
+    for r in [sq, wide] {
+        assert!(near(r.center().y - pano.min.y, 50.0), "{r:?}");
+    }
+    assert!(
+        near(sq.center().x - (pano.min.x - 210.0 * 2.0), 100.0),
+        "{sq:?}"
+    );
+    drop(c);
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
 /// The Library's downloaded list: recordings in the destination folder and finished downloads elsewhere, one file
 /// per recording, oldest first; photos, partial files and finished entries whose file is gone are left out.
 #[test]
