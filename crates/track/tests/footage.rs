@@ -72,6 +72,21 @@ fn samples() -> Option<PathBuf> {
     d
 }
 
+/// A `<clip>_track.csv` of `subject` (a reference track checked by eye): per frame direction, score (0: the subject
+/// unseen), box height (degrees).
+fn reference(p: &str) -> Vec<(Vec3, f32, f32)> {
+    std::fs::read_to_string(p)
+        .unwrap()
+        .lines()
+        .skip(1)
+        .map(|l| {
+            let v: Vec<&str> = l.split(',').collect();
+            let f = |i: usize| v[i].parse::<f32>().unwrap();
+            (track::dir(f(3), f(4)), f(2), f(8))
+        })
+        .collect()
+}
+
 fn fixtures() -> PathBuf {
     let d = std::env::var_os("X5_FIXTURES")
         .map_or_else(|| std::env::temp_dir().join("x5-track"), PathBuf::from);
@@ -427,7 +442,9 @@ fn fit(h: f32) -> f32 {
 /// gate). Per frame, the detector also looks at the tracker's area: how often its box
 /// of the subject's class overlaps the tracker's (IoU > 0.5) measures agreement. Auto framing detects over
 /// `sphere()` every 10 frames. `X5_BLANK` = `start:len` hands the tracker a black panorama for those
-/// frames (the subject walks on unseen), to make it lose the subject and find it again by detection.
+/// frames (the subject walks on unseen), to make it lose the subject and find it again by detection. With `X5_REF` (a
+/// reference track of the subject, see `reid`) the tracker must keep the subject itself on half the frames, not just a
+/// box: on someone else it keeps a box too.
 #[test]
 fn subject() {
     let Some(d) = samples() else { return };
@@ -586,6 +603,28 @@ fn subject() {
             back.map_or(0.0, |k| sm[k].raw.angle_between(b.raw).to_degrees())
         );
     }
+    // frames from the gap's end (else 1) with the box on the subject: its centre within half the reference box's height
+    // (2° at least) of the reference's, a frame the reference has no subject on taking the nearest one that has
+    let on = std::env::var("X5_REF").ok().map(|rp| {
+        let rf = reference(&rp);
+        let has: Vec<usize> = (0..rf.len()).filter(|&k| rf[k].1 > 0.0).collect();
+        let ks = blank.end.max(1)..n.min(rf.len());
+        let on = ks
+            .clone()
+            .filter(|&k| {
+                let r = rf[*has.iter().min_by_key(|&&i| (i.abs_diff(k), i)).unwrap()];
+                sm[k].score > 0.0
+                    && sm[k].raw.angle_between(r.0).to_degrees() <= (0.5 * r.2).max(2.0)
+            })
+            .count();
+        eprintln!(
+            "{name}: box on the subject (X5_REF) on {on}/{} frames from frame {} ({:.1} %)",
+            ks.len(),
+            ks.start,
+            100.0 * on as f64 / ks.len().max(1) as f64
+        );
+        (on, ks.len())
+    });
     let lost = sm
         .windows(2)
         .filter(|w| w[1].state == State::Lost && w[0].state != State::Lost)
@@ -757,8 +796,9 @@ fn subject() {
             .map(|f| fixtures().join(f).display().to_string())
             .join(", ")
     );
+    let (kept, of) = on.unwrap_or((boxed, n));
     assert!(
-        boxed as f64 >= 0.5 * n as f64,
+        kept as f64 >= 0.5 * of as f64,
         "the tracker kept the subject on half the frames at least"
     );
     assert!(agree as f64 >= 0.5 * boxed as f64, "detector agreement");
@@ -781,17 +821,7 @@ fn reid() {
         eprintln!("X5_REF unset: skipped");
         return;
     };
-    // per frame: direction, score, height (degrees)
-    let rf: Vec<(Vec3, f32, f32)> = std::fs::read_to_string(&rp)
-        .unwrap()
-        .lines()
-        .skip(1)
-        .map(|l| {
-            let v: Vec<&str> = l.split(',').collect();
-            let f = |i: usize| v[i].parse::<f32>().unwrap();
-            (track::dir(f(3), f(4)), f(2), f(8))
-        })
-        .collect();
+    let rf = reference(&rp);
     let name = if rp.ends_with("v606_track.csv") {
         "v606"
     } else {
