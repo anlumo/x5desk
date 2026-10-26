@@ -554,7 +554,8 @@ mod tests {
     /// with that index under the slider (frame 60 showed labelled 61, 58 for 59), and it plays on in order to the end.
     #[test]
     fn bframes() {
-        let dir = crate::clip::tests::Tmp::new("movie");
+        // not "movie": deep's dir is x5desk-movie-<pid>, and this one's drop would remove it under deep
+        let dir = crate::clip::tests::Tmp::new("movie-bf");
         let p = dir.0.join("bf1.mp4");
         if !crate::clip::tests::numbered(&p, &["-c:v", "libx264", "-bf", "1"]) {
             eprintln!("no ffmpeg: skipped");
