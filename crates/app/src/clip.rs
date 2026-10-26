@@ -1,10 +1,13 @@
 //! A clip's video: the media thread demuxes (crate `media`) and decodes (crate `video`) ahead of the master clock
 //! into the decoders' rings and queues the frames; the UI takes the newest frame due and never paces anything.
+//! Frames are numbered and queued in presentation order: with B-frames the media thread keeps a decoded frame back
+//! until every frame shown before it is queued.
 //! Frame hand-over (ARCHITECTURE.md): the UI acquires the frame it samples and releases it when it takes a newer one
-//! (`release(next − 1)` also frees the frames it skipped) or when it seeks; the media thread releases what the UI
-//! never got: frames decoded only to reach a seek target and the queue a seek discards.
+//! (`release_before` also frees the frames it skipped) or when it seeks; the media thread releases what the UI
+//! never got: frames decoded only to reach a seek target and the queue a seek discards. A ring's release frees every
+//! earlier decoder frame, so a release stops below the lowest decoder frame still to show (`Pic::r`).
 
-use media::mp4::{Codec, Mp4};
+use media::mp4::{Codec, Mp4, Sample};
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -15,18 +18,28 @@ use std::{
     thread,
     time::Duration,
 };
-use video::{Decoder, Gpu, Ring};
+use video::{Decoder, Gpu, Ring, decode::OUT};
 
 /// A frame counts as due this much early: a seek puts the clock on the target's time rounded to audio samples.
 const EPS: f64 = 1e-3;
 
-/// A decoded frame: decoder frame index per ring, sample index, presentation time (s), seek epoch.
+/// A decoded frame: decoder frame index per ring; per ring the lowest decoder frame of the frames after it (with
+/// B-frames a later frame may decode first), which its release stops below; frame index (presentation order),
+/// presentation time (s), seek epoch.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pic {
     pub f: [u64; 2],
+    r: [u64; 2],
     pub k: usize,
     pub t: f64,
     e: u32,
+}
+
+impl Pic {
+    /// Per ring: the lowest decoder frame of this frame and every later one.
+    fn lo(&self) -> [u64; 2] {
+        [0, 1].map(|i| self.f[i].min(self.r[i]))
+    }
 }
 
 #[derive(Default)]
@@ -54,29 +67,47 @@ pub fn frame_at(times: &[f64], t: f64) -> usize {
     times.partition_point(|&x| x <= t + EPS).saturating_sub(1)
 }
 
-/// The last sync sample at or before `k` (0 if none).
-fn idr(sync: &[usize], k: usize) -> usize {
-    sync.partition_point(|&s| s <= k)
-        .checked_sub(1)
-        .map_or(0, |i| sync[i])
+/// Presentation order of samples in decode order: the sample of each frame (by pts, equal ones in decode order), and
+/// how many decoded frames a ring holds at once for a consumer that keeps one while the next decodes, from the
+/// lowest decoder frame still to show to the next frame's (2 without B-frames, 7 with libx264's defaults).
+fn order(s: &[Sample]) -> (Vec<usize>, usize) {
+    let mut ord: Vec<usize> = (0..s.len()).collect();
+    ord.sort_by_key(|&i| s[i].pts);
+    let (mut w, mut m) = (1, usize::MAX);
+    for k in (0..ord.len()).rev() {
+        m = m.min(ord[k]);
+        if let Some(&x) = ord.get(k + 1) {
+            w = w.max(x + 1 - m);
+        }
+    }
+    (ord, w)
+}
+
+/// The sample decoding to frame `k` starts at: the last sync sample at or before `k`'s (decode order) that is not
+/// shown after `k` (an open GOP's leading frames need the GOP before), else 0. `pk`: the frame of each sample.
+fn start(sync: &[usize], ord: &[usize], pk: &[usize], k: usize) -> usize {
+    let s = &sync[..sync.partition_point(|&s| s <= ord[k])];
+    s.iter().rev().find(|&&s| pk[s] <= k).map_or(0, |&s| s)
 }
 
 #[derive(Debug, PartialEq)]
 enum Plan {
-    /// the queue holds the target: drop this many frames before it
-    Keep(usize),
-    /// decode from this sample, dropping everything before the target
+    /// the queue holds the target: drop the frames before it
+    Keep,
+    /// decode on, dropping everything before the target
+    On,
+    /// restart at this sample, dropping everything before the target
     Go(usize),
 }
 
-/// Seek to sample `t`, with `pos` = the next sample to decode and `q0` = the first queued one: keep the queue from `t`
-/// on if it holds `t`; else decode on from `pos` when no sync sample lies in (pos, t] (`idr` = the last one ≤ t);
-/// else restart at `idr`.
-fn plan(t: usize, pos: usize, q0: Option<usize>, idr: usize) -> Plan {
+/// Seek to frame `t`, with `nk` = the next frame to queue, `pos` = the next sample to decode, `q0` = the first queued
+/// frame and `s` = the sample decoding to `t` starts at: keep the queue from `t` on if it holds `t`; else decode on
+/// when `t` lies ahead and `s` is not past `pos`; else restart at `s`.
+fn plan(t: usize, nk: usize, pos: usize, q0: Option<usize>, s: usize) -> Plan {
     match q0 {
-        Some(q0) if q0 <= t && t < pos => Plan::Keep(t - q0),
-        _ if idr <= pos && pos <= t => Plan::Go(pos),
-        _ => Plan::Go(idr),
+        Some(q0) if q0 <= t && t < nk => Plan::Keep,
+        _ if nk <= t && s <= pos => Plan::On,
+        _ => Plan::Go(s),
     }
 }
 
@@ -88,7 +119,7 @@ pub struct Video {
     pub rings: Vec<Arc<Ring>>,
     /// display window (x, y, w, h) of the first stream's pictures
     pub view: [u32; 4],
-    /// presentation time of each frame, and the end of the last one (s)
+    /// presentation time of each frame (ascending), and the end of the last one (s)
     pub times: Arc<[f64]>,
     pub end: f64,
     epoch: u32,
@@ -114,16 +145,6 @@ impl Video {
         if st.is_empty() {
             return Err("no H.264 / H.265 video track".into());
         }
-        let mut decs = vec![];
-        for &(i, t) in &st {
-            let tr = &mp4s[i].tracks[t];
-            let (c, ps) = match &tr.codec {
-                Codec::Hevc { ps, .. } => (video::Codec::H265, ps),
-                Codec::Avc { ps, .. } => (video::Codec::H264, ps),
-                _ => unreachable!(),
-            };
-            decs.push(Decoder::new(g, c, ps, tr.width, tr.height).map_err(|e| e.to_string())?);
-        }
         let (m, tr) = (&mp4s[st[0].0], &mp4s[st[0].0].tracks[st[0].1]);
         let n = st
             .iter()
@@ -134,11 +155,23 @@ impl Video {
             return Err("empty video track".into());
         }
         let (d, ts) = (tr.shift(m.timescale), tr.timescale as f64);
-        let times: Arc<[f64]> = tr.samples[..n]
-            .iter()
-            .map(|s| (s.pts + d) as f64 / ts)
+        let (ord, w) = order(&tr.samples[..n]);
+        let mut decs = vec![];
+        for &(i, t) in &st {
+            let tr = &mp4s[i].tracks[t];
+            let (c, ps) = match &tr.codec {
+                Codec::Hevc { ps, .. } => (video::Codec::H265, ps),
+                Codec::Avc { ps, .. } => (video::Codec::H264, ps),
+                _ => unreachable!(),
+            };
+            // decoding runs as far ahead of a consumer holding one frame as without B-frames (2 frames, OUT slots)
+            let d = Decoder::with_out(g, c, ps, tr.width, tr.height, w + OUT - 2);
+            decs.push(d.map_err(|e| e.to_string())?);
+        }
+        let times: Arc<[f64]> = (ord.iter())
+            .map(|&s| (tr.samples[s].pts + d) as f64 / ts)
             .collect();
-        let s = tr.samples[n - 1];
+        let s = tr.samples[ord[n - 1]];
         let end = (s.pts + d + s.dur as i64) as f64 / ts;
         let sync: Vec<usize> = (0..n).filter(|&k| tr.samples[k].sync).collect();
         let sh = Arc::new(Sh {
@@ -150,7 +183,7 @@ impl Video {
         let (g, s, t) = (g.clone(), sh.clone(), times.clone());
         let th = thread::Builder::new()
             .name("media".into())
-            .spawn(move || run(&g, &s, &mp4s, &st, decs, &t, &sync, wake))
+            .spawn(move || run(&g, &s, &mp4s, &st, decs, &ord, &t, &sync, wake))
             .map_err(|e| e.to_string())?;
         Ok(Video {
             sh,
@@ -172,18 +205,12 @@ impl Video {
 
     /// Releases `p` and everything before it (after the last submit that samples it).
     pub fn release(&self, g: &Gpu, p: &Pic) {
-        for (r, ring) in self.rings.iter().enumerate() {
-            ring.release(g, p.f[r]);
-        }
+        free(g, &self.rings, p.r);
     }
 
     /// Releases everything before `p`.
     pub fn release_before(&self, g: &Gpu, p: &Pic) {
-        for (r, ring) in self.rings.iter().enumerate() {
-            if p.f[r] > 0 {
-                ring.release(g, p.f[r] - 1);
-            }
-        }
+        free(g, &self.rings, p.lo());
     }
 
     /// Takes the newest queued frame due at `now` and how many due ones it skipped. The caller samples it and
@@ -237,6 +264,15 @@ impl Drop for Video {
     }
 }
 
+/// Releases every decoder frame below `r[i]` of ring `i`.
+fn free<R: std::ops::Deref<Target = Ring>>(g: &Gpu, rings: &[R], r: [u64; 2]) {
+    for (ring, &r) in rings.iter().zip(&r) {
+        if r > 0 {
+            ring.release(g, r - 1);
+        }
+    }
+}
+
 /// Splits a sample's length-prefixed NAL units (`n`-byte lengths) into `out`; returns how many.
 fn nals<'a>(mut b: &'a [u8], n: usize, out: &mut [&'a [u8]]) -> usize {
     let mut c = 0;
@@ -250,9 +286,9 @@ fn nals<'a>(mut b: &'a [u8], n: usize, out: &mut [&'a [u8]]) -> usize {
     c
 }
 
-/// The media thread: decodes every stream's sample `pos` into its decoder, queues the frame (or releases it while
-/// running up to a seek target), and follows the UI's seeks. Backpressure is the rings: `decode` waits while the
-/// UI holds the slot it needs.
+/// The media thread: decodes every stream's sample `pos` into its decoder, queues the frames in presentation order
+/// (or releases them while running up to a seek target), and follows the UI's seeks. Backpressure is the rings:
+/// `decode` waits while the UI holds the slot it needs.
 #[allow(clippy::too_many_arguments)]
 fn run(
     g: &Gpu,
@@ -260,11 +296,16 @@ fn run(
     mp4s: &[Mp4],
     st: &[(usize, usize)],
     mut decs: Vec<Decoder>,
+    ord: &[usize],
     times: &[f64],
     sync: &[usize],
     wake: impl Fn(),
 ) {
     let n = times.len();
+    let mut pk = vec![0; n];
+    for (k, &s) in ord.iter().enumerate() {
+        pk[s] = k;
+    }
     let nal: Vec<usize> = st
         .iter()
         .map(|&(i, t)| match mp4s[i].tracks[t].codec {
@@ -272,18 +313,25 @@ fn run(
             _ => 4,
         })
         .collect();
-    let (mut pos, mut skip, mut e, mut buf) = (0, 0, 0, vec![]);
+    // pos: the next sample to decode, nk: the next frame to queue; own: nothing of this epoch is queued, so the UI
+    // holds no frame and what the run-up to the target drops is ours to release
+    let (mut pos, mut nk, mut e, mut own, mut buf) = (0, 0, 0, true, vec![]);
     let mut f = [0u64; 2];
+    // decoded frames waiting for an earlier one: frame index, decoder frames (None: one failed)
+    let mut pend: Vec<(usize, Option<[u64; 2]>)> = vec![];
+    // per ring the lowest decoder frame of those waiting and those not decoded yet
+    let low = |decs: &[Decoder], pend: &[(usize, Option<[u64; 2]>)]| {
+        let mut r = [0; 2];
+        for (i, d) in decs.iter().enumerate() {
+            r[i] = (pend.iter().filter_map(|p| p.1)).fold(d.frame, |a, f| a.min(f[i]));
+        }
+        r
+    };
     let fail = |m: String| {
         let mut q = sh.q();
         if q.err.is_none() {
             eprintln!("media: {m}");
             q.err = Some(m);
-        }
-    };
-    let release = |decs: &[Decoder], f: [u64; 2]| {
-        for (d, &f) in decs.iter().zip(&f) {
-            d.release(g, f);
         }
     };
     'main: while !sh.quit.load(Relaxed) {
@@ -292,25 +340,29 @@ fn run(
             if q.epoch != e {
                 e = q.epoch;
                 let t = q.target.min(n - 1);
-                match plan(t, pos, q.pics.front().map(|p| p.k), idr(sync, t)) {
-                    Plan::Keep(d) => {
-                        if d > 0 {
-                            release(&decs, q.pics[d - 1].f);
-                            q.pics.drain(..d);
-                        }
+                let s = start(sync, ord, &pk, t);
+                match plan(t, nk, pos, q.pics.front().map(|p| p.k), s) {
+                    Plan::Keep => {
+                        // a frame that failed to decode left a gap
+                        let d = q.pics.partition_point(|p| p.k < t);
+                        free(g, &decs, q.pics.get(d).map_or(low(&decs, &pend), Pic::lo));
+                        q.pics.drain(..d);
                         q.pics.iter_mut().for_each(|p| p.e = e);
+                        own = false;
                     }
-                    Plan::Go(p) => {
+                    Plan::On => {
                         q.pics.clear();
-                        for d in &decs {
-                            if d.frame > 0 {
-                                d.release(g, d.frame - 1);
-                            }
-                        }
-                        pos = p;
+                        pend.retain(|p| p.0 >= t);
+                        (nk, own) = (t, true);
+                        free(g, &decs, low(&decs, &pend));
+                    }
+                    Plan::Go(s) => {
+                        q.pics.clear();
+                        pend.clear();
+                        free(g, &decs, low(&decs, &[]));
+                        (pos, nk, own) = (s, t, true);
                     }
                 }
-                skip = t;
             }
         }
         if pos >= n {
@@ -350,18 +402,29 @@ fn run(
                 }
             }
         }
-        if ok && pos >= skip {
-            sh.q().pics.push_back(Pic {
-                f,
-                k: pos,
-                t: times[pos],
-                e,
-            });
-            wake();
-        } else if ok {
-            release(&decs, f);
-        }
+        let k = pk[pos];
         pos += 1;
+        if k >= nk {
+            pend.push((k, ok.then_some(f)));
+        } else if own {
+            free(g, &decs, low(&decs, &pend));
+        }
+        let mut q = None;
+        while let Some(i) = pend.iter().position(|p| p.0 == nk) {
+            let (k, f) = pend.swap_remove(i);
+            nk += 1;
+            if let Some(f) = f {
+                let r = low(&decs, &pend);
+                let t = times[k];
+                q.get_or_insert_with(|| sh.q())
+                    .pics
+                    .push_back(Pic { f, r, k, t, e });
+                own = false;
+            }
+        }
+        if q.take().is_some() {
+            wake();
+        }
     }
 }
 
@@ -384,22 +447,72 @@ pub(crate) mod tests {
             100
         );
         assert_eq!(frame_at(&times, 1e9), 174);
-        let sync = [0, 60, 120];
-        let i = |k| idr(&sync, k);
+        // no B-frames: frames are samples
+        let id: Vec<usize> = (0..175).collect();
+        let i = |k| start(&[0, 60, 120], &id, &id, k);
         assert_eq!([i(0), i(59), i(60), i(100), i(174)], [0, 0, 60, 60, 120]);
-        assert_eq!(idr(&[], 5), 0);
+        assert_eq!(start(&[], &id, &id, 5), 0);
         // queued 10..14, next to decode 14
-        assert_eq!(plan(12, 14, Some(10), 0), Plan::Keep(2));
-        assert_eq!(plan(10, 14, Some(10), 0), Plan::Keep(0));
+        assert_eq!(plan(12, 14, 14, Some(10), 0), Plan::Keep);
+        assert_eq!(plan(10, 14, 14, Some(10), 0), Plan::Keep);
         // just past the queue, no sync sample in between: decode on
-        assert_eq!(plan(14, 14, Some(10), 0), Plan::Go(14));
-        assert_eq!(plan(59, 14, Some(10), 0), Plan::Go(14));
+        assert_eq!(plan(14, 14, 14, Some(10), 0), Plan::On);
+        assert_eq!(plan(59, 14, 14, Some(10), 0), Plan::On);
         // a sync sample after pos: restart there
-        assert_eq!(plan(100, 14, Some(10), 60), Plan::Go(60));
+        assert_eq!(plan(100, 14, 14, Some(10), 60), Plan::Go(60));
         // backwards: restart
-        assert_eq!(plan(5, 14, Some(10), 0), Plan::Go(0));
-        assert_eq!(plan(9, 70, Some(66), 0), Plan::Go(0));
-        assert_eq!(plan(0, 0, None, 0), Plan::Go(0));
+        assert_eq!(plan(5, 14, 14, Some(10), 0), Plan::Go(0));
+        assert_eq!(plan(9, 70, 70, Some(66), 0), Plan::Go(0));
+        assert_eq!(plan(0, 0, 0, None, 0), Plan::On);
+        // B-frames: frame 4 decoded (waiting for 3), frames 1, 2 queued
+        assert_eq!(plan(4, 3, 5, Some(1), 0), Plan::On);
+        assert_eq!(plan(2, 3, 5, Some(1), 0), Plan::Keep);
+    }
+
+    /// Samples in decode order with these presentation times (sync where `key`).
+    fn samples(pts: &[i64], key: &[usize]) -> Vec<Sample> {
+        (pts.iter().enumerate())
+            .map(|(i, &pts)| Sample {
+                off: 0,
+                dts: i as i64,
+                pts,
+                size: 0,
+                dur: 1,
+                sync: key.contains(&i),
+            })
+            .collect()
+    }
+
+    /// Presentation order and the ring a consumer that holds a frame needs: without B-frames, libx264's `-bf 1` and its
+    /// defaults (three B-frames, the middle one a reference: P4 B2 b1 b3, and frame 4 waits for 1 to 3 while the
+    /// consumer holds frame 0), an open GOP whose leading frames a seek into them starts before.
+    #[test]
+    fn order_maths() {
+        let gop = |n: i64, m: &[i64]| -> Vec<i64> {
+            let w = m.len() as i64;
+            std::iter::once(0)
+                .chain((0..n).flat_map(|g| m.iter().map(move |x| g * w + x)))
+                .collect()
+        };
+        for (what, pts, w) in [
+            ("no B-frames", gop(20, &[1]), 2),
+            ("-bf 1", gop(20, &[2, 1]), 4),
+            ("libx264 defaults", gop(20, &[4, 2, 1, 3]), 7),
+        ] {
+            let (ord, ww) = order(&samples(&pts, &[0]));
+            let shown: Vec<i64> = ord.iter().map(|&s| pts[s]).collect();
+            assert!(shown.windows(2).all(|x| x[0] < x[1]), "{what}: {shown:?}");
+            assert_eq!(ww, w, "{what}");
+        }
+        // I0 P3 B1 B2 | I6 (open GOP) B4 B5 P9 B7 B8: B4 and B5 lead I6
+        let pts = [0, 3, 1, 2, 6, 4, 5, 9, 7, 8];
+        let (ord, _) = order(&samples(&pts, &[0, 4]));
+        let mut pk = vec![0; ord.len()];
+        for (k, &s) in ord.iter().enumerate() {
+            pk[s] = k;
+        }
+        let s = |k| start(&[0, 4], &ord, &pk, k);
+        assert_eq!([s(0), s(3), s(4), s(5), s(6), s(9)], [0, 0, 0, 0, 4, 4]);
     }
 
     #[test]
@@ -580,6 +693,85 @@ pub(crate) mod tests {
         v.release_before(g, &x);
         *held = Some(x);
         px
+    }
+
+    /// B-frames (H.264 from the ffmpeg CLI, frame numbers burned in, `-bf 1` and libx264's defaults): frames are
+    /// numbered in presentation order (frame 59 showed for 60 and 136 for 137); seeks show the frame asked for, as
+    /// FFmpeg decodes it, and playback holding each frame while the next decodes shows every frame once, in order (the
+    /// ring holds what reordering needs: 4 and 7 frames, plus 2 to decode ahead).
+    #[test]
+    fn bframes() {
+        let dir = Tmp::new("bframes");
+        let g = Arc::new(Gpu::new().unwrap());
+        for (name, enc, w) in [
+            ("bf1", &["-c:v", "libx264", "-bf", "1"][..], 4),
+            ("x264", &["-c:v", "libx264"][..], 7),
+        ] {
+            let p = dir.0.join(format!("{name}.mp4"));
+            if !numbered(&p, enc) {
+                eprintln!("no ffmpeg: skipped");
+                return;
+            }
+            let m = Mp4::open(&p).unwrap();
+            let (ord, ww) = order(&m.tracks[0].samples);
+            let late = (0..ord.len()).filter(|&k| ord[k] != k).count();
+            eprintln!(
+                "{name}: {late} of {} frames decode out of order, ring {ww}",
+                ord.len()
+            );
+            assert!(late > 50 && ww == w, "{name}");
+            let mut v = Video::open(&g, std::slice::from_ref(&p), || {}).unwrap();
+            assert_eq!(v.rings[0].slots(), w + 2);
+            let [_, _, vw, _] = v.view.map(|x| x as usize);
+            let mut held = None;
+            for k in [0, 60, 137, 59, 199, 100, 101, 61, 3, 0] {
+                let px = show(&g, &mut v, k, &mut held);
+                assert_eq!(number(&px, vw, 1), k, "{name}: seek {k}");
+                if [60, 137].contains(&k) {
+                    let bad = px
+                        .iter()
+                        .zip(ffmpeg(&p, 0, k, false))
+                        .filter(|(a, b)| *a != b)
+                        .count();
+                    eprintln!(
+                        "{name}: frame {k}: {bad} of {} bytes differ from FFmpeg",
+                        px.len()
+                    );
+                    assert_eq!(bad, 0);
+                }
+            }
+            // play from 0 holding each frame: every one comes, in order
+            show(&g, &mut v, 0, &mut held);
+            let t0 = Instant::now();
+            for k in 1..v.times.len() {
+                let x = loop {
+                    if let (Some(x), n) = v.take(v.times[k], true) {
+                        assert_eq!((x.k, n), (k, 0), "{name}: playback");
+                        break x;
+                    }
+                    assert!(
+                        t0.elapsed().as_secs() < 20,
+                        "{name}: playback stalled at {k}"
+                    );
+                    thread::sleep(Duration::from_millis(1));
+                };
+                v.acquire(&g, &x);
+                assert_eq!(
+                    number(&read(&g, &v.rings[0], v.view, x.f[0]), vw, 1),
+                    k,
+                    "{name}: playback"
+                );
+                v.release_before(&g, &x);
+                held = Some(x);
+            }
+            eprintln!(
+                "{name}: played {} frames in order in {:.2} s",
+                v.times.len(),
+                t0.elapsed().as_secs_f64()
+            );
+            v.release(&g, &held.take().unwrap());
+            assert_eq!(v.err(), None);
+        }
     }
 
     /// A 10-bit H.265 clip (ffmpeg CLI, libx265 Main 10) decodes into P010: frame 30 read back after a seek is

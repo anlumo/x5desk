@@ -17,8 +17,6 @@ use std::{
 use stitch::{Ctx, Preview, View};
 use video::Gpu;
 
-const OUT: u64 = video::decode::OUT as u64;
-
 pub struct Movie {
     g: Arc<Gpu>,
     pub path: PathBuf,
@@ -114,7 +112,7 @@ impl Movie {
         let deep = v.rings[0].texture(0).format() == wgpu::TextureFormat::P010;
         g.queue
             .write_buffer(&o, 0, bytemuck::cast_slice(&[x, y, deep as u32, 0]));
-        let bg = (0..OUT)
+        let bg = (0..v.rings[0].slots() as u64)
             .map(|s| {
                 let t = v.rings[0].texture(s);
                 // the plane's own format: R8 / RG8, or R16 / RG16 for P010
@@ -265,7 +263,7 @@ impl Movie {
             ..Default::default()
         });
         rp.set_pipeline(&self.pipe);
-        rp.set_bind_group(0, &self.bg[(p.f[0] % OUT) as usize], &[]);
+        rp.set_bind_group(0, &self.bg[p.f[0] as usize % self.bg.len()], &[]);
         rp.draw(0..3, 0..1);
     }
 
@@ -551,5 +549,64 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+    /// A B-frame H.264 clip (ffmpeg CLI, libx264 `-bf 1`, frame numbers burned in): a seek shows the frame asked for,
+    /// with that index under the slider (frame 60 showed labelled 61, 58 for 59), and it plays on in order to the end.
+    #[test]
+    fn bframes() {
+        let dir = crate::clip::tests::Tmp::new("movie");
+        let p = dir.0.join("bf1.mp4");
+        if !crate::clip::tests::numbered(&p, &["-c:v", "libx264", "-bf", "1"]) {
+            eprintln!("no ffmpeg: skipped");
+            return;
+        }
+        let g = Arc::new(Gpu::new().unwrap());
+        let cx = Ctx::new(&g.device, &g.queue);
+        let ctx = egui::Context::default();
+        let mut m = Movie::open(&g, &cx, &p, &ctx, None).unwrap();
+        let w = m.rgba.width() as usize;
+        // the number in the picture shown (white blocks along the top)
+        let shown = |m: &Movie| {
+            let pic = m.held.unwrap();
+            let mut enc = g.device.create_command_encoder(&Default::default());
+            m.yuv(&mut enc, &pic);
+            m.v.acquire(&g, &pic);
+            g.queue.submit([enc.finish()]);
+            let px = stitch::read_texture(&g.device, &g.queue, &m.rgba);
+            (0..8)
+                .map(|i| ((px[(20 * w + 40 * i + 20) * 4] > 128) as usize) << i)
+                .sum::<usize>()
+        };
+        let t0 = Instant::now();
+        for k in [60, 137, 59, 150] {
+            m.seek(k);
+            while m.held.is_none_or(|p| p.k != k) {
+                m.tick(&ctx);
+                assert_eq!(
+                    (m.err.as_deref(), t0.elapsed().as_secs() < 20),
+                    (None, true)
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            eprintln!(
+                "seek {k}: frame {} shown, number {}",
+                m.held.unwrap().k,
+                shown(&m)
+            );
+            assert_eq!(shown(&m), k);
+        }
+        m.play(true);
+        let mut last = 150;
+        while m.held.is_some_and(|p| p.k + 1 < m.v.times.len()) {
+            m.tick(&ctx);
+            let k = m.held.unwrap().k;
+            assert!(
+                k >= last && t0.elapsed().as_secs() < 30,
+                "playback at {k} after {last}"
+            );
+            last = k;
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!((shown(&m), m.err.as_deref()), (199, None));
     }
 }

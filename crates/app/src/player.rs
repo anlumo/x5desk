@@ -38,7 +38,6 @@ use std::{
 use stitch::{Calib, Ctx, Flow, Frame, Mode, Opts, Pose, Preview, Raft, Stitcher, View};
 use video::Gpu;
 
-const OUT: u64 = video::decode::OUT as u64;
 /// The viewer's texture: egui samples it as sRGB values, which is what the preview writes into a non-sRGB target.
 pub const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -204,7 +203,7 @@ impl Src {
         let blend = m.blend.unwrap_or(6.0);
         let pv = Preview::new(cx, &cal, fr, blend, Some(0.1), FMT);
         let bg = lens.map(|(r, rect)| {
-            (0..OUT)
+            (0..v.rings[r].slots() as u64)
                 .map(|s| cx.rect(v.rings[r].texture(s), rect))
                 .collect()
         });
@@ -232,7 +231,7 @@ impl Src {
     }
 
     pub(crate) fn src(&self, p: &Pic) -> [&stitch::Src; 2] {
-        [0, 1].map(|i| &self.bg[i][(p.f[self.lens[i].0] % OUT) as usize])
+        [0, 1].map(|i| &self.bg[i][p.f[self.lens[i].0] as usize % self.bg[i].len()])
     }
 
     /// A RAFT job for `p`: its lens pictures copied into `snap` (made or remade to fit), stitched with the rolling-shutter
