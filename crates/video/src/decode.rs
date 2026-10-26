@@ -20,7 +20,8 @@ use std::{
 };
 use wgpu_hal::api::Vulkan as Vk;
 
-/// Output ring size: how far decoding runs ahead of the consumer. Also the bitstream and command buffer ring.
+/// Output ring size (the least; `Decoder::with_out` makes it larger): how far decoding runs ahead of the consumer.
+/// Also the bitstream and command buffer ring.
 pub const OUT: usize = 4;
 /// Most DPB slots: 16 references and the current picture.
 pub const MAXS: usize = 17;
@@ -37,8 +38,8 @@ const RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     layer_count: 1,
 };
 
-/// What decoders that can share memory have in common: codec, profile, 10-bit, texture size, DPB slots.
-type Shape = (Codec, u32, bool, u32, u32, usize);
+/// What decoders that can share memory have in common: codec, profile, 10-bit, texture size, DPB slots, ring size.
+type Shape = (Codec, u32, bool, u32, u32, usize, usize);
 
 /// A decoder's session (with its memory), DPB, bitstream buffer and command buffers.
 struct Body {
@@ -214,7 +215,12 @@ impl Ring {
     /// R8Unorm / Rg8Unorm plane views, or P010 (H.265 Main 10), sampled through R16Unorm / Rg16Unorm plane views that
     /// read the 10-bit sample `d` as `64·d / 65535` (P010 keeps it in the high bits, the low 6 are zero).
     pub fn texture(&self, f: u64) -> &wgpu::Texture {
-        &self.tex[(f % OUT as u64) as usize]
+        &self.tex[(f % self.tex.len() as u64) as usize]
+    }
+
+    /// Its frames at once: frame `f` is in slot `f % slots()` ([`OUT`] unless [`Decoder::with_out`] asked for more).
+    pub fn slots(&self) -> usize {
+        self.tex.len()
     }
 
     /// Frames fully decoded: frames below this are ready to sample without stalling wgpu's queue.
@@ -373,6 +379,20 @@ impl Decoder {
         w: u32,
         h: u32,
     ) -> Result<Decoder> {
+        Self::with_out(g, codec, params, w, h, OUT)
+    }
+
+    /// [`Decoder::new`] with a ring of `out` frames (at least [`OUT`]): a consumer that shows B-frame video in
+    /// presentation order keeps frames that decode before ones it shows first.
+    pub fn with_out<P: AsRef<[u8]>>(
+        g: &Gpu,
+        codec: Codec,
+        params: &[P],
+        w: u32,
+        h: u32,
+        out: usize,
+    ) -> Result<Decoder> {
+        let out = out.max(OUT);
         let mut st = match codec {
             Codec::H264 => St::H264(Default::default()),
             Codec::H265 => St::H265(Default::default()),
@@ -474,7 +494,7 @@ impl Decoder {
             }
             let slots = slots.min(caps.max_dpb_slots as usize).min(MAXS);
             let hd = g.device.as_hal::<Vk>().ok_or(Bad("not a Vulkan device"))?;
-            let shape = (codec, idc, deep, w, h, slots);
+            let shape = (codec, idc, deep, w, h, slots, out);
             let bin = || g.bin.lock().unwrap_or_else(|e| e.into_inner());
 
             // from here every object belongs to `ring`, `d` or wgpu as soon as it exists: an error drops it
@@ -559,7 +579,7 @@ impl Decoder {
                 height: h,
                 depth_or_array_layers: 1,
             };
-            while ring.tex.len() < OUT {
+            while ring.tex.len() < out {
                 let (img, m) = image(
                     vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR
                         | vk::ImageUsageFlags::SAMPLED
@@ -689,7 +709,7 @@ impl Decoder {
             }
 
             let mut info = vk::BufferCreateInfo::default()
-                .size((d.slot * OUT) as u64)
+                .size((d.slot * out) as u64)
                 .usage(vk::BufferUsageFlags::VIDEO_DECODE_SRC_KHR);
             info.p_next = list;
             d.bs = g.dev.create_buffer(&info, None)?;
@@ -709,7 +729,7 @@ impl Decoder {
             d.pool = g.dev.create_command_pool(&info, None)?;
             let info = vk::CommandBufferAllocateInfo::default()
                 .command_pool(d.pool)
-                .command_buffer_count(OUT as u32);
+                .command_buffer_count(out as u32);
             d.cbs = g.dev.allocate_command_buffers(&info)?;
             d.params(g)?;
             d.warm(g)?;
@@ -821,13 +841,13 @@ impl Decoder {
     }
 
     /// Decodes one access unit (the NAL units of one sample: its slices plus any in-band parameter sets) into
-    /// texture `frame % OUT` and returns the frame index. Waits up to 50 ms for the consumer to release that slot
+    /// texture `frame % slots()` and returns the frame index. Waits up to 50 ms for the consumer to release that slot
     /// (`free`; a release no submit has carried yet goes out with an empty one); then returns `Error::Full` with
     /// nothing changed.
     pub fn decode(&mut self, g: &Gpu, au: &[&[u8]]) -> Result<u64> {
-        let (f, r) = (self.frame, OUT as u64);
+        let (f, r) = (self.frame, self.ring.slots() as u64);
         let k = (f % r) as usize;
-        // the consumer released frame f - OUT and its decode is done (a frame released without being sampled may
+        // the consumer released frame f - r and its decode is done (a frame released without being sampled may
         // still be decoding): its texture, bitstream slot and command buffer are free
         let (s, v) = ([self.ring.free, self.ring.done], (f + 1).saturating_sub(r));
         if f >= r && !unsafe { self.wait(&s, v, 0)? } {
