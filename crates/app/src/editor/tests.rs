@@ -1000,6 +1000,81 @@ fn slider_lost() {
     }
 }
 
+/// A slider drag released in a frame that also moves it, with `tick` before the inspector as in the app (egui input,
+/// the Intensity slider found through AccessKit, no samples needed): one undo step, holding the release's value (the
+/// release's change was a step of its own, and one undo left the value before it).
+#[test]
+fn slider_release() {
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = stitch::Ctx::new(&g.device, &g.queue);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut e = Editor::new(&g, &cx, &ctx, player::still(&g, &cx), None);
+    e.take(Project::new(FPS).unwrap(), Extra::default(), None);
+    for i in 0..2 {
+        let f = e.pj.file(&format!("/nowhere/{i}.insv"), 20.0).unwrap();
+        let mut c = Clip::new(f, 2.0, 10.0);
+        c.look = "Teal & Orange".into();
+        e.ed(|p| p.insert(i, c));
+    }
+    (e.sel, e.tab) = (Some(1), Tab::Colour);
+    // one frame with `ev` as the input: tick, then the tab (tick once: egui runs a frame's ui again when a pass asks
+    // to discard it, without the input's events)
+    let frame = |e: &mut Editor, ev: Vec<egui::Event>| {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(500.0, 1400.0),
+            )),
+            time: Some(ctx.input(|i| i.time) + 1.0 / 60.0),
+            events: ev,
+            ..Default::default()
+        };
+        let mut tick = true;
+        let mut o = ctx.run_ui(raw, |ui| {
+            if std::mem::take(&mut tick) {
+                e.tick(true);
+            }
+            e.colour_ui(ui);
+        });
+        o.textures_delta.clear();
+        o.platform_output.accesskit_update
+    };
+    let u = frame(&mut e, vec![]).expect("AccessKit is on");
+    let l = (u.nodes.iter())
+        .find(|(_, n)| n.role() == egui::Role::Label && n.value() == Some("Intensity"))
+        .map(|x| x.0)
+        .expect("its label");
+    let r = (u.nodes.iter())
+        .find(|(_, n)| n.role() == egui::Role::Slider && n.labelled_by().contains(&l))
+        .and_then(|(_, n)| n.bounds())
+        .expect("the Intensity slider");
+    let y = ((r.y0 + r.y1) / 2.0) as f32;
+    let at = |f: f64| egui::pos2((r.x0 + f * (r.x1 - r.x0)) as f32, y);
+    let amt = |e: &Editor| e.pj.tl().clips[1].amt;
+    let (h0, a0, mut a) = (e.history(), amt(&e), vec![]);
+    for ev in [
+        vec![egui::Event::PointerMoved(at(0.3))],
+        vec![btn(at(0.3), true)],
+        vec![egui::Event::PointerMoved(at(0.4))],
+        vec![egui::Event::PointerMoved(at(0.7)), btn(at(0.7), false)],
+        vec![],
+    ] {
+        frame(&mut e, ev);
+        a.push(amt(&e));
+    }
+    eprintln!(
+        "Intensity {a0} dragged, released in a frame that moves it: {a:?}, history {h0:?} -> {:?}",
+        e.history()
+    );
+    assert!(a[2] < a0 && a[3] > a[2] && a[4] == a[3], "{a:?}");
+    assert_eq!(e.history(), (h0.0 + 1, 0), "one step");
+    e.undo();
+    assert_eq!(amt(&e), a0, "the drag's step");
+    e.redo();
+    assert_eq!(amt(&e), a[3]);
+}
+
 /// The playhead stays on a timeline that gets shorter (no samples needed): paused at 14 s, the last clip deleted
 /// leaves it at the new end (it read "0:14.00 / 0:09.41" over the new last frame), and so does undoing the clips.
 #[test]
