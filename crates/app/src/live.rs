@@ -269,6 +269,27 @@ fn kat(url: &str) -> Option<Range<usize>> {
     (k > app).then_some(k..u.len())
 }
 
+/// The URL and stream key the settings stream to: a key in the URL (key field empty) goes as the key, never inside the
+/// URL.
+fn dest<'a>(url: &'a str, key: &'a str) -> (&'a str, &'a str) {
+    let (url, key) = (url.trim(), key.trim());
+    match kat(url).filter(|_| key.is_empty()) {
+        Some(k) => (&url[..k.start - 1], &url[k]),
+        None => (url, key),
+    }
+}
+
+/// The URL field's text with a key in it masked as the key field masks it (same character count: the cursor's places
+/// stay); the key found as [`dest`] finds it.
+fn mask(t: &str) -> String {
+    match kat(t.trim_end()) {
+        Some(k) => {
+            t[..k.start].to_owned() + &"•".repeat(t[k.clone()].chars().count()) + &t[k.end..]
+        }
+        None => t.into(),
+    }
+}
+
 /// Which source the outputs show.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Pick {
@@ -891,18 +912,12 @@ impl Live {
         ui.add_enabled_ui(!streaming, |ui| {
             egui::Grid::new("rtmp").num_columns(2).show(ui, |ui| {
                 ui.label("Server URL");
-                // a stream key typed into the URL is masked as the key field masks it (same character count: the
-                // cursor's places stay)
                 let hide = self.set.key.trim().is_empty() && !self.show_key;
                 let mut lay = |ui: &egui::Ui, b: &dyn egui::TextBuffer, _: f32| {
-                    let t = b.as_str();
-                    let t = match kat(t).filter(|_| hide) {
-                        Some(k) => {
-                            t[..k.start].to_owned()
-                                + &"•".repeat(t[k.clone()].chars().count())
-                                + &t[k.end..]
-                        }
-                        None => t.into(),
+                    let t = if hide {
+                        mask(b.as_str())
+                    } else {
+                        b.as_str().into()
                     };
                     let v = ui.visuals();
                     let c = (v.override_text_color).unwrap_or(v.widgets.inactive.text_color());
@@ -1268,12 +1283,7 @@ impl Outs {
             asc: enc.asc().to_vec(),
             lag: 1000,
         };
-        // a key in the URL goes as the key, never inside the URL
-        let (url, key) = (s.url.trim(), s.key.trim());
-        let (url, key) = match kat(url).filter(|_| key.is_empty()) {
-            Some(k) => (&url[..k.start - 1], &url[k]),
-            None => (url, key),
-        };
+        let (url, key) = dest(&s.url, &s.key);
         let r = Arc::new(Rtmp::start(url, key, cfg).map_err(|e| format!("RTMP: {e}"))?);
         let pic = tex(&self.g, w, h, wgpu::TextureFormat::Rgba8Unorm);
         let pv = pic.create_view(&Default::default());
@@ -1881,6 +1891,45 @@ mod tests {
         ] {
             assert_eq!(kat(u).map(|r| &u[r]), k, "{u}");
         }
+    }
+
+    /// The URL field masks the key the stream goes with, also with whitespace around the URL (the start trims it),
+    /// keeping its character count; a URL without a key shows as it is.
+    #[test]
+    fn masked() {
+        for (u, m) in [
+            (
+                "rtmps://a.example/app/s3cr3t/ ",
+                "rtmps://a.example/app/••••••/ ",
+            ),
+            (
+                " rtmp://a.example/app/s3cr3t\t",
+                " rtmp://a.example/app/••••••\t",
+            ),
+            (
+                "rtmp://a.example/app/s3cr3t// \n",
+                "rtmp://a.example/app/••••••// \n",
+            ),
+            ("rtmp://a.example/app/k3y", "rtmp://a.example/app/•••"),
+            ("rtmp://a.example/app/ ", "rtmp://a.example/app/ "),
+            ("rtmp://a.example/app", "rtmp://a.example/app"),
+        ] {
+            assert_eq!(mask(u), m, "{u:?}");
+            // the key the stream goes with is the one hidden
+            let k = dest(u, "").1;
+            assert!(
+                k.is_empty() == (m == u) && (k.is_empty() || !m.contains(k)),
+                "{u:?}"
+            );
+        }
+        assert_eq!(
+            dest("rtmps://a.example/app/s3cr3t/ ", ""),
+            ("rtmps://a.example/app", "s3cr3t")
+        );
+        assert_eq!(
+            dest(" rtmp://a.example/app/ ", " k "),
+            ("rtmp://a.example/app/", "k")
+        );
     }
 
     /// Every size and rate the screen offers gets an H.264 encoder (level, size and bitrate limits).
