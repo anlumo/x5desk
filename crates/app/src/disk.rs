@@ -152,8 +152,9 @@ fn media(n: &str) -> bool {
         && (4..=6).contains(&n.split('_').count())
 }
 
-/// The card's album: its media files as camera URIs (`/DCIM/…`, relative to `root`) grouped into items, with the
-/// trailer metadata of the files that carry it and the card's favourites.
+/// The card's album: its media files as camera URIs (`/DCIM/…`, relative to `root`) grouped into items, with each
+/// item's metadata from the trailer of its first file and the card's favourites. Empty files are left out: an
+/// interrupted recording leaves a 0-byte main file beside a whole proxy, whose trailer then speaks for the item.
 pub fn list(root: &Path) -> io::Result<Vec<Item>> {
     let mut uris = vec![];
     let mut st = vec![root.join("DCIM")];
@@ -167,27 +168,25 @@ pub fn list(root: &Path) -> io::Result<Vec<Item>> {
             }
             if p.is_dir() {
                 st.push(p)
-            } else if media(&n) && p.is_file() {
+            } else if media(&n) && p.metadata().is_ok_and(|m| m.is_file() && m.len() > 0) {
                 let r = p.strip_prefix(root).unwrap_or(&p);
                 uris.push(format!("/{}", r.to_string_lossy()))
             }
         }
     }
     uris.sort();
-    let infos: Vec<(String, Option<pb::ExtraMetadata>)> = uris
-        .iter()
-        .filter(|u| {
-            let n = album::name(u).to_ascii_lowercase();
-            [".insv", ".insp", ".jpg", ".mp4"]
-                .iter()
-                .any(|e| n.ends_with(e))
-        })
-        .map(|u| (u.clone(), meta(&root.join(&u[1..]))))
-        .collect();
     let ed = fs::read(root.join("DCIM/.editinfo_list.list"))
         .ok()
         .and_then(|b| pb::EditFileInfoList::decode(&b[..]).ok())
         .unwrap_or_default();
+    // one trailer per item: grouped first to know each item's first file, then again with their metadata
+    let infos: Vec<(String, Option<pb::ExtraMetadata>)> = album::group(&uris, &[], &ed)
+        .into_iter()
+        .map(|it| {
+            let u = &it.uris[0];
+            (u.clone(), meta(&root.join(&u[1..])))
+        })
+        .collect();
     Ok(album::group(&uris, &infos, &ed))
 }
 

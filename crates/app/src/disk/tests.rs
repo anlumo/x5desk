@@ -97,8 +97,9 @@ fn mounts() {
     fs::remove_dir_all(&d).unwrap();
 }
 
-/// A card's DCIM as the album shows it: the camera's grouping, metadata and thumbnails from the trailers, the
-/// favourites file; files the app would not collect left out.
+/// A card's DCIM as the album shows it: the camera's grouping, metadata and thumbnails from the trailers (one per
+/// item: its first file's), the favourites file; files the app would not collect and empty ones left out (an
+/// interrupted recording: a 0-byte main file beside its proxy).
 #[test]
 fn card() {
     let d = dir("card");
@@ -111,6 +112,7 @@ fn card() {
         ("VID_20260117_141148_00_635.insv", "v635.insv"),
         ("LRV_20260117_141148_01_635.lrv", "v635.lrv"),
         ("VID_20260116_152935_00_606.insv", "v606.insv"),
+        ("LRV_20260503_190639_01_708.lrv", "v635.lrv"),
     ] {
         match &s {
             Some(s) => symlink(s.join(f), c.join(n)).unwrap(),
@@ -126,6 +128,12 @@ fn card() {
         "IMG_20260118_124432_00_660.jpg.part",
     ] {
         fs::write(c.join(n), b"x").unwrap();
+    }
+    for n in [
+        "VID_20260503_190639_00_708.insv",
+        "IMG_20260504_101010_00_709.jpg",
+    ] {
+        fs::write(c.join(n), b"").unwrap();
     }
     fs::write(
         r.join("DCIM/Camera02/IMG_20260119_101010_00_700.jpg"),
@@ -153,7 +161,7 @@ fn card() {
         t.elapsed().as_secs_f64() * 1e3
     );
     let f = |n: &str| v.iter().find(|i| i.uris[0].ends_with(n)).unwrap();
-    assert_eq!(v.len(), 4, "{v:#?}");
+    assert_eq!(v.len(), 5, "{v:#?}");
     let a = f("_00_635.insv");
     assert_eq!(
         (a.kind, &a.uris[..], &*a.key),
@@ -173,6 +181,15 @@ fn card() {
         (album::Kind::Photo, 2, 1, 20260118124432)
     );
     assert_eq!(f("_700.jpg").key, "/DCIM/Camera02/IMG_20260119_101010_700_");
+    // the proxy alone, its size (and with the samples its length and size) from its own trailer
+    let lone = f("_708.lrv");
+    let ln = fs::metadata(c.join("LRV_20260503_190639_01_708.lrv"))
+        .unwrap()
+        .len();
+    assert_eq!(
+        (lone.kind, lone.uris.len(), lone.size),
+        (album::Kind::Video, 1, ln)
+    );
     assert!(list(&d).is_err(), "no DCIM");
     let Some(s) = s else {
         eprintln!("X5_SAMPLES not set: no trailer metadata or thumbnails checked");
@@ -189,6 +206,12 @@ fn card() {
         "{}",
         a.date
     );
+    println!(
+        "lone v635.lrv from its trailer: {} ms, {} × {}, {} B",
+        lone.ms, lone.dim[0], lone.dim[1], lone.size
+    );
+    assert!(lone.ms > 1000 && lone.dim[0] > 0 && lone.dim[1] > 0);
+    assert!(lone.ms.abs_diff(a.ms) < 1000, "{} vs {}", lone.ms, a.ms);
     for u in [&a.uris[0], &a.uris[1], &f("_606.insv").uris[0]] {
         let t = Instant::now();
         let th = thumb(&r.join(&u[1..]));
