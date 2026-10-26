@@ -1,0 +1,21 @@
+Network compiled into crate stitch by burn-onnx (build.rs), under a permissive licence whose text is next to this
+file, and run by burn on the shared device for the seam flow (src/raft.rs).
+
+raft_small_128x2176.onnx
+  What: RAFT-small optical flow (Teed & Deng, "RAFT: Recurrent All-Pairs Field Transforms for Optical Flow", ECCV
+        2020, https://arxiv.org/abs/2003.12039), 0.99 M parameters: torchvision's Raft_Small_Weights.C_T_V2 exported
+        to ONNX for src/raft.rs (128 x 2176, 8 iterations, opset 17).
+  Source: https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.optical_flow.raft_small.html
+          (C_T_V2, the default: "These weights were trained from scratch on FlyingChairs + FlyingThings3D", recipe
+          https://github.com/pytorch/vision/tree/main/references/optical_flow)
+  Licence: BSD-3-Clause (torchvision) -> LICENSE-torchvision. torchvision's README: "The pre-trained models provided
+           in this library may have their own licenses or terms and conditions derived from the dataset used for
+           training. It is your responsibility to determine whether you have permission to use the models for your
+           use case."
+  Training data: FlyingChairs and FlyingThings3D (one of the Scene Flow datasets), synthetic, from the University of
+           Freiburg: "provided for research purposes only and without any warranty. Any commercial use is
+           prohibited." (https://lmb.informatik.uni-freiburg.de/resources/datasets/FlyingChairs.en.html and
+           https://lmb.informatik.uni-freiburg.de/resources/datasets/SceneFlowDatasets.en.html, whose FAQ answers
+           commercial use with "Unfortunately, this is not possible. We do not own the necessary licenses for the 3D
+           models and textures which we used.")
+  sha256: f3dcff8fd22dc979f17d923f40fa7a78a92b633b2d433e5aac47a9880be0a0f1

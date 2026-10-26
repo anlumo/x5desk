@@ -12,6 +12,13 @@ object_tracking_vittrack_2023sep.onnx
           (downloaded from the zoo's mirror https://huggingface.co/opencv/object_tracking_vittrack/resolve/main/object_tracking_vittrack_2023sep.onnx)
   Licence: Apache-2.0 ("All files in this directory are licensed under Apache 2.0 License", the directory's README
            and LICENSE) -> LICENSE-vittrack
+  Training data: not named by the zoo. The contributor's training config (https://github.com/lpylpy0514/VitTracker
+           experiments/vit_dist/vit_48_h32_noKD.yaml) trains on LaSOT, GOT-10k (its vottrain split), COCO 2017 and
+           TrackingNet; in opencv_zoo PR #245 (https://github.com/opencv/opencv_zoo/pull/245) the contributor runs
+           that config's checkpoint (OstrackDist_ep0300.pth.tar) beside the zoo's ONNX on the same input: "Two models
+           are almost same", with near-equal outputs. GOT-10k: "licensed under CC BY-NC-SA 4.0. You are free to use
+           the dataset for research purpose. If you want to use it for commercial purpose, please contact us."
+           (http://got-10k.aitestunion.com/downloads)
   sha256: 2990f0b7cd44d92afa48cd97db6de7be113fc1d9594fddb74e2725c10478e91d
 
 yolox_nano.onnx
@@ -34,6 +41,9 @@ face_detection_yunet_2023mar.onnx
           (downloaded from https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx)
   Licence: MIT ("All files in this directory are licensed under MIT License", Copyright (c) 2020 Shiqi Yu) ->
            LICENSE-yunet
+  Training data: WIDER FACE (YuNet's training code https://github.com/ShiqiYu/libfacedetection.train: "YuNet face
+           detection training on WIDER Face"), "Creative Common License (cc by-nc-nd)"
+           (http://shuoyang1213.me/WIDERFACE/)
   sha256: 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
   Considered for licence plates: LPD-YuNet from the same zoo (license_plate_detection_lpd_yunet_2023mar.onnx, Apache-2.0,
   1.03 M parameters, sha256 6d4978a7b6d25514d5e24811b82bfb511d166bdd8ca3b03aa63c1623d4d039c7), trained on Chinese

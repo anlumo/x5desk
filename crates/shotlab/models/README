@@ -11,10 +11,12 @@ human_segmentation_pphumanseg_2023mar.onnx
           (downloaded from the zoo's mirror https://huggingface.co/opencv/human_segmentation_pphumanseg/resolve/main/human_segmentation_pphumanseg_2023mar.onnx;
           the mirror's LFS oid is the sha256 below)
   Licence: Apache-2.0 ("All files in this directory are licensed under Apache 2.0 License", the directory's README
-           and LICENSE; Copyright (c) 2021 PaddlePaddle Authors) -> LICENSE-pphumanseg. Training data: PaddleSeg's
-           HumanSeg README (release/2.1) says the released models were trained on "large-scale portrait data"
-           without naming it, and uses a subset of Supervisely Persons for its fine-tuning example; the weights are
-           published under Apache-2.0 by their authors.
+           and LICENSE; Copyright (c) 2021 PaddlePaddle Authors) -> LICENSE-pphumanseg.
+  Training data: "Baidu self-built dataset", no published terms (PaddleHub's humanseg_mobile, HRNet_w18_small_v1 like
+           this one: https://github.com/PaddlePaddle/PaddleHub/blob/develop/modules/image/semantic_segmentation/humanseg_mobile/README_en.md).
+           PaddleSeg's HumanSeg README (release/2.1) says the released models were trained on "large-scale portrait
+           data" without naming it, and uses a subset of Supervisely Persons for its fine-tuning example; the weights
+           are published under Apache-2.0 by their authors.
   sha256: 552d8a984054e59b5d773d24b9b12022b22046ceb2bbc4c9aaeaceb36a9ddf24
   Build fix: burn-onnx 0.22 resolves 6 of the network's 20 stride-2 3x3 convolutions (SAME_UPPER on even inputs: pad
   0 before, 1 after) as padding 1 on both sides; build.rs rewrites them in the generated code and asserts the counts.
