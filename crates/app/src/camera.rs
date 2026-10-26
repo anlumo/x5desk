@@ -1052,9 +1052,10 @@ pub struct Cam {
     pub import: bool,
 }
 
-/// The bar's camera state. A camera in another USB mode whose own disk is mounted is the X5 in U-disk mode (Webcam
-/// Mode has no disk).
+/// The bar's camera state. A mounted disk of the camera's own is the X5 in U-disk mode (Webcam Mode has no disk),
+/// whatever the bus scan says: in U-disk mode the X5 enumerates under another vendor id (`070a:4027`).
 fn status(i: &Info) -> String {
+    let app = "choose Android App on its USB menu for the full features (settings, capture, live preview)";
     match (i.conn, i.plug, &i.id) {
         (Conn::On, _, Some(id)) => format!("{} · firmware {}", id.model, id.firmware),
         (Conn::Connecting, ..) => match i.since.map_or(0, |t| t.elapsed().as_secs()) {
@@ -1062,19 +1063,19 @@ fn status(i: &Info) -> String {
             _ => "Connecting…".into(),
         },
         (_, Some(Plug::App), _) => "X5 found".into(),
-        (_, Some(Plug::Other), _) => {
-            let app = "choose Android App on its USB menu for the full features (settings, capture, live preview)";
-            match i.disk.iter().find(|v| v.cam.is_some()) {
-                Some(v) if i.src.as_ref() == Some(&v.root) => {
-                    format!("Camera in U-disk mode: the Album shows its card; {app}")
-                }
-                Some(_) => format!("Camera in U-disk mode: pick its card in the Album; {app}"),
-                None => {
-                    "Insta360 camera in another USB mode: choose Android App on its USB menu".into()
-                }
+        (_, p, _) => match (i.disk.iter().find(|v| v.cam.is_some()), &i.src) {
+            (Some(v), Some(r)) if *r == v.root => {
+                format!("Camera in U-disk mode: the Album shows its card; {app}")
             }
-        }
-        _ => "No camera: connect the X5 by USB in app mode".into(),
+            (Some(_), _) => format!("Camera in U-disk mode: pick its card in the Album; {app}"),
+            _ if p == Some(Plug::Other) => {
+                "Insta360 camera in another USB mode: choose Android App on its USB menu".into()
+            }
+            (_, Some(_)) => {
+                "No camera: the Album shows a card; connect the X5 by USB in app mode".into()
+            }
+            _ => "No camera: connect the X5 by USB in app mode".into(),
+        },
     }
 }
 

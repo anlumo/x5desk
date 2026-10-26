@@ -1163,6 +1163,24 @@ fn card_album() {
         (i.src.as_ref(), i.disk.len(), i.conn),
         (Some(&r), 1, Conn::Off)
     );
+    // in U-disk mode the X5 is not on the bus under its vendor id: the bar still says what is shown
+    let full = "choose Android App on its USB menu for the full features (settings, capture, live preview)";
+    assert_eq!(i.plug, None);
+    assert_eq!(
+        status(&i),
+        format!("Camera in U-disk mode: the Album shows its card; {full}")
+    );
+    let mut j = i.clone();
+    j.src = None;
+    assert_eq!(
+        status(&j),
+        format!("Camera in U-disk mode: pick its card in the Album; {full}")
+    );
+    (j.src, j.disk[0].cam) = (Some(r.clone()), None);
+    assert_eq!(
+        status(&j),
+        "No camera: the Album shows a card; connect the X5 by USB in app mode"
+    );
     let v = album(&w);
     assert_eq!(v.len(), 2);
     let rec = v.iter().find(|i| i.kind == Kind::Video).unwrap();
