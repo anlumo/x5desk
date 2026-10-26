@@ -14,7 +14,8 @@
 //! (serve the OBS source), `pwcam` (publish the PipeWire camera), `grab=<file.png>` (once the player is idle, e.g. a
 //! paused frame's RAFT stitch done: save the live outputs' `view` and `360` pictures as `<file>-view.png`,
 //! `<file>-360.png`), `min=<s>` (minimise the window after s seconds: the compositor stops drawing it, the live outputs
-//! run on), `max` (maximise the window: a tiling compositor gives it some size of its own otherwise). Under the hook the Live screen neither reads nor writes the user's live settings, and the live output
+//! run on), `max` (maximise the window: a tiling compositor gives it some size of its own otherwise; the screenshot
+//! waits for it). Under the hook the Live screen neither reads nor writes the user's live settings, and the live output
 //! thread prints its state every 5 s. Capture: `capture` (start on the Capture screen with the live preview running),
 //! `replay=<rec.h264>` (a simulated camera streaming that `x5 live` recording in real time instead of the X5, with
 //! the calibration of `$X5_SAMPLES/v635.insv` and `/CONF` from `conf=<file>` or `$X5_CONF`; `battery=<%>`: the level it
@@ -397,6 +398,8 @@ struct App {
     /// the test hook saves the live outputs' pictures once the player is idle, and minimises the window after `min` s
     grab: Option<PathBuf>,
     min: Option<f64>,
+    /// the test hook's `max`: when to ask for it next, until the window is maximised
+    max: Option<Duration>,
     /// the test hook shows the Live screen scrolled to its end
     end: bool,
     t0: Instant,
@@ -542,9 +545,14 @@ impl App {
             _ if pane.is_some() => Tab::Camera,
             _ => Tab::Library,
         };
-        let (grab, min, end) = test
-            .as_ref()
-            .map_or((None, None, false), |t| (t.grab.clone(), t.min, t.end));
+        let (grab, min, max, end) = test.as_ref().map_or((None, None, None, false), |t| {
+            (
+                t.grab.clone(),
+                t.min,
+                t.max.then_some(Duration::ZERO),
+                t.end,
+            )
+        });
         let help = help::Help::new(&g, test.as_ref().and_then(|t| t.help));
         let set = settings::Settings::new(&g, prefs);
         let mut lib = library::Library::new(&g, &cx, &cc.egui_ctx, still, test);
@@ -581,6 +589,7 @@ impl App {
             exit,
             grab,
             min,
+            max,
             end,
             t0: Instant::now(),
         }
@@ -774,7 +783,20 @@ impl eframe::App for App {
             && self.auto.is_none()
             && self.lab.idle()
             && self.lib.auto.is_none()
-            && self.exp.idle();
+            && self.exp.idle()
+            && self.max.is_none();
+        // an X11 window manager ignores a maximise for a window it has not mapped, and eframe maps it after its first
+        // frame (winit sends `with_maximized` before): asked until it is
+        if let Some(t) = self.max {
+            match ctx.input(|i| i.viewport().maximized) {
+                Some(true) => self.max = None,
+                _ if self.t0.elapsed() >= t => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+                    self.max = Some(self.t0.elapsed() + Duration::from_millis(250));
+                }
+                _ => ctx.request_repaint_after(Duration::from_millis(50)),
+            }
+        }
         if self.lib.idle() && self.grab.is_some() {
             self.live.grab = self.grab.take();
         }
@@ -886,7 +908,6 @@ fn main() -> eframe::Result {
             ..Default::default()
         },
         viewport: egui::ViewportBuilder::default()
-            .with_maximized(test.as_ref().is_some_and(|t| t.max))
             .with_inner_size([1600.0, 900.0])
             .with_title("x5desk")
             .with_app_id("x5desk")
