@@ -2257,14 +2257,9 @@ mod tests {
             eprintln!("no ffprobe: skipping");
             return;
         }
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
         let file = out(&format!("live-rtmp{fps}.flv"));
         let f = file.to_str().unwrap();
-        let (mut ff, url) = listen(port, &file);
+        let (mut ff, url, _) = serve(&file);
         let g = Arc::new(Gpu::new().unwrap());
         let cx = stitch::Ctx::new(&g.device, &g.queue);
         let hook = Hook {
@@ -2419,10 +2414,11 @@ mod tests {
         assert!(worst <= if fps > 30 { 10 } else { 4 });
     }
 
-    /// `ffmpeg -listen` (test tool) on `port` into `file`, listening; and its URL.
-    fn listen(port: u16, file: &Path) -> (Kid, String) {
+    /// `ffmpeg -listen` (test tool) on `port` into `file` once it listens, and its URL; None when it ends before it
+    /// listens (the port is taken).
+    fn listen(port: u16, file: &Path) -> Option<(Kid, String)> {
         let url = format!("rtmp://127.0.0.1:{port}/live/test");
-        let ff = Kid::new(
+        let mut ff = Kid::new(
             std::process::Command::new("ffmpeg")
                 .args([
                     "-hide_banner",
@@ -2439,21 +2435,60 @@ mod tests {
                 .stdin(std::process::Stdio::null()),
             file,
         );
-        // until it listens: a probe connection would be taken as the publisher
-        let hex = format!(":{port:04X} ");
+        // until it listens, on a socket of its own: another run's listener may hold the port. A probe connection
+        // would be taken as the publisher
+        let (hex, pid) = (format!("0100007F:{port:04X}"), ff.0.id());
+        let own = |i: &str| {
+            let s = format!("socket:[{i}]");
+            std::fs::read_dir(format!("/proc/{pid}/fd"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|e| std::fs::read_link(e.path()).is_ok_and(|l| l.as_os_str() == &*s))
+        };
         let t = Instant::now();
         while !std::fs::read_to_string("/proc/net/tcp")
             .unwrap()
             .lines()
-            .any(|l| l.contains(&hex) && l.split_whitespace().nth(3) == Some("0A"))
+            .map(|l| l.split_whitespace().collect::<Vec<_>>())
+            .any(|l| l.len() > 9 && l[1] == hex && l[3] == "0A" && own(l[9]))
         {
+            if ff.0.try_wait().unwrap().is_some() {
+                return None;
+            }
             assert!(
                 t.elapsed() < Duration::from_secs(10),
                 "ffmpeg isn't listening"
             );
             thread::sleep(Duration::from_millis(20));
         }
-        (ff, url)
+        Some((ff, url))
+    }
+
+    /// A listener into `file` on a port the kernel found free, its URL and the port; should another process take it
+    /// before ffmpeg does, on another.
+    fn serve(file: &Path) -> (Kid, String, u16) {
+        (0..5)
+            .find_map(|_| {
+                let p = std::net::TcpListener::bind("127.0.0.1:0")
+                    .unwrap()
+                    .local_addr()
+                    .unwrap()
+                    .port();
+                listen(p, file).map(|(k, u)| (k, u, p))
+            })
+            .expect("no port ffmpeg could listen on")
+    }
+
+    /// A socket already listening on the port is not taken for ffmpeg's: `listen` waits for ffmpeg to give up.
+    #[test]
+    fn port_taken() {
+        if tool("ffmpeg", &["-version"]).is_none() {
+            eprintln!("no ffmpeg: skipping");
+            return;
+        }
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        assert!(listen(l.local_addr().unwrap().port(), &out("live-taken.flv")).is_none());
     }
 
     fn reap(c: &mut std::process::Child) {
@@ -2500,13 +2535,8 @@ mod tests {
             eprintln!("no ffprobe: skipping");
             return;
         }
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
         let (fa, fb) = (out("live-a.flv"), out("live-b.flv"));
-        let (a, url) = listen(port, &fa);
+        let (a, url, port) = serve(&fa);
         let g = Arc::new(Gpu::new().unwrap());
         let cx = stitch::Ctx::new(&g.device, &g.queue);
         let hook = Hook {
@@ -2519,7 +2549,7 @@ mod tests {
         // between IDRs (0 and 60): what's queued at the reconnect holds none
         run(&mut l, &p, 2.3, |_| {});
         drop(a);
-        let (mut b, _) = listen(port, &fb);
+        let (mut b, _) = listen(port, &fb).expect("the port was taken");
         // the frame handed to the encoder when the new session went live
         let mut at = None;
         run(&mut l, &p, 5.0, |l| {
