@@ -15,8 +15,9 @@
 //! paused frame's RAFT stitch done: save the live outputs' `view` and `360` pictures as `<file>-view.png`,
 //! `<file>-360.png`), `min=<s>` (minimise the window after s seconds: the compositor stops drawing it, the live outputs
 //! run on), `max` (maximise the window: a tiling compositor gives it some size of its own otherwise; the screenshot
-//! waits for it). Under the hook the Live screen neither reads nor writes the user's live settings, and the live output
-//! thread prints its state every 5 s. Capture: `capture` (start on the Capture screen with the live preview running),
+//! waits for it, asked up to 12 times 250 ms apart, about 3 s). Under the hook the Live screen neither reads nor
+//! writes the user's live settings, and the live output thread prints its state every 5 s. Capture: `capture` (start
+//! on the Capture screen with the live preview running),
 //! `replay=<rec.h264>` (a simulated camera streaming that `x5 live` recording in real time instead of the X5, with
 //! the calibration of `$X5_SAMPLES/v635.insv` and `/CONF` from `conf=<file>` or `$X5_CONF`; `battery=<%>`: the level it
 //! reports), `webcam[=1920|<file.mjpg>]`
@@ -398,8 +399,8 @@ struct App {
     /// the test hook saves the live outputs' pictures once the player is idle, and minimises the window after `min` s
     grab: Option<PathBuf>,
     min: Option<f64>,
-    /// the test hook's `max`: when to ask for it next, until the window is maximised
-    max: Option<Duration>,
+    /// the test hook's `max`: when to ask for it next and how many more times, until the window is maximised
+    max: Option<(Duration, u8)>,
     /// the test hook shows the Live screen scrolled to its end
     end: bool,
     t0: Instant,
@@ -549,7 +550,7 @@ impl App {
             (
                 t.grab.clone(),
                 t.min,
-                t.max.then_some(Duration::ZERO),
+                t.max.then_some((Duration::ZERO, 12)),
                 t.end,
             )
         });
@@ -786,15 +787,28 @@ impl eframe::App for App {
             && self.exp.idle()
             && self.max.is_none();
         // an X11 window manager ignores a maximise for a window it has not mapped, and eframe maps it after its first
-        // frame (winit sends `with_maximized` before): asked until it is
-        if let Some(t) = self.max {
-            match ctx.input(|i| i.viewport().maximized) {
-                Some(true) => self.max = None,
-                _ if self.t0.elapsed() >= t => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
-                    self.max = Some(self.t0.elapsed() + Duration::from_millis(250));
+        // frame (winit sends `with_maximized` before): asked every 250 ms until it is, for 3 s (one without EWMH, or
+        // bare Xvfb, never maximises)
+        if let Some((t, n)) = self.max {
+            let now = self.t0.elapsed();
+            self.max = match ctx.input(|i| i.viewport().maximized) {
+                Some(true) => None,
+                _ if now < t => self.max,
+                _ if n == 0 => {
+                    let s = ctx.input(|i| i.content_rect().size() * i.pixels_per_point);
+                    eprintln!(
+                        "x5desk: not maximised in 3 s; going on at {:.0} × {:.0}",
+                        s.x, s.y
+                    );
+                    None
                 }
-                _ => ctx.request_repaint_after(Duration::from_millis(50)),
+                _ => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+                    Some((now + Duration::from_millis(250), n - 1))
+                }
+            };
+            if self.max.is_some() {
+                ctx.request_repaint_after(Duration::from_millis(50))
             }
         }
         if self.lib.idle() && self.grab.is_some() {
