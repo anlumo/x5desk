@@ -298,7 +298,9 @@ impl Track {
                                     .filter(|x| x.0 >= 0.3)
                                     .max_by(|a, b| a.0.total_cmp(&b.0))
                                     .map(|x| x.1);
-                                track::Tracker::new(ai, p, Subject { cls, ..s }).map(|t| {
+                                track::Tracker::new(ai, p, Subject { cls, ..s }).map(|mut t| {
+                                    // every frame is stepped: the subject's reach is per second of the clip
+                                    t.fps = c.meta.fps as f32;
                                     tr = Some(t);
                                     Sample {
                                         raw: s.dir,
