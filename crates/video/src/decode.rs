@@ -840,10 +840,19 @@ impl Decoder {
         Ok(())
     }
 
+    /// Decoding restarts at the next access unit, a random access point (a seek): an H.265 CRA there is handled as a
+    /// BLA (HandleCraAsBlaFlag), so it empties the DPB and its RASL pictures, which reference pictures before it,
+    /// are `Error::Skip`. H.264 has no CRA: nothing changes.
+    pub fn restart(&mut self) {
+        if let St::H265(s) = &mut self.st {
+            s.restart();
+        }
+    }
+
     /// Decodes one access unit (the NAL units of one sample: its slices plus any in-band parameter sets) into
     /// texture `frame % slots()` and returns the frame index. Waits up to 50 ms for the consumer to release that slot
     /// (`free`; a release no submit has carried yet goes out with an empty one); then returns `Error::Full` with
-    /// nothing changed.
+    /// nothing changed. A RASL picture that cannot be decoded is `Error::Skip`, no frame.
     pub fn decode(&mut self, g: &Gpu, au: &[&[u8]]) -> Result<u64> {
         let (f, r) = (self.frame, self.ring.slots() as u64);
         let k = (f % r) as usize;

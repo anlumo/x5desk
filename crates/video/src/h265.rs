@@ -2,7 +2,7 @@
 //! PCM, tiles and inter RPS prediction; no long-term references, scaling lists or range extensions), plus POC
 //! (8.3.1) and RPS (8.3.2) picture management.
 use crate::{
-    Error::Bad,
+    Error::{Bad, Skip},
     Result,
     bits::Bits,
     decode::{MAXS, Pic, Ref},
@@ -528,7 +528,8 @@ pub struct Slice {
     pub rps_bits: u16,
 }
 
-/// Parameter sets by id, the POC of prevTid0Pic, and whether a picture came since the start or an end of sequence.
+/// Parameter sets by id, the POC of prevTid0Pic, whether a picture came since the start, an end of sequence or a
+/// restart, and NoRaslOutputFlag of the last IRAP picture.
 pub struct State {
     pub vps: [Option<Vps>; 16],
     pub sps: [Option<Sps>; 16],
@@ -536,6 +537,7 @@ pub struct State {
     raw: Vec<Vec<u8>>, // the NAL unit stored under each id: VPS 0..16, SPS 16..32, PPS 32..96
     prev: i32,
     started: bool,
+    norasl: bool,
 }
 
 impl Default for State {
@@ -547,11 +549,17 @@ impl Default for State {
             raw: vec![vec![]; 96],
             prev: 0,
             started: false,
+            norasl: false,
         }
     }
 }
 
 impl State {
+    /// Decoding restarts at the next picture (a seek): a CRA there is handled as a BLA (HandleCraAsBlaFlag, 8.1.3).
+    pub fn restart(&mut self) {
+        self.started = false;
+    }
+
     /// Stores a VPS / SPS / PPS under its id, replacing the one before (the last received is active); true when
     /// that changed what the id holds.
     pub fn put(&mut self, n: &[u8]) -> Result<bool> {
@@ -640,7 +648,7 @@ impl State {
 
     /// POC and RPS for the picture in `au`: drops the DPB pictures its RPS does not list, fills `p`, lists the
     /// active reference slots in `act`, and puts the current picture in a free slot (`Pic::setup`). On an error
-    /// nothing has changed.
+    /// nothing has changed; a RASL picture of an IRAP with NoRaslOutputFlag is `Skip`.
     pub(crate) fn picture(
         &mut self,
         au: &[&[u8]],
@@ -652,6 +660,10 @@ impl State {
             .iter()
             .find(|n| n.len() > 2 && nal_type(n) < 32 && n[2] & 0x80 != 0)
             .ok_or(Bad("no first slice segment"))?;
+        // it references pictures before its IRAP that were never decoded: neither decoded nor output (8.1.3)
+        if matches!(nal_type(n), 8 | 9) && self.norasl {
+            return Err(Skip);
+        }
         let sl = self.slice(n)?;
         let t = sl.nal_type;
         let pps = self.pps[sl.pps_id as usize]
@@ -662,8 +674,8 @@ impl State {
             .get(pps.sps_id as usize)
             .and_then(Option::as_ref)
             .ok_or(Bad("missing SPS"))?;
-        // NoRaslOutputFlag: IDR, BLA, and a CRA first in the stream or after an end of sequence start a new POC
-        // sequence and empty the DPB (RASL pictures after such a CRA fail with "missing reference")
+        // NoRaslOutputFlag: IDR, BLA, and a CRA first in the stream, after an end of sequence or where decoding
+        // restarts start a new POC sequence and empty the DPB; RASL pictures after them are skipped
         let restart = (16..=20).contains(&t) || t == 21 && !self.started;
         let max = 1 << sps.log2_max_poc_lsb;
         let (lsb, pl, pm) = (sl.poc_lsb, self.prev & (max - 1), self.prev & !(max - 1));
@@ -699,6 +711,9 @@ impl State {
             self.prev = poc;
         }
         self.started = !au.iter().any(|n| n.len() > 1 && nal_type(n) == 36);
+        if (16..=21).contains(&t) {
+            self.norasl = restart;
+        }
         refs.iter_mut().for_each(|r| r.live = keep(r));
         p.flags.set_IrapPicFlag((16..=23).contains(&t) as u32);
         p.flags.set_IdrPicFlag((t == 19 || t == 20) as u32);

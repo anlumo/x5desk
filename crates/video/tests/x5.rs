@@ -984,7 +984,9 @@ fn live_loss() {
 /// - x264 P only: POC type 2, a sliding window of 4 references, weighted prediction, cropping (404 of 416 rows)
 /// - x264 B-pyramid: POC type 0, MMCO 1, temporal direct, implicit weights (POC distances)
 /// - x265 B-pyramid, open GOP: sub-layer non-reference pictures, RPS in slice headers, CRAs with RASL pictures,
-///   conformance window; then again from the first CRA, where only its RASL pictures may fail
+///   conformance window; then from a CRA where decoding starts or restarts (`Decoder::restart`: a seek back to the
+///   first CRA after the whole stream, forward to the last one after 5 pictures; CRAs with RASL pictures), which
+///   skips exactly its RASL pictures and gives every other AU the whole stream's picture
 /// - the same x265 stream in Main 10: P010 textures, against FFmpeg's `p010le` (the low 6 bits included)
 #[test]
 fn x26x_matches_ffmpeg() {
@@ -1041,49 +1043,75 @@ fn x26x_matches_ffmpeg() {
             .copied()
             .filter(|n| is_param(codec, n))
             .collect();
-        let cra = aus
-            .iter()
-            .position(|au| codec == Codec::H265 && au.iter().any(|n| h265::nal_type(n) == 21));
-        for start in [Some(0), cra].into_iter().flatten() {
+        // H.265: each AU's picture type; a CRA's RASL pictures follow it up to the next IRAP
+        let ty: Vec<_> = (aus.iter())
+            .map(|au| au.iter().map(|n| h265::nal_type(n)).find(|&t| t < 32))
+            .collect();
+        let rasl = |c: usize| {
+            (ty[c + 1..].iter())
+                .take_while(|t| !matches!(t, Some(16..=21)))
+                .filter(|t| matches!(t, Some(8 | 9)))
+                .count()
+        };
+        let cra: Vec<_> = (0..aus.len())
+            .filter(|&i| codec == Codec::H265 && ty[i] == Some(21) && rasl(i) > 0)
+            .collect();
+        // the AUs decoded before a restart, the AU it restarts at
+        let mut runs = vec![(0, 0)];
+        if let (Some(&a), Some(&b)) = (cra.first(), cra.last()) {
+            runs.extend([(0, a), (aus.len(), a), (5, b)]);
+        }
+        // the whole stream's picture of each AU
+        let mut full = vec![];
+        for (pre, start) in runs {
             let mut d = Decoder::new(&g, codec, &params, 0, 0).unwrap();
             let p010 = d.texture(0).format() == wgpu::TextureFormat::P010;
             assert_eq!(p010, deep, "{name}: texture format");
             let (mut got, mut skipped) = (vec![], 0);
-            for au in &aus[start..] {
+            for (i, au) in aus[..pre].iter().chain(&aus[start..]).enumerate() {
+                if i == pre && pre > 0 {
+                    d.restart();
+                }
                 match d.decode(&g, au) {
                     Ok(f) => {
                         d.acquire(&g, f);
-                        got.push(hash(&read(&g, &d, d.view, f)));
+                        let j = if i < pre { i } else { start + i - pre };
+                        got.push((j, hash(&read(&g, &d, d.view, f))));
                         d.release(&g, f);
                     }
-                    Err(Error::Bad(e)) if start > 0 => {
-                        let t = au.iter().map(|n| h265::nal_type(n)).find(|&t| t < 32);
-                        assert!(
-                            matches!(t, Some(8 | 9)),
-                            "{name} from AU {start}: {e} at {t:?}"
-                        );
-                        skipped += 1;
-                    }
-                    Err(e) => panic!("{name}: {e}"),
+                    Err(Error::Skip) if i >= pre && start > 0 => skipped += 1,
+                    Err(e) => panic!("{name}, {pre} AUs, then from AU {start}: {e}"),
                 }
             }
             let miss = got
                 .iter()
-                .filter(|x| want.binary_search(x).is_err())
+                .filter(|x| want.binary_search(&x.1).is_err())
+                .count();
+            // a wrong reference can give another frame's picture
+            let wrong = (got.iter())
+                .filter(|&&(j, x)| full.get(j).is_some_and(|&y| y != x))
                 .count();
             println!(
-                "{name} from AU {start}: {} of {} pictures decoded, view {:?} in {}x{}, {miss} not among \
-                 FFmpeg's frames, {skipped} RASL failed",
+                "{name}: {pre} AUs, then from AU {start}: {} of {} pictures decoded, view {:?} in {}x{}, {miss} \
+                 not among FFmpeg's frames, {wrong} not the whole stream's of their AU, {skipped} RASL skipped",
                 got.len(),
-                aus.len() - start,
+                pre + aus.len() - start,
                 d.view,
                 d.w,
                 d.h
             );
-            assert_eq!(miss, 0, "{name}");
+            assert_eq!((miss, wrong), (0, 0), "{name}");
+            // exactly the restart's RASL pictures (later CRAs' decode), and there are some
+            assert!(
+                start == 0 || skipped > 0 && skipped == rasl(start),
+                "{name}: {skipped} skipped of {} RASL pictures",
+                rasl(start)
+            );
             if start == 0 {
-                got.sort();
-                assert_eq!(got, want, "{name}: not FFmpeg's frames");
+                full = got.iter().map(|x| x.1).collect();
+                let mut s = full.clone();
+                s.sort();
+                assert_eq!(s, want, "{name}: not FFmpeg's frames");
             }
         }
     }

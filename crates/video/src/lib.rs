@@ -23,6 +23,10 @@ pub enum Error {
     /// `Input::acquire`: the encoder has not finished the slot's last frame; `Encoder::encode`: `encode::SLOTS`
     /// frames are in flight, collect a packet first.
     Full,
+    /// `Decoder::decode`: an H.265 RASL picture of a BLA or of a CRA where decoding started or restarted
+    /// (`Decoder::restart`): it references pictures before that point, so it is neither decoded nor output; nothing
+    /// changed but the parameter sets it carried.
+    Skip,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -40,6 +44,7 @@ impl std::fmt::Display for Error {
             Error::Bad(s) => write!(f, "stream: {s}"),
             Error::Gpu(s) => write!(f, "GPU setup: {s}"),
             Error::Full => write!(f, "output ring full"),
+            Error::Skip => write!(f, "RASL picture skipped"),
         }
     }
 }
