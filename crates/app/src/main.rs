@@ -263,6 +263,17 @@ pub fn xdg(var: &str, home: &str) -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(home)))
 }
 
+/// `d`, made owner-only if missing, if it is a dir of this user's that no other can write to: in a shared tmp another
+/// user may have made it first, or put a symlink there.
+fn mine(d: PathBuf) -> Option<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let _ = std::fs::DirBuilder::new().mode(0o700).create(&d);
+    let m = d.symlink_metadata().ok()?;
+    // SAFETY: geteuid has no preconditions.
+    let me = unsafe { libc::geteuid() };
+    (m.is_dir() && m.uid() == me && m.mode() & 0o022 == 0).then_some(d)
+}
+
 /// Makes the app's config dir `d` before a save there: created if missing, owner-only also when it exists already
 /// (it holds the stream key, the client id, the recent files). Its parents keep their modes.
 pub fn private(d: &Path) -> std::io::Result<()> {
@@ -885,16 +896,14 @@ fn main() -> eframe::Result {
     }));
     // burn's device measurements and autotune results; the test hook's runs share a dir of their own (warm too)
     let cc = match test {
-        Some(_) => Some(
+        Some(_) => mine(
             std::env::var_os("XDG_RUNTIME_DIR")
                 .map_or_else(std::env::temp_dir, PathBuf::from)
                 .join("x5desk-cubecl"),
         ),
         None => xdg("XDG_CACHE_HOME", ".cache").map(|d| d.join("x5desk/cubecl")),
     };
-    if let Some(d) = cc {
-        stitch::cache(&d)
-    }
+    stitch::cache(cc.as_deref());
     // cubecl's handler panics on the surface race: attach first, so ours replaces it for good (RAFT and the
     // trackers reuse the attachment)
     if let Err(e) = stitch::attach(&g.instance, &g.adapter, &g.device, &g.queue) {
@@ -977,6 +986,34 @@ mod tests {
             (ble("ble=sim"), ble("ble=sta"), ble("ble=x")),
             (Some(false), Some(true), None)
         );
+    }
+
+    /// The hook's cubecl dir: made owner-only; refused when another user owns it (here root), when it is a symlink (to
+    /// a dir of ours too) or when others can write to it.
+    #[test]
+    fn cubecl_dir() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        struct Rm(std::path::PathBuf);
+        impl Drop for Rm {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let run = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, Into::into);
+        let b = Rm(run.join(format!("x5desk-mine-{}", std::process::id())));
+        std::fs::create_dir(&b.0).unwrap();
+        let mode = |d: &std::path::Path| std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+        let d = b.0.join("x5desk-cubecl");
+        assert_eq!(super::mine(d.clone()), Some(d.clone()));
+        assert_eq!(mode(&d), 0o700);
+        assert_eq!(super::mine("/".into()), None);
+        let l = b.0.join("link");
+        symlink(&d, &l).unwrap();
+        assert_eq!(super::mine(l), None);
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(super::mine(d.clone()), None);
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(super::mine(d.clone()), Some(d));
     }
 
     /// The error wgpu 30 reports for `Surface::configure` when another thread submitted during its idle wait, and

@@ -14,7 +14,9 @@ use burn::tensor::ops::{
 };
 use burn::tensor::{DType, Device, FloatDType, Tensor, TensorData, s, wgpu::WgpuSetup};
 use burn_cubecl::CubeBackend;
-use std::fs::{File, TryLockError};
+use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
+use std::io::ErrorKind;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -89,37 +91,56 @@ fn storage(t: &Tensor<4>) -> Result<(Res, [u32; 4]), String> {
 /// first job on a later start only compiles its kernels (≈ 2 s instead of ≈ 10 s). One process at a time per dir:
 /// cubecl's database (cubecl-environment 0.11 on turso 0.8's experimental multi-process WAL) loses acknowledged
 /// writes, reads corrupt pages and panics when processes share it, so this takes the first slot `<base>/<n>` it can
-/// lock (the kernel unlocks it when the process ends, however it ends). No build records (a session per run). The
-/// first call wins (burn reads its configuration once), `attach`'s default (cubecl's own root) included; cubecl.toml
-/// files are not read, the `CUBECL_*` variables are.
-pub fn cache(base: &Path) {
+/// lock (the kernel unlocks it when the process ends, however it ends). With no `base`, or no slot locked there (no
+/// write access, no locks on that file system, a symlink as a lock), it keeps nothing: cubecl keeps what it learns
+/// in memory. `base` is a dir no other user can write to. No build records (a session per run). The first call wins
+/// (burn reads its configuration once), `attach`'s default (cubecl's own root) included; cubecl.toml files are not
+/// read, the `CUBECL_*` variables are.
+pub fn cache(base: Option<&Path>) {
     use burn::cubecl::config::{CubeClRuntimeConfig, RuntimeConfig, cache::CacheConfig};
     if CubeClRuntimeConfig::storage().lock().is_some() {
         return;
     }
-    let (d, l) = slot(base);
-    // held until the process ends
-    std::mem::forget(l);
+    let d = match base.and_then(|b| slot(b, File::try_lock)) {
+        Some((d, l)) => {
+            // held until the process ends
+            std::mem::forget(l);
+            d
+        }
+        // no dir can be made there, so cubecl's database can't be opened: it falls back to memory
+        None => "/dev/null".into(),
+    };
     let mut c = CubeClRuntimeConfig::default().override_from_env();
     c.environment.path = CacheConfig::Directory(d);
     c.environment.records.level = burn::cubecl::records::RecordLevel::Off;
     CubeClRuntimeConfig::try_set(c);
 }
 
-/// The first dir `<base>/<n>` whose `lock` this process locks, and the lock (held while the file lives). One that
-/// can't be locked at all (no write access) is used unlocked: cubecl then reads it at most.
-fn slot(base: &Path) -> (PathBuf, Option<File>) {
-    (0..)
-        .find_map(|n| {
-            let d = base.join(n.to_string());
-            let f = std::fs::create_dir_all(&d).and_then(|_| File::create(d.join("lock")));
-            match f.map(|f| f.try_lock().map(|_| f)) {
-                Ok(Err(TryLockError::WouldBlock)) => None,
-                Ok(Ok(f)) => Some((d, Some(f))),
-                _ => Some((d, None)),
+/// The first dir `<base>/<n>` (made owner-only) whose `lock` this process locks with `lock`, and the lock (held while
+/// the file lives). None once anything fails but a lock held elsewhere: a slot used unlocked could be shared.
+fn slot(base: &Path, lock: fn(&File) -> Result<(), TryLockError>) -> Option<(PathBuf, File)> {
+    let mut b = DirBuilder::new();
+    b.recursive(true).mode(0o700);
+    for n in 0u32.. {
+        let d = base.join(n.to_string());
+        b.create(&d).ok()?;
+        // never through a symlink: made with O_EXCL, or a plain file there already
+        let (p, mut o) = (d.join("lock"), OpenOptions::new());
+        o.write(true).mode(0o600);
+        let f = match o.clone().create_new(true).open(&p) {
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                p.symlink_metadata().ok()?.is_file().then(|| o.open(&p))?
             }
-        })
-        .unwrap()
+            r => r,
+        }
+        .ok()?;
+        match lock(&f) {
+            Ok(()) => return Some((d, f)),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(_)) => return None,
+        }
+    }
+    None
 }
 
 /// burn's device per wgpu device. cubecl registers a new runtime for every setup it is handed, and every registration
@@ -148,7 +169,8 @@ pub fn attach(
         return Ok(d.clone());
     }
     // for a user that chose no cache dir (tests): cubecl's own root
-    cache(&burn::cubecl::config::cache::CacheConfig::Target.root());
+    let root = burn::cubecl::config::cache::CacheConfig::Target.root();
+    cache(Some(&root));
     let setup = WgpuSetup {
         instance: inst.clone(),
         adapter: ad.clone(),
@@ -305,23 +327,56 @@ impl Raft {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::{self, File, TryLockError};
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::path::PathBuf;
+
+    struct Rm(PathBuf);
+
+    impl Drop for Rm {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn base(n: &str) -> Rm {
+        let run = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, Into::into);
+        Rm(run.join(format!("x5desk-{n}-{}", std::process::id())))
+    }
+
     /// A dir another lock holds is skipped (in one process too: `flock` locks belong to the open file), a released one
-    /// is taken again, so dirs are reused and never outnumber the processes that held them at once.
+    /// is taken again, so dirs are reused and never outnumber the processes that held them at once. Slots are
+    /// owner-only.
     #[test]
     fn slots() {
-        struct Rm(std::path::PathBuf);
-        impl Drop for Rm {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let run = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, Into::into);
-        let b = Rm(run.join(format!("x5desk-slots-{}", std::process::id())));
-        let (d0, l0) = super::slot(&b.0);
-        let (d1, l1) = super::slot(&b.0);
-        assert_eq!((d0, d1), (b.0.join("0"), b.0.join("1")));
-        assert!(l0.is_some() && l1.is_some());
+        let b = base("slots");
+        let (d0, l0) = super::slot(&b.0, File::try_lock).unwrap();
+        let (d1, _l1) = super::slot(&b.0, File::try_lock).unwrap();
+        assert_eq!((&d0, d1), (&b.0.join("0"), b.0.join("1")));
+        assert_eq!(
+            fs::metadata(&d0).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         drop(l0);
-        assert_eq!(super::slot(&b.0).0, b.0.join("0"));
+        assert_eq!(super::slot(&b.0, File::try_lock).unwrap().0, d0);
+    }
+
+    /// No slot where locking fails but on a lock held elsewhere (`ENOLCK`: NFS without lockd, some FUSE file
+    /// systems), and none through a symlink as a lock: what it points to stays as it was, or missing.
+    #[test]
+    fn no_slot() {
+        let b = base("noslot");
+        let nolck = |_: &File| Err(TryLockError::Error(std::io::Error::other("ENOLCK")));
+        assert!(super::slot(&b.0, nolck).is_none());
+        assert!(b.0.join("0/lock").is_file() && !b.0.join("1").exists());
+        let (v, gone) = (b.0.join("victim"), b.0.join("gone"));
+        fs::write(&v, "kept").unwrap();
+        for t in [&v, &gone] {
+            fs::remove_file(b.0.join("0/lock")).unwrap();
+            symlink(t, b.0.join("0/lock")).unwrap();
+            assert!(super::slot(&b.0, File::try_lock).is_none(), "{t:?}");
+        }
+        assert_eq!(fs::read_to_string(&v).unwrap(), "kept");
+        assert!(!gone.exists() && !b.0.join("1").exists());
     }
 }
