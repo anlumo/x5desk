@@ -847,6 +847,18 @@ fn main() -> eframe::Result {
         eprintln!("x5desk: {e}");
         std::process::exit(1)
     }));
+    // burn's device measurements and autotune results; the test hook's runs share a dir of their own (warm too)
+    let cc = match test {
+        Some(_) => Some(
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .map_or_else(std::env::temp_dir, PathBuf::from)
+                .join("x5desk-cubecl"),
+        ),
+        None => xdg("XDG_CACHE_HOME", ".cache").map(|d| d.join("x5desk/cubecl")),
+    };
+    if let Some(d) = cc {
+        stitch::cache(&d)
+    }
     // cubecl's handler panics on the surface race: attach first, so ours replaces it for good (RAFT and the
     // trackers reuse the attachment)
     if let Err(e) = stitch::attach(&g.instance, &g.adapter, &g.device, &g.queue) {
