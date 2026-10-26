@@ -497,9 +497,9 @@ fn colour() {
     assert_eq!(ex(&e), [0.5, 0.5]);
 }
 
-/// One timeline frame with `ev` as the input at `t` s: the timeline drawn in a known rect, what its widgets asked for
-/// applied (the drags' acts).
-fn frame(e: &mut Editor, ctx: &egui::Context, t: f64, ev: Vec<egui::Event>) -> egui::Rect {
+/// One timeline frame with `ev` as the input, a 60th of a second after the last: the timeline drawn in a known rect,
+/// what its widgets asked for applied (the drags' acts).
+fn frame(e: &mut Editor, ctx: &egui::Context, ev: Vec<egui::Event>) -> egui::Rect {
     let mut rect = egui::Rect::NOTHING;
     let mut acts = vec![];
     let raw = egui::RawInput {
@@ -507,40 +507,40 @@ fn frame(e: &mut Editor, ctx: &egui::Context, t: f64, ev: Vec<egui::Event>) -> e
             egui::Pos2::ZERO,
             egui::vec2(1400.0, 300.0),
         )),
-        time: Some(t),
+        time: Some(ctx.input(|i| i.time) + 1.0 / 60.0),
         events: ev,
         ..Default::default()
     };
-    let _ = ctx.run_ui(raw, |ui| {
+    let mut o = ctx.run_ui(raw, |ui| {
         let (r, _) = ui.allocate_exact_size(egui::vec2(1400.0, 200.0), egui::Sense::hover());
         rect = r;
         e.paint(ui, r, &mut acts);
     });
+    // no renderer takes them (epaint's debug check panics on dropped deltas)
+    o.textures_delta.clear();
     for a in acts {
         e.act(a);
     }
     rect
 }
 
-/// A drag from `a` to `b` through egui's input, frame by frame.
-fn drag(e: &mut Editor, ctx: &egui::Context, a: egui::Pos2, b: egui::Pos2) {
-    let btn = |pos, pressed| egui::Event::PointerButton {
+fn btn(pos: egui::Pos2, pressed: bool) -> egui::Event {
+    egui::Event::PointerButton {
         pos,
         button: egui::PointerButton::Primary,
         pressed,
         modifiers: Default::default(),
-    };
-    let steps = [
-        vec![egui::Event::PointerMoved(a)],
-        vec![btn(a, true)],
-        vec![egui::Event::PointerMoved(a + (b - a) * 0.5)],
-        vec![egui::Event::PointerMoved(b)],
-        vec![btn(b, false)],
-        vec![],
-    ];
-    for (i, ev) in steps.into_iter().enumerate() {
-        frame(e, ctx, 1.0 + i as f64 / 60.0, ev);
     }
+}
+
+/// A drag from `a` to `b` through egui's input, frame by frame.
+fn drag(e: &mut Editor, ctx: &egui::Context, a: egui::Pos2, b: egui::Pos2) {
+    frame(e, ctx, vec![egui::Event::PointerMoved(a)]);
+    frame(e, ctx, vec![btn(a, true)]);
+    frame(e, ctx, vec![egui::Event::PointerMoved(a + (b - a) * 0.5)]);
+    frame(e, ctx, vec![egui::Event::PointerMoved(b)]);
+    frame(e, ctx, vec![btn(b, false)]);
+    frame(e, ctx, vec![]);
 }
 
 /// Speed keys and volume points drag on the timeline (egui input, no samples needed): a speed key moves in source time
@@ -558,7 +558,7 @@ fn drags() {
     e.ed(|p| p.edit(0, |c| c.vol = vec![(4.0, 1.0), (8.0, 0.5)]));
     e.sync();
     let u0 = e.history();
-    let rect = frame(&mut e, &ctx, 0.0, vec![]);
+    let rect = frame(&mut e, &ctx, vec![]);
     let (z, x0) = (e.zoom, rect.left() + 8.0);
     let xt = |t: f64| x0 + t as f32 * z;
     // rows: ruler, view keys, video, audio (heights and 3 px apart)
@@ -620,13 +620,6 @@ fn move_lost() {
     let cx = stitch::Ctx::new(&g.device, &g.queue);
     let ctx = egui::Context::default();
     let mut e = Editor::new(&g, &cx, &ctx, player::still(&g, &cx), None);
-    let btn = |pos, pressed| egui::Event::PointerButton {
-        pos,
-        button: egui::PointerButton::Primary,
-        pressed,
-        modifiers: Default::default(),
-    };
-    let mut at = 0.0;
     for (n, k) in [(3, 0), (2, 1)] {
         e.take(Project::new(FPS).unwrap(), Extra::default(), None);
         for i in 0..n {
@@ -634,16 +627,14 @@ fn move_lost() {
             e.ed(|p| p.insert(i, Clip::new(f, 0.0, 4.0)));
         }
         let files = |e: &Editor| e.pj.tl().clips.iter().map(|c| c.file).collect::<Vec<_>>();
-        at += 1.0;
-        let rect = frame(&mut e, &ctx, at, vec![]);
+        let rect = frame(&mut e, &ctx, vec![]);
         let tl = e.pj.tl();
         let x = |t: f64| rect.left() + 8.0 + t as f32 * e.zoom;
         let y = rect.top() + ROWS[0] + ROWS[1] + 6.0 + ROWS[2] / 2.0;
         let a = egui::pos2(x(tl.out.fps.t(tl.frames(k).start)) + 20.0, y);
         let end = egui::pos2(x(tl.dur()) + 100.0, y);
-        let mut step = |e: &mut Editor, ev: Vec<egui::Event>| {
-            at += 1.0 / 60.0;
-            frame(e, &ctx, at, ev);
+        let step = |e: &mut Editor, ev: Vec<egui::Event>| {
+            frame(e, &ctx, ev);
         };
         step(&mut e, vec![egui::Event::PointerMoved(a)]);
         step(&mut e, vec![btn(a, true)]);
@@ -781,7 +772,7 @@ fn sync() {
     e.ed(|p| p.key(On::Out, 4.0, v, Ease::Linear));
     e.sync();
     let u = e.history().0;
-    let rect = frame(&mut e, &ctx, 0.0, vec![]);
+    let rect = frame(&mut e, &ctx, vec![]);
     let (z, x0) = (e.zoom, rect.left() + 8.0);
     let y = rect.top() + ROWS[0] + 3.0 + ROWS[1] / 2.0;
     // halfway the pointer is on the key at 2 s, which the dragged one replaces until it moves on: the track is one
@@ -899,7 +890,8 @@ fn paused_edit() {
             time: Some(n),
             ..Default::default()
         };
-        let _ = ctx.run_ui(raw, |ui| e.ui(ui, &rs, &[]));
+        // egui's own textures: no renderer takes them (epaint's debug check panics on dropped deltas)
+        (ctx.run_ui(raw, |ui| e.ui(ui, &rs, &[])).textures_delta).clear();
         thread::sleep(Duration::from_millis(5));
     };
     let pic = |e: &Editor| {

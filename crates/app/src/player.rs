@@ -1800,9 +1800,12 @@ mod tests {
             // twice: egui sizes some widgets from the frame before
             let mut o = None;
             for _ in 0..2 {
-                o = Some(ctx.run_ui(input.clone(), |ui| {
+                let mut x = ctx.run_ui(input.clone(), |ui| {
                     egui::CentralPanel::default().show(ui, |ui| p.controls(ui));
-                }));
+                });
+                // no renderer takes them (epaint's debug check panics on dropped deltas)
+                x.textures_delta.clear();
+                o = Some(x);
             }
             // a label in a wrapping row is laid out from the row's start, its galley from there
             let r = o
