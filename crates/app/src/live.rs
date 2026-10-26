@@ -1840,24 +1840,23 @@ mod tests {
             (t.res, t.fps, t.kbps, t.obs, t.cam),
             (2, 30, 500, false, false)
         );
-        let d = std::env::var_os("X5_FIXTURES")
+        let d = Rm(std::env::var_os("X5_FIXTURES")
             .map_or_else(std::env::temp_dir, PathBuf::from)
-            .join(format!("x5desk-live-{}", std::process::id()));
-        let f = d.join("live");
+            .join(format!("x5desk-live-{}", std::process::id())));
+        let f = d.0.join("live");
         // an existing directory and file with looser permissions end up owner-only too
-        std::fs::create_dir_all(&d).unwrap();
+        std::fs::create_dir_all(&d.0).unwrap();
         std::fs::write(&f, "").unwrap();
         let mode = |p: &Path, m| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m));
-        mode(&d, 0o755).unwrap();
+        mode(&d.0, 0o755).unwrap();
         mode(&f, 0o644).unwrap();
         s.save(&f).unwrap();
         let got = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-        assert_eq!((got(&d), got(&f)), (0o700, 0o600));
+        assert_eq!((got(&d.0), got(&f)), (0o700, 0o600));
         assert_eq!(
             Set::parse(&std::fs::read_to_string(&f).unwrap()).key,
             "abcdef"
         );
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     /// A stream key in the URL (key field empty) is its last path segment after the app, trailing '/' ignored; a URL
