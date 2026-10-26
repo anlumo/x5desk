@@ -151,15 +151,20 @@ pub struct Rtmp {
 
 impl Rtmp {
     /// Publishes to `url` (`rtmp://host[:port]/app`) as stream `key`; an empty key takes the last
-    /// path segment of `url`, trailing '/' ignored. Connects, and reconnects with backoff, on its own
-    /// thread.
+    /// path segment of `url` after the app, trailing '/' ignored. Connects, and reconnects with
+    /// backoff, on its own thread.
     pub fn start(url: &str, key: &str, cfg: Cfg) -> io::Result<Self> {
         let bad =
             |m: &str, u: &str| io::Error::new(io::ErrorKind::InvalidInput, format!("{m}: {u}"));
         // a trailing '/' does not hide the key: an empty segment would leave it in tc
         let u = url.trim_end_matches('/');
         let (tc, key) = if key.is_empty() {
-            u.rsplit_once('/').ok_or_else(|| bad("no key", url))?
+            // the host's end: a single segment after it may be the app or the key, so is never quoted
+            let p = u.find("://").map_or(0, |i| i + 3);
+            let h = p + u[p..].find('/').unwrap_or(u.len() - p);
+            u.rsplit_once('/')
+                .filter(|s| s.0.len() > h)
+                .ok_or_else(|| bad("no stream key", &u[..h]))?
         } else {
             (u, key)
         };
@@ -932,6 +937,41 @@ mod tests {
         let r = Rtmp::start("rtmp://127.0.0.1:9/live/test", "", cfg()).unwrap();
         r.video(0, 0, true, [&[0x65u8][..]]);
         drop(r);
+    }
+
+    /// With no key given, a URL with the app but no segment after it (or not even the app) lacks the
+    /// key: so the error says, quoting the server only (that one segment may be the key).
+    #[test]
+    fn no_key() {
+        let cfg = || Cfg {
+            meta: Default::default(),
+            avcc: vec![],
+            asc: vec![],
+            lag: 0,
+        };
+        for u in [
+            "rtmp://a.example/app/",
+            "rtmp://a.example/app",
+            "rtmp://a.example/app//",
+            "rtmp://a.example/",
+            "rtmp://a.example",
+            "rtmps://a.example:1935/app",
+        ] {
+            let e = Rtmp::start(u, "", cfg()).err().unwrap().to_string();
+            assert!(
+                e.starts_with("no stream key: rtmp") && !e.contains("app"),
+                "{u}: {e}"
+            );
+            assert!(
+                e.ends_with("://a.example") || e.ends_with(":1935"),
+                "{u}: {e}"
+            );
+        }
+        let e = Rtmp::start("rtmp://a.example", "k", cfg())
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(e, "no app: rtmp://a.example");
     }
 
     /// A failing start quotes the URL without the stream key, from its last path segment or given apart.

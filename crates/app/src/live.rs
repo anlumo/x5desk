@@ -1932,6 +1932,33 @@ mod tests {
         );
     }
 
+    /// A URL with the app but nothing after it, the key field empty: the Live screen says the key is missing, quoting
+    /// the server only.
+    #[test]
+    fn no_key() {
+        let g = Arc::new(Gpu::new().unwrap());
+        let cx = stitch::Ctx::new(&g.device, &g.queue);
+        // no audio
+        let p = pat(&g, Path::new("/nonexistent"));
+        for u in ["rtmp://127.0.0.1:9/app/", "rtmp://127.0.0.1:9/app "] {
+            let hook = Hook {
+                rtmp: Some(u.into()),
+                ..Default::default()
+            };
+            let mut l = Live::new(&g, &cx, &egui::Context::default(), Some(hook));
+            l.tick(Some(p.clone() as Src));
+            let t = Instant::now();
+            let e = loop {
+                if let Some(e) = l.sh.lock().unwrap().st.err[0].clone() {
+                    break e;
+                }
+                assert!(t.elapsed() < Duration::from_secs(10), "{u}: no error");
+                thread::sleep(Duration::from_millis(10));
+            };
+            assert_eq!(e, "RTMP: no stream key: rtmp://127.0.0.1:9", "{u}");
+        }
+    }
+
     /// Every size and rate the screen offers gets an H.264 encoder (level, size and bitrate limits).
     #[test]
     fn encoders() {
