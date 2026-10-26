@@ -248,7 +248,7 @@ const MODELS: [Model; 7] = [
         "Apache-2.0",
         "PaddleSeg via the OpenCV model zoo, human_segmentation_pphumanseg_2023mar; Copyright (c) 2021 PaddlePaddle \
          Authors",
-        "Trained on large-scale portrait data its authors do not name.",
+        "Trained on a \"Baidu self-built dataset\", as PaddleHub's humanseg_mobile page names it.",
         include_str!("../../shotlab/models/LICENSE-pphumanseg"),
     ),
     Model(
