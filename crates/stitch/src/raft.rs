@@ -14,6 +14,8 @@ use burn::tensor::ops::{
 };
 use burn::tensor::{DType, Device, FloatDType, Tensor, TensorData, s, wgpu::WgpuSetup};
 use burn_cubecl::CubeBackend;
+use std::fs::{File, TryLockError};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 #[allow(clippy::all, unused)]
@@ -83,6 +85,43 @@ fn storage(t: &Tensor<4>) -> Result<(Res, [u32; 4]), String> {
     Ok((r, std::array::from_fn(|i| st[i] as u32)))
 }
 
+/// Keeps what burn learns about the device (its measured throughput, the autotune results) under `base`, so RAFT's
+/// first job on a later start only compiles its kernels (≈ 2 s instead of ≈ 10 s). One process at a time per dir:
+/// cubecl's database (cubecl-environment 0.11 on turso 0.8's experimental multi-process WAL) loses acknowledged
+/// writes, reads corrupt pages and panics when processes share it, so this takes the first slot `<base>/<n>` it can
+/// lock (the kernel unlocks it when the process ends, however it ends). No build records (a session per run). The
+/// first call wins (burn reads its configuration once), `attach`'s default (cubecl's own root) included; cubecl.toml
+/// files are not read, the `CUBECL_*` variables are.
+pub fn cache(base: &Path) {
+    use burn::cubecl::config::{CubeClRuntimeConfig, RuntimeConfig, cache::CacheConfig};
+    if CubeClRuntimeConfig::storage().lock().is_some() {
+        return;
+    }
+    let (d, l) = slot(base);
+    // held until the process ends
+    std::mem::forget(l);
+    let mut c = CubeClRuntimeConfig::default().override_from_env();
+    c.environment.path = CacheConfig::Directory(d);
+    c.environment.records.level = burn::cubecl::records::RecordLevel::Off;
+    CubeClRuntimeConfig::try_set(c);
+}
+
+/// The first dir `<base>/<n>` whose `lock` this process locks, and the lock (held while the file lives). One that
+/// can't be locked at all (no write access) is used unlocked: cubecl then reads it at most.
+fn slot(base: &Path) -> (PathBuf, Option<File>) {
+    (0..)
+        .find_map(|n| {
+            let d = base.join(n.to_string());
+            let f = std::fs::create_dir_all(&d).and_then(|_| File::create(d.join("lock")));
+            match f.map(|f| f.try_lock().map(|_| f)) {
+                Ok(Err(TryLockError::WouldBlock)) => None,
+                Ok(Ok(f)) => Some((d, Some(f))),
+                _ => Some((d, None)),
+            }
+        })
+        .unwrap()
+}
+
 /// burn's device per wgpu device. cubecl registers a new runtime for every setup it is handed, and every registration
 /// installs cubecl's own uncaptured-error handler (it panics on any error) and device-lost callback on the device
 /// (cubecl-wgpu 0.11 `PoisonWatch::watch`, called while registering), replacing the caller's. So burn attaches once
@@ -108,6 +147,8 @@ pub fn attach(
     if let Some((.., d)) = b.iter().find(|(i, w, _)| i == inst && w == dev) {
         return Ok(d.clone());
     }
+    // for a user that chose no cache dir (tests): cubecl's own root
+    cache(&burn::cubecl::config::cache::CacheConfig::Target.root());
     let setup = WgpuSetup {
         instance: inst.clone(),
         adapter: ad.clone(),
@@ -259,5 +300,28 @@ impl Raft {
                 .with_padding([4, 4]),
         ) * sign;
         Tensor::cat(vec![x, fl.slice(s![.., 1..2])], 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A dir another lock holds is skipped (in one process too: `flock` locks belong to the open file), a released one
+    /// is taken again, so dirs are reused and never outnumber the processes that held them at once.
+    #[test]
+    fn slots() {
+        struct Rm(std::path::PathBuf);
+        impl Drop for Rm {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let run = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, Into::into);
+        let b = Rm(run.join(format!("x5desk-slots-{}", std::process::id())));
+        let (d0, l0) = super::slot(&b.0);
+        let (d1, l1) = super::slot(&b.0);
+        assert_eq!((d0, d1), (b.0.join("0"), b.0.join("1")));
+        assert!(l0.is_some() && l1.is_some());
+        drop(l0);
+        assert_eq!(super::slot(&b.0).0, b.0.join("0"));
     }
 }

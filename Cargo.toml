@@ -37,7 +37,7 @@ protox = "0.10"
 zune-jpeg = "0.5"
 libc = "0.2"
 rfd = "0.17"
-burn = { version = "0.22", default-features = false, features = ["std", "wgpu", "vulkan", "fusion", "autotune"] }
+burn = { version = "0.22", default-features = false, features = ["std", "wgpu", "vulkan", "fusion", "autotune", "persistence"] }
 burn-store = "0.22"
 burn-onnx = "0.22"
 

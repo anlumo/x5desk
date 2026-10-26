@@ -16,7 +16,7 @@ mod raft;
 
 pub use offset::{Calib, Lens, Model};
 pub use preview::{Input, Mode, Preview, View};
-pub use raft::{Raft, attach};
+pub use raft::{Raft, attach, cache};
 
 use glam::{Mat3, Quat, Vec3};
 use offset::PLEN;
