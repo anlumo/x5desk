@@ -1,4 +1,5 @@
-//! Library: local files opened from the dialog, drag and drop or the command line; the recent list (config dir);
+//! Library: local files opened from the dialog, drag and drop or the command line; the recent list (config dir; an
+//! entry whose file is not there, such as one on a card that is not mounted, is greyed out until it is back);
 //! pairing of a recording's files by name (lens files `_00_` / `_10_`, proxies `_01_` / `_11_`); the player of the
 //! open work, shared with the live output thread, the viewer of the open photo, or of a plain video (an export). Export
 //! jobs start here: from the player or the photo (its view), or from a file's menu in the lists.
@@ -11,11 +12,16 @@ use crate::{
 };
 use eframe::{egui, egui_wgpu::RenderState};
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     thread,
+    time::{Duration, Instant},
 };
 use video::Gpu;
+
+/// How often the lists' files are looked for.
+const LOOK: Duration = Duration::from_secs(2);
 
 /// The files of one recording: main files in lens order (one with both lenses on the X5), the proxy.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -152,6 +158,11 @@ pub struct Library {
     recent: Recent,
     /// downloaded recordings (from the camera screen), newest first, one file per work
     down: Vec<PathBuf>,
+    /// files of the lists that are not there (on a card that is not mounted): greyed out until they are back; looked
+    /// for off the UI thread (a stat can hang on a card pulled without an unmount), the next look
+    gone: HashSet<PathBuf>,
+    look: Option<mpsc::Receiver<HashSet<PathBuf>>>,
+    next: Instant,
     player: Option<Arc<Mutex<Player>>>,
     photo: Option<photo::Photo>,
     movie: Option<movie::Movie>,
@@ -189,6 +200,9 @@ impl Library {
             ctx: ctx.clone(),
             recent,
             down: vec![],
+            gone: HashSet::new(),
+            look: None,
+            next: Instant::now(),
             player: None,
             photo: None,
             movie: None,
@@ -285,7 +299,7 @@ impl Library {
         self.down.insert(0, r.clone());
     }
 
-    /// Every frame, whatever screen is shown: the clock, frame hand-over, finished dialogs.
+    /// Every frame, whatever screen is shown: the clock, frame hand-over, finished dialogs, the lists' files.
     pub fn tick(&mut self) {
         if let Some(r) = &self.dlg
             && let Ok(p) = r.try_recv()
@@ -294,6 +308,23 @@ impl Library {
             if let Some(p) = p {
                 self.open(&p);
             }
+        }
+        if let Some(g) = self.look.as_ref().and_then(|r| r.try_recv().ok()) {
+            (self.gone, self.look) = (g, None);
+        }
+        let now = Instant::now();
+        if self.look.is_none() && now >= self.next {
+            let (tx, rx) = mpsc::channel();
+            let l: Vec<PathBuf> = self.recent.list.iter().chain(&self.down).cloned().collect();
+            let (old, ctx) = (self.gone.clone(), self.ctx.clone());
+            thread::spawn(move || {
+                let g: HashSet<PathBuf> = l.into_iter().filter(|p| !p.exists()).collect();
+                let new = g != old;
+                if tx.send(g).is_ok() && new {
+                    ctx.request_repaint()
+                }
+            });
+            (self.look, self.next) = (Some(rx), now + LOOK);
         }
         if let Some(p) = &self.player {
             let mut p = p.lock().unwrap();
@@ -321,11 +352,12 @@ impl Library {
         }
     }
 
-    /// The videos of the recent and downloaded lists (the editor's media), one per recording.
+    /// The videos of the recent and downloaded lists that are there (the editor's media), one per recording.
     pub fn videos(&self) -> Vec<PathBuf> {
         let mut v: Vec<PathBuf> = vec![];
         for p in self.down.iter().chain(&self.recent.list) {
             if matches!(ext(p).as_str(), "insv" | "lrv" | "mp4")
+                && !self.gone.contains(p)
                 && !v.iter().any(|q| key(name(q)) == key(name(p)))
             {
                 v.push(p.clone());
@@ -423,6 +455,8 @@ impl Library {
         });
         if self.side {
             let (mut pick, mut exp, mut add) = (None, None, None);
+            // the next look for the lists' files, also while nothing else repaints
+            ui.ctx().request_repaint_after(LOOK);
             egui::Panel::left("recent")
                 .default_size(240.0)
                 .show(ui, |ui| {
@@ -433,9 +467,14 @@ impl Library {
                             .max_height(ui.available_height() / 2.0)
                             .show(ui, |ui| {
                                 for p in l {
+                                    let b = egui::Button::selectable(false, name(p));
                                     let r = ui
-                                        .selectable_label(false, name(p))
-                                        .on_hover_text(p.to_string_lossy());
+                                        .add_enabled(!self.gone.contains(p), b)
+                                        .on_hover_text(p.to_string_lossy())
+                                        .on_disabled_hover_text(format!(
+                                            "{}: not there (on a card that is not mounted?)",
+                                            p.display()
+                                        ));
                                     if r.clicked() {
                                         pick = Some(p.clone());
                                     }
@@ -581,6 +620,112 @@ mod tests {
         assert_eq!(r2.list[0], Path::new("/v/10.insv"));
         assert_eq!(r2.list[1], Path::new("/v/24.insv"));
         assert_eq!(r2.list.iter().filter(|p| p.ends_with("10.insv")).count(), 1);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A recent entry whose file went away (its card unmounted) is greyed out within a look or two and does not open
+    /// (it opened into an error); it comes back with the file. One that is there opens: here into the error of a file
+    /// that is no video, which shows the click got through.
+    #[test]
+    fn recent_gone() {
+        let g = Arc::new(Gpu::new().unwrap());
+        let cx = stitch::Ctx::new(&g.device, &g.queue);
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let f = wgpu::TextureFormat::Bgra8Unorm;
+        let rs = RenderState {
+            adapter: g.adapter.clone(),
+            available_adapters: vec![],
+            instance: g.instance.clone(),
+            device: g.device.clone(),
+            queue: g.queue.clone(),
+            target_format: f,
+            renderer: Arc::new(egui::mutex::RwLock::new(eframe::egui_wgpu::Renderer::new(
+                &g.device,
+                f,
+                Default::default(),
+            ))),
+        };
+        let (still, _jobs) = mpsc::channel();
+        let mut l = Library::new(&g, &cx, &ctx, still, Some(Test::default()));
+        let d = std::env::var_os("X5_FIXTURES")
+            .map_or_else(std::env::temp_dir, PathBuf::from)
+            .join(format!("x5desk-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (card, away) = (d.join("X5"), d.join("away"));
+        let n = "VID_20260118_124432_00_659.mp4";
+        let p = card.join("DCIM/Camera01").join(n);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"no video").unwrap();
+        l.recent.list = vec![p.clone()];
+        let mut t = 0.0;
+        // one frame with `ev`: the entry's middle and whether it is greyed out
+        let mut frame = |l: &mut Library, ev: Vec<egui::Event>| {
+            l.tick();
+            t += 0.05;
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                time: Some(t),
+                events: ev,
+                ..Default::default()
+            };
+            let mut o = ctx.run_ui(raw, |ui| l.ui(ui, &rs));
+            o.textures_delta.clear();
+            let u = o.platform_output.accesskit_update.expect("AccessKit is on");
+            let (_, e) = (u.nodes.iter())
+                .find(|(_, x)| x.role() == egui::Role::Button && x.label() == Some(n))
+                .expect("the entry");
+            let b = e.bounds().unwrap();
+            let m = egui::pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32);
+            (m, e.is_disabled())
+        };
+        type Frame<'a> = dyn FnMut(&mut Library, Vec<egui::Event>) -> (egui::Pos2, bool) + 'a;
+        // frames until the entry is greyed out or not, the last look in
+        let until = |f: &mut Frame, l: &mut Library, off: bool| {
+            let t0 = Instant::now();
+            loop {
+                let (m, o) = f(l, vec![]);
+                if o == off && l.look.is_none() {
+                    return (m, t0.elapsed());
+                }
+                assert!(t0.elapsed() < 3 * LOOK, "still {o}");
+                thread::sleep(Duration::from_millis(20));
+            }
+        };
+        let click = |f: &mut Frame, l: &mut Library, m: egui::Pos2| {
+            let b = |pressed| egui::Event::PointerButton {
+                pos: m,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            for ev in [
+                vec![egui::Event::PointerMoved(m)],
+                vec![b(true)],
+                vec![b(false)],
+            ] {
+                f(l, ev);
+            }
+        };
+        let (m, _) = until(&mut frame, &mut l, false);
+        click(&mut frame, &mut l, m);
+        assert!(l.err.take().is_some_and(|e| e.contains(n)), "opened");
+        std::fs::rename(&card, &away).unwrap();
+        let (m, s) = until(&mut frame, &mut l, true);
+        println!(
+            "greyed out {:.0} ms after the card went",
+            s.as_secs_f64() * 1e3
+        );
+        click(&mut frame, &mut l, m);
+        assert!(l.err.is_none() && l.movie.is_none() && l.player.is_none());
+        assert!(l.videos().is_empty());
+        std::fs::rename(&away, &card).unwrap();
+        let (_, s) = until(&mut frame, &mut l, false);
+        println!("back {:.0} ms after the card", s.as_secs_f64() * 1e3);
+        assert_eq!(l.videos(), [p]);
         std::fs::remove_dir_all(&d).unwrap();
     }
 }
