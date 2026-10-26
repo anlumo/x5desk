@@ -84,11 +84,57 @@ No model: person re-identification (src/reid.rs)
     v606 with weights from its 8 features of others). With nobody seen next to the subject yet (LOMO by plain
     cosine, 0.63): the subject 4 of 37 and 52 of 66, the others 1 of 899 and 0 of 768; 0.5 there would pass 561 and
     308 of them, as weights from the first 1, 3, 8 features of others would 802, 254, 20 of v627's 899.
-    subject with X5_BLANK (v627 none and 5 gaps, v606 none and 3; scored against a reference track): back on the
-    subject after every gap with both, 98.3 to 100 % / 98.3 to 100 % of the frames after the gap on it, never on
-    someone else (the rest without a box).
-    Dark-clothed subjects at night (v627 picks at yaw 21 and 127, with and without a 2 s gap at frame 150): LOMO
-    holds the yaw 21 subject with and without the gap; on the yaw 127 pick, once the subject is lost at frame 153,
-    it takes someone else in dark clothes (after the gap at frame 248, without it at 153 to 168; by plain cosine,
-    the gallery holding 8 and 10 features of others) where OSNet finds the subject again. Re-ID per call in the
-    tracker 1.4 to 3.3 ms (CPU) against 7 to 13 ms (GPU), median.
+    Re-ID per call in the tracker 1.4 to 3.3 ms (CPU) against 7 to 13 ms (GPU), median.
+  Finding the subject again (src/vit.rs `find`, `Seen::prior`, `Seen::speed`): the speed, in its heights a second, the
+    subject needs to be a candidate since it was last seen for sure (a person: at the pick and where a sample joined
+    its features, not where find() took someone, who may be someone else), its heading carried on for up to a second,
+    its box height for its distance (a candidate's box down to 0.4 of the person). Beyond its reach in the time the
+    candidate is someone else: it sets off at a walk (1 height a second) and speeds up by 3 a second² (5 m/s², a
+    sprint's start) to a sprint's 3, so that 0.3 s reach 0.44 heights; within it the similarity loses 0.1 × (speed /
+    1 height a second)². A person is taken only with the tracker's box on it (VitTrack's confidence 0.25 or more): on
+    the detector's box alone (2 of 32 finds in 21 debug runs, both someone else) the next search misses it, or takes
+    whoever VitTrack likes there with no look at them. Whom find() took and the tracker lost again before VitTrack was
+    sure of them (0.5) it remembers (the last 8), and one more like them than like the subject is taken again only at
+    0.5: look-alikes pass 0.25, and whom VitTrack is unsure of the tracker cannot follow. They do not join the people
+    the subject is not: one of them can be the subject (the v635 man below, found again at frame 115 and lost 2 frames
+    on), whom the gallery would then turn down until 24 newer others had pushed him out.
+  The tracker on the samples (tests/footage.rs `subject` and `reid`, 2026-10-26), before (commit 93c7779: find() took
+    the one most like the subject of the 8 candidates nearest to where the tracker lost it, within its height × (1 + 0.1
+    × frames missed), also on the detector's box alone) and after, the same build of everything else, runs three at a
+    time on the shared GPU, before and after interleaved, 10 runs each unless said; six at a time listed apart. On the
+    subject: the box's centre within half the height of a reference track checked by eye (2° at least), a frame it has
+    no subject on taking the nearest one that has; a wrong find: find() taking someone else. Results depend on GPU
+    load: with burn's features as in the workspace's Cargo.toml at 93c7779 (no `persistence`) cubecl keeps no autotune
+    cache, so every run times burn's kernels anew under whatever else runs on the GPU; other kernels round VitTrack's
+    confidence across 0.25 or 0.5 differently and send the track down another path (with `persistence` cubecl keeps
+    its choices under the workspace's target/environment; not measured).
+    subject with X5_BLANK (v627 yaw 64.5 none and 5 gaps, 2 runs each; v606 none and 3 gaps, 1 run each): on the
+    subject 93.6 to 100 % of the frames from the gap's end before, 96.2 to 100 % after (v606 100 % either way), never
+    a wrong find (the rest without a box).
+    v627 yaw 21, a woman of a couple in a dark coat and a beanie (the reference corrected by eye from frame 507, where
+    the tracker run it was made from had jumped to the man beside her): on her without a gap 45.3 to 91.6 % before,
+    77.8 to 78.1 % after, with a 2 s gap at frame 150 19.6 to 87.2 % / 67.2 to 87.2 %; most runs either way follow the
+    man from frame 507 (130 frames), VitTrack drifting onto him. Before, find() took a figure 34° off by the pillars at
+    frame 304, while a soap bubble hides her (at frame 303 it needs 5.5 of her heights a second, src/tests.rs
+    `speed`), in 1 run without the gap (45.3 %) and 1 with it (19.6 %); after, nobody. Six at a time (4 runs each)
+    neither did: 78.7 to 91.3 % / 77.8 to 91.3 %, 67.2 to 87 % / 67.6 to 88.3 %.
+    v627 yaw 127, a woman in a dark coat who walks behind a couple at frame 95 (6 runs each): without a gap 15 wrong
+    finds in 6 of 6 runs before (14 over 20° off her), 5 in 5 of 6 after (the couple, 22° off), and 5 finds of her
+    against none; on her 14.9 to 15.6 % / 15.3 to 16.4 % of the frames, once 54.7 %. With the 2 s gap 14 wrong finds in
+    6 of 6 runs / 4 in 4 of 6, on her 0 to 1.4 % / 0 to 3.4 %. The agreement assertion passes in every run either way,
+    but the track is on her about a sixth of the time.
+    v635: the woman carrying a child at yaw -82 (2 runs each, also with a 2 s gap at frame 60) 100 % either way. The man
+    walking off at yaw -134 is lost at frame 46 (VitTrack holds him no longer) and never followed for long again.
+    Before, find() took a look-alike 28° off at frame 54 (2.9 of his heights a second from where he was) that VitTrack
+    held for 104 frames, then 2 more: 3 wrong finds a run, on him 26.4 %, 107 frames on others, a box on 153 of 174
+    frames. After, in every run find() takes 2 look-alikes at frames 69 and 79 (held 3 and 1 frames), finds him again
+    at frame 115 (VitTrack 0.34) and loses him 2 frames on, then takes 1 or 2 more: 3 or 4 wrong finds a run (35 in
+    10), held 1 to 11 frames, on him 27.6 %, 14 to 34 frames on others, a box on 62 to 82. The test's box assertion (a
+    box on half the frames) therefore passes in 10 of 10 runs before and 0 of 10 after: it holds only with the box on
+    someone else. With X5_REF the test asserts the box on the subject instead, which fails either way (26.4 / 27.6 %).
+    Six at a time (4 runs each): before the same (151 to 153 boxes, 11 wrong finds, 105 to 107 frames on others; 4 of
+    4 pass), after him found again in 3 runs, 14 wrong finds, 16 to 22 frames on others, a box on 64 to 70 (0 of 4
+    pass).
+    reid (from frame 110, 4 to 18 s later): nobody beyond reach, the subject needing 0.16 to 0.30 heights a second;
+    v606's rule passes 50 of its 66 samples (52 without the prior), v627's by plain cosine 3 of 37 (4), the others'
+    unchanged; ROC AUC v627 0.9927 → 0.9918 (plain cosine 0.8990 → 0.8923), v606 0.9989 → 0.9997.
