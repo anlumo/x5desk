@@ -1,10 +1,10 @@
 //! Camera screen: the X5 over USB. A worker thread owns the link: it follows USB hotplug, connects (automatically
-//! if wanted; the sync runs on the link's thread and a disconnect or quit cancels it), reads identity, sets the
-//! camera clock (on every connect, as the app does), reads battery, storage, Wi-Fi and clock, lists the album,
-//! fetches thumbnails (disk cache first, the ones on screen first), runs the download queue and the camera commands,
-//! and follows the camera's notifications. The UI sends it commands and draws what it reports. The Capture screen
-//! shares the session through [`Tap`]: the handle, and the live-preview packets and notifications, which the events
-//! thread hands it directly.
+//! if wanted; the sync runs on the link's thread and a disconnect or quit cancels it), reads identity, battery,
+//! storage, Wi-Fi and clock, sets the camera clock (on every connect, as the app does, its answers not waited for),
+//! lists the album, fetches thumbnails (disk cache first, the ones on screen first), runs the download queue and the
+//! camera commands, and follows the camera's notifications. The UI sends it commands and draws what it reports. The
+//! Capture screen shares the session through [`Tap`]: the handle, and the live-preview packets and notifications,
+//! which the events thread hands it directly.
 //!
 //! The album can show a mounted card instead (`disk`: the X5 in USB mass-storage mode, or its card in a reader): the
 //! worker watches the mount table, lists the card's DCIM with the same grouping, reads thumbnails from the trailers,
@@ -177,6 +177,7 @@ impl Worker {
             scan,
             watch: None,
             look: None,
+            clk: None,
         };
         let th = thread::Builder::new()
             .name("x5-camera".into())
@@ -247,6 +248,16 @@ struct W {
     /// where cards get mounted; the next look at the mount table
     watch: Option<disk::Watch>,
     look: Option<Instant>,
+    clk: Option<Clk>,
+}
+
+/// A clock sync in flight (PROTOCOL.md §5.3): the answers to come, the first error, the note for success, and a
+/// connect's notes, which wait for it.
+struct Clk {
+    p: Vec<link::Pending<pb::SetOptionsResp>>,
+    err: Option<Error>,
+    ok: String,
+    conn: Vec<(String, bool)>,
 }
 
 /// Unix time, the app's favourite timestamp (unix + standard offset: Java's `ZONE_OFFSET`, no DST), offset from UTC
@@ -291,14 +302,6 @@ fn clock() -> (u64, i64, i32, String, String) {
     (t, t as i64 + std, off, tz, s)
 }
 
-/// Sets the camera clock and zone to this computer's with the app's two SET_OPTIONS (PROTOCOL.md §5.3).
-fn set_time(c: &Camera) -> link::Result<String> {
-    let (t, _, off, tz, s) = clock();
-    c.set_time(t, off, &tz)
-        .wait()
-        .map(|_| format!("camera clock set to {s} ({tz})"))
-}
-
 impl W {
     fn send(&self, u: Up) {
         let _ = self.up.send(u);
@@ -321,7 +324,8 @@ impl W {
                 || (self.cam.is_some() || self.info.src.is_some()) && !self.todo.is_empty()
                 || self.cur.is_some()
                 || self.relist.is_some()
-                || self.retry.is_some();
+                || self.retry.is_some()
+                || self.clk.is_some();
             let t = Duration::from_millis(if busy { 15 } else { 250 });
             match rx.recv_timeout(t) {
                 Ok(Cmd::Quit) | Err(RecvTimeoutError::Disconnected) => break,
@@ -346,6 +350,22 @@ impl W {
         if let Some(r) = self.opening.as_mut().and_then(link::Opening::poll) {
             self.opening = None;
             self.opened(r);
+        }
+        if let Some(k) = &mut self.clk {
+            k.p.retain(|p| p.poll().map(|r| k.err = k.err.take().or(r.err())).is_none());
+            if k.p.is_empty() {
+                let Clk {
+                    err, ok, mut conn, ..
+                } = self.clk.take().unwrap();
+                match (err, conn.first_mut()) {
+                    (Some(e), _) => conn.push((format!("time sync: {e}"), true)),
+                    (None, Some(c)) => c.0 = format!("{}; {ok}", c.0),
+                    (None, None) => conn.push((ok, false)),
+                }
+                for (s, e) in conn {
+                    self.note(s, e)
+                }
+            }
         }
         let now = Instant::now();
         if self.scan.is_some_and(|t| now >= t) {
@@ -496,33 +516,25 @@ impl W {
                         }
                     });
                 let ms = t.elapsed().as_secs_f64() * 1e3;
-                // as the app on every USB and Wi-Fi connect, before anything else is asked (§5.1 step 5); a failure
-                // leaves the session up
-                let clk = set_time(&c);
-                let s = clk.as_ref().map_or(String::new(), |s| format!("; {s}"));
-                self.note(format!("connected to {} in {ms:.0} ms{s}", id.model), false);
-                if id.battery.as_ref().is_some_and(low) {
-                    self.note(
-                        format!(
-                            "{}: charge the camera",
-                            battery(id.battery.as_ref().unwrap())
-                        ),
-                        true,
-                    );
-                }
-                if let Err(e) = clk {
-                    self.note(format!("time sync: {e}"), true)
+                let mut conn = vec![(format!("connected to {} in {ms:.0} ms", id.model), false)];
+                if let Some(b) = id.battery.as_ref().filter(|b| low(b)) {
+                    conn.push((format!("{}: charge the camera", battery(b)), true))
                 }
                 (self.info.battery, self.info.id) = (id.battery, Some(id));
                 self.info.conn = Conn::On;
                 self.info.tries += 1;
+                self.cam = Some(c.clone());
+                // the app's order on every USB and Wi-Fi connect (§5.1): options and capture status, then the clock
+                // (its answers not waited for, a refusal leaves the session up), then the Capture screen and the
+                // listing
+                self.opts();
+                let st = c.capture_status().wait();
+                self.time(&c, conn);
                 {
                     let mut tp = self.tap.lock().unwrap();
-                    (tp.cam, tp.sid) = (Some(c.clone()), self.sid);
+                    (tp.cam, tp.sid) = (Some(c), self.sid);
                 }
-                self.cam = Some(c);
-                self.opts();
-                self.album();
+                self.list(Some(st));
             }
             Err(e) => {
                 self.info.conn = Conn::Off;
@@ -555,7 +567,7 @@ impl W {
     }
 
     fn reset(&mut self) {
-        self.cam = None;
+        (self.cam, self.clk) = (None, None);
         {
             let mut t = self.tap.lock().unwrap();
             t.cam = None;
@@ -610,8 +622,27 @@ impl W {
         self.info();
     }
 
+    /// Sets the camera clock and zone to this computer's with the app's two SET_OPTIONS (PROTOCOL.md §5.3), its
+    /// answers not waited for: [`W::tick`] notes them, after `conn` and the notes of a sync still in flight.
+    fn time(&mut self, c: &Camera, conn: Vec<(String, bool)>) {
+        let (t, _, off, tz, s) = clock();
+        let mut v = self.clk.take().map_or(vec![], |k| k.conn);
+        v.extend(conn);
+        self.clk = Some(Clk {
+            p: c.set_time(t, off, &tz).into(),
+            err: None,
+            ok: format!("camera clock set to {s} ({tz})"),
+            conn: v,
+        });
+    }
+
     /// Lists the card's or the camera's files (not while it records) and queues the thumbnails not sent yet.
     fn album(&mut self) {
+        self.list(None)
+    }
+
+    /// [`W::album`] with the camera's capture status if it was just read.
+    fn list(&mut self, st: Option<link::Result<pb::CameraCaptureStatus>>) {
         self.relist = None;
         let t = Instant::now();
         if let Some(r) = self.info.src.clone() {
@@ -625,7 +656,7 @@ impl W {
             return self.send(Up::Album(vec![]));
         };
         let r = (|| {
-            if rec(c.capture_status().wait()?.state) {
+            if rec(st.unwrap_or_else(|| c.capture_status().wait())?.state) {
                 return Ok(None);
             }
             use pb::{CardLocation::StorClCamera as L, MediaType as M};
@@ -808,11 +839,15 @@ impl W {
         let Some(cam) = self.cam.clone() else {
             return self.note("not connected", true);
         };
+        // noted once the camera answered; the clock read after it
+        if let Cmd::Time = c {
+            self.time(&cam, vec![]);
+            return self.opts();
+        }
         let what = match c {
             Cmd::Delete(_) => "delete",
             Cmd::Fav(_) => "favourites",
             Cmd::Format => "format",
-            Cmd::Time => "time sync",
             _ => return,
         };
         let r: link::Result<String> = match c {
@@ -871,7 +906,6 @@ impl W {
                 .format(pb::CardLocation::StorClCamera)
                 .wait()
                 .map(|_| "SD card formatted".into()),
-            Cmd::Time => set_time(&cam),
             _ => return,
         };
         match r {

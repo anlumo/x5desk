@@ -123,14 +123,24 @@ fn encodings() {
         ),
         (176, 1)
     );
-    // Time: 2025-01-01 12:00:00 UTC, +3600 s, Europe/Vienna; two requests (§5.3).
+    // Time: 2025-01-01 12:00:00 UTC, +3600 s, Europe/Vienna; two requests (§5.3), both out before any answer (this
+    // handle never answers) and ahead of the next call.
     let _p = c.set_time(1735732800, 3600, "Europe/Vienna");
+    let _q = c.capture_status();
     let (k, b) = req(&rx);
     let w = hex(
         "32 00 00 00 04 00 00 07 00 02 04 00 00 80 00 00 08 0c 08 0d 08 af 01 12 19 60 c0 dc d4 bb 06 68 90 1c fa 0a 0d \
          45 75 72 6f 70 65 2f 56 69 65 6e 6e 61",
     );
     assert_eq!(wire(k, 4, &b), w);
+    assert_eq!(
+        req(&rx),
+        (
+            7,
+            hex("08 af 01 12 10 fa 0a 0d 45 75 72 6f 70 65 2f 56 69 65 6e 6e 61")
+        )
+    );
+    assert_eq!(req(&rx).0, code::CAPTURE_STATUS);
     let q = pb::CheckAuthorization {
         id: "01234567-89ab-cdef-0123-456789abcdef".into(),
         initiator_type: 2,

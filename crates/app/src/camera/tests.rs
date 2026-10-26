@@ -20,6 +20,8 @@ struct Card {
     stuck: HashMap<String, u8>,
     /// request codes answered with status 500
     refuse: Vec<u16>,
+    /// request codes never answered
+    mute: Vec<u16>,
 }
 
 type Fake = Arc<Mutex<Card>>;
@@ -67,6 +69,9 @@ fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'static
         c.log.push((Instant::now(), code, b.to_vec()));
         if c.refuse.contains(&code) {
             return (500, vec![]);
+        }
+        if c.mute.contains(&code) {
+            return (0, vec![]);
         }
         let ok = |m: &dyn Fn() -> Vec<u8>| (200, m());
         match code {
@@ -241,6 +246,14 @@ fn wait<T>(w: &Worker, secs: f64, mut f: impl FnMut(Up) -> Option<T>) -> T {
 fn album(w: &Worker) -> Vec<Item> {
     wait(w, 5.0, |u| match u {
         Up::Album(v) => Some(v),
+        _ => None,
+    })
+}
+
+/// The connect's note: it comes once the clock's answers did, after the listing.
+fn connected(w: &Worker) -> String {
+    wait(w, 5.0, |u| match u {
+        Up::Note(s, false) if s.starts_with("connected") => Some(s),
         _ => None,
     })
 }
@@ -496,9 +509,9 @@ fn low_battery() {
     drop(w);
 }
 
-/// Every connect sets the camera clock once, as the app does (§5.1 step 5, §5.3): its two SET_OPTIONS right after the
-/// identity, before anything else; the note says so. A camera that refuses it still connects and lists its album,
-/// the refusal in an error note.
+/// Every connect sets the camera clock once, in the app's order (§5.1, §5.3): identity, options and capture status,
+/// then its two SET_OPTIONS, then the listing; the note says so once both answered. A camera that refuses it still
+/// connects and lists its album, the refusal in an error note after the connect note.
 #[test]
 fn connect_time() {
     let f = card(&NAMES[..2]);
@@ -507,19 +520,20 @@ fn connect_time() {
     let run = || {
         let n0 = f.lock().unwrap().log.len();
         w.tx.send(Cmd::Connect).unwrap();
-        let mut notes = vec![];
-        let v = wait(&w, 10.0, |u| match u {
-            Up::Note(s, e) => {
-                notes.push((s, e));
-                None
+        let (mut notes, mut n) = (vec![], None);
+        wait(&w, 10.0, |u| {
+            match u {
+                Up::Note(s, e) => notes.push((s, e)),
+                Up::Album(v) => n = Some(v.len()),
+                _ => {}
             }
-            Up::Album(v) => Some(v),
-            _ => None,
+            let clk = |x: &(String, bool)| x.0.contains("clock") || x.0.starts_with("time sync");
+            (n.is_some() && notes.iter().any(clk)).then_some(())
         });
         let l: Vec<(u16, Vec<u8>)> = (f.lock().unwrap().log[n0..].iter())
             .map(|l| (l.1, l.2.clone()))
             .collect();
-        (notes, v.len(), l)
+        (notes, n.unwrap(), l)
     };
     let (t, _, off, tz, _) = clock();
     for i in 0..2 {
@@ -530,11 +544,14 @@ fn connect_time() {
             .collect();
         println!("connect {i}: requests {k:?}; notes {notes:?}");
         assert_eq!(n, 1);
+        use link::code::*;
         assert!(s.len() == 2 && s[1] == s[0] + 1, "{k:?}");
-        assert!(
-            s[0] > 0 && k[..s[0]].iter().all(|&c| c == link::code::GET_OPTIONS),
-            "only the identity before: {k:?}"
+        assert_eq!(
+            k[..s[0]],
+            [GET_OPTIONS, GET_OPTIONS, CAPTURE_STATUS],
+            "{k:?}"
         );
+        assert_eq!(k.get(s[1] + 1), Some(&GET_FILE_LIST), "{k:?}");
         let set: Vec<pb::SetOptions> = (s.iter())
             .map(|&i| pb::SetOptions::decode(&l[i].1[..]).unwrap())
             .collect();
@@ -577,6 +594,72 @@ fn connect_time() {
         "{notes:?}"
     );
     drop(w);
+}
+
+/// A camera that never answers the clock's SET_OPTIONS holds nothing up (the connect waited for each answer, up to
+/// 10 s, with Disconnect and Quit unhandled): the album is listed and listed again meanwhile, Disconnect and the
+/// worker's end are handled at once, and the connect's notes come with the answers' timeout.
+#[test]
+fn silent_time() {
+    let f = card(&NAMES[..2]);
+    f.lock().unwrap().mute = vec![link::code::SET_OPTIONS];
+    let q = Arc::new(Mutex::new(dl::Queue::load(None)));
+    let (w, _) = spawn(&f, 50_000_000, q, Cache::at(None));
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+    let t = Instant::now();
+    w.tx.send(Cmd::Connect).unwrap();
+    assert_eq!(album(&w).len(), 1);
+    let listed = ms(t);
+    assert_eq!(count(&f, link::code::SET_OPTIONS), 2, "both sent");
+    let t = Instant::now();
+    w.tx.send(Cmd::Refresh).unwrap();
+    album(&w);
+    let again = ms(t);
+    let t = Instant::now();
+    w.tx.send(Cmd::Disconnect).unwrap();
+    let mut notes = vec![];
+    wait(&w, 5.0, |u| match u {
+        Up::Note(s, _) if s == "disconnected" => Some(()),
+        Up::Note(s, e) => {
+            notes.push((s, e));
+            None
+        }
+        _ => None,
+    });
+    let off = ms(t);
+    assert!(notes.is_empty(), "{notes:?}");
+
+    let t = Instant::now();
+    w.tx.send(Cmd::Connect).unwrap();
+    album(&w);
+    let mut notes = vec![];
+    wait(&w, 15.0, |u| match u {
+        Up::Note(s, e) => {
+            notes.push((s, e));
+            (notes.len() == 2).then_some(())
+        }
+        _ => None,
+    });
+    let late = ms(t);
+    assert!(
+        notes[0].0.starts_with("connected to Insta360 X5 in ")
+            && !notes[0].1
+            && notes[1] == ("time sync: timeout".into(), true),
+        "{notes:?}"
+    );
+
+    w.tx.send(Cmd::Disconnect).unwrap();
+    conn(&w, Conn::Off);
+    w.tx.send(Cmd::Connect).unwrap();
+    album(&w);
+    let t = Instant::now();
+    drop(w);
+    let gone = ms(t);
+    println!(
+        "silent clock: listed in {listed:.0} ms and again in {again:.0} ms, disconnected in {off:.0} ms, its \
+         timeout noted after {late:.0} ms, worker gone in {gone:.0} ms"
+    );
+    assert!(listed < 2000.0 && again < 1000.0 && off < 1000.0 && gone < 2000.0);
 }
 
 /// A download over four tunnel connections, cancelled, resumed after a restart of the worker from the queue file,
@@ -713,6 +796,7 @@ fn delete_passes() {
     let (w, _) = spawn(&f, 50_000_000, q, Cache::at(None));
     w.tx.send(Cmd::Connect).unwrap();
     assert_eq!(album(&w).len(), 9);
+    connected(&w);
     let run = |v: &[String]| {
         let n0 = f.lock().unwrap().log.len();
         w.tx.send(Cmd::Delete(v.to_vec())).unwrap();
@@ -740,8 +824,8 @@ fn delete_passes() {
     drop(w);
 }
 
-/// Delete in batches of 200, 150 ms apart; favourites; format; time sync (two SET_OPTIONS, §5.3). Each is followed
-/// by a fresh album.
+/// Delete in batches of 200, 150 ms apart; favourites; format, each followed by a fresh album; time sync (two
+/// SET_OPTIONS, §5.3, then the clock read).
 #[test]
 fn commands() {
     let names: Vec<String> = (0..450)
@@ -752,6 +836,7 @@ fn commands() {
     let (w, _) = spawn(&f, 50_000_000, q, Cache::at(None));
     w.tx.send(Cmd::Connect).unwrap();
     assert_eq!(album(&w).len(), 450);
+    connected(&w);
     let after = |w: &Worker| {
         let s = wait(w, 10.0, |u| match u {
             Up::Note(s, e) => Some((s, e)),
@@ -808,8 +893,17 @@ fn commands() {
 
     let n0 = f.lock().unwrap().log.len();
     w.tx.send(Cmd::Time).unwrap();
-    after(&w);
+    let s = wait(&w, 10.0, |u| match u {
+        Up::Note(s, e) => Some((s, e)),
+        _ => None,
+    });
+    assert!(!s.1 && s.0.starts_with("camera clock set to "), "{s:?}");
     let l = f.lock().unwrap().log[n0..].to_vec();
+    use link::code::*;
+    let k: Vec<u16> = (l.iter().map(|l| l.1))
+        .filter(|&c| c != GET_FILE_EXTRA)
+        .collect();
+    assert_eq!(k, [SET_OPTIONS, SET_OPTIONS, GET_OPTIONS]);
     let set: Vec<pb::SetOptions> = l
         .iter()
         .filter(|l| l.1 == link::code::SET_OPTIONS)
@@ -1313,11 +1407,6 @@ fn real_camera() {
         Up::Info(i) if i.conn == Conn::On => Some(i),
         _ => None,
     });
-    assert!(
-        notes.iter().any(|n| n.0.contains("; camera clock set to "))
-            && !notes.iter().any(|n| n.0.starts_with("time sync")),
-        "the clock not set on connect: {notes:?}"
-    );
     let id = i.id.unwrap();
     println!(
         "connected in {:.0} ms: {} {}, battery {}, storage {}, Wi-Fi {}, clock skew {:?} s",
@@ -1334,15 +1423,28 @@ fn real_camera() {
         v.iter().filter(|i| i.kind == Kind::Video).count(),
         v.iter().filter(|i| i.kind == Kind::Photo).count(),
     );
-    let mut n = 0;
-    let s = wait(&w, 120.0, |u| match u {
-        Up::Thumb(_, Some(_)) => {
-            n += 1;
-            None
+    // the connect's notes come once the clock's answers did, after the listing
+    let (mut n, mut st) = (0, None);
+    let clk =
+        |x: &(String, bool)| x.0.contains("; camera clock set to ") || x.0.starts_with("time sync");
+    wait(&w, 120.0, |u| {
+        match u {
+            Up::Thumb(_, Some(_)) => n += 1,
+            Up::Stats(s) => st = Some(s),
+            Up::Note(s, e) => {
+                println!("note: {s}");
+                notes.push((s, e))
+            }
+            _ => {}
         }
-        Up::Stats(s) => Some(s),
-        _ => None,
+        (st.is_some() && notes.iter().any(clk)).then_some(())
     });
+    assert!(
+        notes.iter().any(|n| n.0.contains("; camera clock set to "))
+            && !notes.iter().any(|n| n.0.starts_with("time sync")),
+        "the clock not set on connect: {notes:?}"
+    );
+    let s = st.unwrap();
     println!(
         "album: {} items ({vids} videos, {photos} photos, {} files, {} favourites) listed in {:.0} ms",
         v.len(),

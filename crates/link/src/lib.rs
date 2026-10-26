@@ -720,24 +720,20 @@ impl Camera {
         }
     }
 
-    /// Camera clock: unix seconds, offset from UTC in s, IANA zone; then the zone alone, as the app does (§5.3).
-    pub fn set_time(&self, unix: u64, tz_s: i32, tz: &str) -> Pending<()> {
-        let o = pb::Options {
-            local_time: unix,
-            time_zone_seconds_from_gmt: tz_s,
+    /// Camera clock: unix seconds, offset from UTC in s, IANA zone; then the zone alone. Both go out now, ahead of
+    /// anything sent after, and neither waits for an answer: the app's two `setOptionAsync` (§5.1 step 5, §5.3).
+    pub fn set_time(&self, unix: u64, tz_s: i32, tz: &str) -> [Pending<pb::SetOptionsResp>; 2] {
+        use pb::OptionType::*;
+        let o = |local_time, time_zone_seconds_from_gmt| pb::Options {
+            local_time,
+            time_zone_seconds_from_gmt,
             geographic_time_zone: tz.into(),
             ..Default::default()
         };
-        self.job(move |c| {
-            use pb::OptionType::*;
-            c.set_options(&[LocalTime, TimeZone, GeographicTimeZone], o.clone())
-                .wait()?;
-            let o = pb::Options {
-                geographic_time_zone: o.geographic_time_zone,
-                ..Default::default()
-            };
-            c.set_options(&[GeographicTimeZone], o).wait().map(drop)
-        })
+        [
+            self.set_options(&[LocalTime, TimeZone, GeographicTimeZone], o(unix, tz_s)),
+            self.set_options(&[GeographicTimeZone], o(0, 0)),
+        ]
     }
 
     /// Switches the capture mode by setting the photo or video sub-mode option (§8.10).

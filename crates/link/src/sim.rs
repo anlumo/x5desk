@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-/// Request handler: method and body in, status and body out.
+/// Request handler: method and body in, status and body out; status 0 sends no answer (a camera silent on it).
 pub type Req = Box<dyn FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send>;
 /// The camera's files by URI.
 pub type Files = Arc<dyn Fn(&str) -> Option<Arc<Vec<u8>>> + Send + Sync>;
@@ -69,7 +69,9 @@ impl Link for Cam {
             v.extend(ucd::SYNC);
         } else if let Ok(Some((ucd::Pkt::Msg { code, id, body, .. }, _))) = ucd::next(p) {
             let (s, b) = (self.req)(code, body);
-            ucd::msg(&mut v, s, id, true, &b);
+            if s != 0 {
+                ucd::msg(&mut v, s, id, true, &b);
+            }
         }
         if !v.is_empty() {
             let _ = self.tx.send(Msg::Rx(v));
@@ -184,8 +186,8 @@ impl Camera {
         start(|_, _| Ok(Mute), None)
     }
 
-    /// A session with a simulated camera: `req` answers requests, `files` serves HTTP at `rate` bytes per second
-    /// and connection.
+    /// A session with a simulated camera: `req` answers requests (status 0: never), `files` serves HTTP at `rate`
+    /// bytes per second and connection.
     pub fn sim(
         req: impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'static,
         files: impl Fn(&str) -> Option<Arc<Vec<u8>>> + Send + Sync + 'static,
