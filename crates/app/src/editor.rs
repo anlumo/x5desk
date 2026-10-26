@@ -406,6 +406,10 @@ impl Editor {
         if self.playing {
             self.pause();
         }
+        // a shorter timeline: the playhead stays on it
+        if self.t > self.pj.tl().dur() {
+            self.seek(self.t);
+        }
         let n = self.pj.tl().clips.len();
         if self.sel.is_some_and(|k| k >= n) {
             self.sel = n.checked_sub(1);

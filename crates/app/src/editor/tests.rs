@@ -835,6 +835,39 @@ fn drag_lost() {
     }
 }
 
+/// The playhead stays on a timeline that gets shorter (no samples needed): paused at 14 s, the last clip deleted
+/// leaves it at the new end (it read "0:14.00 / 0:09.41" over the new last frame), and so does undoing the clips.
+#[test]
+fn clamp() {
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = stitch::Ctx::new(&g.device, &g.queue);
+    let mut e = Editor::new(
+        &g,
+        &cx,
+        &egui::Context::default(),
+        player::still(&g, &cx),
+        None,
+    );
+    for (i, b) in [9.41, 6.0].into_iter().enumerate() {
+        let f = e.pj.file(&format!("/nowhere/{i}.insv"), 20.0).unwrap();
+        e.ed(|p| p.insert(i, Clip::new(f, 0.0, b)));
+    }
+    e.seek(14.0);
+    e.delete(1);
+    let d = e.pj.tl().dur();
+    eprintln!(
+        "paused at 14 s, the last clip deleted: {} / {}",
+        mmss(e.t),
+        mmss(d)
+    );
+    assert_eq!(e.t, d);
+    e.undo();
+    assert_eq!(e.t, d, "a longer timeline moved it");
+    e.undo();
+    e.undo();
+    assert_eq!((e.pj.tl().clips.len(), e.t), (0, 0.0));
+}
+
 /// The history keeps in step with edit's log (no samples needed): a drag that ends where it started after an undo keeps
 /// edit's redo, and so the history's; a Shot Lab replacement that would fail halfway changes nothing (redo kept); no
 /// undo mid-drag; a view key dragged past another (egui input) stays in the drag and ends as one step.
