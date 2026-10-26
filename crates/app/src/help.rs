@@ -149,8 +149,8 @@ fn guide(p: Page) -> &'static [&'static str] {
             "Mass storage: when the X5 is plugged in as a USB disk (or its card is in a reader) and the desktop mounts \
              it, the album offers it as a source. Import copies the selected items into the download folder; an \
              interrupted import resumes.",
-            "Camera: model, firmware, serial, clock (Sync time sets it), the camera's Wi-Fi name and password, and the \
-             SD card format.",
+            "Camera: model, firmware, serial, clock (every USB or Wi-Fi connect sets it to this computer's, Sync time \
+             on demand), the camera's Wi-Fi name and password, and the SD card format.",
             "Wireless: Bluetooth (scan, connect, pair, wake from standby, read the access point) and Wi-Fi station \
              mode (the camera joins your network, then x5desk connects to it there). The X5 ignores Bluetooth while \
              it is connected by USB: use USB then.",
