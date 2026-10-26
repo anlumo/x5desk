@@ -27,8 +27,6 @@ use video::Gpu;
 pub const CANCELLED: &str = "cancelled";
 /// Equirect width the networks look at (the face tiles' and the tracker tests' resolution, crate track).
 const W: u32 = 3072;
-/// Re-ID batch sizes to warm up (crate track's `reid::MAX`).
-const REID: usize = 8;
 /// Smoothing of a finished track for views and keys, s (`track::smooth`'s σ).
 const SIGMA: f64 = 0.25;
 /// Auto edit: every this many frames analysed; the share of the clip the highlights fill (at least `MIN_AUTO` s).
@@ -84,9 +82,9 @@ impl Models {
     }
 
     /// Runs `f` with the models on this thread, loaded on the run's first use (through `stitch::attach`: main.rs
-    /// attached first) and, with `warm`, warmed up first: the tracker, the detector at every batch size and re-ID
-    /// compiled and tuned on a black panorama, a network run at a time under `BURN`, with a progress note (seconds
-    /// each on the first use, 16 to 39 s in all, crate track).
+    /// attached first) and, with `warm`, warmed up first: the tracker and the detector at every batch size compiled
+    /// and tuned on a black panorama, a network run at a time under `BURN`, with a progress note (seconds each on the
+    /// first use, 16 to 39 s in all, crate track; re-ID runs no network).
     pub fn with<T>(
         &self,
         g: &Arc<Gpu>,
@@ -122,11 +120,8 @@ impl Models {
                 view_formats: &[],
             });
             let p = ai.pano(&t.create_view(&Default::default()));
-            let (tiles, b) = (
-                track::sphere(),
-                [(Vec3::NEG_X, Vec2::new(10.0, 20.0)); REID],
-            );
-            let n = 1 + tiles.len() + REID;
+            let tiles = track::sphere();
+            let n = 1 + tiles.len();
             self.steps("Warming up the AI models (first use)", n, ctx, |i| {
                 let _b = BURN.lock();
                 match i {
@@ -138,8 +133,7 @@ impl Models {
                         };
                         track::Tracker::new(ai, &p, s)?.step(ai, &p);
                     }
-                    _ if i <= tiles.len() => drop(ai.detect(&p, &tiles[..i], 1.0)),
-                    _ => drop(ai.embed(&p, &b[..i - tiles.len()])),
+                    _ => drop(ai.detect(&p, &tiles[..i], 1.0)),
                 }
                 Ok(())
             })?;
