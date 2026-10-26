@@ -14,6 +14,11 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   `v635.lrv`) and return early with a note when it is unset.
 - Tests that make paths in `$XDG_RUNTIME_DIR` name them `<name>-<pid>` and remove them through a drop guard, also
   when they fail.
+- The RTMP tests' `ffmpeg -listen` listeners (app `live.rs`, live `tests/rtmp.rs`) and `pw_gst`'s gst-launch are
+  each held in a `Kid` drop guard, which kills and reaps the process also when the test fails; the listeners' `Kid`
+  removes the file it received too, and gst-launch's output has a `Run` guard. `Kid` spawns with `PR_SET_PDEATHSIG`
+  (SIGKILL), so a test process that is killed or aborts leaves none running. The signal follows the spawning thread:
+  the test's own thread spawns and owns the child.
 
 ## Crates
 
@@ -77,10 +82,16 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   undefined afterwards), `Image::release()` after the last one; it returns the sync_file and also attaches it to the
   DMA-BUF as its write fence, so implicit-sync consumers (PipeWire clients) are correct too.
 - A command encoder is either raw (`as_hal_mut`) or wgpu, never both.
-- Video decode holds back the same process's graphics submissions by the decode queue's backlog (RADV / amdgpu;
-  another process decoding at full speed does not). A decode burst, such as the editor's next deck decoding from
-  its keyframe to the next clip's first frame, delays the UI's frames by 40–190 ms: `vkAcquireNextImageKHR` waits
-  for the release of a frame the GPU has not finished.
+- Freeing GPU memory while decodes are queued holds the process's graphics back (amdgpu): the page-table update that
+  unmaps it waits for every submission queued in the process's VM, decodes included, and later graphics submissions
+  wait for that update (another process's decodes are not in our VM). During playback the decode queue never drains
+  (two 3840² lenses keep a VCN busy), so memory freed then delays the UI's frames by the backlog
+  (`vkAcquireNextImageKHR` waits; 40–190 ms at the editor's cuts, where a deck is dropped while the next one decodes
+  from its keyframe). So a dropped `Decoder` parks its session, DPB, bitstream and command buffers, and its `Ring`
+  its textures, in `Gpu`'s bin (`decode::Bin`, two of each per shape: codec, profile, bit depth, size, DPB slots;
+  freed with the `Gpu`), and the next decoder of the shape takes them (new timelines, frames from 0): nothing may
+  sample a ring's textures after its last `Arc` goes. `Decoder::new` grows its command buffers' upload memory before
+  any decode (RADV frees outgrown upload buffers at a command buffer's next reset).
 - The player's paused RAFT snapshot copies the lens planes as R8 / RG8, or R16 / RG16 for P010 (2 bytes per sample
   in the row stride).
 
@@ -92,10 +103,14 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   export preset, audio output of the player and the editor's preview, thumbnail cache, GPU info, client id) and Help (keys, a guide per screen, About with
   licences). A camera battery at 20 % or less and not charging shows as a warning on every screen (`camera::low`).
 - One module per screen: `library.rs` / `player.rs`; `editor.rs` (`deck.rs`, `sound.rs`, `thumbs.rs`, `doc.rs`);
-  `lab.rs` (Shot Lab on crate shotlab); `camera.rs` (`album.rs`, `dl.rs`; `disk.rs`: a mounted card found through
-  the mount table and the sysfs product string, listed from its trailers, imported as `file://` download entries;
-  `bt.rs`: Bluetooth and station-mode Wi-Fi: join, a read of the camera's existing station connection over BLE, a
-  typed camera address); `capture.rs` (worker on the camera session through `camera::Tap`;
+  `lab.rs` (Shot Lab on crate shotlab); `camera.rs` (its worker sets the camera clock on every USB and Wi-Fi connect,
+  right after the identity, with the app's two SET_OPTIONS of PROTOCOL.md §5.3; a refusal is an error note and the
+  session stays; `album.rs`, `dl.rs`; `disk.rs`: a mounted card found through the mount table and the sysfs product
+  string, listed with one trailer per item (its first file; empty files left out), imported as `file://` download
+  entries; the bar takes U-disk mode from a mounted disk of the camera's own, not from the bus scan, on which the X5
+  in U-disk mode is `070a:4027`; `bt.rs`: Bluetooth and station-mode Wi-Fi: join, a read of the camera's existing
+  station connection over BLE, a typed camera address); `capture.rs` (worker on the camera session through
+  `camera::Tap`;
   `conf.rs`: the `/CONF` model and its wire values; `feed.rs`: live preview decode thread, pictures handed over under
   one lock and taken as they fall due, paced on the camera clock from the slowest of the last 32 deliveries, IMU
   levelling; `webcam.rs`: Webcam Mode via `media::uvc` + MJPEG; `replay.rs`: link's simulated camera streaming a
@@ -104,8 +119,9 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   P010 to RGBA through BT.709 limited range); `ai.rs`;
   `settings.rs`; `help.rs`. Work runs on the threads in PLAN.md §2; the UI thread only reads the newest state and
   draws.
-- AI (`ai.rs`): `ai::MODELS` loads one `track::Ai` per run and device on first use (warm-up one network call at a
-  time under BURN), shared by Deep Track, auto edit and every face pass. Deep Track directions are in the frame of the
+- AI (`ai.rs`): `ai::MODELS` loads one `track::Ai` per run and device on first use (warm-up: the tracker and the
+  detector at every batch size, one network call at a time under BURN; re-identification runs no network), shared by
+  Deep Track, auto edit and every face pass. Deep Track directions are in the frame of the
   track's stabilisation and are turned into any other frame with `Track::turn` / `ai::rots`. The privacy blur also
   covers editor timelines (one face pass per clip) and Shot Lab passes (before the effect).
 - Editor projects are edit's JSON plus a top-level `"x5desk"` object (overlays, denoise, stabilisation). A clip's
@@ -118,19 +134,29 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   both as they were, the steps undone included. The player and the editor share one RAFT worker (`player::still`).
 - The editor's viewer redraws only from decks bound for the current edit (`schedule` runs before each redraw); while
   the playhead's frame is still decoding (seek, cut) the last picture stays.
+- Timeline drags (clip move, trim handle, speed key, volume point, view key) name their target by index: an edit that
+  is not the drag's own ends the drag first, with its undo step (`Editor::halt` from `ed`, `begin` and `changed`; the
+  drag's own edits go through `Editor::own`). Escape cancels a clip move (a drop is a release). A timeline that gets
+  shorter keeps the playhead on it.
 - Audio output: the device picked in Settings is looked up off the UI thread (`settings::output`:
   `media::audio::device` on a thread per pick; a caller waits while the newest pick's lookup runs, so it is never
-  called on the UI thread). The player opens its audio on it with `media::audio::Player::open_on` (a failing stream
-  falls back to the system default; no AAC track or no device: the silent clock), and the live outputs follow the
-  player's clock. The editor's preview plays on it through cpal directly (`editor/sound.rs`): its stream is looked
-  up, opened and closed on the sound's own thread, one stream at a time (`sound::DEV`), and its clock holds at the
-  start position until the device plays.
+  called on the UI thread; a lookup that panics still counts as done, through a drop guard). The player opens its
+  audio on it with `media::audio::Player::open_on` (a stream that fails to build or start, an `io::Error` holding a
+  `cpal::Error`, falls back to the system default; any other error, such as no AAC track, a file the decoder refuses
+  or no device, gives the silent clock), and the live outputs follow the player's clock. The editor's preview plays
+  on it through cpal directly (`editor/sound.rs`): its stream is looked up, opened and closed on the sound's own
+  thread, one stream at a time (`sound::DEV`; a Sound dropped during its mixer's setup opens no more files), and its
+  clock holds at the start position until the device plays.
 - Disk work stays off the UI thread: the Settings screen measures and trims the thumbnail cache on a thread of its
-  own; the Downloads pane takes whether an import waits for its card from the camera worker's mounted volumes. The
-  download queue file is written only when its text changes.
+  own; the Downloads pane takes whether an import waits for its card from the camera worker's mounted volumes, and an
+  import whose card is mounted without its file fails ("not on the card"). The Library looks for the files of its
+  Recent and Downloaded lists on a thread every 2 s and greys out the ones not there (on a card that is not mounted),
+  keeping them out of the editor's media, until they are back. The download queue file is written only when its
+  text changes.
 - Config: every save to `<config>/x5desk` makes that dir owner-only (`main.rs` `private`), also when it exists
   already; the `live` file (stream key) is 0600. A stream key in the RTMP URL (key field empty: the last path
-  segment after the app) is drawn masked and handed to `live::rtmp` as the key, never inside the URL.
+  segment after the app) is drawn masked and handed to `live::rtmp` as the key, never inside the URL;
+  `live::rtmp::Rtmp::start`'s errors quote the URL without the key.
 - Device policy (`main.rs` `GATE: RwLock`, `BURN: Mutex`): the app's own submitting threads hold `GATE` shared around
   each piece of GPU work (live output thread per pass, RTMP encoder per frame, export threads and decoders, photo
   exports); threads whose work runs through burn (RAFT worker, the AI models, shotlab's person network) hold `BURN`
@@ -152,7 +178,8 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   download queue is the run's own; no thumbnail cache: `settings::Prefs::thumbs`), and `dest=` is also the download
   folder. Tokens:
   - player: `play`, `loop`, `vol=`, `view=`, `seek=`, `proxy`, `stats=<s>`, `novsync`, `full`,
-    `stab=off|free|horizon|direction`, `smooth=<s>`, `aim=<yaw>/<pitch>/<fov>`, `max`;
+    `stab=off|free|horizon|direction`, `smooth=<s>`, `aim=<yaw>/<pitch>/<fov>`, `max` (`play`, `seek=` and `vol=`
+    also drive the viewer of plain videos, `movie.rs`);
   - camera: `camera=album|downloads|settings|wireless`, `dl=<uri>`, `mount=<dir>` (repeatable fake card; the real
     mount table is not read), `import`, `ble=sim`, `ble=sta` (the simulated X5 on HomeNet from an earlier
     session: connect, pair, read its station connection; no join), `battery=<%>` (the `replay=` camera's level);
