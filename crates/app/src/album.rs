@@ -547,9 +547,10 @@ mod tests {
         t[20..24].copy_from_slice(&40960u32.to_le_bytes());
         assert!(thumb(&t).is_none(), "2 × 40960 leaves nothing");
 
+        // a name of its own: settings::tests::cache_thread runs alongside in `x5desk-thumbs-<pid>`
         let d = std::env::var_os("X5_FIXTURES")
             .map_or_else(std::env::temp_dir, PathBuf::from)
-            .join(format!("x5desk-thumbs-{}", std::process::id()));
+            .join(format!("x5desk-cache-{}", std::process::id()));
         let c = Cache::at(Some(d.clone()));
         let it = Item {
             uris: vec!["/DCIM/Camera01/a.insv".into()],
