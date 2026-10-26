@@ -931,7 +931,7 @@ fn texture_cap() {
 }
 
 /// A card's album tiles: a flat photo's thumbnail (square, or wider than 2:1) keeps its aspect centred in the 2:1 box,
-/// a 360 one fills it.
+/// a 360 one fills it; a double click opens a photo from the card as it does a video.
 #[test]
 fn tiles() {
     let d = dir("tiles");
@@ -1007,6 +1007,30 @@ fn tiles() {
     assert!(
         near(sq.center().x - (pano.min.x - 210.0 * 2.0), 100.0),
         "{sq:?}"
+    );
+
+    // double click on the square photo: opened from the card
+    let p = sq.center();
+    let btn = |pressed| egui::Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    let mut open = vec![];
+    for ev in [
+        vec![egui::Event::PointerMoved(p)],
+        vec![btn(true)],
+        vec![btn(false)],
+        vec![btn(true)],
+        vec![btn(false)],
+        vec![],
+    ] {
+        open.extend(frame(&mut c, ev).1);
+    }
+    assert_eq!(
+        open,
+        [card.join("DCIM/Camera01/IMG_20260118_124432_00_659.jpg")]
     );
     drop(c);
     std::fs::remove_dir_all(&d).unwrap();

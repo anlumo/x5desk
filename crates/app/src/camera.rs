@@ -1659,7 +1659,8 @@ impl Cam {
                                     .join("\n"),
                             );
                             if resp.double_clicked()
-                                && it.kind == Kind::Video
+                                && (it.kind == Kind::Video
+                                    || crate::photo::is(Path::new(&it.uris[0])))
                                 && (self.have.contains(&it.key) || card.is_some())
                             {
                                 // what was downloaded, else straight from the card
