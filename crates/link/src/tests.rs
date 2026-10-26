@@ -706,7 +706,8 @@ fn thumbnail_nv12() {
     assert!(none(268435458, 16) && none(1, 32) && none(32, 1) && !none(8, 4));
 }
 
-/// The hotplug watch opens (netlink uevents need no privileges) and reports the bus state at once.
+/// The hotplug watch opens (netlink uevents need no privileges) and reports the bus state at once; with
+/// `X5_PLUG=none|disk|other|app` (what is plugged in now: `disk` for the X5 in U-disk mode) it is that.
 #[test]
 fn watch_reports_now() {
     let (tx, rx) = mpsc::channel();
@@ -718,6 +719,9 @@ fn watch_reports_now() {
     let p = rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert_eq!(p, scan());
     println!("bus: {p:?}");
+    if let Ok(w) = std::env::var("X5_PLUG") {
+        assert_eq!(format!("{p:?}").to_lowercase(), w);
+    }
 }
 
 /// A transport that never answers: the camera enumerated but asleep. Its `stop` says when the I/O thread let go.

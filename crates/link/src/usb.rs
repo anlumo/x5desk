@@ -44,25 +44,35 @@ pub(crate) struct Usb {
     _if: Interface,
 }
 
-/// An Insta360 device on the bus: none, one in another mode (Webcam Mode, mass storage), or one in app mode.
+/// An Insta360 device on the bus: none, a camera as a USB disk (the X5's U-disk mode, also the first seconds after
+/// plug-in in app mode, without media then), one in another mode (Webcam Mode), or one in app mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Plug {
     None,
+    Disk,
     Other,
     App,
 }
 
-/// The PID is not fixed (the app checks the VID only); Webcam Mode shares the VID but has no vendor interface.
+/// The PID is not fixed (the app checks the VID only); Webcam Mode shares the VID but has no vendor interface. As a
+/// disk the X5 is `070a:4027` (§8.1), the vendor id of its USB stack, not Insta360's: the product string tells, as in
+/// the app's mass-storage test.
 fn plug(d: &DeviceInfo) -> Plug {
-    if !matches!(d.vendor_id(), 0x2e1a | 0x4255) {
-        Plug::None
-    } else if d
-        .interfaces()
-        .any(|i| i.interface_number() == 0 && i.class() == 0xff)
-    {
-        Plug::App
-    } else {
-        Plug::Other
+    match d.vendor_id() {
+        0x2e1a | 0x4255
+            if d.interfaces()
+                .any(|i| i.interface_number() == 0 && i.class() == 0xff) =>
+        {
+            Plug::App
+        }
+        0x2e1a | 0x4255 => Plug::Other,
+        0x070a
+            if d.product_string()
+                .is_some_and(|s| s.starts_with("Insta360")) =>
+        {
+            Plug::Disk
+        }
+        _ => Plug::None,
     }
 }
 
