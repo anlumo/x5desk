@@ -272,6 +272,11 @@ impl Gallery {
     /// Best similarity of `e` to the subject and to the others (−1 for none), by the weights, by plain cosine while
     /// there are none.
     pub fn score(&self, e: &Emb) -> (f32, f32) {
+        (self.like(e, &self.me), self.like(e, &self.not))
+    }
+
+    /// Best similarity of `e` to the features `v` (−1 for none), as `score`.
+    pub fn like(&self, e: &Emb, v: &[Emb]) -> f32 {
         let s = |x: &Emb| {
             if self.w.is_empty() {
                 return sim(x, e);
@@ -283,7 +288,6 @@ impl Gallery {
             }
             d / (a * b).sqrt().max(1e-12)
         };
-        let m = |v: &[Emb]| v.iter().map(s).fold(-1f32, f32::max);
-        (m(&self.me), m(&self.not))
+        v.iter().map(s).fold(-1f32, f32::max)
     }
 }

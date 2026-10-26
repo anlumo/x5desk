@@ -62,6 +62,8 @@ const SPEED: f32 = 3.0;
 const WALK: f32 = 1.0;
 const ACC: f32 = 3.0;
 const PRIOR: f32 = 0.1;
+/// Persons `find` took and the tracker lost again that it remembers (`Tracker::tried`).
+const TRIED: usize = 8;
 
 /// What to track: centre direction and angular width, height (degrees), and the detector class if known (it
 /// narrows re-detection; None takes any class).
@@ -207,6 +209,12 @@ pub struct Tracker {
     w: Vec3,
     last: Seen,
     sure: bool,
+    /// The feature of the person `find` took last, until VitTrack is sure of them (`Tracked`), and of the last `TRIED`
+    /// it took and the tracker lost again before that: VitTrack's confidence passes `LO` on look-alikes, and whom it is
+    /// unsure of the tracker cannot follow, so one more like them than like the subject is taken again only at `HI`.
+    /// Not one of the others (the gallery): the subject itself, from behind or far off, can be one of them.
+    took: Option<Box<Emb>>,
+    tried: Vec<Emb>,
 }
 
 impl Tracker {
@@ -243,6 +251,8 @@ impl Tracker {
                 k: 0,
             },
             sure: true,
+            took: None,
+            tried: vec![],
         };
         tr.template(ai, p, 0);
         if tr.gal.is_some() {
@@ -420,7 +430,8 @@ impl Tracker {
             let s = g.score(&e[0]);
             take = self
                 .prior((d, deg(sz)))
-                .is_some_and(|q| g.is((s.0 - q, s.1)));
+                .is_some_and(|q| g.is((s.0 - q, s.1)))
+                && (sc >= HI || g.like(&e[0], &self.tried) < s.0);
         }
         // a box several times larger or smaller in one frame is the tracker jumping to something else
         sz = sz.clamp(self.sz * 0.7, self.sz * 1.4);
@@ -444,12 +455,16 @@ impl Tracker {
                 seen = Some(v);
             }
         }
-        if !take
-            && self.miss + 1 >= MISS
-            && (self.miss + 1 - MISS).is_multiple_of(EVERY)
-            && let Some(x) = self.find(ai, p)
-        {
-            (take, st, sc, d, sz) = (true, State::Found, x.score, x.dir, tan(x.size));
+        if !take && self.miss + 1 >= MISS && (self.miss + 1 - MISS).is_multiple_of(EVERY) {
+            if let Some(e) = self.took.take() {
+                if self.tried.len() >= TRIED {
+                    self.tried.remove(0);
+                }
+                self.tried.push(*e);
+            }
+            if let Some(x) = self.find(ai, p) {
+                (take, st, sc, d, sz) = (true, State::Found, x.score, x.dir, tan(x.size));
+            }
         }
         if take {
             self.miss = 0;
@@ -465,6 +480,9 @@ impl Tracker {
                 w - w.dot(d) * d
             };
             self.sm = sm;
+            if st == State::Tracked {
+                self.took = None;
+            }
             self.sure =
                 st == State::Tracked && self.sure || st == State::Found && self.gal.is_none();
             if self.sure {
@@ -520,8 +538,8 @@ impl Tracker {
     /// `WIDE` frames) and returns, of the `FIND` within its reach that need the least speed (`Seen::prior`), the one
     /// the pick's template likes best (confidence ≥ `HI`, its box on the detection) as the tracker's box and
     /// confidence; a person: the one most like the subject (`Gallery`), if the template's box is on it (confidence
-    /// ≥ `LO`). The best, not the first: VitTrack's confidence passes `HI` on other people too, so the nearest
-    /// confirmed one is often someone else.
+    /// ≥ `LO`, `HI` for one more like a person `tried` than like the subject). The best, not the first: VitTrack's
+    /// confidence passes `HI` on other people too, so the nearest confirmed one is often someone else.
     fn find(&mut self, ai: &mut Ai, p: &Pano) -> Option<Det> {
         let tiles = if self.miss >= WIDE {
             sphere()
@@ -553,22 +571,24 @@ impl Tracker {
             // seen next to it, if the tracker's box is on it: taken on its look alone, the next search misses it too
             // or takes whoever VitTrack likes there, unlooked at (the gap is over)
             let e = ai.embed(p, &c.iter().map(|x| x.1.on()).collect::<Vec<_>>());
-            let x = c
+            let (x, e, m) = c
                 .iter()
                 .zip(&e)
                 .map(|((q, x), e)| {
                     let s = g.score(e);
-                    ((s.0 - q, s.1), x)
+                    ((s.0 - q, s.1), x, e, s.0)
                 })
-                .filter(|(s, _)| g.is(*s))
+                .filter(|(s, ..)| g.is(*s))
                 .max_by(|a, b| a.0.0.total_cmp(&b.0.0))
-                .map(|(_, x)| *x)?;
+                .map(|(_, x, e, m)| (*x, e, m))?;
+            let lo = if g.like(e, &self.tried) >= m { HI } else { LO };
             self.sz = tan(x.size);
             let (sc, d, sz) = self.search(ai, p, x.dir, 1);
             self.sz = keep;
-            if sc < LO || iou((d, deg(sz)), x.on(), false) <= 0.3 {
+            if sc < lo || iou((d, deg(sz)), x.on(), false) <= 0.3 {
                 return None;
             }
+            self.took = Some(Box::new(*e));
             return Some(Det {
                 dir: d,
                 size: deg(sz),
