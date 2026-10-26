@@ -353,6 +353,10 @@ fn run(sh: &Sh, m: &Mix, t0: f64) -> Result<(), String> {
     let mut mp4s: Vec<Option<(Mp4, usize)>> = (0..tl.files.len()).map(|_| None).collect();
     let start = (t0 * R).round() as u64;
     for (k, c) in tl.clips.iter().enumerate() {
+        // dropped meanwhile (a seek while playing): the next Sound waits for this thread (`DEV`), opening no more files
+        if sh.quit.load(Relaxed) {
+            return Ok(());
+        }
         let n = tl.frames(k);
         let span = [fps.t(n.start), fps.t(n.end)];
         if c.hold > 0.0 || c.mute || span[1] <= t0 {
@@ -382,7 +386,7 @@ fn run(sh: &Sh, m: &Mix, t0: f64) -> Result<(), String> {
         vs.push((k, span.map(|s| (s * R).round() as u64), None::<Voice>));
     }
     let mut music = None;
-    if let Some(mu) = &tl.out.music {
+    if let Some(mu) = tl.out.music.as_ref().filter(|_| !sh.quit.load(Relaxed)) {
         let p = m.files.get(mu.file as usize).ok_or("music file")?;
         let err = |x: std::io::Error| format!("music {}: {x}", p.display());
         let mut x = Music::open(p).map_err(err)?;
@@ -613,6 +617,76 @@ mod tests {
         eprintln!("denoise 1.0: rms {dr:.4} (dry {c:.4}), difference {diff:.4}");
         assert!(dn.iter().all(|v| v.is_finite()) && diff > 0.001 && dr > 0.0);
         let _ = std::fs::remove_file(&w);
+    }
+
+    /// A mixer told to quit before it opened the clips' files (its Sound dropped by a seek during playback) opens
+    /// none: the next Sound waits for its thread (`DEV`). The files are FIFOs, whose open waits for a writer.
+    #[test]
+    fn quit_setup() {
+        use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+        struct Rm(PathBuf);
+        impl Drop for Rm {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let d = std::env::var_os("X5_FIXTURES")
+            .map_or_else(std::env::temp_dir, PathBuf::from)
+            .join(format!("x5desk-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let _rm = Rm(d.clone());
+        let mut tl = edit::Timeline::new(edit::Rate {
+            num: 30000,
+            den: 1001,
+        });
+        let files: Vec<PathBuf> = (0..3).map(|i| d.join(format!("{i}.mp4"))).collect();
+        for (i, f) in files.iter().enumerate() {
+            let c = std::ffi::CString::new(f.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+            tl.files.push(edit::File {
+                path: f.to_string_lossy().into(),
+                dur: 10.0,
+            });
+            tl.clips.push(edit::Clip::new(i as u32, 0.0, 4.0));
+        }
+        tl.fix();
+        let m = Mix {
+            tl,
+            files: files.clone(),
+            denoise: None,
+        };
+        let sh = Sh {
+            ring: (0..RING).map(|_| AtomicU32::new(0)).collect(),
+            w: AtomicUsize::new(0),
+            r: AtomicUsize::new(0),
+            played: AtomicU64::new(0),
+            lat: AtomicU64::new(0),
+            vol: AtomicU32::new(0),
+            quit: AtomicBool::new(true),
+            err: Default::default(),
+            on: AtomicU8::new(0),
+            wall: OnceLock::new(),
+        };
+        thread::scope(|sc| {
+            let t = Instant::now();
+            let h = sc.spawn(|| run(&sh, &m, 0.0));
+            while !h.is_finished() && t.elapsed() < Duration::from_secs(2) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            let s = t.elapsed().as_secs_f64();
+            let quick = h.is_finished();
+            // one that opens them anyway goes on past each FIFO a writer opens
+            while !h.is_finished() {
+                for f in &files {
+                    let mut w = std::fs::OpenOptions::new();
+                    drop(w.write(true).custom_flags(libc::O_NONBLOCK).open(f));
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            h.join().unwrap().unwrap();
+            eprintln!("mixer told to quit first: back after {:.1} ms", s * 1e3);
+            assert!(quick, "it opened the clips' files");
+        });
     }
 
     /// A mixer that fails (the music file gone) says why and plays silence on, so the clock keeps going (on the
