@@ -1035,10 +1035,11 @@ fn codes(notes: &[(Instant, Note)]) -> String {
 
 /// The real X5 with the state-changing checks the user allowed (`X5_CAMERA_WRITE=<scratch dir>`), each through the
 /// command its control sends, checked with reads of its own on the same session: a setting of the current mode
-/// changed and set back; a test photo; a time sync, the clock skew from the photo's and the clip's names before and
-/// after; a favourite on an existing clip and off again; a 5 s clip in VIDEO_NORMAL with a highlight mark (the clip's
-/// HIGHLIGHT trailer record) and the notifications meanwhile; the photo and the clip in the album, then deleted from
-/// it. Mode, settings and file list end as they began, also when a check fails.
+/// changed and set back; a test photo; a time sync, the clock skew from the photo's name (already after a sync: the
+/// worker's connect sets the clock, and the X5 does not report it, so nothing reads it before) and from the clip's
+/// after the manual one; a favourite on an existing clip and off again; a 5 s clip in VIDEO_NORMAL with a highlight
+/// mark (the clip's HIGHLIGHT trailer record) and the notifications meanwhile; the photo and the clip in the album,
+/// then deleted from it. Mode, settings and file list end as they began, also when a check fails.
 #[test]
 fn real_writes() {
     let Some(d) = std::env::var_os("X5_CAMERA_WRITE").map(PathBuf::from) else {
@@ -1126,8 +1127,8 @@ fn real_writes() {
 
         let t = unix();
         let p = r.photo()?;
-        let before = named(&p).ok_or("photo name")? - t;
-        println!("  clock skew before the sync (photo name): {before:+} s");
+        let con = named(&p).ok_or("photo name")? - t;
+        println!("  clock skew after the connect's sync (photo name): {con:+} s");
 
         let k = r.said.len();
         r.w.tx.send(Cc::Time).unwrap();
@@ -1148,7 +1149,7 @@ fn real_writes() {
         let (v, shown) = r.record(5.0, Some(3.5))?;
         let after = named(&v).ok_or("clip name")? - t;
         let ns = r.notes.lock().unwrap()[n..].to_vec();
-        println!("  clock skew after the sync (clip name): {after:+} s");
+        println!("  clock skew after the manual sync (clip name): {after:+} s");
         println!("  notifications during the clip: {}", codes(&ns));
         for (at, x) in &ns {
             if let Note::CaptureStatus(_) | Note::RecordStatus(_) | Note::CaptureStopped(_) = x {
