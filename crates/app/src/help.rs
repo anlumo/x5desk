@@ -202,7 +202,7 @@ struct Model(
     &'static str,
 );
 
-const MODELS: [Model; 8] = [
+const MODELS: [Model; 7] = [
     Model(
         "RAFT-small",
         "seam flow (stitch)",
@@ -232,15 +232,6 @@ const MODELS: [Model; 8] = [
          use only by arrangement with its authors). The weights are published under Apache-2.0. Check the datasets' \
          terms before any commercial use.",
         include_str!("../../track/models/LICENSE-vittrack"),
-    ),
-    Model(
-        "OSNet-AIN x1.0",
-        "person re-identification (track)",
-        "MIT",
-        "Kaiyang Zhou's torchreid weights (osnet_ain_x1_0_msmt17), exported by us; Copyright (c) 2018 Kaiyang Zhou",
-        "⚠ Trained on MSMT17, a research dataset released under its own terms (research use); the weights are \
-         published under MIT by their authors. Check the dataset's terms before any commercial use.",
-        include_str!("../../track/models/LICENSE-osnet"),
     ),
     Model(
         "YuNet",
@@ -408,6 +399,12 @@ impl Help {
             });
             ui.add_space(6.0);
         }
+        ui.label(
+            "Person re-identification (track) uses no model: LOMO, a hand-made appearance feature from Liao et al., \
+             \"Person Re-identification by Local Maximal Occurrence Representation and Metric Learning\" (CVPR 2015, \
+             arXiv:1406.4216), written for this app from the paper, with no weights and no training data. It replaces \
+             OSNet-AIN, whose training data (MSMT17) is for research use only.",
+        );
     }
 }
 
