@@ -2242,8 +2242,10 @@ impl Editor {
                 self.drag = Some(Drag::Move(k));
                 acts.push(Act::Sel(k));
             }
+            // a drop is a release: egui also ends a drag on Escape, the button still down, which cancels the move
             if body.drag_stopped()
                 && let Some(Drag::Move(from)) = self.drag.take()
+                && ui.input(|i| i.pointer.any_released())
             {
                 drop = body.interact_pointer_pos().map(|q| (from, q.x));
             }

@@ -672,6 +672,60 @@ fn move_lost() {
     }
 }
 
+/// Escape cancels a clip's move (egui input, no samples needed): egui ends the drag on it as if it stopped, the button
+/// still down, and the move was placed; the release after it moves nothing. A drag released there moves the clip.
+#[test]
+fn move_escape() {
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = stitch::Ctx::new(&g.device, &g.queue);
+    let ctx = egui::Context::default();
+    let mut e = Editor::new(&g, &cx, &ctx, player::still(&g, &cx), None);
+    for i in 0..3 {
+        let f = e.pj.file(&format!("/nowhere/{i}.insv"), 20.0).unwrap();
+        e.ed(|p| p.insert(i, Clip::new(f, 0.0, 4.0)));
+    }
+    let files = |e: &Editor| e.pj.tl().clips.iter().map(|c| c.file).collect::<Vec<_>>();
+    let rect = frame(&mut e, &ctx, vec![]);
+    let x = |t: f64| rect.left() + 8.0 + t as f32 * e.zoom;
+    let y = rect.top() + ROWS[0] + ROWS[1] + 6.0 + ROWS[2] / 2.0;
+    let (a, end) = (
+        egui::pos2(x(0.0) + 20.0, y),
+        egui::pos2(x(e.pj.tl().dur()) + 100.0, y),
+    );
+    let esc = |pressed| egui::Event::Key {
+        key: egui::Key::Escape,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: Default::default(),
+    };
+    for ev in [
+        vec![egui::Event::PointerMoved(a)],
+        vec![btn(a, true)],
+        vec![egui::Event::PointerMoved(a + egui::vec2(30.0, 0.0))],
+        vec![egui::Event::PointerMoved(end)],
+    ] {
+        frame(&mut e, &ctx, ev);
+    }
+    assert!(matches!(e.drag, Some(Drag::Move(0))), "no move");
+    for ev in [
+        vec![esc(true)],
+        vec![esc(false)],
+        vec![btn(end, false)],
+        vec![],
+    ] {
+        frame(&mut e, &ctx, ev);
+    }
+    eprintln!(
+        "clip 0 moved past the end, Escape, release: files {:?}",
+        files(&e)
+    );
+    assert!(e.drag.is_none(), "the move went on");
+    assert_eq!(files(&e), [0, 1, 2], "Escape placed the move");
+    drag(&mut e, &ctx, a, end);
+    assert_eq!(files(&e), [1, 2, 0], "the drop moved nothing");
+}
+
 /// Index-based drags end when the timeline changes under them (egui input, no samples needed): a trim handle, a speed
 /// key, a volume point and a view key of clip 1 of 3, each dragged while clip 1 is deleted (Delete) or split at the
 /// playhead (S) halfway. The drag ends before the edit as an undo step of its own, the edit is one too, and the rest
