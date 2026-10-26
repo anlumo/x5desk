@@ -225,7 +225,9 @@ impl Player {
         Player::open_on(path, None)
     }
 
-    /// [`Player::open`] on output device `dev` (from [`device`]; None: the default).
+    /// [`Player::open`] on output device `dev` (from [`device`]; None: the default). A stream that fails to build or
+    /// start comes back as an `io::Error` holding the `cpal::Error` (`get_ref`); file, track, decoder and missing
+    /// device errors do not (the app's `player::lost` tells them apart by it).
     pub fn open_on(path: impl AsRef<Path>, dev: Option<cpal::Device>) -> io::Result<Player> {
         let mp4 = Mp4::open(path)?;
         let t = mp4
