@@ -15,20 +15,24 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   reference track checked by eye) asserts the box on the subject itself on half the frames, without it just a box.
   Track test results depend on the kernels burn's autotune picks (other kernels round VitTrack's confidence across
   its thresholds differently): a cold cubecl slot (App, burn's cache) tunes them under whatever else runs on the GPU.
+- Tests on numbered clips (`clip::tests::numbered`, made with the ffmpeg CLI: the B-frame, open-GOP and 10-bit tests of
+  the app's `clip.rs`, movie's B-frame test) skip with a note when ffmpeg is missing or cannot make the clip (an encoder
+  or filter it lacks, drawtext without fontconfig).
 - Tests that make paths in `$XDG_RUNTIME_DIR` name them `<name>-<pid>` and remove them through a drop guard, also
   when they fail. The test hook's burn cache is the exception: `x5desk-cubecl/<n>`, shared by every hook run on
   purpose, one process to a slot (`flock`), kept.
 - Concurrent test runs share `X5_FIXTURES`, `X5_OUT` and the temp dir: stitch, fx, the player's proxy and live's
   `tests/rtmp.rs` write a fixture cached under a fixed name under a name of the process (and thread) and rename it into
   place whole, and live's `tests/rtmp.rs` names what its listeners receive `<pid>-<name>`; other fixed-name caches
-  (stab's `.tracks`) are still written in place.
+  (stab's `.tracks`) are still written in place. Within one process, tests name their dirs apart: a
+  `clip::tests::Tmp` (`x5desk-<name>-<pid>`) is removed whole when it drops, also under another test using that dir.
 - The RTMP tests' `ffmpeg -listen` listeners (app `live.rs`, live `tests/rtmp.rs`) and `pw_gst`'s gst-launch are
   each held in a `Kid` drop guard, which kills and reaps the process also when the test fails; the listeners' `Kid`
   removes the file it received too, and gst-launch's output has a `Run` guard. `Kid` spawns with `PR_SET_PDEATHSIG`
   (SIGKILL), so a test process that is killed or aborts leaves none running. The signal follows the spawning thread:
-  the test's own thread spawns and owns the child. live's `tests/rtmp.rs` takes each listener's port from `bind(0)`,
-  trusts the listener only once a listening socket on that port is one of ffmpeg's own fds, and moves to another port
-  if ffmpeg exits first; the app's `live.rs` listeners still wait for any listening socket on their port.
+  the test's own thread spawns and owns the child. Both take a listener's port from `bind(0)` (`serve`; a reconnect
+  test's second listener takes the first one's again), trust the listener only once a listening socket on that port is
+  one of ffmpeg's own fds (its inode among `/proc/<pid>/fd`), and move to another port, 5 in all, if ffmpeg exits first.
 
 ## Crates
 
@@ -38,12 +42,12 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 | `media` | MP4 demux and mux (`sv3d` / `st3d`), `.insv` / `.insp` trailer (calibration, gyro, exposure), AAC decode (symphonia) and AAC-LC encode (`aacenc`), editor mixer with ducking and limiter (`mix`), music import (`music`), resampler, RNNoise denoise, audio output and master clock (cpal; `audio::Player::open_on` plays on a picked device, `audio::device(id)` resolves the settings' device id by exact match: it lists the devices, so resolve when the choice changes, never per open), MJPEG decode, UVC capture of the X5's Webcam Mode |
 | `proto` | Protobuf messages for the camera (prost, compiled with protox from `proto/`) |
 | `link` | Camera link: UCD framing, session, requests, notifications, HTTP tunnel with several connections, downloads; USB (nusb), Wi-Fi (TCP); BLE lives in `ble`. Connections start as `link::Opening` (dropping it cancels the sync); `Error::Silent` after 30 s without a sync answer; `Camera::set_time` sends the app's two SET_OPTIONS at once and returns both pending answers; `scan` / `watch` report `Plug::Disk` for an Insta360 product string under vendor 070a (the X5 in U-disk mode, or the first seconds of app mode); feature `sim`: a simulated camera (a handler status 0 leaves the request unanswered) |
-| `stitch` | Dual fisheye → equirect / perspective on the shared device from NV12 / P010 textures: template seam, RAFT flow, colour matching, stabilisation rotation; burn's attachment per device (`attach`) and its cache dir (`cache`: a slot of the process's own) |
+| `stitch` | Dual fisheye → equirect / perspective on the shared device from NV12 / P010 textures: template seam, RAFT flow, colour matching, stabilisation rotation; burn's attachment per device (`attach`) and its cache dir (`cache`: a slot of the process's own, else memory only) |
 | `stab` | Stabilisation maths: trailer gyro / accelerometer → per-frame orientation, smoothing (FlowState-like), horizon and direction lock, rolling-shutter terms |
 | `fx` | Image effects on the shared device: colour adjustments (incl. brightness, brilliance), automatic colour and underwater correction, `.cube` LUTs and our own looks, defringe (purple / green / blue), clarity, overlays (watermark, stickers, text) |
 | `edit` | Editor model: timeline, clips with a look and colour adjustments each (`fx::Params`: edit depends on fx), trim / split / speed / freeze, reframing keyframes and camera-movement presets, undo (a drag that ends where it started leaves no undo step and keeps the redo list), project files |
 | `export` | Render jobs: decode → stitch → stabilise → effects → encode → mux, 360 and flat, queue; editor timelines (`Cut::Edit`: speed ramps, freeze frames, views, each clip's adjustments and look via `fx`, audio mixed with music, RNNoise-denoised after the time-stretch when `Edit::denoise` is set, and AAC-encoded, or copied for plain 1× cuts without denoise); photo frame grabs (JPEG with GPano). `export::locks(gate, burn)` hands it the app's GATE / BURN; `Job::flat` keeps a flat 2:1 picture from a 360 hook untagged |
-| `track` | AI with open models (burn on the shared device): subject tracker on the sphere with re-identification (LOMO colour and texture histograms with Fisher weights learnt per session, no model), detector, auto framing, face privacy blur regions, highlights → `edit::Timeline`. The tracker finds a lost subject again only within its reach (`Seen::prior`, `Seen::speed`: the speed, in its own heights a second, it needs to be a candidate since it was last seen for sure, its heading carried on for up to a second; beyond what it reaches setting off at a walk and speeding up by 3 heights/s² to a sprint's 3, it is someone else; within it, its similarity loses 0.1 × (speed / 1 height a second)²), and a person only with the pick's template's box on it; one more like a person `find` took and the tracker lost again before VitTrack was sure of them (`Tracker::tried`, the last 8; not added to the gallery, as the subject can be one) needs VitTrack 0.5, not 0.25. `Tracker::fps` is the clip's frame rate (30 until set) |
+| `track` | AI with open models (burn on the shared device): subject tracker on the sphere with re-identification (LOMO colour and texture histograms with Fisher weights learnt per session, no model), detector, auto framing, face privacy blur regions, highlights → `edit::Timeline`. The tracker finds a lost subject again only within its reach (`Seen::prior`, `Seen::speed`: the speed, in its own heights a second, it needs to be a candidate since it was last seen for sure, its heading carried on for up to a second; beyond what it reaches setting off at a walk and speeding up by 3 heights/s² to a sprint's 3, it is someone else; within it, its similarity loses 0.1 × (speed / 1 height a second)²), and a person only with the pick's template's box on it (`vit::hit`: never on the detector's box alone); a person at least as like one `find` took and the tracker lost again before VitTrack was sure of them as like the subject (`vit::Tried`, the last 8; not added to the gallery, as the subject can be one) needs VitTrack 0.5, not 0.25 (`Tried::need`, also for whoever the tracker takes on its own after a gap). `Tracker::fps` is the clip's frame rate (30 until set) |
 | `ble` | Camera BLE: scan, wake, pairing, Wi-Fi credentials (btleplug). The X5's wake-up brings up its radios and session, never its screen. Feature `sim`: `Ble::sim`, a simulated adapter and camera on the real session code |
 | `live` | FLV and RTMP client, OBS frame protocol (Unix socket + DMA-BUF fds), PipeWire camera node |
 | `obs` | OBS source plugin (`cdylib`) that imports our frames |
@@ -76,6 +80,12 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 - H.264 input may miss whole access units (the live preview drops packets when the decode thread falls behind):
   frame_num gaps infer non-existing frames (8.2.5.2) that stand in with the pushed-out picture, and an IDR always
   recovers a full DPB. Loss shows as concealment until the next IDR, never as a refused stream.
+- A consumer that seeks calls `Decoder::restart()` before the access unit decoding restarts at. H.265: a CRA there is
+  handled as a BLA (HandleCraAsBlaFlag): a new POC sequence and an empty DPB. RASL pictures of an IRAP with
+  NoRaslOutputFlag (that CRA, a BLA, a CRA first in the stream or after an end of sequence) return `Error::Skip`:
+  nothing decoded, no frame index used. H.264 has no CRA, and restart changes nothing. Known bug: after a jump, H.264
+  decoding restarted at a non-IDR I picture (with libx264's `open-gop` such pictures are sync samples) can decode
+  pictures after it, up to the next I picture, as other frames', with no error; a fresh decoder decodes them right.
 - Anything else that stages a semaphore signal on wgpu's queue (DMA-BUF export, encoder input) stages it only after
   the submit it covers, never before: a signal staged first can be taken by another thread's earlier submit.
 - Stitch sources are whole NV12 / P010 textures or rects in one (full range, BT.709; `Ctx::planes` also takes
@@ -117,9 +127,10 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 - One module per screen: `library.rs` / `player.rs`; `editor.rs` (`deck.rs`, `sound.rs`, `thumbs.rs`, `doc.rs`);
   `lab.rs` (Shot Lab on crate shotlab); `camera.rs` (its worker connects in the app's order, PROTOCOL.md §5.1:
   identity, options, capture status, then the clock's two SET_OPTIONS (§5.3) on every USB and Wi-Fi connect, not
-  waited for: polled in its tick, the connect note and a low-battery note come once both answered, a refusal or
-  timeout adds an error note and the session stays; then the Capture screen's tap and the listing; Sync time takes
-  the same path; at quit only the running download's end is collected (`dl::end`), nothing new starts; `album.rs`,
+  waited for: polled in its tick; once both answered, the options are read again if both succeeded (the Clock row
+  shows the clock as set), then the connect note and a low-battery note come; a refusal or timeout adds an error note
+  and the session stays; then the Capture screen's tap and the listing; Sync time takes the same path; at quit only
+  the running download's end is collected (`dl::end`), nothing new starts; `album.rs`,
   `dl.rs`; `disk.rs`: a mounted card found through the mount table and the sysfs product string, listed with one
   trailer per item (its first file; empty files left out), imported as `file://` download entries; the bar takes
   U-disk mode from a mounted disk of the camera's own, else from the scan's `Plug::Disk` (`070a:4027`, also the first
@@ -152,9 +163,11 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   (`times` ascending, `Pic::k`). With B-frames the media thread holds a decoded frame back until those shown before
   it are queued, and a frame's release stops below the lowest decoder frame of the frames after it (`Pic::r`): a
   ring's release is one timeline in decode order. A seek starts at the last sync sample at or before the target in
-  decode order that is not shown after it (an open GOP's leading frames need the GOP before). A clip's decoders get
-  as many ring frames as reordering keeps decoded for a consumer holding one frame (2 without B-frames, 4 for libx264
-  `-bf 1`, 7 for its defaults) plus 2 to decode ahead (`Decoder::with_out`).
+  decode order that is not shown after it (an open GOP's leading frames need the GOP before). A seek that restarts
+  decoding there (`Plan::Go`) calls `Decoder::restart` on each decoder: the restart CRA's RASL frames show before it,
+  below the target, and their `Error::Skip` is no frame, no error. A clip's decoders get as many ring frames as
+  reordering keeps decoded for a consumer holding one frame (2 without B-frames, 4 for libx264 `-bf 1`, 7 for its
+  defaults) plus 2 to decode ahead (`Decoder::with_out`).
 - The editor's viewer redraws only from decks bound for the current edit (`schedule` runs before each redraw); while
   the playhead's frame is still decoding (seek, cut) the last picture stays. For a frame it takes the deck holding
   that frame (no seek pending) first, then one a few frames before it (decoding on), then any deck of the file
@@ -183,23 +196,30 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   text changes.
 - Config: every save to `<config>/x5desk` makes that dir owner-only (`main.rs` `private`), also when it exists
   already; the `live` file (stream key) is 0600. A stream key in the RTMP URL (key field empty: the last path
-  segment after the app, trailing '/' ignored, the same rule as `live::rtmp::Rtmp::start`) is drawn masked and handed
-  to `live::rtmp` as the key, never inside the URL; `live::rtmp::Rtmp::start`'s errors quote the URL without the key.
+  segment after the app, trailing '/' ignored as `live::rtmp::Rtmp::start` does, whitespace around the URL trimmed by
+  the app first: `live::dest`, `live::mask`) is drawn masked and handed to `live::rtmp` as the key, never inside the
+  URL. `Rtmp::start`'s errors quote the URL without the key; given no key and no segment after the app, it fails with
+  "no stream key", quoting the server only (`<scheme>://<host>[:<port>]`).
 - Device policy (`main.rs` `GATE: RwLock`, `BURN: Mutex`): the app's own submitting threads hold `GATE` shared around
   each piece of GPU work (live output thread per pass, RTMP encoder per frame, export threads and decoders, photo
   exports); threads whose work runs through burn (RAFT worker, the AI models, shotlab's person network) hold `BURN`
   for a whole job instead. Lock order: GATE is dropped before BURN is taken; BURN never nests. A new submitter takes
   one of them.
 - burn's cache: burn keeps its device measurements and autotune results (burn feature `persistence`) in a slot of
-  `<cache>/x5desk/cubecl` (`stitch::cache`, called in `main` before `stitch::attach`). Test-hook runs share
-  `$XDG_RUNTIME_DIR/x5desk-cubecl` (the temp dir without it), so they start warm too; any other burn user (tests) gets
-  cubecl's own root from `stitch::attach` (`target/environment` of the outermost Cargo workspace above the working
-  dir, else the user cache dir). A slot is the first `<n>` whose `lock` the process can `flock`: cubecl-environment
-  0.11's database (turso 0.8, experimental multi-process WAL) loses acknowledged writes, reads corrupt pages and
-  panics when processes share it. The lock goes with the process however it ends, so slots are reused and never
-  outnumber the processes that ran at once (nothing trims them). Build records are off. With a warm slot RAFT's
-  first job only compiles its kernels (≈ 2 s instead of ≈ 10 s on a quiet GPU; 4–9 s instead of 22–46 s under other
-  load). A configure retry (below) that lands in a burn job still waits for the job's end, the UI frozen meanwhile.
+  `<cache>/x5desk/cubecl` (`stitch::cache(Option<&Path>)`, called in `main` before `stitch::attach`). Test-hook runs
+  share `$XDG_RUNTIME_DIR/x5desk-cubecl` (the temp dir without it), so they start warm too, if it is a dir of this
+  user's, not a symlink, that no other user can write to (`main.rs` `mine`, made 0700 when missing); any other burn
+  user (tests) gets cubecl's own root from `stitch::attach` (`target/environment` of the outermost Cargo workspace
+  above the working dir, else the user cache dir). A slot is the first `<n>` (made 0700) whose `lock` the process can
+  `flock`, never through a symlink another user planted (the lock made with `O_EXCL`, else taken only if `lstat` shows
+  a plain file): cubecl-environment 0.11's database (turso 0.8, experimental multi-process WAL) loses acknowledged
+  writes, reads corrupt pages and panics when processes share it. The lock goes with the process however it ends, so
+  slots are reused and never outnumber the processes that ran at once (nothing trims them). With no dir (a hook dir
+  refused, neither `XDG_CACHE_HOME` nor `HOME`) or no slot locked (no locks on that file system, no write access),
+  cubecl's root is `/dev/null`, where its database can't be opened, and cubecl keeps it all in memory. Build records
+  are off. With a warm slot RAFT's first job only compiles its kernels (≈ 2 s instead of ≈ 10 s on a quiet GPU; 4–9 s
+  instead of 22–46 s under other load). A configure retry (below) that lands in a burn job still waits for the job's
+  end, the UI frozen meanwhile.
 - The app owns the device's uncaptured-error handler (`main.rs` `errors`). A `Surface::configure` that fails with
   `GpuWaitTimeout` (another thread submitted during its idle wait; native Wayland never reports the stale swapchain
   `Outdated`) is retried in the next painted frame: egui is made to reconfigure by flipping
@@ -214,14 +234,14 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   camera's session (after its `/CONF` attempt, which may fail). `X5DESK_TEST=<tokens>` drives the app; under it
   nothing of the user's config or cache is read, written or trimmed (app and camera settings, the recent list; the
   download queue is the run's own; no thumbnail cache: `settings::Prefs::thumbs`; burn's cache is the hook's shared
-  `x5desk-cubecl` dir), and `dest=` is also the download folder. Tokens:
+  `x5desk-cubecl` dir, or memory only), and `dest=` is also the download folder. Tokens:
   - player: `play`, `loop`, `vol=`, `view=`, `seek=`, `proxy`, `stats=<s>`, `novsync`, `full`,
     `stab=off|free|horizon|direction`, `smooth=<s>`, `aim=<yaw>/<pitch>/<fov>`, `max` (`play`, `seek=` and `vol=`
-    also drive the viewer of plain videos, `movie.rs`. `max` maximises the window, asked until the window manager has
-    done it: an X11 one ignores a maximise for a window it has not mapped, and eframe maps the window after its first
-    frame. Under XWayland on COSMIC's tiling the window is otherwise tiled, 602 × 996 here; with `max` it fills the
-    output's work area, 2488 × 1012 on a 2560 × 1080 output. The screenshot waits for it, under a window manager that
-    never maximises until the hook's 120 s fallback);
+    also drive the viewer of plain videos, `movie.rs`. `max` maximises the window, asked every 250 ms until the window
+    manager has done it: an X11 one ignores a maximise for a window it has not mapped, and eframe maps the window after
+    its first frame. Under XWayland on COSMIC's tiling the window is otherwise tiled, 602 × 996 here; with `max` it
+    fills the output's work area, 2488 × 1012 on a 2560 × 1080 output. The screenshot waits for it, 12 asks (about
+    3 s) at most; then the run logs the size it got and goes on);
   - camera: `camera=album|downloads|settings|wireless`, `dl=<uri>`, `mount=<dir>` (repeatable fake card; the real
     mount table is not read), `import`, `ble=sim`, `ble=sta` (the simulated X5 on HomeNet from an earlier
     session: connect, pair, read its station connection; no join), `battery=<%>` (the `replay=` camera's level);
@@ -234,9 +254,9 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
     `etab=clip|reframe|colour|audio|overlays`, `e360`, `epreset=<preset>`, `esave=<file>`,
     `tlexport=<preset>[:noraft][:qp=<n>]`, `eplay`;
   - AI and Shot Lab: `box=<x0>/<y0>/<x1>/<y1>`, `restab=off|free|horizon|direction[/<σ>]`, `ebox=…`, `blur`,
-    `autoedit[=<preset>[:faces]]`, `lab=<effect>`, `lrange=<a>/<b>`, `lpre`, `lexp=<preset>[:faces]` (`box=` takes
-    the view's aspect when it applies the box, which may still change with the layout, so the subject's size can
-    differ between runs);
+    `autoedit[=<preset>[:faces]]`, `lab=<effect>`, `lrange=<a>/<b>`, `lpre`, `lexp=<preset>[:faces]` (`box=` is 0..1
+    of the player's view at 16:9, as a flat 1080p export frames it, whatever the window's size or layout; the hook
+    prints its subject, `x5desk: box: subject at yaw …, pitch …, <w>° × <h>°`, so runs can be compared);
   - other screens: `settings`, `help[=keys|about|<screen>]`.
 
   Real-camera tests that change the camera's state and restore it: `X5_CAMERA_WRITE=<dir>`
