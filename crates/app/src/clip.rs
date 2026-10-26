@@ -366,9 +366,9 @@ fn run(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use std::time::Instant;
+    use std::{path::Path, time::Instant};
 
     #[test]
     fn seek_maths() {
@@ -410,8 +410,8 @@ mod tests {
         assert_eq!((o[0], o[1]), (&[0xa, 0xb][..], &[0xc][..]));
     }
 
-    /// FFmpeg's NV12 of frame `k` of video stream `t` (test tool).
-    fn ffmpeg(p: &std::path::Path, t: usize, k: usize) -> Vec<u8> {
+    /// FFmpeg's NV12 (P010 when `deep`) of frame `k` (presentation order) of video stream `t` (test tool).
+    fn ffmpeg(p: &Path, t: usize, k: usize, deep: bool) -> Vec<u8> {
         let o = std::process::Command::new("ffmpeg")
             .args(["-v", "error", "-i"])
             .arg(p)
@@ -429,25 +429,27 @@ mod tests {
                 "-f",
                 "rawvideo",
             ])
-            .args(["-pix_fmt", "nv12", "-"])
+            .args(["-pix_fmt", if deep { "p010le" } else { "nv12" }, "-"])
             .output()
             .expect("ffmpeg");
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         o.stdout
     }
 
-    /// The window of frame `f` of `ring` read back as NV12 through copies of its plane views; the caller acquires
-    /// and releases it.
+    /// The window of frame `f` of `ring` read back as NV12, or P010 (2 bytes per sample, little-endian) from a 10-bit
+    /// ring, through copies of its plane views; the caller acquires and releases it.
     fn read(g: &Gpu, ring: &Ring, [x, y, w, h]: [u32; 4], f: u64) -> Vec<u8> {
+        let tex = ring.texture(f);
+        // bytes per sample: a P010 row of either plane is 2 · w bytes
+        let b = 1 + (tex.format() == wgpu::TextureFormat::P010) as usize;
         let (w, h) = (w as usize, h as usize);
-        let bpr = w.next_multiple_of(256);
+        let bpr = (b * w).next_multiple_of(256);
         let buf = g.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: (bpr * h * 3 / 2) as u64,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let tex = ring.texture(f);
         let mut e = g.device.create_command_encoder(&Default::default());
         for (aspect, s, offset) in [
             (wgpu::TextureAspect::Plane0, 1, 0),
@@ -499,9 +501,125 @@ mod tests {
             .unwrap();
         let m = buf.slice(..).get_mapped_range().unwrap();
         (0..h * 3 / 2)
-            .flat_map(|r| &m[r * bpr..r * bpr + w])
+            .flat_map(|r| &m[r * bpr..r * bpr + b * w])
             .copied()
             .collect()
+    }
+
+    /// A directory of the test run's own under `X5_FIXTURES` (default: the temp dir), removed when dropped, also
+    /// when the test fails.
+    pub(crate) struct Tmp(pub PathBuf);
+
+    impl Tmp {
+        pub fn new(name: &str) -> Tmp {
+            let d = std::env::var_os("X5_FIXTURES")
+                .map_or_else(std::env::temp_dir, PathBuf::from)
+                .join(format!("x5desk-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&d).unwrap();
+            Tmp(d)
+        }
+    }
+
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Makes `p` with the ffmpeg CLI (test tool; false if it is missing): 200 frames of 640 × 360 at 25 fps, frame
+    /// n's number burned in as digits and in binary along the top (`number`), encoded with `enc`.
+    pub(crate) fn numbered(p: &Path, enc: &[&str]) -> bool {
+        let bits = "if(lt(Y\\,40)\\,16+219*bitand(floor(N/pow(2\\,floor(X/40)))\\,1)";
+        let vf = format!(
+            "geq=lum='{bits}\\,lum(X\\,Y))':cb='if(lt(Y\\,40)\\,128\\,cb(X\\,Y))':\
+             cr='if(lt(Y\\,40)\\,128\\,cr(X\\,Y))',drawtext=text='%{{frame_num}}':fontsize=160:\
+             fontcolor=white:box=1:boxcolor=black:x=(w-tw)/2:y=(h-th)/2+20"
+        );
+        let Ok(o) = std::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=640x360:r=25:d=8",
+            ])
+            .args(["-vf", &vf])
+            .args(enc)
+            .arg(p)
+            .output()
+        else {
+            return false;
+        };
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        true
+    }
+
+    /// The number `numbered` burned into a picture whose luma rows are `w` samples of `b` bytes (the high byte read).
+    pub(crate) fn number(y: &[u8], w: usize, b: usize) -> usize {
+        (0..8)
+            .map(|i| ((y[(20 * w + 40 * i + 20) * b + b - 1] > 128) as usize) << i)
+            .sum()
+    }
+
+    /// Frame `k` the way the player shows it after a seek, read back.
+    fn show(g: &Gpu, v: &mut Video, k: usize, held: &mut Option<Pic>) -> Vec<u8> {
+        v.seek(g, k, held.take());
+        let t0 = Instant::now();
+        let x = loop {
+            if let (Some(x), _) = v.take(v.times[k], true) {
+                break x;
+            }
+            assert!(t0.elapsed().as_secs() < 10, "seek {k} stalled");
+            thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!((x.k, x.t), (k, v.times[k]));
+        v.acquire(g, &x);
+        let px = read(g, &v.rings[0], v.view, x.f[0]);
+        v.release_before(g, &x);
+        *held = Some(x);
+        px
+    }
+
+    /// A 10-bit H.265 clip (ffmpeg CLI, libx265 Main 10) decodes into P010: frame 30 read back after a seek is
+    /// FFmpeg's P010 to the byte, and carries its number.
+    #[test]
+    fn deep() {
+        let dir = Tmp::new("deep");
+        let p = dir.0.join("main10.mp4");
+        let enc = [
+            "-c:v",
+            "libx265",
+            "-pix_fmt",
+            "yuv420p10le",
+            "-tag:v",
+            "hvc1",
+            "-x265-params",
+            "log-level=error:bframes=0",
+        ];
+        if !numbered(&p, &enc) {
+            eprintln!("no ffmpeg: skipped");
+            return;
+        }
+        let g = Arc::new(Gpu::new().unwrap());
+        let mut v = Video::open(&g, std::slice::from_ref(&p), || {}).unwrap();
+        assert_eq!(v.rings[0].texture(0).format(), wgpu::TextureFormat::P010);
+        let (mut held, k) = (None, 30);
+        let px = show(&g, &mut v, k, &mut held);
+        let bad = px
+            .iter()
+            .zip(ffmpeg(&p, 0, k, true))
+            .filter(|(a, b)| *a != b)
+            .count();
+        eprintln!(
+            "main10: frame {k}: {} bytes, {bad} differ from FFmpeg, number {}",
+            px.len(),
+            number(&px, 640, 2)
+        );
+        assert_eq!((px.len(), bad, number(&px, 640, 2)), (640 * 360 * 3, 0, k));
+        v.release(&g, &held.unwrap());
+        assert_eq!(v.err(), None);
     }
 
     /// Seeks through the clip the way the player does (seek, then `take` at the target's time) and checks the
@@ -545,7 +663,7 @@ mod tests {
                 for (r, ring) in v.rings.iter().enumerate() {
                     ring.acquire(&g, x.f[r]);
                     let ours = read(&g, ring, v.view, x.f[r]);
-                    let theirs = ffmpeg(&p, r, k);
+                    let theirs = ffmpeg(&p, r, k, false);
                     let bad = ours.iter().zip(&theirs).filter(|(a, b)| a != b).count();
                     println!(
                         "frame {k}, track {r}: {} bytes, {bad} differ from FFmpeg",
