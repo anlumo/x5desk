@@ -16,8 +16,8 @@ use std::{
 };
 use stitch::{Calib, Ctx, Frame, Pose, Preview, Src, Stitcher, View};
 use track::{
-    Ai, Blur, Cam, Emb, Framer, Gallery, Hide, LOW, Region, Sample, Scorer, Sig, State, Subject,
-    Tracker, face_tiles, iou, sim, sphere, yaw_pitch,
+    Ai, Blur, Cam, Emb, Framer, Gallery, Hide, LOW, Region, Sample, Scorer, Seen, Sig, State,
+    Subject, Tracker, face_tiles, iou, sim, sphere, yaw_pitch,
 };
 
 /// Lens texture side the streams are scaled to, equirect for the networks, output view.
@@ -352,13 +352,14 @@ fn vpx(v: &View) -> impl Fn(Vec3) -> Option<Vec2> {
     }
 }
 
-/// Frames `ks` of `$X5_LOOK` (default v627) stitched, with the detections over `sphere()` drawn, as PNGs: to
-/// pick subjects by eye and to see what the detector finds.
+/// Frames `ks` of `$X5_LOOK` (v606, v635, default v627) stitched, with the detections over `sphere()` drawn, as PNGs:
+/// to pick subjects by eye and to see what the detector finds.
 #[test]
 fn look() {
     let Some(d) = samples() else { return };
     let name = match std::env::var("X5_LOOK").as_deref() {
         Ok("v606") => "v606",
+        Ok("v635") => "v635",
         _ => "v627",
     };
     let ks: Vec<usize> = std::env::var("X5_LOOK_FRAMES")
@@ -432,7 +433,11 @@ fn subject() {
     let Some(d) = samples() else { return };
     let arg = std::env::var("X5_TRACK").unwrap_or_else(|_| "v606:-71:-43".into());
     let a: Vec<&str> = arg.split(':').collect();
-    let name = if a[0] == "v627" { "v627" } else { "v606" };
+    let name = match a[0] {
+        "v627" => "v627",
+        "v635" => "v635",
+        _ => "v606",
+    };
     let at = track::dir(a[1].parse().unwrap(), a[2].parse().unwrap());
     let n: usize = std::env::var("X5_FRAMES").map_or(usize::MAX, |v| v.parse().unwrap());
     let blank = std::env::var("X5_BLANK").map_or(0..0, |v| {
@@ -503,7 +508,9 @@ fn subject() {
                 s.size.y
             );
             cls = s.cls;
-            tr = Some(Tracker::new(&mut ai, &pano, Subject::from(s)).unwrap());
+            let mut t = Tracker::new(&mut ai, &pano, Subject::from(s)).unwrap();
+            t.fps = c.fps;
+            tr = Some(t);
             rows.push((
                 Sample {
                     raw: s.dir,
@@ -764,21 +771,25 @@ fn subject() {
 /// tracker's gallery while nobody has been seen next to the subject) and with the first 1 to 20 features of the people
 /// next to it (plain cosine below 12). Prints the similarity distributions, how many pass the tracker's rules (the
 /// subject's, the others'), how often the subject is the most similar person in the frame (what finding it again in a
-/// crowd needs) and whom `find()` would take.
+/// crowd needs) and whom `find()` would take; for the tracker's gallery and the subject's features alone also with the
+/// speed the subject needs to be each box (`Seen::speed`) since the gallery last saw it (frame 110 of the reference,
+/// heading as it did then): who is beyond its reach, the rules and `find()` on similarities less its prior
+/// (`Seen::prior`), and the ROC AUC of the subject against the others without and with it.
 #[test]
 fn reid() {
     let (Some(d), Ok(rp)) = (samples(), std::env::var("X5_REF")) else {
         eprintln!("X5_REF unset: skipped");
         return;
     };
-    let rf: Vec<(Vec3, f32)> = std::fs::read_to_string(&rp)
+    // per frame: direction, score, height (degrees)
+    let rf: Vec<(Vec3, f32, f32)> = std::fs::read_to_string(&rp)
         .unwrap()
         .lines()
         .skip(1)
         .map(|l| {
             let v: Vec<&str> = l.split(',').collect();
             let f = |i: usize| v[i].parse::<f32>().unwrap();
-            (track::dir(f(3), f(4)), f(2))
+            (track::dir(f(3), f(4)), f(2), f(8))
         })
         .collect();
     let name = if rp.ends_with("v606_track.csv") {
@@ -793,9 +804,9 @@ fn reid() {
     let rig = Rig::new(&g, &c);
     let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
     let mut dec = Dec::new(&c, n);
-    // per key frame: (frame, is the subject, feature)
-    let mut v: Vec<(usize, bool, Emb)> = vec![];
-    for (k, &(rd, rs)) in rf.iter().enumerate().take(n) {
+    // per key frame: (frame, is the subject, feature, box)
+    let mut v: Vec<(usize, bool, Emb, (Vec3, Vec2))> = vec![];
+    for (k, &(rd, rs, _)) in rf.iter().enumerate().take(n) {
         assert!(dec.next());
         if k % 10 != 0 || rs <= 0.0 {
             continue;
@@ -811,12 +822,21 @@ fn reid() {
         let near = |b: &(Vec3, Vec2), a: f32| b.0.angle_between(rd).to_degrees() < a;
         for (b, e) in ps.iter().zip(ai.embed(&pano, &ps)) {
             if near(b, 4.0) {
-                v.push((k, true, e));
+                v.push((k, true, e, *b));
             } else if !near(b, 8.0) && (k >= 240 || near(b, 30.0)) {
-                v.push((k, false, e));
+                v.push((k, false, e, *b));
             }
         }
     }
+    // the subject where the gallery last saw it, heading as over the half second before
+    let (d0, _, h0) = rf[110];
+    let w0 = (d0 - rf[95].0) / 15.0;
+    let seen = Seen {
+        d: d0,
+        h: 2.0 * (h0 / 2.0).to_radians().tan(),
+        w: w0 - w0.dot(d0) * d0,
+        k: 110,
+    };
     // the tracker's gallery, then one of the subject's features alone (nobody seen next to it: plain cosine), then
     // with the first features of the people seen next to it
     for nb in [usize::MAX, 0, 1, 2, 3, 4, 6, 8, 12, 16, 20] {
@@ -824,16 +844,28 @@ fn reid() {
         let (me, not) = v
             .iter()
             .filter(|x| x.0 < 120)
-            .partition::<Vec<&(usize, bool, Emb)>, _>(|x| x.1);
+            .partition::<Vec<&(usize, bool, Emb, (Vec3, Vec2))>, _>(|x| x.1);
         let g0: Vec<_> = me.into_iter().chain(not.into_iter().take(nb)).collect();
         for x in &g0 {
             gal.add(x.2, x.1);
         }
-        let sc: Vec<(usize, bool, (f32, f32))> = v
+        // (frame, is the subject, similarities, speed the subject needs, its prior: None beyond its reach)
+        type Sc = (usize, bool, (f32, f32), f32, Option<f32>);
+        let sc: Vec<Sc> = v
             .iter()
             .filter(|x| x.0 >= 240)
-            .map(|x| (x.0, x.1, gal.score(&x.2)))
+            .map(|x| {
+                (
+                    x.0,
+                    x.1,
+                    gal.score(&x.2),
+                    seen.speed(x.3, x.0 as u32, c.fps),
+                    seen.prior(x.3, x.0 as u32, c.fps),
+                )
+            })
             .collect();
+        // the similarity to the subject under the prior; beyond the reach -2
+        let pr = |x: &Sc| (x.4.map_or(-2.0, |q| x.2.0 - q), x.2.1);
         let n = g0.iter().filter(|x| x.1).count();
         eprintln!(
             "gallery: {n} subject and {} neighbour features from frames 0..120",
@@ -876,6 +908,7 @@ fn reid() {
         // tracker's rule passes; here of everyone on the sphere, not only the 8 nearest within reach)
         let ks: BTreeSet<usize> = sc.iter().map(|x| x.0).collect();
         let (mut top, mut sub, mut me, mut other) = (0, 0, 0, 0);
+        let (mut mp, mut op) = (0, 0);
         for k in ks.iter() {
             let m = sc.iter().filter(|x| x.0 == *k);
             let s = m
@@ -886,11 +919,20 @@ fn reid() {
             sub += (s > -2.0) as usize;
             top += (s > -2.0 && m.clone().filter(|x| !x.1).all(|x| x.2.0 < s)) as usize;
             match m
+                .clone()
                 .filter(|x| gal.is(x.2))
                 .max_by(|a, b| a.2.0.total_cmp(&b.2.0))
             {
                 Some(x) if x.1 => me += 1,
                 Some(_) => other += 1,
+                None => {}
+            }
+            match m
+                .filter(|x| gal.is(pr(x)))
+                .max_by(|a, b| pr(a).0.total_cmp(&pr(b).0))
+            {
+                Some(x) if x.1 => mp += 1,
+                Some(_) => op += 1,
                 None => {}
             }
         }
@@ -905,6 +947,38 @@ fn reid() {
             pass(false, &|s| gal.other(s)),
             ks.len()
         );
+        if nb == usize::MAX || nb == 0 {
+            let cnt = |who: bool, f: &dyn Fn(&Sc) -> bool| {
+                let t: Vec<_> = sc.iter().filter(|x| x.1 == who).collect();
+                format!("{}/{}", t.iter().filter(|x| f(x)).count(), t.len())
+            };
+            // the chance that the subject scores above someone else
+            let auc = |f: &dyn Fn(&Sc) -> f32| {
+                let (a, b): (Vec<&Sc>, Vec<&Sc>) = sc.iter().partition(|x| x.1);
+                let w: f64 = a
+                    .iter()
+                    .flat_map(|x| {
+                        b.iter()
+                            .map(move |y| f(x).total_cmp(&f(y)) as i8 as f64 / 2.0 + 0.5)
+                    })
+                    .sum();
+                w / (a.len() * b.len()).max(1) as f64
+            };
+            let mut u: Vec<f64> = sc.iter().filter(|x| x.1).map(|x| x.3 as f64).collect();
+            let (u50, _, umx) = pct(&mut u);
+            eprintln!(
+                "  with the speed the subject needs since frame 110: the subject median {u50:.3}, max {umx:.3} heights \
+                 a second; beyond its reach subject {}, others {}; the rule passes subject {}, others {}; find() would \
+                 take the subject on {mp}, someone else on {op}; ROC AUC subject against others {:.4} by similarity, \
+                 {:.4} with the prior",
+                cnt(true, &|x| x.4.is_none()),
+                cnt(false, &|x| x.4.is_none()),
+                cnt(true, &|x| gal.is(pr(x))),
+                cnt(false, &|x| gal.is(pr(x))),
+                auc(&|x| x.2.0),
+                auc(&|x| pr(x).0)
+            );
+        }
     }
 }
 

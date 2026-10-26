@@ -5,7 +5,9 @@
 //! the box centre offset and its size relative to the search crop. When the confidence drops, the detector checks the
 //! box; when the subject is lost, it searches around its last direction and then the whole horizon. A person is
 //! found again by appearance (`reid`): its features from the pick and from frames where it was tracked with
-//! certainty against those of the people seen next to it; anything else by the pick's template.
+//! certainty against those of the people seen next to it; anything else by the pick's template. Either only within
+//! the subject's reach ([`Seen::prior`]): the speed it needs to be a candidate ([`Seen::speed`]) since it was last
+//! seen for sure, in its own heights a second (its box height gives its distance), from where it was heading.
 
 use crate::reid::{self, Emb, Gallery};
 use crate::{Ai, Cam, Crops, Det, In, Job, Norm, Pano, deg, iou, read, sphere, tan};
@@ -45,6 +47,21 @@ const SMAX: f32 = 3.732;
 const SMIN: f32 = 0.0175;
 /// Frames between appearance samples while a person is tracked.
 const LOOK: u32 = 10;
+/// The speed the subject needs to be a box ([`Seen::speed`]): box centres `SLACK` of its heights apart for nothing (a
+/// box's jitter), a box 1/`JIT` to `JIT` times as tall as the person (its jitter: ±20 % frame to frame on the reference
+/// tracks), a candidate's down to `HIDE` times (half hidden or crouching).
+const SLACK: f32 = 0.25;
+const HIDE: f32 = 0.4;
+const JIT: f32 = 1.25;
+/// The subject's speed relative to the camera, in its heights a second: commonly up to `WALK` (the samples' reference
+/// tracks: 0.6 and 0.9 at most over half a second and more), at most `SPEED` (a sprint), reached from a walk at `ACC`
+/// a second (a sprint's start, 5 m/s²). A candidate's similarity to the subject loses `PRIOR` × (speed / `WALK`)²
+/// ([`Seen::prior`]): at a walk's pace about the gap between the subject's median similarity and the others' 95th
+/// percentile in `tests/footage.rs` `reid` (0.08 on v627, 0.10 on v606), four times that at a jog's.
+const SPEED: f32 = 3.0;
+const WALK: f32 = 1.0;
+const ACC: f32 = 3.0;
+const PRIOR: f32 = 0.1;
 
 /// What to track: centre direction and angular width, height (degrees), and the detector class if known (it
 /// narrows re-detection; None takes any class).
@@ -91,6 +108,59 @@ pub enum State {
     Found,
 }
 
+/// Where the subject was on frame `k`: box centre, height in the tangent plane (a person about one height tall stands
+/// 1/`h` heights away), angular velocity (radians a frame, tangent at `d`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Seen {
+    pub d: Vec3,
+    pub h: f32,
+    pub w: Vec3,
+    pub k: u32,
+}
+
+impl Seen {
+    /// The speed (its heights a second) the subject needs to be box `x` (centre, angular width and height in degrees)
+    /// on frame `k` at `fps`: the least distance between where it would be had it kept its angular velocity for up to
+    /// a second and the box, the distances known to within the box heights' 1/`JIT`..`JIT` (the box's `HIDE`..`JIT`),
+    /// less `SLACK`, over the time. It falls as the gap grows: after a long one anyone can be the subject.
+    pub fn speed(&self, x: (Vec3, Vec2), k: u32, fps: f32) -> f32 {
+        let n = k.saturating_sub(self.k).max(1) as f32;
+        let t = self.w.length() * n.min(fps);
+        let c = (self.d * t.cos() + self.w.normalize_or_zero() * t.sin()).dot(x.0);
+        let h = tan(x.1).y;
+        let (a, b) = ([1.0 / (JIT * self.h), JIT / self.h], [HIDE / h, JIT / h]);
+        let f = |x: f32, y: f32| x * x + y * y - 2.0 * x * y * c;
+        // the squared distance is convex over the two ranges: least on an edge, where the other one is clamped
+        let d = [
+            f(a[0], (a[0] * c).clamp(b[0], b[1])),
+            f(a[1], (a[1] * c).clamp(b[0], b[1])),
+            f((b[0] * c).clamp(a[0], a[1]), b[0]),
+            f((b[1] * c).clamp(a[0], a[1]), b[1]),
+        ]
+        .into_iter()
+        .fold(f32::MAX, f32::min);
+        (d.max(0.0).sqrt() - SLACK).max(0.0) * fps / n
+    }
+
+    /// What box `x`'s similarity to the subject loses for the speed `s` the subject needs to be it on frame `k`
+    /// ([`Seen::speed`]): `PRIOR` × (`s` / `WALK`)², the more the faster beyond a walk; None beyond its reach in the
+    /// time, someone else. It sets off at up to `WALK` from its heading and speeds up by `ACC` a second to `SPEED`: its
+    /// fastest mean speed over `t` seconds is `WALK` + `ACC`·`t`/2 until it runs at `SPEED`, so that a short gap
+    /// reaches little (in 0.3 s 0.44 heights, where a sprint covers 0.9).
+    pub fn prior(&self, x: (Vec3, Vec2), k: u32, fps: f32) -> Option<f32> {
+        let (s, t) = (
+            self.speed(x, k, fps),
+            k.saturating_sub(self.k).max(1) as f32 / fps,
+        );
+        let v = if ACC * t <= SPEED - WALK {
+            WALK + ACC * t / 2.0
+        } else {
+            SPEED - (SPEED - WALK).powi(2) / (2.0 * ACC * t)
+        };
+        (s <= v).then(|| PRIOR * (s / WALK).powi(2))
+    }
+}
+
 /// One frame of a track.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sample {
@@ -126,6 +196,17 @@ pub struct Tracker {
     /// Persons: who the subject is and who it is not; frames since the last sample.
     gal: Option<Gallery>,
     tick: u32,
+    /// Frames stepped (the pick's is 0) and their rate (30 until set: the subject's speed is per second).
+    fr: u32,
+    pub fps: f32,
+    /// Angular velocity of the smoothed direction (radians a frame); where the subject was last seen for sure and
+    /// whether the tracker has been sure on every frame since (it follows them): a person at the pick and where a
+    /// sample joined its features (`look`), anything else also where its pick's template found it again. Not where
+    /// `find` took a person, nor after: that one may be someone else, and the prior from it would favour them over
+    /// the subject; unsure, the tracker may drift onto someone close by.
+    w: Vec3,
+    last: Seen,
+    sure: bool,
 }
 
 impl Tracker {
@@ -152,6 +233,16 @@ impl Tracker {
             miss: 0,
             gal: (s.cls == Some(0)).then(Gallery::default),
             tick: 0,
+            fr: 0,
+            fps: 30.0,
+            w: Vec3::ZERO,
+            last: Seen {
+                d: s.dir.normalize(),
+                h: tan(s.size).y.max(SMIN),
+                w: Vec3::ZERO,
+                k: 0,
+            },
+            sure: true,
         };
         tr.template(ai, p, 0);
         if tr.gal.is_some() {
@@ -203,8 +294,8 @@ impl Tracker {
         } else {
             g.score(&e[0])
         };
-        let d = g.other(s);
-        if sure || s.0 >= s.1.max(g.same()) {
+        let (d, me) = (g.other(s), sure || s.0 >= s.1.max(g.same()));
+        if me {
             g.add(e[0], true);
         } else if s.0 < s.1.min(g.same()) {
             g.add(e[0], false);
@@ -212,7 +303,22 @@ impl Tracker {
         for e in &e[1..] {
             g.add(*e, false);
         }
+        if me {
+            self.last = Seen {
+                d: x.dir,
+                h: tan(x.size).y,
+                w: self.w,
+                k: self.fr,
+            };
+            self.sure = true;
+        }
         Some(d)
+    }
+
+    /// What box `x`'s similarity to the subject loses on this frame (`Seen::prior`) for where it was last seen for
+    /// sure; not the tracker's last box, which may be someone close by it drifted onto while unsure.
+    fn prior(&self, x: (Vec3, Vec2)) -> Option<f32> {
+        self.last.prior(x, self.fr, self.fps)
     }
 
     /// Takes template `i` around the subject's box in `p`; tracking uses it from now on.
@@ -295,6 +401,7 @@ impl Tracker {
 
     /// Tracks the subject into the next frame `p`.
     pub fn step(&mut self, ai: &mut Ai, p: &Pano) -> Sample {
+        self.fr += 1;
         let (mut sc, mut d, mut sz) = self.search(ai, p, self.d, self.nt);
         let mut st = State::Tracked;
         let mut take = sc >= HI;
@@ -304,13 +411,16 @@ impl Tracker {
             st = State::Checked;
         }
         // after a gap the tracker takes whoever stands where the subject was: a person is back only if they look
-        // like it
+        // like it, by `find`'s rule
         if take
             && self.miss >= MISS
             && let Some(g) = &self.gal
         {
             let e = ai.embed(p, &[(d, deg(sz))]);
-            take = g.is(g.score(&e[0]));
+            let s = g.score(&e[0]);
+            take = self
+                .prior((d, deg(sz)))
+                .is_some_and(|q| g.is((s.0 - q, s.1)));
         }
         // a box several times larger or smaller in one frame is the tracker jumping to something else
         sz = sz.clamp(self.sz * 0.7, self.sz * 1.4);
@@ -346,7 +456,25 @@ impl Tracker {
             self.d = d;
             self.sz = sz.max(Vec2::splat(SMIN));
             let a = self.sm.angle_between(d) / self.sz.element_product().sqrt().atan().max(1e-4);
-            self.sm = self.sm.lerp(d, (0.2 + 0.8 * a).min(1.0)).normalize();
+            let sm = self.sm.lerp(d, (0.2 + 0.8 * a).min(1.0)).normalize();
+            // the subject's heading, from the smoothed direction; none known after a find (a jump)
+            self.w = if st == State::Found {
+                Vec3::ZERO
+            } else {
+                let w = self.w.lerp(sm - self.sm, 0.2);
+                w - w.dot(d) * d
+            };
+            self.sm = sm;
+            self.sure =
+                st == State::Tracked && self.sure || st == State::Found && self.gal.is_none();
+            if self.sure {
+                self.last = Seen {
+                    d,
+                    h: self.sz.y,
+                    w: self.w,
+                    k: self.fr,
+                };
+            }
             // a new template once the subject looks √2 larger or smaller (it comes closer, walks away): against the
             // pick's alone the confidence sags toward HI as the view of the subject changes. Only when the tracker is
             // sure, the detector sees the subject's class there and nobody else overlapping (which is which is unsure
@@ -370,6 +498,7 @@ impl Tracker {
             }
         } else {
             self.miss += 1;
+            self.sure = false;
             st = if self.miss >= MISS {
                 // how the subject looked before the gap is no guide after it
                 self.nt = 1;
@@ -388,9 +517,10 @@ impl Tracker {
     }
 
     /// Detects candidates of the subject's class near its last direction (over `sphere()` once it has been gone
-    /// `WIDE` frames) and returns, of the `FIND` nearest within reach, the one the pick's template likes best
-    /// (confidence ≥ `HI`, its box on the detection) as the tracker's box and confidence. The best, not the first:
-    /// VitTrack's confidence passes `HI` on other people too, so the nearest confirmed one is often someone else.
+    /// `WIDE` frames) and returns, of the `FIND` within its reach that need the least speed (`Seen::prior`), the one
+    /// the pick's template likes best (confidence ≥ `HI`, its box on the detection) as the tracker's box and
+    /// confidence. The best, not the first: VitTrack's confidence passes `HI` on other people too, so the nearest
+    /// confirmed one is often someone else.
     fn find(&mut self, ai: &mut Ai, p: &Pano) -> Option<Det> {
         let tiles = if self.miss >= WIDE {
             sphere()
@@ -406,35 +536,31 @@ impl Tracker {
                 })
                 .into()
         };
-        // a person covers about 3 of its heights a second at most (0.1 a frame at 30 fps): one farther from where the
-        // subject was lost is someone else, however much the tracker likes it
-        let (cls, reach) = (
-            self.cls,
-            (deg(self.sz).y * (1.0 + 0.1 * self.miss as f32)).to_radians(),
-        );
-        let mut c: Vec<Det> = ai
+        // one the subject could not have got to is someone else, however much the tracker or the gallery likes it
+        let cls = self.cls;
+        let mut c: Vec<(f32, Det)> = ai
             .detect(p, &tiles, DMIN)
             .into_iter()
-            .filter(|x| cls.is_none_or(|c| c == x.cls) && x.dir.angle_between(self.d) <= reach)
+            .filter(|x| cls.is_none_or(|c| c == x.cls))
+            .filter_map(|x| Some((self.prior(x.on())?, x)))
             .collect();
-        c.sort_by(|a, b| {
-            a.dir
-                .angle_between(self.d)
-                .total_cmp(&b.dir.angle_between(self.d))
-        });
+        c.sort_by(|a, b| a.0.total_cmp(&b.0));
         c.truncate(FIND);
         let keep = self.sz;
         if let Some(g) = &self.gal {
-            // the candidate most like the subject and clearly less like anyone seen next to it; its box from the
-            // tracker if that agrees, else the detector's
-            let e = ai.embed(p, &c.iter().map(|x| x.on()).collect::<Vec<_>>());
+            // the candidate most like the subject, less the prior of the speed it needed, and clearly less like anyone
+            // seen next to it; its box from the tracker if that agrees, else the detector's
+            let e = ai.embed(p, &c.iter().map(|x| x.1.on()).collect::<Vec<_>>());
             let (m, x) = c
                 .iter()
                 .zip(&e)
-                .map(|(x, e)| (g.score(e), x))
-                .filter(|(s, _)| g.is(*s))
+                .map(|((q, x), e)| {
+                    let s = g.score(e);
+                    ((s.0 - q, s.1), s.0, x)
+                })
+                .filter(|(s, ..)| g.is(*s))
                 .max_by(|a, b| a.0.0.total_cmp(&b.0.0))
-                .map(|((m, _), x)| (m, *x))?;
+                .map(|(_, m, x)| (m, *x))?;
             self.sz = tan(x.size);
             let (sc, d, sz) = self.search(ai, p, x.dir, 1);
             self.sz = keep;
@@ -450,7 +576,7 @@ impl Tracker {
             });
         }
         let mut best: Option<Det> = None;
-        for x in c {
+        for (_, x) in c {
             self.sz = tan(x.size);
             let (sc, d, sz) = self.search(ai, p, x.dir, 1);
             if sc >= HI

@@ -27,7 +27,7 @@ pub use frame::{Framer, LOW, Shot};
 pub use high::{BIN, Highlight, Scorer, Sig, timeline};
 pub use privacy::{Hide, Region, face_tiles};
 pub use reid::{DIM, Emb, Gallery, sim};
-pub use vit::{Sample, State, Subject, Tracker, smooth};
+pub use vit::{Sample, Seen, State, Subject, Tracker, smooth};
 
 use burn::backend::Cube;
 use burn::cubecl::wgpu::{AutoCompiler, WgpuResource, WgpuServer};

@@ -347,6 +347,65 @@ fn geometry() {
     assert!((iou((d, s), b, true) - 0.5).abs() < 0.02);
 }
 
+/// The speed the subject needs to be a box (`vit::Seen::speed`, heights a second at 30 fps) and its prior
+/// (`vit::Seen::prior`). The yaw-21 pick of v627 under `X5_BLANK=150:60`: 8 frames after the tracker's last box of the
+/// subject (22.7° tall) `find` took someone 27° away and a third as tall, which the reach it had then (the subject's
+/// height times 1 + 0.1 a missed frame, 38° there) let through. The v635 walking man (`X5_TRACK=v635:-134:-33`): 9
+/// frames after he was last seen for sure (26.7° tall, heading up and right at 8.85° a second) two look-alikes 27° and
+/// 37° away, less than half as tall, needed 2.9 and 2.4 heights a second, under a sprint's 3: in a third of a second
+/// nobody gets that fast. A long gap, a half-hidden subject, walking pace, the heading, a jog.
+#[test]
+fn speed() {
+    let seen = |y, p, h: f32, w: Vec3, k| vit::Seen {
+        d: dir(y, p),
+        h: 2.0 * (h / 2.0).to_radians().tan(),
+        w,
+        k,
+    };
+    let b = |y, p, h: f32| (dir(y, p), Vec2::new(0.4 * h, h));
+    let a = seen(16.0, -14.2, 22.7, Vec3::ZERO, 295);
+    let (v, q) = (|x, k| a.speed(x, k, 30.0), |x, k| a.prior(x, k, 30.0));
+    let far = b(42.9, -4.9, 6.3);
+    eprintln!("far {:.2}, 10 s later {:.3}", v(far, 303), v(far, 595));
+    assert!(q(far, 303).is_none(), "someone else");
+    assert!(q(far, 595).unwrap() < 0.01, "after a long gap anyone");
+    assert_eq!(q(b(16.0, -14.2, 22.7), 296), Some(0.0));
+    assert!(v(b(16.0, -18.0, 11.3), 310) < 0.15, "half hidden");
+    let (d0, d1) = (dir(-116.7, -27.6), dir(-115.0, -26.4));
+    let w = (d1 - d0).normalize() * (8.85f32 / 30.0).to_radians();
+    let a = seen(-116.7, -27.6, 26.7, w - w.dot(d0) * d0, 45);
+    let x = [
+        (dir(-89.47, -12.21), Vec2::new(3.89, 9.32)),
+        (dir(-80.83, -11.95), Vec2::new(4.75, 14.16)),
+        (dir(-115.86, -24.5), Vec2::new(10.09, 23.57)),
+    ];
+    let u = x.map(|x| a.speed(x, 54, 30.0));
+    eprintln!("v635 frame 54: {u:.3?}");
+    assert!(u[0] < 3.0 && u[1] < 3.0 && u[2] == 0.0);
+    assert!(x[..2].iter().all(|&x| a.prior(x, 54, 30.0).is_none()));
+    assert_eq!(a.prior(x[2], 54, 30.0), Some(0.0));
+    // a person 10° tall (5.7 of its heights away) walks a height sideways in a second: about half a height a second
+    // for the box centres' slack and jitter
+    let a = seen(0.0, 0.0, 10.0, Vec3::ZERO, 0);
+    let walk = a.speed(b(10.0, 0.0, 10.0), 30, 30.0);
+    // heading towards yaw +10° a second (+Y at yaw 0): there after a second for nothing, the other way twice the walk
+    let h = seen(0.0, 0.0, 10.0, Vec3::Y * (10f32 / 30.0).to_radians(), 0);
+    let (ahead, back) = (
+        h.speed(b(10.0, 0.0, 10.0), 30, 30.0),
+        h.speed(b(-10.0, 0.0, 10.0), 30, 30.0),
+    );
+    eprintln!("walk {walk:.3}, heading: ahead {ahead:.3}, back {back:.3}");
+    assert!((0.45..0.75).contains(&walk) && ahead == 0.0 && back > 1.8 * walk);
+    // a walk's pace costs little, more the faster: twice the distance in the second, four times as much and more
+    let (q1, j) = (
+        a.prior(b(10.0, 0.0, 10.0), 30, 30.0).unwrap(),
+        b(25.0, 0.0, 10.0),
+    );
+    let (q2, s2) = (a.prior(j, 30, 30.0).unwrap(), a.speed(j, 30, 30.0));
+    eprintln!("walk costs {q1:.3}, {s2:.3} heights a second {q2:.3}");
+    assert!(q1 < 0.06 && s2 > 2.0 * walk && (q2 / q1 - (s2 / walk).powi(2)).abs() < 1e-3);
+}
+
 /// Synthetic detections, all 15° below the horizon: A (a person, 20° tall) walks from yaw 0 to 60° and leaves after
 /// 6 s; B (a person, 10° tall) stands at yaw −132° (168° on from A's end); C (a chair, larger) at yaw 90°. The path
 /// follows A without jumping, then turns to B once A has been gone a while, level: the great-circle arc from A to B
