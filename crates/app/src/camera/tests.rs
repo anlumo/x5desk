@@ -781,6 +781,47 @@ fn capture_hold() {
     std::fs::remove_dir_all(&d).unwrap();
 }
 
+/// At quit nothing new starts: the download the session's close cuts goes back to the queue, and the import queued
+/// behind it (its file there) waits for the next run instead of starting while the worker waits for that end.
+#[test]
+fn quit_import() {
+    let d = dir("quit");
+    let name = "VID_20260116_152935_00_603.insv";
+    let f = card(&[name]);
+    let uri = format!("/DCIM/Camera01/{name}");
+    f.lock()
+        .unwrap()
+        .data
+        .insert(uri.clone(), Arc::new(vec![5; 8_000_000]));
+    let src = d.join("card/DCIM/Camera01/IMG_20260118_124432_00_659.jpg");
+    std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+    std::fs::write(&src, vec![9u8; 100_000]).unwrap();
+    let (qf, dst) = (
+        d.join("downloads"),
+        d.join("IMG_20260118_124432_00_659.jpg"),
+    );
+    let mut q = dl::Queue::load(Some(qf.clone()));
+    q.add(&uri, d.join(name));
+    q.add(&format!("file://{}", src.display()), dst.clone());
+    let q = Arc::new(Mutex::new(q));
+    // 4 × 1 MB/s: 2 s for the download
+    let (w, _) = spawn(&f, 1_000_000, q.clone(), Cache::at(None));
+    w.tx.send(Cmd::Connect).unwrap();
+    until(&q, &|p| p.0 == St::Running && p.1 > 0);
+    drop(w);
+    let st: Vec<St> = (dl::Queue::load(Some(qf)).v.iter()).map(|x| x.st).collect();
+    thread::sleep(Duration::from_millis(200));
+    let mut part = dst.clone().into_os_string();
+    part.push(".part");
+    println!("after quit: {st:?}");
+    assert_eq!(st, [St::Queued, St::Queued]);
+    assert!(
+        !dst.exists() && !Path::new(&part).exists(),
+        "the import ran"
+    );
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
 /// The app's delete passes (§7.8): a batch the camera refuses goes again one URI at a time, what a fresh listing
 /// still has gets another pass, a single URI it refuses ends it.
 #[test]

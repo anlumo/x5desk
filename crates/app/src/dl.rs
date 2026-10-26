@@ -207,16 +207,9 @@ impl Queue {
 /// The running download: its destination and the link's result.
 pub type Cur = Option<(PathBuf, Pending<u64>)>;
 
-/// One turn of the runner: collects the end of the running download, starts the next queued one when `cam` is up or
-/// its file is there, fails an import whose card is among the mounted `vols` without its file, updates rates.
-/// Returns the file that just finished.
-pub fn step(
-    q: &Shared,
-    cam: Option<&Camera>,
-    vols: &[disk::Vol],
-    cur: &mut Cur,
-) -> Option<PathBuf> {
-    let mut g = q.lock().unwrap();
+/// Collects the end of the running download into the queue, which is saved then; starts nothing (also the app's
+/// quit). Returns the file that just finished.
+pub fn end(g: &mut Queue, cur: &mut Cur) -> Option<PathBuf> {
     let mut fin = None;
     if let Some((dst, p)) = cur.as_ref()
         && let Some(r) = p.poll()
@@ -245,6 +238,20 @@ pub fn step(
         *cur = None;
         g.save();
     }
+    fin
+}
+
+/// One turn of the runner: [`end`], then starts the next queued one when `cam` is up or its file is there, fails an
+/// import whose card is among the mounted `vols` without its file, updates rates. Returns the file that just
+/// finished.
+pub fn step(
+    q: &Shared,
+    cam: Option<&Camera>,
+    vols: &[disk::Vol],
+    cur: &mut Cur,
+) -> Option<PathBuf> {
+    let mut g = q.lock().unwrap();
+    let fin = end(&mut g, cur);
     // the next one that can run: an import whose file is there, a download while the camera is. An import whose card
     // is mounted without its file fails; the file is looked at before the card, so one unmounted in between waits.
     let mut failed = false;

@@ -335,12 +335,12 @@ impl W {
             self.tick();
         }
         self.close();
-        // the end of the running download goes into the queue before it is saved
+        // the end of the running download goes into the queue before it is saved; nothing new starts
         for _ in 0..200 {
             if self.cur.is_none() {
                 break;
             }
-            dl::step(&self.q, None, &[], &mut self.cur);
+            dl::end(&mut self.q.lock().unwrap(), &mut self.cur);
             thread::sleep(Duration::from_millis(10));
         }
         self.q.lock().unwrap().save();
