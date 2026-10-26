@@ -89,6 +89,12 @@ fn mounts() {
         (v[0].name(), v[1].name()),
         ("Insta360 X5 (X5 CARD)".into(), "Card SD".into())
     );
+    // mounted under its label, which is the product string: named once
+    let x5 = Vol {
+        root: media.join("user/Insta360 X5"),
+        ..v[0].clone()
+    };
+    assert_eq!(x5.name(), "Insta360 X5");
     // this machine's table parses, whatever is mounted
     println!(
         "mounted camera disks and cards here: {:?}",

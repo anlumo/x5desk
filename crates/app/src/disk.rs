@@ -35,6 +35,8 @@ impl Vol {
             .file_name()
             .map_or("".into(), |n| n.to_string_lossy());
         match &self.cam {
+            // udisks2 names the mount point after the volume label, and the X5 labels its card with its product string
+            Some(c) if *c == l => c.clone(),
             Some(c) => format!("{c} ({l})"),
             None => format!("Card {l}"),
         }
