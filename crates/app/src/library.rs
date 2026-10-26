@@ -251,7 +251,16 @@ impl Library {
                 t.as_ref().and_then(|t| t.look),
             ) {
                 Ok(mut m) => {
-                    m.vol(t.and_then(|t| t.vol).unwrap_or(1.0));
+                    m.vol(t.as_ref().and_then(|t| t.vol).unwrap_or(1.0));
+                    // the player's hook tokens
+                    if let Some(t) = t {
+                        if let Some(k) = t.seek {
+                            m.seek(k)
+                        }
+                        if t.play {
+                            m.play(true)
+                        }
+                    }
                     self.movie = Some(m);
                     self.recent.add(&p);
                     self.err = None;

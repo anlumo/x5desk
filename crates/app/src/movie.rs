@@ -194,7 +194,8 @@ impl Movie {
         self.audio.cmd(Cmd::Vol(self.vol));
     }
 
-    fn seek(&mut self, k: usize) {
+    /// Shows frame `k` next; playing goes on from there once it is shown.
+    pub fn seek(&mut self, k: usize) {
         let k = k.min(self.v.times.len() - 1);
         self.v.seek(&self.g, k, self.held.take());
         if self.playing {
@@ -205,7 +206,7 @@ impl Movie {
         self.want = Some(k);
     }
 
-    fn play(&mut self, on: bool) {
+    pub fn play(&mut self, on: bool) {
         self.playing = on;
         if !on {
             self.resume = false;
