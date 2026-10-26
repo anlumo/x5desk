@@ -333,14 +333,19 @@ fn varint(mut x: u64) -> Vec<u8> {
 }
 
 /// A proxy of v606 the way the camera makes one: both lenses side by side at 832² (lens 0 left), H.264, the main
-/// file's trailer appended; it starts at main frame `s0` and its trailer's first frame says so.
+/// file's trailer appended; it starts at main frame `s0` and its trailer's first frame says so. Made under names of
+/// this process and thread and renamed into place: another test run that finds it must never read it half written.
 fn proxy(d: &Path, s0: usize, n: usize) -> PathBuf {
     let out = fixtures().join(format!("v606_proxy_{s0}_{n}.lrv"));
     if out.exists() {
         return out;
     }
     let f = d.join("v606.insv");
-    let tmp = out.with_extension("mp4");
+    let id = format!("{}-{:?}", std::process::id(), std::thread::current().id());
+    let (tmp, part) = (
+        out.with_extension(format!("{id}.mp4")),
+        out.with_extension(format!("{id}.part")),
+    );
     // DUAL_STREAM_TRACK_REVERSE: track 1 holds lens 0
     let cut = |t: usize, o: &str| {
         format!("[0:v:{t}]trim=start_frame={s0},setpts=PTS-STARTPTS,scale=832:832{o}")
@@ -383,8 +388,9 @@ fn proxy(d: &Path, s0: usize, n: usize) -> PathBuf {
     tr[i..i + a.len()].copy_from_slice(&b);
     let mut mp4 = std::fs::read(&tmp).unwrap();
     mp4.extend(tr);
-    std::fs::write(&out, mp4).unwrap();
+    std::fs::write(&part, mp4).unwrap();
     std::fs::remove_file(&tmp).unwrap();
+    std::fs::rename(&part, &out).unwrap();
     out
 }
 
