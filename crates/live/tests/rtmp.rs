@@ -1,6 +1,6 @@
 //! FLV and RTMP against FFmpeg (a test tool only): H.264 + AAC from `v635.lrv` ($X5_SAMPLES) and an
 //! x264 re-encode with B-frames, written as FLV and published to `ffmpeg -listen 1`, then checked
-//! with ffprobe. Outputs go to $X5_OUT (default: a temp dir).
+//! with ffprobe. Outputs go to $X5_OUT (default: a temp dir); what a listener received goes with it.
 
 use live::{flv, rtmp};
 use std::{
@@ -437,24 +437,58 @@ fn flv_file() {
     }
 }
 
-fn listen(port: u16, file: &Path) -> Child {
-    let c = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-listen",
-            "1",
-            "-i",
-            &format!("rtmp://127.0.0.1:{port}/live/test"),
-            "-c",
-            "copy",
-        ])
-        .arg(file)
-        .stdin(Stdio::null())
-        .spawn()
-        .unwrap();
+/// A test tool's process and the file it writes: dropping it kills and reaps the one, then removes the other, also
+/// when the test fails.
+struct Kid(Child, PathBuf);
+
+impl Kid {
+    /// Spawns `c`. The child also gets SIGKILL when this thread ends, so a test process that dies without unwinding
+    /// (killed, aborted) leaves no listener behind.
+    fn new(c: &mut Command, f: &Path) -> Kid {
+        use std::os::unix::process::CommandExt;
+        let pp = std::process::id();
+        // only async-signal-safe calls between fork and exec
+        unsafe {
+            c.pre_exec(move || {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                // the parent died before the prctl
+                if libc::getppid() as u32 != pp {
+                    libc::_exit(1);
+                }
+                Ok(())
+            })
+        };
+        Kid(c.spawn().unwrap(), f.into())
+    }
+}
+
+impl Drop for Kid {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+        let _ = fs::remove_file(&self.1);
+    }
+}
+
+fn listen(port: u16, file: &Path) -> Kid {
+    let c = Kid::new(
+        Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-listen",
+                "1",
+                "-i",
+                &format!("rtmp://127.0.0.1:{port}/live/test"),
+                "-c",
+                "copy",
+            ])
+            .arg(file)
+            .stdin(Stdio::null()),
+        file,
+    );
     // wait until it listens; a probe connection would be taken as the publisher
     let hex = format!("0100007F:{port:04X}");
     let t = Instant::now();
@@ -474,7 +508,7 @@ fn listen(port: u16, file: &Path) -> Child {
     c
 }
 
-fn wait(mut c: Child) {
+fn wait(c: &mut Child) {
     let t = Instant::now();
     loop {
         if let Some(s) = c.try_wait().unwrap() {
@@ -482,7 +516,6 @@ fn wait(mut c: Child) {
             return;
         }
         if t.elapsed() > Duration::from_secs(30) {
-            c.kill().unwrap();
             panic!("ffmpeg didn't finish");
         }
         thread::sleep(Duration::from_millis(20));
@@ -517,7 +550,7 @@ fn rtmp_ffmpeg() {
     ] {
         let s = mp4(&src);
         let file = out(name);
-        let ff = listen(port, &file);
+        let mut ff = listen(port, &file);
         let t = Instant::now();
         let r = rtmp::Rtmp::start(
             &format!("rtmp://127.0.0.1:{port}/live"),
@@ -535,7 +568,7 @@ fn rtmp_ffmpeg() {
             (st.state, st.drop, st.reconnects),
             (rtmp::State::Live, [0, 0], 0)
         );
-        wait(ff);
+        wait(&mut ff.0);
         check(&file, &s.p, 0);
     }
 }
@@ -550,7 +583,7 @@ fn rtmp_late_key() {
     }
     let s = mp4(&bframes(&d));
     let file = out("rtmp_late_key.flv");
-    let ff = listen(19356, &file);
+    let mut ff = listen(19356, &file);
     let r = rtmp::Rtmp::start("rtmp://127.0.0.1:19356/live/test", "", cfg(&s, 60_000)).unwrap();
     let t = Instant::now();
     while r.stats().state != rtmp::State::Live {
@@ -581,7 +614,7 @@ fn rtmp_late_key() {
         "first audio {} ms ahead of the key frame: {st:?}",
         s.p[a].dts - s.p[0].dts
     );
-    wait(ff);
+    wait(&mut ff.0);
     assert_eq!(st.drop, [0, 0]);
     check(&file, &s.p, 0);
 }
@@ -596,7 +629,7 @@ fn rtmp_ext_ts() {
     }
     let s = mp4(&d.join("v635.lrv"));
     let file = out("rtmp_ext.flv");
-    let ff = listen(19355, &file);
+    let mut ff = listen(19355, &file);
     let r = rtmp::Rtmp::start("rtmp://127.0.0.1:19355/live/test", "", cfg(&s, 60_000)).unwrap();
     let want: Vec<P> = s.p[..1]
         .iter()
@@ -614,7 +647,7 @@ fn rtmp_ext_ts() {
     want[1..].iter().for_each(|p| send(&r, &s, p, 0));
     until_sent(&r, want.len(), t);
     drop(r);
-    wait(ff);
+    wait(&mut ff.0);
     check(&file, &want, 0);
     let x = want.iter().filter(|p| p.dts > 0xFF_FFFF).count();
     println!("{x} packets past 0xFFFFFF ms");
@@ -628,13 +661,12 @@ fn rtmp_stop() {
         return;
     }
     let s = mp4(&d.join("v635.lrv"));
-    let mut ff = listen(19354, &out("rtmp_frozen.flv"));
+    let ff = listen(19354, &out("rtmp_frozen.flv"));
     let r = rtmp::Rtmp::start("rtmp://127.0.0.1:19354/live/test", "", cfg(&s, 600_000)).unwrap();
     let t = Instant::now();
     s.p.iter().for_each(|p| send(&r, &s, p, 0));
     until_sent(&r, s.p.len(), t);
-    let pid = ff.id() as i32;
-    unsafe { libc::kill(pid, libc::SIGSTOP) };
+    unsafe { libc::kill(ff.0.id() as i32, libc::SIGSTOP) };
     // 19 more loops (about 57 MB), far beyond the socket buffers
     let len = s.p.iter().map(|p| p.dts).max().unwrap() as u32 + 40;
     for i in 1..20 {
@@ -645,8 +677,7 @@ fn rtmp_stop() {
     let t = Instant::now();
     drop(r);
     let e = t.elapsed();
-    unsafe { libc::kill(pid, libc::SIGKILL) };
-    ff.wait().unwrap();
+    drop(ff);
     println!("frozen receiver: {st:?}, stopped in {e:?}");
     assert!(st.sent[0] < 20 * 173, "the writer never blocked");
     assert!(e < rtmp::STOP + Duration::from_millis(500), "{e:?}");
@@ -660,8 +691,8 @@ fn rtmp_backpressure() {
     }
     let s = mp4(&d.join("v635.lrv"));
     let file = out("rtmp_stall.flv");
-    let ff = listen(19352, &file);
-    let pid = ff.id() as i32;
+    let mut ff = listen(19352, &file);
+    let pid = ff.0.id() as i32;
     let r = rtmp::Rtmp::start("rtmp://127.0.0.1:19352/live/test", "", cfg(&s, 500)).unwrap();
     // freeze the receiver for 3 s while publishing 4 loops of the clip at 4× real time
     let stall = thread::spawn(move || {
@@ -685,7 +716,7 @@ fn rtmp_backpressure() {
     let st = r.stats();
     drop(r);
     println!("stalled: {st:?}");
-    wait(ff);
+    wait(&mut ff.0);
     assert!(st.drop[0] > 0, "the stall dropped no video: {st:?}");
     let got = probe(&file);
     let n = |v: bool| got.iter().filter(|p| p.0 == v).count() as u64;
@@ -721,22 +752,21 @@ fn rtmp_reconnect() {
     let (f1, f2) = (out("rtmp_cut.flv"), out("rtmp_resumed.flv"));
     let mut ff = listen(19353, &f1);
     let r = rtmp::Rtmp::start("rtmp://127.0.0.1:19353/live/test", "", cfg(&s, 2000)).unwrap();
-    // publish 3 loops at 4× real time; the server dies after 1 s and a new one takes the port
-    let f = f2.clone();
-    let cut = thread::spawn(move || {
-        thread::sleep(Duration::from_secs(1));
-        ff.kill().unwrap();
-        ff.wait().unwrap();
-        listen(19353, &f)
-    });
+    // publish 3 loops at 4× real time; the server dies after 1 s and a new one takes the port (on this thread: a
+    // listener dies with the thread that spawned it)
     let len = s.p.iter().map(|p| p.dts).max().unwrap() as u32 + 40;
-    let t = Instant::now();
+    let (t, mut cut) = (Instant::now(), false);
     for i in 0..3 {
         for p in &s.p {
             if let Some(w) =
                 Duration::from_millis((p.dts as u32 + i * len) as u64 / 4).checked_sub(t.elapsed())
             {
                 thread::sleep(w);
+            }
+            if !cut && t.elapsed() > Duration::from_secs(1) {
+                drop(ff);
+                ff = listen(19353, &f2);
+                cut = true;
             }
             send(&r, &s, p, i * len);
         }
@@ -752,7 +782,7 @@ fn rtmp_reconnect() {
     let st = r.stats();
     drop(r);
     println!("reconnected: {st:?}");
-    wait(cut.join().unwrap());
+    wait(&mut ff.0);
     assert_eq!(st.reconnects, 1);
     assert_eq!(st.sent[0] + st.drop[0], 3 * 173);
     assert_eq!(st.sent[1] + st.drop[1], 3 * 268);

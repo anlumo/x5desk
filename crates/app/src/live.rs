@@ -1916,6 +1916,39 @@ mod tests {
             .join(format!("x5desk-{}-{name}", std::process::id()))
     }
 
+    /// A test tool's process and the file it writes: dropping it kills and reaps the one, then removes the other,
+    /// also when the test fails.
+    struct Kid(std::process::Child, PathBuf);
+
+    impl Kid {
+        /// Spawns `c`. The child also gets SIGKILL when this thread ends, so a test process that dies without
+        /// unwinding (killed, aborted) leaves no listener behind.
+        fn new(c: &mut std::process::Command, f: &Path) -> Kid {
+            use std::os::unix::process::CommandExt;
+            let pp = std::process::id();
+            // only async-signal-safe calls between fork and exec
+            unsafe {
+                c.pre_exec(move || {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                    // the parent died before the prctl
+                    if libc::getppid() as u32 != pp {
+                        libc::_exit(1);
+                    }
+                    Ok(())
+                })
+            };
+            Kid(c.spawn().unwrap(), f.into())
+        }
+    }
+
+    impl Drop for Kid {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+            let _ = std::fs::remove_file(&self.1);
+        }
+    }
+
     /// Every packet once, in order, each when the clock passes its start and timed by it; a seek or a jump
     /// restarts at the clock.
     #[test]
@@ -2169,7 +2202,7 @@ mod tests {
             made.2 as f64 / 1e6
         );
         assert_eq!(st.state, State::Live);
-        reap(&mut ff);
+        reap(&mut ff.0);
         let st = tool(
             "ffprobe",
             &[
@@ -2290,28 +2323,28 @@ mod tests {
         // 60 fps has half the bits per frame, and frames the encoder left out make the next one's change larger;
         // patterns lie 37 or more apart
         assert!(worst <= if fps > 30 { 10 } else { 4 });
-        std::fs::remove_file(&file).unwrap();
     }
 
     /// `ffmpeg -listen` (test tool) on `port` into `file`, listening; and its URL.
-    fn listen(port: u16, file: &Path) -> (std::process::Child, String) {
+    fn listen(port: u16, file: &Path) -> (Kid, String) {
         let url = format!("rtmp://127.0.0.1:{port}/live/test");
-        let ff = std::process::Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-listen",
-                "1",
-                "-i",
-                &url,
-            ])
-            .args(["-c", "copy"])
-            .arg(file)
-            .stdin(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        let ff = Kid::new(
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-listen",
+                    "1",
+                    "-i",
+                    &url,
+                ])
+                .args(["-c", "copy"])
+                .arg(file)
+                .stdin(std::process::Stdio::null()),
+            file,
+        );
         // until it listens: a probe connection would be taken as the publisher
         let hex = format!(":{port:04X} ");
         let t = Instant::now();
@@ -2379,7 +2412,7 @@ mod tests {
             .unwrap()
             .port();
         let (fa, fb) = (out("live-a.flv"), out("live-b.flv"));
-        let (mut a, url) = listen(port, &fa);
+        let (a, url) = listen(port, &fa);
         let g = Arc::new(Gpu::new().unwrap());
         let cx = stitch::Ctx::new(&g.device, &g.queue);
         let hook = Hook {
@@ -2391,8 +2424,7 @@ mod tests {
         let p = pat(&g, &d);
         // between IDRs (0 and 60): what's queued at the reconnect holds none
         run(&mut l, &p, 2.3, |_| {});
-        a.kill().unwrap();
-        a.wait().unwrap();
+        drop(a);
         let (mut b, _) = listen(port, &fb);
         // the frame handed to the encoder when the new session went live
         let mut at = None;
@@ -2408,7 +2440,7 @@ mod tests {
         let s = sh.lock().unwrap().st.clone();
         let t = s.rtmp.as_ref().unwrap();
         let (f, st) = (t.f, t.st.clone());
-        reap(&mut b);
+        reap(&mut b.0);
         let at = at.expect("never live again");
         let (v, _) = packets(fb.to_str().unwrap());
         let keys: Vec<usize> = (0..v.len()).filter(|&i| v[i].1).collect();
@@ -2422,8 +2454,6 @@ mod tests {
         assert!(v[0].1);
         // from about the moment it went live, not from the next GOP (up to 60 frames later)
         assert!(v.len() as u64 + 3 >= f - at, "{} of {}", v.len(), f - at);
-        std::fs::remove_file(&fb).unwrap();
-        let _ = std::fs::remove_file(&fa);
     }
 
     fn err(a: [u8; 3], b: [u8; 3]) -> u8 {

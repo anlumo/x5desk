@@ -35,6 +35,37 @@ impl Drop for Run {
     }
 }
 
+/// A test tool's process: dropping it kills and reaps it, also when the test fails.
+struct Kid(std::process::Child);
+
+impl Kid {
+    /// Spawns `c`. The child also gets SIGKILL when this thread ends, so a test process that dies without unwinding
+    /// (killed, aborted) leaves none behind.
+    fn new(c: &mut std::process::Command) -> Kid {
+        use std::os::unix::process::CommandExt;
+        let pp = std::process::id();
+        // only async-signal-safe calls between fork and exec
+        unsafe {
+            c.pre_exec(move || {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                // the parent died before the prctl
+                if libc::getppid() as u32 != pp {
+                    libc::_exit(1);
+                }
+                Ok(())
+            })
+        };
+        Kid(c.spawn().unwrap())
+    }
+}
+
+impl Drop for Kid {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 pub(crate) const U: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
     .union(wgpu::TextureUsages::TEXTURE_BINDING)
     .union(wgpu::TextureUsages::COPY_SRC);
@@ -1527,7 +1558,7 @@ fn pw_memfd() {
 /// RGBx 3840 × 1920 as DMA-BUF in the device's preferred (DCC) modifier into fakesink.
 #[test]
 fn pw_gst() {
-    use std::process::Command;
+    use std::{io::Read, process::Command};
     if Command::new("gst-launch-1.0")
         .arg("--version")
         .output()
@@ -1558,29 +1589,33 @@ fn pw_gst() {
         ),
     ];
     for (tail, m) in runs {
-        let mut c = Command::new("gst-launch-1.0")
-            .args([
-                "-v",
-                "pipewiresrc",
-                "target-object=x5desk.x5-test-gst",
-                "num-buffers=8",
-                "!",
-            ])
-            .args(tail.split(' '))
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut c = Kid::new(
+            Command::new("gst-launch-1.0")
+                .args([
+                    "-v",
+                    "pipewiresrc",
+                    "target-object=x5desk.x5-test-gst",
+                    "num-buffers=8",
+                    "!",
+                ])
+                .args(tail.split(' '))
+                .stdout(std::process::Stdio::piped()),
+        );
         let mut seen = None;
         let (n, _, cpu) = produce(&cam, &pat, || {
             seen = cam.mode().or(seen);
-            c.try_wait().unwrap().is_some()
+            c.0.try_wait().unwrap().is_some()
         });
-        if c.try_wait().unwrap().is_none() {
-            c.kill().unwrap();
+        if c.0.try_wait().unwrap().is_none() {
+            c.0.kill().unwrap();
         }
-        let o = c.wait_with_output().unwrap();
-        assert!(o.status.success(), "gst-launch failed: {tail}");
-        let caps = String::from_utf8_lossy(&o.stdout);
+        let mut caps = String::new();
+        c.0.stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut caps)
+            .unwrap();
+        assert!(c.0.wait().unwrap().success(), "gst-launch failed: {tail}");
         assert!(caps.contains("framerate=(fraction)60/1"), "{caps}");
         println!(
             "{tail}: sent {n}, mode {seen:x?}, 60/1 negotiated, dequeue + queue {cpu:?} CPU per frame"
