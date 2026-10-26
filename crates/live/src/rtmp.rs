@@ -151,14 +151,17 @@ pub struct Rtmp {
 
 impl Rtmp {
     /// Publishes to `url` (`rtmp://host[:port]/app`) as stream `key`; an empty key takes the last
-    /// path segment of `url`. Connects, and reconnects with backoff, on its own thread.
+    /// path segment of `url`, trailing '/' ignored. Connects, and reconnects with backoff, on its own
+    /// thread.
     pub fn start(url: &str, key: &str, cfg: Cfg) -> io::Result<Self> {
         let bad =
             |m: &str, u: &str| io::Error::new(io::ErrorKind::InvalidInput, format!("{m}: {u}"));
+        // a trailing '/' does not hide the key: an empty segment would leave it in tc
+        let u = url.trim_end_matches('/');
         let (tc, key) = if key.is_empty() {
-            url.rsplit_once('/').ok_or_else(|| bad("no key", url))?
+            u.rsplit_once('/').ok_or_else(|| bad("no key", url))?
         } else {
-            (url.trim_end_matches('/'), key)
+            (u, key)
         };
         // past here the URL may hold the key: errors quote tc only
         let bad = |m: &str| bad(m, tc);
@@ -945,6 +948,9 @@ mod tests {
             ("rtmp://a.example:x/app/s3cr3t", ""),
             ("rtmp://a.example/s3cr3t", ""),
             ("rtmps://a.example/app/", "s3cr3t"),
+            ("rtmps://a.example/app/s3cr3t/", ""),
+            ("rtmp://a.example:x/app/s3cr3t//", ""),
+            ("rtmp://a.example/s3cr3t/", ""),
         ] {
             let e = Rtmp::start(u, k, cfg()).err().unwrap().to_string();
             assert!(!e.contains("s3cr3t") && e.contains("a.example"), "{e}");

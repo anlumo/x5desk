@@ -34,6 +34,7 @@ use media::{
 use std::{
     fmt::Write as _,
     io::Write,
+    ops::Range,
     os::{
         fd::AsFd,
         unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -258,13 +259,14 @@ impl Set {
     }
 }
 
-/// Where the stream key starts in `url` when it is there: with the key field empty, the last path segment after the
-/// app (`rtmp://host/app/key`, `Rtmp::start`'s rule).
-fn kat(url: &str) -> Option<usize> {
-    let p = url.find("://").map_or(0, |i| i + 3);
-    let app = p + url[p..].find('/')? + 1;
-    let k = url.rfind('/')? + 1;
-    (k > app && k < url.len()).then_some(k)
+/// Where the stream key is in `url` when it is there: with the key field empty, the last path segment after the app,
+/// trailing '/' ignored (`rtmp://host/app/key/`, `Rtmp::start`'s rule).
+fn kat(url: &str) -> Option<Range<usize>> {
+    let u = url.trim_end_matches('/');
+    let p = u.find("://").map_or(0, |i| i + 3);
+    let app = p + u[p..].find('/')? + 1;
+    let k = u.rfind('/')? + 1;
+    (k > app).then_some(k..u.len())
 }
 
 /// Which source the outputs show.
@@ -895,7 +897,11 @@ impl Live {
                 let mut lay = |ui: &egui::Ui, b: &dyn egui::TextBuffer, _: f32| {
                     let t = b.as_str();
                     let t = match kat(t).filter(|_| hide) {
-                        Some(k) => t[..k].to_owned() + &"•".repeat(t[k..].chars().count()),
+                        Some(k) => {
+                            t[..k.start].to_owned()
+                                + &"•".repeat(t[k.clone()].chars().count())
+                                + &t[k.end..]
+                        }
                         None => t.into(),
                     };
                     let v = ui.visuals();
@@ -1265,7 +1271,7 @@ impl Outs {
         // a key in the URL goes as the key, never inside the URL
         let (url, key) = (s.url.trim(), s.key.trim());
         let (url, key) = match kat(url).filter(|_| key.is_empty()) {
-            Some(k) => (&url[..k - 1], &url[k..]),
+            Some(k) => (&url[..k.start - 1], &url[k]),
             None => (url, key),
         };
         let r = Arc::new(Rtmp::start(url, key, cfg).map_err(|e| format!("RTMP: {e}"))?);
@@ -1854,8 +1860,8 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
-    /// A stream key in the URL (key field empty) is its last path segment after the app; a URL with the app only has
-    /// none.
+    /// A stream key in the URL (key field empty) is its last path segment after the app, trailing '/' ignored; a URL
+    /// with the app only has none.
     #[test]
     fn key_in_url() {
         for (u, k) in [
@@ -1865,12 +1871,16 @@ mod tests {
             ),
             ("rtmp://a.example:1935/app/inst/k3y?x=1", Some("k3y?x=1")),
             ("rtmp://[::1]/app/key", Some("key")),
+            ("rtmps://a.example/app/s3cr3t/", Some("s3cr3t")),
+            ("rtmp://a.example/app/s3cr3t//", Some("s3cr3t")),
             ("rtmp://a.example/app", None),
             ("rtmp://a.example/app/", None),
+            ("rtmp://a.example/app//", None),
+            ("rtmp://a.example//", None),
             ("rtmp://a.example", None),
             ("", None),
         ] {
-            assert_eq!(kat(u).map(|i| &u[i..]), k, "{u}");
+            assert_eq!(kat(u).map(|r| &u[r]), k, "{u}");
         }
     }
 
