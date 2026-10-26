@@ -760,12 +760,11 @@ pub struct Player {
     /// the AAC track for live outputs, opened on first use
     tap: Option<Option<crate::live::Tap>>,
     /// Deep Track: the run on this clip; a box drawn in the view starts one (armed); the view follows the subject;
-    /// the box being drawn; the picture's aspect
+    /// the box being drawn
     pub trk: Option<Arc<ai::Track>>,
     arm: bool,
     pub follow: bool,
     from: Option<egui::Pos2>,
-    aspect: f32,
     /// privacy preview: the paused frame's faces blurred; the faces found, a search out, the unblurred picture and the
     /// pass
     pub blur: bool,
@@ -774,7 +773,8 @@ pub struct Player {
     bt: Option<(wgpu::Texture, wgpu::TextureView, crate::export::Blur)>,
     /// the editor is to make an auto edit of this clip
     pub auto: bool,
-    /// test hook: the box to draw once the frame shows; the stabilisation to switch to once its run is over
+    /// test hook: the box to draw once the frame shows (0..1 of the view at 16:9); the stabilisation to switch to once
+    /// its run is over
     tbox: Option<[f32; 4]>,
     restab: Option<(gyro::Mode, f64)>,
 }
@@ -871,7 +871,6 @@ impl Player {
             arm: false,
             follow: false,
             from: None,
-            aspect: 16.0 / 9.0,
             blur: false,
             regs: None,
             fq: None,
@@ -1008,9 +1007,9 @@ impl Player {
         Some((self.main_k(&p), self.stab.mode, self.stab.smooth.to_bits()))
     }
 
-    /// Deep Track of the subject in box `b` (0..1 of the picture) of the perspective view, from the frame shown to the
-    /// clip's end; the view follows it once the run is over.
-    pub fn track(&mut self, b: [f32; 4]) -> Result<(), String> {
+    /// Deep Track of subject `s` (`ai::subject` of a box in the perspective view), from the frame shown to the clip's
+    /// end; the view follows it once the run is over.
+    pub fn track(&mut self, s: track::Subject) -> Result<(), String> {
         let f = (self.work.main.first().cloned())
             .ok_or("Deep Track needs the main file, not the proxy alone")?;
         if self.look != Look::Perspective {
@@ -1021,7 +1020,6 @@ impl Player {
             t.stop.store(true, Relaxed);
         }
         let k0 = self.main_k(&p);
-        let s = ai::subject(&self.view, self.aspect, b);
         let st = (self.stab.mode, self.stab.smooth);
         self.trk = Some(ai::Track::start(
             &self.g,
@@ -1225,9 +1223,16 @@ impl Player {
             });
             self.fq = Some((k, rx));
         }
+        // the hook's box is 0..1 of the view at 16:9 (a flat 1080p export's frame of it), whatever the window: the
+        // picture changes shape while the window's layout settles and with its size, and the box with it
         if self.tbox.is_some() && self.held.is_some() && self.want.is_none() && self.stab.ready() {
-            let b = self.tbox.take().unwrap();
-            if let Err(e) = self.track(b) {
+            let s = ai::subject(&self.view, 16.0 / 9.0, self.tbox.take().unwrap());
+            let [y, x] = track::yaw_pitch(s.dir);
+            eprintln!(
+                "x5desk: box: subject at yaw {y:.2}°, pitch {x:.2}°, {:.2}° × {:.2}°",
+                s.size.x, s.size.y
+            );
+            if let Err(e) = self.track(s) {
                 eprintln!("x5desk: box: {e}");
                 self.note = Some(e);
             }
@@ -1572,13 +1577,12 @@ impl Player {
         let (rect, resp) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         let r = self.look.fit(rect);
-        self.aspect = r.aspect_ratio();
         let mut live = None;
         if self.arm && self.look == Look::Perspective {
             let (l, b) = ai::drag_box(ui, &resp, r, &mut self.from);
             live = l;
             if let Some(b) = b
-                && let Err(e) = self.track(b)
+                && let Err(e) = self.track(ai::subject(&self.view, r.aspect_ratio(), b))
             {
                 self.note = Some(e);
             }

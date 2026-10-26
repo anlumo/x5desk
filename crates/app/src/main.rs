@@ -43,8 +43,9 @@
 //! station connection, no join). Under the hook nothing of the user's config or cache is read, written or trimmed
 //! (the app's and the camera's settings, the recent list, the download queue: the run's own; no thumbnail cache), and
 //! `dest=` is the download folder too. AI and Shot Lab:
-//! `box=<x0>/<y0>/<x1>/<y1>` (Deep Track in the player: that box, 0..1 of the picture, drawn once the frame shows; the
-//! view follows the subject when the run is over, and an `export=` waits for it and takes the follow view),
+//! `box=<x0>/<y0>/<x1>/<y1>` (Deep Track in the player: that box, 0..1 of the view at 16:9 as a flat 1080p export
+//! frames it, whatever the window, drawn once the frame shows, its subject printed; the view follows the subject when
+//! the run is over, and an `export=` waits for it and takes the follow view),
 //! `restab=off|free|horizon|direction[/<σ>]` (once that run is over, the player's stabilisation changes to this, as its
 //! controls would: the follow view turns into the new frame), `blur`
 //! (the player's face blur preview), `autoedit[=<preset>]` (an auto edit of the first file onto the editor's
