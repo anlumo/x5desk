@@ -22,6 +22,8 @@ struct Card {
     refuse: Vec<u16>,
     /// request codes never answered
     mute: Vec<u16>,
+    /// the camera clock SET_OPTIONS set and when; until then 30 s ahead of this computer's
+    clk: Option<(u64, Instant)>,
 }
 
 type Fake = Arc<Mutex<Card>>;
@@ -94,7 +96,9 @@ fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'static
                         password: "88888888".into(),
                         ..Default::default()
                     }),
-                    local_time: clock().0 + 30,
+                    local_time: c
+                        .clk
+                        .map_or(clock().0 + 30, |(t, at)| t + at.elapsed().as_secs()),
                     ..Default::default()
                 };
                 pb::GetOptionsResp {
@@ -189,6 +193,13 @@ fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'static
                 }
                 c.uris.retain(|u| !q.uri.contains(u) || many && is(u, 2));
                 (200, pb::DeleteFilesResp::default().encode_to_vec())
+            }
+            link::code::SET_OPTIONS => {
+                let q = pb::SetOptions::decode(b).unwrap();
+                if q.option_types.contains(&(pb::OptionType::LocalTime as i32)) {
+                    c.clk = Some((q.value.unwrap().local_time, Instant::now()))
+                }
+                (200, pb::SetOptionsResp::default().encode_to_vec())
             }
             link::code::SET_FAVORITE => {
                 for s in pb::SetFavoriteList::decode(b).unwrap().set_favorite {
@@ -593,6 +604,56 @@ fn connect_time() {
             && notes[1].0.starts_with("time sync: status 500"),
         "{notes:?}"
     );
+    drop(w);
+}
+
+/// A camera that reports its clock (LOCAL_TIME; the X5 leaves it out): the Clock row shows the skew read on connect
+/// until the clock is set, then the clock as set, by the time "camera clock set to …" is noted; the same after Sync
+/// time; a refused sync leaves the skew as read.
+#[test]
+fn clock_row() {
+    let f = card(&NAMES[..2]);
+    let q = Arc::new(Mutex::new(dl::Queue::load(None)));
+    let (w, _) = spawn(&f, 50_000_000, q, Cache::at(None));
+    // the row's text by the clock's note
+    let row = |w: &Worker, mut s: Option<i64>| {
+        wait(w, 10.0, |u| match u {
+            Up::Info(i) => {
+                s = i.skew;
+                None
+            }
+            Up::Note(n, e) if n.contains("camera clock set to ") || e => Some((n, e)),
+            _ => None,
+        });
+        s.map(skew)
+    };
+    w.tx.send(Cmd::Connect).unwrap();
+    let i = conn(&w, Conn::On);
+    assert!(
+        i.skew.is_some_and(|s| (29..=31).contains(&s)),
+        "{:?}",
+        i.skew
+    );
+    let ok = Some("in sync with this computer".to_string());
+    assert_eq!(row(&w, i.skew), ok);
+    // the camera's clock drifts 100 s behind
+    f.lock().unwrap().clk = Some((clock().0 - 100, Instant::now()));
+    w.tx.send(Cmd::Refresh).unwrap();
+    let i = wait(&w, 5.0, |u| match u {
+        Up::Info(i) if i.skew.is_some_and(|s| s < -90) => Some(i),
+        _ => None,
+    });
+    w.tx.send(Cmd::Time).unwrap();
+    assert_eq!(row(&w, i.skew), ok);
+    f.lock().unwrap().clk = Some((clock().0 - 100, Instant::now()));
+    f.lock().unwrap().refuse = vec![link::code::SET_OPTIONS];
+    w.tx.send(Cmd::Refresh).unwrap();
+    let i = wait(&w, 5.0, |u| match u {
+        Up::Info(i) if i.skew.is_some_and(|s| s < -90) => Some(i),
+        _ => None,
+    });
+    w.tx.send(Cmd::Time).unwrap();
+    assert_eq!(row(&w, i.skew), i.skew.map(skew));
     drop(w);
 }
 

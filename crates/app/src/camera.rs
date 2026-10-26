@@ -357,6 +357,10 @@ impl W {
                 let Clk {
                     err, ok, mut conn, ..
                 } = self.clk.take().unwrap();
+                // the clock as set, for the Clock row (the connect read the options before the sync)
+                if err.is_none() {
+                    self.opts()
+                }
                 match (err, conn.first_mut()) {
                     (Some(e), _) => conn.push((format!("time sync: {e}"), true)),
                     (None, Some(c)) => c.0 = format!("{}; {ok}", c.0),
@@ -623,7 +627,8 @@ impl W {
     }
 
     /// Sets the camera clock and zone to this computer's with the app's two SET_OPTIONS (PROTOCOL.md §5.3), its
-    /// answers not waited for: [`W::tick`] notes them, after `conn` and the notes of a sync still in flight.
+    /// answers not waited for: [`W::tick`] notes them, after `conn` and the notes of a sync still in flight, and reads
+    /// the options again once the camera took both.
     fn time(&mut self, c: &Camera, conn: Vec<(String, bool)>) {
         let (t, _, off, tz, s) = clock();
         let mut v = self.clk.take().map_or(vec![], |k| k.conn);
@@ -839,10 +844,9 @@ impl W {
         let Some(cam) = self.cam.clone() else {
             return self.note("not connected", true);
         };
-        // noted once the camera answered; the clock read after it
+        // noted once the camera answered, the options read again if it took both
         if let Cmd::Time = c {
-            self.time(&cam, vec![]);
-            return self.opts();
+            return self.time(&cam, vec![]);
         }
         let what = match c {
             Cmd::Delete(_) => "delete",
@@ -1035,6 +1039,14 @@ pub fn battery(b: &pb::BatteryInfo) -> String {
             _ => "",
         }
     )
+}
+
+/// The Clock row: the camera clock minus this computer's, s.
+fn skew(s: i64) -> String {
+    match s {
+        -2..=2 => "in sync with this computer".into(),
+        s => format!("{s:+} s from this computer"),
+    }
 }
 
 fn storage(s: &pb::StorageState) -> String {
@@ -1985,11 +1997,7 @@ impl Cam {
                 row(
                     "Clock",
                     // the X5 leaves LOCAL_TIME out of its answer (fw v1.13.21)
-                    i.skew
-                        .map_or("not reported by the camera".into(), |s| match s {
-                            -2..=2 => "in sync with this computer".into(),
-                            s => format!("{s:+} s from this computer"),
-                        }),
+                    i.skew.map_or("not reported by the camera".into(), skew),
                 );
             });
         ui.add_space(8.0);
