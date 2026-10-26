@@ -558,7 +558,6 @@ mod tests {
         let dir = crate::clip::tests::Tmp::new("movie-bf");
         let p = dir.0.join("bf1.mp4");
         if !crate::clip::tests::numbered(&p, &["-c:v", "libx264", "-bf", "1"]) {
-            eprintln!("no ffmpeg: skipped");
             return;
         }
         let g = Arc::new(Gpu::new().unwrap());

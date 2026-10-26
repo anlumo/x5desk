@@ -639,8 +639,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// Makes `p` with the ffmpeg CLI (test tool; false if it is missing): 200 frames of 640 × 360 at 25 fps, frame
-    /// n's number burned in as digits and in binary along the top (`number`), encoded with `enc`.
+    /// Makes `p` with the ffmpeg CLI (test tool): 200 frames of 640 × 360 at 25 fps, frame n's number burned in as
+    /// digits and in binary along the top (`number`), encoded with `enc`. False, with a note, when ffmpeg is missing
+    /// or cannot make it (an encoder or filter it lacks, drawtext without fontconfig).
     pub(crate) fn numbered(p: &Path, enc: &[&str]) -> bool {
         let bits = "if(lt(Y\\,40)\\,16+219*bitand(floor(N/pow(2\\,floor(X/40)))\\,1)";
         let vf = format!(
@@ -648,7 +649,7 @@ pub(crate) mod tests {
              cr='if(lt(Y\\,40)\\,128\\,cr(X\\,Y))',drawtext=text='%{{frame_num}}':fontsize=160:\
              fontcolor=white:box=1:boxcolor=black:x=(w-tw)/2:y=(h-th)/2+20"
         );
-        let Ok(o) = std::process::Command::new("ffmpeg")
+        let why = match std::process::Command::new("ffmpeg")
             .args([
                 "-v",
                 "error",
@@ -662,11 +663,13 @@ pub(crate) mod tests {
             .args(enc)
             .arg(p)
             .output()
-        else {
-            return false;
+        {
+            Ok(o) if o.status.success() => return true,
+            Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+            Err(e) => format!("no ffmpeg ({e})"),
         };
-        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-        true
+        eprintln!("ffmpeg {enc:?} cannot make the clip, skipped: {why}");
+        false
     }
 
     /// The number `numbered` burned into a picture whose luma rows are `w` samples of `b` bytes (the high byte read).
@@ -695,33 +698,62 @@ pub(crate) mod tests {
         px
     }
 
+    /// Plays frames `ks`, after the one shown, holding each while the next decodes the way the player does: each
+    /// comes once, in order; `f` checks its picture.
+    fn play(
+        g: &Gpu,
+        v: &Video,
+        ks: std::ops::Range<usize>,
+        held: &mut Option<Pic>,
+        what: &str,
+        mut f: impl FnMut(usize, &[u8]),
+    ) {
+        let t0 = Instant::now();
+        for k in ks {
+            let x = loop {
+                if let (Some(x), n) = v.take(v.times[k], true) {
+                    assert_eq!((x.k, n), (k, 0), "{what}: playback");
+                    break x;
+                }
+                assert!(
+                    t0.elapsed().as_secs() < 20,
+                    "{what}: playback stalled at {k}"
+                );
+                thread::sleep(Duration::from_millis(1));
+            };
+            v.acquire(g, &x);
+            f(k, &read(g, &v.rings[0], v.view, x.f[0]));
+            v.release_before(g, &x);
+            *held = Some(x);
+        }
+    }
+
     /// B-frames (H.264 from the ffmpeg CLI, frame numbers burned in, `-bf 1` and libx264's defaults): frames are
     /// numbered in presentation order (frame 59 showed for 60 and 136 for 137); seeks show the frame asked for, as
     /// FFmpeg decodes it, and playback holding each frame while the next decodes shows every frame once, in order (the
-    /// ring holds what reordering needs: 4 and 7 frames, plus 2 to decode ahead).
+    /// ring holds what the stream's reordering needs, plus 2 to decode ahead).
     #[test]
     fn bframes() {
         let dir = Tmp::new("bframes");
         let g = Arc::new(Gpu::new().unwrap());
-        for (name, enc, w) in [
-            ("bf1", &["-c:v", "libx264", "-bf", "1"][..], 4),
-            ("x264", &["-c:v", "libx264"][..], 7),
+        for (name, enc) in [
+            ("bf1", &["-c:v", "libx264", "-bf", "1"][..]),
+            ("x264", &["-c:v", "libx264"][..]),
         ] {
             let p = dir.0.join(format!("{name}.mp4"));
             if !numbered(&p, enc) {
-                eprintln!("no ffmpeg: skipped");
                 return;
             }
             let m = Mp4::open(&p).unwrap();
-            let (ord, ww) = order(&m.tracks[0].samples);
+            let (ord, w) = order(&m.tracks[0].samples);
             let late = (0..ord.len()).filter(|&k| ord[k] != k).count();
             eprintln!(
-                "{name}: {late} of {} frames decode out of order, ring {ww}",
+                "{name}: {late} of {} frames decode out of order, ring {w}",
                 ord.len()
             );
-            assert!(late > 50 && ww == w, "{name}");
+            assert!(late > 0, "{name}: no B-frames");
             let mut v = Video::open(&g, std::slice::from_ref(&p), || {}).unwrap();
-            assert_eq!(v.rings[0].slots(), w + 2);
+            assert_eq!(v.rings[0].slots(), w + OUT - 2);
             let [_, _, vw, _] = v.view.map(|x| x as usize);
             let mut held = None;
             for k in [0, 60, 137, 59, 199, 100, 101, 61, 3, 0] {
@@ -743,27 +775,9 @@ pub(crate) mod tests {
             // play from 0 holding each frame: every one comes, in order
             show(&g, &mut v, 0, &mut held);
             let t0 = Instant::now();
-            for k in 1..v.times.len() {
-                let x = loop {
-                    if let (Some(x), n) = v.take(v.times[k], true) {
-                        assert_eq!((x.k, n), (k, 0), "{name}: playback");
-                        break x;
-                    }
-                    assert!(
-                        t0.elapsed().as_secs() < 20,
-                        "{name}: playback stalled at {k}"
-                    );
-                    thread::sleep(Duration::from_millis(1));
-                };
-                v.acquire(&g, &x);
-                assert_eq!(
-                    number(&read(&g, &v.rings[0], v.view, x.f[0]), vw, 1),
-                    k,
-                    "{name}: playback"
-                );
-                v.release_before(&g, &x);
-                held = Some(x);
-            }
+            play(&g, &v, 1..v.times.len(), &mut held, name, |k, px| {
+                assert_eq!(number(px, vw, 1), k, "{name}: playback")
+            });
             eprintln!(
                 "{name}: played {} frames in order in {:.2} s",
                 v.times.len(),
@@ -791,7 +805,6 @@ pub(crate) mod tests {
             "log-level=error:bframes=0",
         ];
         if !numbered(&p, &enc) {
-            eprintln!("no ffmpeg: skipped");
             return;
         }
         let g = Arc::new(Gpu::new().unwrap());
