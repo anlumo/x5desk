@@ -33,20 +33,37 @@ pub struct Prefs {
 
 /// The output the player, the live outputs and the editor's preview play on ([`output`]): [`Prefs::audio`], set by
 /// the Settings screen.
-static AUDIO: Out = Out::new();
+static AUDIO: Out = Out::new(media::audio::device);
 
 /// An output device looked up off the UI thread (an id lists ALSA's devices): the device of the newest pick looked up
-/// so far, the picks made, the newest one looked up.
+/// so far, the picks made, the newest one looked up; the lookup (`media::audio::device`).
 struct Out {
     m: Mutex<(Option<cpal::Device>, u32, u32)>,
     c: Condvar,
+    look: fn(Option<&str>) -> Option<cpal::Device>,
+}
+
+/// A pick's lookup result, handed over when it drops: also when the lookup panics, which left every later `get` (each
+/// file opened) waiting.
+struct Done(&'static Out, u32, Option<cpal::Device>);
+
+impl Drop for Done {
+    fn drop(&mut self) {
+        let mut m = self.0.m.lock().unwrap_or_else(|e| e.into_inner());
+        // an earlier pick whose lookup ends later changes nothing
+        if self.1 > m.2 {
+            (m.0, m.2) = (self.2.take(), self.1);
+        }
+        self.0.c.notify_all();
+    }
 }
 
 impl Out {
-    const fn new() -> Out {
+    const fn new(look: fn(Option<&str>) -> Option<cpal::Device>) -> Out {
         Out {
             m: Mutex::new((None, 0, 0)),
             c: Condvar::new(),
+            look,
         }
     }
 
@@ -59,13 +76,8 @@ impl Out {
             m.1
         };
         thread::spawn(move || {
-            let d = media::audio::device(id.as_deref());
-            let mut m = self.m.lock().unwrap();
-            // an earlier pick whose lookup ends later changes nothing
-            if n > m.2 {
-                (m.0, m.2) = (d, n);
-            }
-            self.c.notify_all();
+            let mut d = Done(self, n, None);
+            d.2 = (self.look)(id.as_deref());
         });
     }
 
@@ -508,7 +520,7 @@ mod tests {
     #[test]
     fn out() {
         // not AUDIO: other tests play on it
-        static O: Out = Out::new();
+        static O: Out = Out::new(media::audio::device);
         let h = cpal::default_host();
         let id = |d: Option<cpal::Device>| Some(d?.id().ok()?.to_string());
         let outs: Vec<String> = (h.output_devices().into_iter().flatten())
@@ -534,6 +546,27 @@ mod tests {
         }
         O.pick(Some("alsa:no such device".into()));
         assert_eq!(id(O.get()), id(h.default_output_device()));
+    }
+
+    /// A lookup that panics still counts as done: `get` gives the system default instead of waiting for good (every
+    /// file opened after it would hang), and the next pick is looked up as usual.
+    #[test]
+    fn out_panic() {
+        static O: Out = Out::new(|i| match i {
+            Some("panic") => panic!("a lookup that panics (this test)"),
+            i => media::audio::device(i),
+        });
+        let id = |d: Option<cpal::Device>| Some(d?.id().ok()?.to_string());
+        let def = id(cpal::default_host().default_output_device());
+        let get = || {
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || tx.send(id(O.get())));
+            rx.recv_timeout(std::time::Duration::from_secs(10))
+        };
+        O.pick(Some("panic".into()));
+        assert_eq!(get(), Ok(def.clone()), "waits for the lookup that panicked");
+        O.pick(None);
+        assert_eq!(get(), Ok(def));
     }
 
     /// The page reads and trims the thumbnail cache on a thread of its own: its first frame (pass 1 here, which the
