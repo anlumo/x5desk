@@ -406,6 +406,65 @@ fn speed() {
     assert!(q1 < 0.06 && s2 > 2.0 * walk && (q2 / q1 - (s2 / walk).powi(2)).abs() < 1e-3);
 }
 
+/// `find`'s rule for persons (`vit::Tried`, `vit::hit`) on features of P (0.7 like the subject) and Q (0.68 like it,
+/// 0.48 like P), both the subject by the gallery. P, taken at VitTrack 0.34 (the v635 man's at frame 115) and lost
+/// before VitTrack was sure of them, is tried: one at least as like P as like the subject needs 0.5 then, Q still
+/// 0.25, until P is one of more than `TRIED` ago. A candidate the pick's template is unsure of or puts its box beside
+/// is not taken at all, never on its detection's box.
+#[test]
+fn tried() {
+    use crate::{Det, Gallery, tan};
+    let f = |c: &[(usize, f32)]| {
+        let mut e = [0f32; reid::DIM];
+        for &(i, v) in c {
+            e[i] = v;
+        }
+        e
+    };
+    let (s, p, q) = (
+        f(&[(0, 1.0)]),
+        f(&[(0, 0.7), (1, 0.51f32.sqrt())]),
+        f(&[(0, 0.68), (2, (1.0 - 0.68f32.powi(2)).sqrt())]),
+    );
+    let mut g = Gallery::default();
+    g.add(s, true);
+    for i in 3..6 {
+        g.add(f(&[(i, 1.0)]), false);
+    }
+    let (sp, sq) = (g.score(&p), g.score(&q));
+    assert!(g.is(sp) && g.is(sq));
+    // P's detection; the template's box on it, beside it
+    let x = Det {
+        dir: dir(10.0, 0.0),
+        size: Vec2::new(4.0, 10.0),
+        cls: 0,
+        score: 0.9,
+    };
+    let (on, off, z) = (dir(10.2, 0.3), dir(16.0, 0.0), Vec2::new(4.2, 10.4));
+    let mut t = vit::Tried::default();
+    let lo = t.need(&g, &p, sp.0);
+    let h = vit::hit(x, (0.34, on, tan(z)), lo).expect("P at 0.34, nobody tried");
+    assert!(lo == 0.25 && h.dir == on && h.score == 0.34 && h.size.abs_diff_eq(z, 1e-4));
+    // `find` took P; the tracker lost them before VitTrack was sure of them (no `Tracked` frame cleared `took`)
+    t.took = Some(Box::new(p));
+    t.lost();
+    assert!(t.took.is_none() && t.v.len() == 1);
+    let lo = t.need(&g, &p, sp.0);
+    assert_eq!(lo, 0.5, "P tried");
+    assert!(vit::hit(x, (0.34, on, tan(z)), lo).is_none());
+    assert!(vit::hit(x, (0.5, on, tan(z)), lo).is_some());
+    assert_eq!(t.need(&g, &q, sq.0), 0.25, "Q less like P than the subject");
+    // the last `TRIED` (8) are kept
+    for i in 0..8 {
+        t.took = Some(Box::new(f(&[(10 + i, 1.0)])));
+        t.lost();
+    }
+    assert!(t.v.len() == 8 && t.v[0][10] == 1.0 && t.need(&g, &p, sp.0) == 0.25);
+    // the template unsure, or its box beside the detection: no box (the detection's was taken before)
+    assert!(vit::hit(x, (0.2, on, tan(z)), 0.25).is_none());
+    assert!(vit::hit(x, (0.9, off, tan(z)), 0.25).is_none());
+}
+
 /// Synthetic detections, all 15° below the horizon: A (a person, 20° tall) walks from yaw 0 to 60° and leaves after
 /// 6 s; B (a person, 10° tall) stands at yaw −132° (168° on from A's end); C (a chair, larger) at yaw 90°. The path
 /// follows A without jumping, then turns to B once A has been gone a while, level: the great-circle arc from A to B
