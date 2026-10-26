@@ -1303,7 +1303,7 @@ impl Editor {
     }
 
     /// A deck for clip `k` of file `path` at source time `src`, not deck `keep`: the one serving it, one of the file
-    /// a few frames before there, else a free or the other deck, reopened on the file if needed.
+    /// at that frame, a few frames before, else a free or the other deck, reopened on the file if needed.
     fn deck(&mut self, k: usize, path: &str, src: f64, keep: Option<usize>) -> Option<usize> {
         let ver = self.ver;
         let ok = |i: usize| Some(i) != keep;
@@ -1311,16 +1311,16 @@ impl Editor {
         {
             return Some(i);
         }
-        // of the file: decoding on from a few frames before (a split clip playing on), else seeking
-        let mine = |i: usize, near: bool| {
+        // of the file: showing the frame at once, decoding on from a few frames before (a split clip playing on),
+        // else seeking
+        let mine = |i: usize, m: u8| {
             let d = &self.decks[i];
-            ok(i) && d.path == path && (!near || d.near(clip::frame_at(&d.s.v.times, src)))
+            let kf = clip::frame_at(&d.s.v.times, src);
+            let held = d.want.is_none() && d.held.is_some_and(|h| h.k == kf);
+            ok(i) && d.path == path && [held, d.near(kf), true][m as usize]
         };
         let n = self.decks.len();
-        if let Some(i) = (0..n)
-            .find(|&i| mine(i, true))
-            .or_else(|| (0..n).find(|&i| mine(i, false)))
-        {
+        if let Some(i) = (0..3).find_map(|m| (0..n).find(|&i| mine(i, m))) {
             return Some(i);
         }
         // else a new deck, or one that serves nothing now

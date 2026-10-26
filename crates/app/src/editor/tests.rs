@@ -1344,6 +1344,62 @@ fn paused_edit() {
     assert!(e.err.is_none(), "{:?}", e.err);
 }
 
+/// With two decks of one file after an edit, the viewer takes the one that holds the playhead's frame over one a few
+/// frames before it, and shows that frame at once (`X5_SAMPLES`, v635, decks at frames 95 and 100, the playhead on
+/// frame 100): no seek, which would decode on to frame 100 meanwhile.
+#[test]
+fn deck_exact() {
+    let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+        eprintln!("X5_SAMPLES unset: skipped");
+        return;
+    };
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = stitch::Ctx::new(&g.device, &g.queue);
+    let mut e = Editor::new(
+        &g,
+        &cx,
+        &egui::Context::default(),
+        player::still(&g, &cx),
+        None,
+    );
+    e.add(&d.join("v635.insv"), None).unwrap();
+    let path = e.pj.tl().files[0].path.clone();
+    let a = e.deck(0, &path, 0.0, None).unwrap();
+    let b = e.deck(0, &path, 0.0, Some(a)).unwrap();
+    for (i, k) in [(a, 95), (b, 100)] {
+        let t = Instant::now();
+        e.decks[i].seek(&g, k);
+        while !e.decks[i].take(&g, 0.0) {
+            assert!(t.elapsed().as_secs() < 20, "deck {i}: seek {k} stalled");
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(e.decks[i].held.map(|p| p.k), Some(k));
+    }
+    // an edit: the decks serve nothing
+    e.changed();
+    let tl = e.pj.tl();
+    e.seek(tl.out.fps.t(100));
+    e.schedule();
+    let at = |e: &Editor, i: usize| {
+        let d = &e.decks[i];
+        (
+            d.k.is_some_and(|x| x.1 == e.ver),
+            d.held.map(|p| p.k),
+            d.want,
+        )
+    };
+    eprintln!(
+        "decks {a} (at 95) and {b} (at 100), the playhead on frame 100: serving, frame shown, seek target {:?} and {:?}",
+        at(&e, a),
+        at(&e, b)
+    );
+    assert_eq!(
+        (at(&e, a), at(&e, b)),
+        ((false, Some(95), None), (true, Some(100), None))
+    );
+    assert!(e.err.is_none(), "{:?}", e.err);
+}
+
 /// Music whose container gives no length (of a 6 s chord encoded by the ffmpeg CLI into a pipe: AAC, MP3, Vorbis, FLAC;
 /// those the reader knows the length of anyway are left out) is counted on a thread: the import returns at once
 /// and the music goes in, 6 s long, once counted; an import meanwhile supersedes it.
