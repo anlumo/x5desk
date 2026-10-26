@@ -1087,7 +1087,8 @@ pub struct Cam {
 }
 
 /// The bar's camera state. A mounted disk of the camera's own is the X5 in U-disk mode (Webcam Mode has no disk),
-/// whatever the bus scan says: in U-disk mode the X5 enumerates under another vendor id (`070a:4027`).
+/// whatever the bus scan says; the scan's [`Plug::Disk`] (`070a:4027`) is the X5 as a disk not mounted (yet), or the
+/// first seconds of app mode.
 fn status(i: &Info) -> String {
     let app = "choose Android App on its USB menu for the full features (settings, capture, live preview)";
     match (i.conn, i.plug, &i.id) {
@@ -1102,6 +1103,9 @@ fn status(i: &Info) -> String {
                 format!("Camera in U-disk mode: the Album shows its card; {app}")
             }
             (Some(_), _) => format!("Camera in U-disk mode: pick its card in the Album; {app}"),
+            _ if p == Some(Plug::Disk) => format!(
+                "Camera in U-disk mode (or starting): its card shows in the Album once mounted; {app}"
+            ),
             _ if p == Some(Plug::Other) => {
                 "Insta360 camera in another USB mode: choose Android App on its USB menu".into()
             }

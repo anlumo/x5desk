@@ -1275,6 +1275,17 @@ fn card_album() {
         status(&j),
         "No camera: the Album shows a card; connect the X5 by USB in app mode"
     );
+    // the X5 on the bus as a disk (070a:4027) not mounted yet, or the first seconds of app mode
+    let k = Info {
+        plug: Some(Plug::Disk),
+        ..Default::default()
+    };
+    assert_eq!(
+        status(&k),
+        format!(
+            "Camera in U-disk mode (or starting): its card shows in the Album once mounted; {full}"
+        )
+    );
     let v = album(&w);
     assert_eq!(v.len(), 2);
     let rec = v.iter().find(|i| i.kind == Kind::Video).unwrap();
