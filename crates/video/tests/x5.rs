@@ -983,6 +983,11 @@ fn live_loss() {
 /// FFmpeg outputs in display order, the decoder in decode order):
 /// - x264 P only: POC type 2, a sliding window of 4 references, weighted prediction, cropping (404 of 416 rows)
 /// - x264 B-pyramid: POC type 0, MMCO 1, temporal direct, implicit weights (POC distances)
+/// - x264 open GOP: a non-IDR I picture (a sync sample to libx264) with B-frames shown before it, a B-pyramid
+///   reference among them; then from that I picture where decoding starts or restarts (as for x265 below), which skips
+///   exactly the pictures shown before it and gives every other AU the whole stream's picture. A restart that kept the
+///   DPB had pictures from before the jump stand in for the frame_num gap's frames at the I picture; one that emptied
+///   it without resetting the session still decoded wrong pictures after it (VCN)
 /// - x265 B-pyramid, open GOP: sub-layer non-reference pictures, RPS in slice headers, CRAs with RASL pictures,
 ///   conformance window; then from a CRA where decoding starts or restarts (`Decoder::restart`: a seek back to the
 ///   first CRA after the whole stream, forward to the last one after 5 pictures; CRAs with RASL pictures), which
@@ -1010,6 +1015,12 @@ fn x26x_matches_ffmpeg() {
             false,
             "-c:v libx264 -bf 3 -refs 3 -g 25 -x264-params b-pyramid=normal:direct=temporal:weightb=1 -f h264",
         ),
+        (
+            Codec::H264,
+            "x264 open GOP",
+            false,
+            "-c:v libx264 -bf 3 -refs 3 -g 32 -x264-params open-gop=1:scenecut=0:b-adapt=0 -f h264",
+        ),
         (Codec::H265, "x265 B", false, x265),
         (Codec::H265, "x265 Main 10 B", true, x265),
     ] {
@@ -1036,7 +1047,9 @@ fn x26x_matches_ffmpeg() {
             0,
             "{name}: FFmpeg has more frames"
         );
-        let mut want: Vec<_> = want.chunks(fs).map(hash).collect();
+        // in display order
+        let shown: Vec<_> = want.chunks(fs).map(hash).collect();
+        let mut want = shown.clone();
         want.sort();
         let params: Vec<_> = aus[0]
             .iter()
@@ -1056,9 +1069,20 @@ fn x26x_matches_ffmpeg() {
         let cra: Vec<_> = (0..aus.len())
             .filter(|&i| codec == Codec::H265 && ty[i] == Some(21) && rasl(i) > 0)
             .collect();
+        // H.264: the non-IDR I pictures
+        let mut s4 = h264::State::default();
+        let open: Vec<_> = (0..aus.len())
+            .filter(|&i| {
+                codec == Codec::H264
+                    && aus[i].iter().any(|n| {
+                        s4.put(n).unwrap();
+                        h264::nal_type(n) == 1 && s4.slice(n).is_ok_and(|s| s.intra)
+                    })
+            })
+            .collect();
         // the AUs decoded before a restart, the AU it restarts at
         let mut runs = vec![(0, 0)];
-        if let (Some(&a), Some(&b)) = (cra.first(), cra.last()) {
+        if let (Some(&a), Some(&b)) = (cra.first().or(open.first()), cra.last().or(open.last())) {
             runs.extend([(0, a), (aus.len(), a), (5, b)]);
         }
         // the whole stream's picture of each AU
@@ -1093,7 +1117,7 @@ fn x26x_matches_ffmpeg() {
                 .count();
             println!(
                 "{name}: {pre} AUs, then from AU {start}: {} of {} pictures decoded, view {:?} in {}x{}, {miss} \
-                 not among FFmpeg's frames, {wrong} not the whole stream's of their AU, {skipped} RASL skipped",
+                 not among FFmpeg's frames, {wrong} not the whole stream's of their AU, {skipped} skipped",
                 got.len(),
                 pre + aus.len() - start,
                 d.view,
@@ -1101,11 +1125,20 @@ fn x26x_matches_ffmpeg() {
                 d.h
             );
             assert_eq!((miss, wrong), (0, 0), "{name}");
-            // exactly the restart's RASL pictures (later CRAs' decode), and there are some
+            // exactly the restart's leading pictures, and there are some: its RASL pictures (later CRAs' decode), or
+            // the pictures up to the next I picture shown before it
+            let at = |j: usize| shown.iter().position(|&x| x == full[j]);
+            let lead = match codec {
+                _ if start == 0 => 0,
+                Codec::H265 => rasl(start),
+                Codec::H264 => (start + 1..aus.len())
+                    .take_while(|j| !open.contains(j))
+                    .filter(|&j| at(j) < at(start))
+                    .count(),
+            };
             assert!(
-                start == 0 || skipped > 0 && skipped == rasl(start),
-                "{name}: {skipped} skipped of {} RASL pictures",
-                rasl(start)
+                start == 0 || skipped > 0 && skipped == lead,
+                "{name}: {skipped} skipped of {lead} leading pictures"
             );
             if start == 0 {
                 full = got.iter().map(|x| x.1).collect();

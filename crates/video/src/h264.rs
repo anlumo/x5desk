@@ -2,7 +2,7 @@
 //! POC types 0 and 2, no scaling matrices), plus POC (8.2.1) and reference marking (8.2.5: gaps in frame_num,
 //! sliding window and MMCO 1-6).
 use crate::{
-    Error::Bad,
+    Error::{Bad, Skip},
     Result,
     bits::Bits,
     decode::{MAXS, Pic, Ref},
@@ -167,7 +167,8 @@ pub struct Slice {
     pub nm: usize,
 }
 
-/// Parameter sets by id and the POC / frame_num state of the previous pictures.
+/// Parameter sets by id, the POC / frame_num state of the previous pictures, whether a picture came since the start
+/// or a restart, and the POC of the non-IDR I picture decoding started at.
 pub struct State {
     pub sps: [Option<Sps>; 32],
     pub pps: Vec<Option<Pps>>,
@@ -178,6 +179,8 @@ pub struct State {
     prev_fno: u32,
     prev_ref: u32,       // PrevRefFrameNum
     max_lt: Option<u32>, // MaxLongTermFrameIdx, None = "no long-term frame indices"
+    started: bool,
+    rp: Option<i32>,
 }
 
 impl Default for State {
@@ -193,11 +196,20 @@ impl Default for State {
             prev_fno: 0,
             prev_ref: 0,
             max_lt: None,
+            started: false,
+            rp: None,
         }
     }
 }
 
 impl State {
+    /// Decoding restarts at the next picture (a seek): everything but the parameter sets starts over as in a new
+    /// decoder; the caller empties the DPB.
+    pub fn restart(&mut self) {
+        (self.prev_msb, self.prev_lsb, self.prev_fn, self.prev_fno) = (0, 0, 0, 0);
+        (self.prev_ref, self.max_lt, self.started, self.rp) = (0, None, false, None);
+    }
+
     /// Stores an SPS / PPS under its id, replacing the one before (the last received is active); true when that
     /// changed what the id holds.
     pub fn put(&mut self, n: &[u8]) -> Result<bool> {
@@ -335,7 +347,8 @@ impl State {
 
     /// POC and reference marking for the picture in `au`: infers the frames of a frame_num gap, fills `p`, lists
     /// the reference slots active for its decode in `act`, then marks (sliding window or MMCO) and puts the picture
-    /// in a free slot (`Pic::setup`). On an error nothing has changed.
+    /// in a free slot (`Pic::setup`). On an error nothing has changed, except for `Skip`: a picture shown before the
+    /// non-IDR I picture decoding started or restarted at, marked but not decoded.
     pub(crate) fn picture(
         &mut self,
         au: &[&[u8]],
@@ -442,6 +455,16 @@ impl State {
             (t, t)
         };
         self.prev_fn = fnum;
+        // decoding started at a non-IDR I picture, a recovery point (D.2.8): the pictures shown before it may
+        // reference pictures before it, never decoded. They are skipped, but marked like any other (later frame_num
+        // values and MMCOs count on them), a reference as a non-existing frame.
+        if s.idr {
+            self.rp = None;
+        } else if !self.started && intra {
+            self.rp = Some(top.min(bot));
+        }
+        self.started = true;
+        let skip = self.rp.is_some_and(|r| top.min(bot) < r);
         p.flags.set_is_intra(intra as u32);
         p.flags.set_IdrPicFlag(s.idr as u32);
         p.flags.set_is_reference(refpic as u32);
@@ -507,15 +530,18 @@ impl State {
             // after decoding, the picture counts as frame_num 0 with its POC rebased to 0
             let m = top.min(bot);
             (top, bot, num, self.prev_fn, self.prev_fno) = (top - m, bot - m, 0, 0, 0);
-            (self.prev_msb, self.prev_lsb, self.prev_ref) = (0, top, 0);
+            (self.prev_msb, self.prev_lsb, self.prev_ref, self.rp) = (0, top, 0, None);
         }
         refs[setup] = Ref {
             live: refpic,
             long,
             num,
             poc: [top, bot],
-            none: false,
+            none: skip,
         };
+        if skip {
+            return Err(Skip);
+        }
         Ok(Pic {
             setup,
             n: na,

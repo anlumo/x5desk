@@ -840,19 +840,26 @@ impl Decoder {
         Ok(())
     }
 
-    /// Decoding restarts at the next access unit, a random access point (a seek): an H.265 CRA there is handled as a
-    /// BLA (HandleCraAsBlaFlag), so it empties the DPB and its RASL pictures, which reference pictures before it,
-    /// are `Error::Skip`. H.264 has no CRA: nothing changes.
+    /// Decoding restarts at the next access unit, a random access point (a seek), as in a new decoder: the session is
+    /// reset and the DPB emptied. An H.265 CRA there is handled as a BLA (HandleCraAsBlaFlag): its RASL pictures,
+    /// which reference pictures before it, are `Error::Skip`. So are the pictures shown before an H.264 non-IDR I
+    /// picture there.
     pub fn restart(&mut self) {
-        if let St::H265(s) = &mut self.st {
-            s.restart();
+        // the session holds state of the device's own (VCN): with only the DPB emptied, H.264 pictures some frames
+        // after a restart still came out wrong, without an error
+        self.reset = true;
+        self.refs.fill(Ref::default());
+        match &mut self.st {
+            St::H264(s) => s.restart(),
+            St::H265(s) => s.restart(),
         }
     }
 
     /// Decodes one access unit (the NAL units of one sample: its slices plus any in-band parameter sets) into
     /// texture `frame % slots()` and returns the frame index. Waits up to 50 ms for the consumer to release that slot
     /// (`free`; a release no submit has carried yet goes out with an empty one); then returns `Error::Full` with
-    /// nothing changed. A RASL picture that cannot be decoded is `Error::Skip`, no frame.
+    /// nothing changed. A leading picture that may reference pictures before where decoding started or restarted
+    /// (`restart`) is `Error::Skip`, no frame.
     pub fn decode(&mut self, g: &Gpu, au: &[&[u8]]) -> Result<u64> {
         let (f, r) = (self.frame, self.ring.slots() as u64);
         let k = (f % r) as usize;

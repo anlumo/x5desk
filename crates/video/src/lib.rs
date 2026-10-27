@@ -24,8 +24,9 @@ pub enum Error {
     /// frames are in flight, collect a packet first.
     Full,
     /// `Decoder::decode`: an H.265 RASL picture of a BLA or of a CRA where decoding started or restarted
-    /// (`Decoder::restart`): it references pictures before that point, so it is neither decoded nor output; nothing
-    /// changed but the parameter sets it carried.
+    /// (`Decoder::restart`), or a picture shown before the H.264 non-IDR I picture there: it may reference pictures
+    /// before that point, so it is neither decoded nor output, and no frame index is used. Nothing changed but the
+    /// parameter sets it carried and, H.264, its reference marking (as a non-existing frame) and POC / frame_num state.
     Skip,
 }
 
@@ -44,7 +45,7 @@ impl std::fmt::Display for Error {
             Error::Bad(s) => write!(f, "stream: {s}"),
             Error::Gpu(s) => write!(f, "GPU setup: {s}"),
             Error::Full => write!(f, "output ring full"),
-            Error::Skip => write!(f, "RASL picture skipped"),
+            Error::Skip => write!(f, "leading picture skipped"),
         }
     }
 }
