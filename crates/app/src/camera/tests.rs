@@ -24,6 +24,9 @@ struct Card {
     mute: Vec<u16>,
     /// the camera clock SET_OPTIONS set and when; until then 30 s ahead of this computer's
     clk: Option<(u64, Instant)>,
+    /// a SET_OPTIONS without LOCAL_TIME (the sync's second, the zone alone) answered with status 500 (the clock's is
+    /// taken)
+    zone: bool,
 }
 
 type Fake = Arc<Mutex<Card>>;
@@ -196,8 +199,10 @@ fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'static
             }
             link::code::SET_OPTIONS => {
                 let q = pb::SetOptions::decode(b).unwrap();
-                if q.option_types.contains(&(pb::OptionType::LocalTime as i32)) {
-                    c.clk = Some((q.value.unwrap().local_time, Instant::now()))
+                match q.option_types.contains(&(pb::OptionType::LocalTime as i32)) {
+                    true => c.clk = Some((q.value.unwrap().local_time, Instant::now())),
+                    false if c.zone => return (500, vec![]),
+                    false => {}
                 }
                 (200, pb::SetOptionsResp::default().encode_to_vec())
             }
@@ -609,23 +614,24 @@ fn connect_time() {
 
 /// A camera that reports its clock (LOCAL_TIME; the X5 leaves it out): the Clock row shows the skew read on connect
 /// until the clock is set, then the clock as set, by the time "camera clock set to …" is noted; the same after Sync
-/// time; a refused sync leaves the skew as read.
+/// time; after a refused sync it shows the clock still behind, after one that took the clock and refused the zone the
+/// clock as set, next to the refusal.
 #[test]
 fn clock_row() {
     let f = card(&NAMES[..2]);
     let q = Arc::new(Mutex::new(dl::Queue::load(None)));
     let (w, _) = spawn(&f, 50_000_000, q, Cache::at(None));
-    // the row's text by the clock's note
+    // the skew by the clock's note, and the note
     let row = |w: &Worker, mut s: Option<i64>| {
-        wait(w, 10.0, |u| match u {
+        let n = wait(w, 10.0, |u| match u {
             Up::Info(i) => {
                 s = i.skew;
                 None
             }
-            Up::Note(n, e) if n.contains("camera clock set to ") || e => Some((n, e)),
+            Up::Note(n, e) if n.contains("camera clock set to ") || e => Some(n),
             _ => None,
         });
-        s.map(skew)
+        (s, n)
     };
     w.tx.send(Cmd::Connect).unwrap();
     let i = conn(&w, Conn::On);
@@ -635,7 +641,7 @@ fn clock_row() {
         i.skew
     );
     let ok = Some("in sync with this computer".to_string());
-    assert_eq!(row(&w, i.skew), ok);
+    assert_eq!(row(&w, i.skew).0.map(skew), ok);
     // the camera's clock drifts 100 s behind
     f.lock().unwrap().clk = Some((clock().0 - 100, Instant::now()));
     w.tx.send(Cmd::Refresh).unwrap();
@@ -644,7 +650,7 @@ fn clock_row() {
         _ => None,
     });
     w.tx.send(Cmd::Time).unwrap();
-    assert_eq!(row(&w, i.skew), ok);
+    assert_eq!(row(&w, i.skew).0.map(skew), ok);
     f.lock().unwrap().clk = Some((clock().0 - 100, Instant::now()));
     f.lock().unwrap().refuse = vec![link::code::SET_OPTIONS];
     w.tx.send(Cmd::Refresh).unwrap();
@@ -653,7 +659,18 @@ fn clock_row() {
         _ => None,
     });
     w.tx.send(Cmd::Time).unwrap();
-    assert_eq!(row(&w, i.skew), i.skew.map(skew));
+    // still 100 s behind (± the second two reads can straddle)
+    let (s, n) = row(&w, i.skew);
+    let no = "time sync: status 500";
+    assert!(
+        s.is_some_and(|s| (-101..=-99).contains(&s)) && n.starts_with(no),
+        "{s:?} {n}"
+    );
+    f.lock().unwrap().refuse.clear();
+    f.lock().unwrap().zone = true;
+    w.tx.send(Cmd::Time).unwrap();
+    let (s, n) = row(&w, i.skew);
+    assert!(s.map(skew) == ok && n.starts_with(no), "{s:?} {n}");
     drop(w);
 }
 
@@ -690,7 +707,7 @@ fn silent_time() {
     let off = ms(t);
     assert!(notes.is_empty(), "{notes:?}");
 
-    let t = Instant::now();
+    let (t, g) = (Instant::now(), count(&f, link::code::GET_OPTIONS));
     w.tx.send(Cmd::Connect).unwrap();
     album(&w);
     let mut notes = vec![];
@@ -708,6 +725,8 @@ fn silent_time() {
             && notes[1] == ("time sync: timeout".into(), true),
         "{notes:?}"
     );
+    // the options not read again after the timeout: the connect's two only
+    assert_eq!(count(&f, link::code::GET_OPTIONS), g + 2);
 
     w.tx.send(Cmd::Disconnect).unwrap();
     conn(&w, Conn::Off);

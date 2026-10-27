@@ -251,11 +251,13 @@ struct W {
     clk: Option<Clk>,
 }
 
-/// A clock sync in flight (PROTOCOL.md §5.3): the answers to come, the first error, the note for success, and a
-/// connect's notes, which wait for it.
+/// A clock sync in flight (PROTOCOL.md §5.3): the answers to come, the first error, whether one did not come or came
+/// garbled (a timeout, the link gone, an undecodable reply), the note for success, and a connect's notes, which wait
+/// for it.
 struct Clk {
     p: Vec<link::Pending<pb::SetOptionsResp>>,
     err: Option<Error>,
+    lost: bool,
     ok: String,
     conn: Vec<(String, bool)>,
 }
@@ -352,13 +354,26 @@ impl W {
             self.opened(r);
         }
         if let Some(k) = &mut self.clk {
-            k.p.retain(|p| p.poll().map(|r| k.err = k.err.take().or(r.err())).is_none());
+            k.p.retain(|p| {
+                p.poll()
+                    .map(|r| {
+                        k.lost |= r.as_ref().is_err_and(|e| !matches!(e, Error::Status(..)));
+                        k.err = k.err.take().or(r.err())
+                    })
+                    .is_none()
+            });
             if k.p.is_empty() {
                 let Clk {
-                    err, ok, mut conn, ..
+                    err,
+                    lost,
+                    ok,
+                    mut conn,
+                    ..
                 } = self.clk.take().unwrap();
-                // the clock as set, for the Clock row (the connect read the options before the sync)
-                if err.is_none() {
+                // the clock as set, for the Clock row (the connect read the options before the sync), also after a
+                // refusal: one of the zone alone leaves the clock set. Not after an answer that never came or came
+                // garbled: on a silent camera GET_OPTIONS would hold the worker until its own timeout
+                if !lost {
                     self.opts()
                 }
                 match (err, conn.first_mut()) {
@@ -628,7 +643,7 @@ impl W {
 
     /// Sets the camera clock and zone to this computer's with the app's two SET_OPTIONS (PROTOCOL.md §5.3), its
     /// answers not waited for: [`W::tick`] notes them, after `conn` and the notes of a sync still in flight, and reads
-    /// the options again once the camera took both.
+    /// the options again once the camera answered both, a refusal too (not after a garbled answer).
     fn time(&mut self, c: &Camera, conn: Vec<(String, bool)>) {
         let (t, _, off, tz, s) = clock();
         let mut v = self.clk.take().map_or(vec![], |k| k.conn);
@@ -636,6 +651,7 @@ impl W {
         self.clk = Some(Clk {
             p: c.set_time(t, off, &tz).into(),
             err: None,
+            lost: false,
             ok: format!("camera clock set to {s} ({tz})"),
             conn: v,
         });
