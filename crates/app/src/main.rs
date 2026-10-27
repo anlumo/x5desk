@@ -50,10 +50,11 @@
 //! controls would: the follow view turns into the new frame), `blur`
 //! (the player's face blur preview), `autoedit[=<preset>]` (an auto edit of the first file onto the editor's
 //! timeline; with a preset key exported once made, the run ending with the queue), `ebox=<x0>/<y0>/<x1>/<y1>` (Deep
-//! Track in the editor's viewer at the playhead once it is set up), `lab=<effect>` (start on Shot Lab with that
-//! effect, e.g. `trails`, `shadow`, `center`), `lrange=<a>/<b>` (its range, s), `lpre` (make its preview),
-//! `lexp=<preset>[:faces]` (export it with that preset, and the face blur, once the clip, and for the subject effects the `box=` run, is there;
-//! the run ends with the queue).
+//! Track in the editor's viewer at the playhead once it is set up: that box, 0..1 of the export preset's flat frame
+//! (`epreset=`; 16:9 for a 360 one, as `box=`) whatever the window, its subject printed), `lab=<effect>` (start on
+//! Shot Lab with that effect, e.g. `trails`, `shadow`, `center`), `lrange=<a>/<b>` (its range, s), `lpre` (make its
+//! preview), `lexp=<preset>[:faces]` (export it with that preset, and the face blur, once the clip, and for the subject
+//! effects the `box=` run, is there; the run ends with the queue).
 
 mod ai;
 mod album;

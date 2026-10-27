@@ -99,7 +99,8 @@ pub struct Hook {
     pub vol: Option<f32>,
     /// preview the 360 frame
     pub pano: bool,
-    /// Deep Track: the box (0..1 of the viewer's picture) drawn once the editor is set up
+    /// Deep Track: the box drawn once the editor is set up, 0..1 of the export preset's flat frame (16:9 for a 360
+    /// preset) whatever the window
     pub tbox: Option<[f32; 4]>,
 }
 
@@ -255,11 +256,10 @@ pub struct Editor {
     /// test hook: playback statistics (frames shown, start: wall time and playhead); play once idle
     log: Option<(u64, Option<(std::time::Instant, f64)>)>,
     autoplay: bool,
-    /// Deep Track: the run, armed (a box drawn in the viewer starts one), the box being drawn, the picture's aspect
+    /// Deep Track: the run, armed (a box drawn in the viewer starts one), the box being drawn
     trk: Option<Trk>,
     arm: bool,
     from: Option<egui::Pos2>,
-    aspect: f32,
     tbox: Option<[f32; 4]>,
     /// an auto edit being made; export it with these `export::parse` tokens once it is on the timeline (test hook)
     auto: Option<Arc<ai::Auto>>,
@@ -385,7 +385,6 @@ impl Editor {
             trk: None,
             arm: false,
             from: None,
-            aspect: 16.0 / 9.0,
             tbox: None,
             auto: None,
             autox: None,
@@ -663,9 +662,9 @@ impl Editor {
         }
     }
 
-    /// Deep Track of the subject in box `b` (0..1 of the viewer's picture) from the playhead to the end of its clip:
-    /// the result becomes the clip's reframing keys, the viewer's view turned onto it.
-    pub fn track(&mut self, b: [f32; 4]) -> Result<(), String> {
+    /// Deep Track of subject `s` (`ai::subject` of a box in the viewer's perspective view) from the playhead to the end
+    /// of its clip: the result becomes the clip's reframing keys, the viewer's view turned onto it.
+    pub fn track(&mut self, s: track::Subject) -> Result<(), String> {
         let v = self.shown();
         if self.pano || look_of(&v) != Look::Perspective {
             return Err("Deep Track: draw the box in the perspective view".into());
@@ -697,7 +696,7 @@ impl Editor {
             (self.x.stab, self.x.smooth),
             k0,
             k1,
-            ai::subject(&v, self.aspect, b),
+            s,
         );
         self.trk = Some(Trk {
             t,
@@ -775,20 +774,23 @@ impl Editor {
         if let Some(a) = &self.auto {
             a.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        let (_, _, pano, [w, h], ..) = crate::export::PRESETS[self.preset];
-        let aspect = if pano {
-            16.0 / 9.0
-        } else {
-            w as f32 / h as f32
-        };
         self.auto = Some(ai::Auto::start(
             &self.g,
             &self.cx,
             &self.ctx,
             f,
             (self.x.stab, self.x.smooth),
-            aspect,
+            self.aspect(),
         ));
+    }
+
+    /// The export preset's flat frame, whatever the window: a flat preset's own (the viewer letterboxes to it), 16:9
+    /// for a 360 one (a flat 1080p export's, as the player's `box=`).
+    fn aspect(&self) -> f32 {
+        match crate::export::PRESETS[self.preset] {
+            (_, _, true, ..) => 16.0 / 9.0,
+            (_, _, _, [w, h], ..) => w as f32 / h as f32,
+        }
     }
 
     /// A finished auto edit's clips onto the timeline.
@@ -1227,9 +1229,16 @@ impl Editor {
         }
         self.rekey();
         self.place();
+        // the hook's box is in the preset's frame, not in the viewer's picture: under a 360 preset that is the viewer's
+        // rect, shaped by the window's size and layout
         if self.tbox.is_some() && self.settled() {
-            let b = self.tbox.take().unwrap();
-            if let Err(e) = self.track(b) {
+            let s = ai::subject(&self.shown(), self.aspect(), self.tbox.take().unwrap());
+            let [y, x] = track::yaw_pitch(s.dir);
+            eprintln!(
+                "x5desk editor: box: subject at yaw {y:.2}°, pitch {x:.2}°, {:.2}° × {:.2}°",
+                s.size.x, s.size.y
+            );
+            if let Err(e) = self.track(s) {
                 eprintln!("x5desk editor: box: {e}");
                 self.err = Some(e);
             }
@@ -1782,13 +1791,12 @@ impl Editor {
             }
             _ => look.fit(rect),
         };
-        self.aspect = r.aspect_ratio();
         let mut live = None;
         if self.arm && !self.pano && look == Look::Perspective {
             let (l, b) = ai::drag_box(ui, &resp, r, &mut self.from);
             live = l;
             if let Some(b) = b
-                && let Err(e) = self.track(b)
+                && let Err(e) = self.track(ai::subject(&v, r.aspect_ratio(), b))
             {
                 self.err = Some(e);
             }

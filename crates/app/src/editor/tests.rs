@@ -1624,6 +1624,79 @@ fn poses() {
     assert!(e.posed(), "off needs no poses");
 }
 
+/// The `ebox=` hook's box is 0..1 of the export preset's flat frame, whatever the window (`X5_SAMPLES`, v606 in
+/// the view of `deep_track`): under a 360 preset, whose picture is the viewer's rect, the run's subject
+/// (its first sample) is the box's in a 16:9 frame in a wide and in a tall window; under a flat one, in the preset's.
+#[test]
+fn ebox() {
+    let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+        eprintln!("X5_SAMPLES unset: skipped");
+        return;
+    };
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = stitch::Ctx::new(&g.device, &g.queue);
+    let (ctx, rs) = (egui::Context::default(), rs(&g));
+    let mut e = Editor::new(&g, &cx, &ctx, player::still(&g, &cx), None);
+    e.add(&d.join("v606.insv"), None).unwrap();
+    e.free = Some(View {
+        yaw: -71.0,
+        pitch: -35.0,
+        fov: 110.0,
+        ..View::default()
+    });
+    let b = [0.41, 0.25, 0.58, 0.83];
+    let mut n = 0.0;
+    let mut frame = |e: &mut Editor, [w, h]: [f32; 2]| {
+        e.tick(true);
+        n += 1.0 / 60.0;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(w, h),
+            )),
+            time: Some(n),
+            ..Default::default()
+        };
+        (ctx.run_ui(raw, |ui| e.ui(ui, &rs, &[])).textures_delta).clear();
+        thread::sleep(Duration::from_millis(5));
+    };
+    for (k, a, wh) in [
+        ("pano57", 16.0 / 9.0, [1600.0, 900.0]),
+        ("pano57", 16.0 / 9.0, [1000.0, 1100.0]),
+        ("vert1080", 9.0 / 16.0, [1600.0, 900.0]),
+    ] {
+        e.preset = (crate::export::PRESETS.iter())
+            .position(|p| p.0 == k)
+            .unwrap();
+        let t = Instant::now();
+        // the viewer drawn in this window, then the hook
+        while !e.idle() {
+            assert!(t.elapsed().as_secs() < 120, "{k}: never idle");
+            frame(&mut e, wh);
+        }
+        e.tbox = Some(b);
+        while (e.trk.as_ref()).is_none_or(|t| t.t.smp.lock().unwrap().is_empty()) {
+            assert!(t.elapsed().as_secs() < 300, "{k}: no run");
+            assert!(e.err.is_none(), "{:?}", e.err);
+            frame(&mut e, wh);
+        }
+        let tr = e.trk.take().unwrap().t;
+        tr.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let (s, x) = (tr.smp.lock().unwrap()[0], ai::subject(&e.shown(), a, b));
+        eprintln!(
+            "{k} in {} × {}: subject {:.2}° × {:.2}°, {:.2}° × {:.2}° expected",
+            wh[0], wh[1], s.size.x, s.size.y, x.size.x, x.size.y
+        );
+        assert!(
+            s.raw.angle_between(x.dir) < 1e-4 && (s.size - x.size).abs().max_element() < 1e-3,
+            "{k} in {wh:?}"
+        );
+        while !tr.st().over() {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
 /// Deep Track in the editor (`X5_SAMPLES`, v606 trimmed to 0–4 s): a box around the woman in the purple coat in the
 /// viewer's view (yaw −71°, pitch −35°, 110°) at the playhead becomes the clip's reframing keys, one undo step: keys
 /// every 0.5 s over the clip, the view's field of view kept, each aimed within a few degrees of her box; the viewer
@@ -1660,7 +1733,8 @@ fn deep_track() {
     e.sync();
     let h0 = e.history().0;
     // the box of the player's run, for the 16:9 picture the editor frames by default
-    e.track([0.41, 0.25, 0.58, 0.83]).unwrap();
+    let b = [0.41, 0.25, 0.58, 0.83];
+    e.track(ai::subject(&e.shown(), 16.0 / 9.0, b)).unwrap();
     while e.trk.as_ref().is_some_and(|t| !t.keyed) {
         assert!(t.elapsed().as_secs() < 600, "no keys");
         e.tick(true);
