@@ -80,12 +80,15 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 - H.264 input may miss whole access units (the live preview drops packets when the decode thread falls behind):
   frame_num gaps infer non-existing frames (8.2.5.2) that stand in with the pushed-out picture, and an IDR always
   recovers a full DPB. Loss shows as concealment until the next IDR, never as a refused stream.
-- A consumer that seeks calls `Decoder::restart()` before the access unit decoding restarts at. H.265: a CRA there is
-  handled as a BLA (HandleCraAsBlaFlag): a new POC sequence and an empty DPB. RASL pictures of an IRAP with
-  NoRaslOutputFlag (that CRA, a BLA, a CRA first in the stream or after an end of sequence) return `Error::Skip`:
-  nothing decoded, no frame index used. H.264 has no CRA, and restart changes nothing. Known bug: after a jump, H.264
-  decoding restarted at a non-IDR I picture (with libx264's `open-gop` such pictures are sync samples) can decode
-  pictures after it, up to the next I picture, as other frames', with no error; a fresh decoder decodes them right.
+- A consumer that seeks calls `Decoder::restart()` before the access unit decoding restarts at: the DPB is emptied,
+  the next decode resets the video session (VCN keeps state of its own: with only the DPB emptied, H.264 pictures some
+  frames after a restart came out wrong), and the POC / frame_num state starts over, as in a new decoder; an H.265 CRA
+  there is handled as a BLA (HandleCraAsBlaFlag). Leading pictures that may reference pictures from before where
+  decoding started or restarted return `Error::Skip`: nothing decoded, no frame index used. These are the RASL
+  pictures of an H.265 IRAP with NoRaslOutputFlag (that CRA, a BLA, a CRA first in the stream or after an end of
+  sequence) and the H.264 pictures shown before the non-IDR I picture decoding started or restarted at (a recovery
+  point; libx264's `open-gop` marks such I pictures as MP4 sync samples); the H.264 ones are still marked, a
+  reference as a non-existing frame.
 - Anything else that stages a semaphore signal on wgpu's queue (DMA-BUF export, encoder input) stages it only after
   the submit it covers, never before: a signal staged first can be taken by another thread's earlier submit.
 - Stitch sources are whole NV12 / P010 textures or rects in one (full range, BT.709; `Ctx::planes` also takes
@@ -127,10 +130,12 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 - One module per screen: `library.rs` / `player.rs`; `editor.rs` (`deck.rs`, `sound.rs`, `thumbs.rs`, `doc.rs`);
   `lab.rs` (Shot Lab on crate shotlab); `camera.rs` (its worker connects in the app's order, PROTOCOL.md §5.1:
   identity, options, capture status, then the clock's two SET_OPTIONS (§5.3) on every USB and Wi-Fi connect, not
-  waited for: polled in its tick; once both answered, the options are read again if both succeeded (the Clock row
-  shows the clock as set), then the connect note and a low-battery note come; a refusal or timeout adds an error note
-  and the session stays; then the Capture screen's tap and the listing; Sync time takes the same path; at quit only
-  the running download's end is collected (`dl::end`), nothing new starts; `album.rs`,
+  waited for: polled in its tick; once both were answered, a refusal too, the options are read again, so the Clock row
+  shows the clock as the camera has it (set, even when only the zone was refused); not when an answer never came or
+  came garbled (timeout: GET_OPTIONS would hold the worker; link lost; undecodable reply); then the connect note and a
+  low-battery note come; a refusal or timeout adds an error note and the session stays; then the Capture screen's tap
+  and the listing; Sync time takes the same path; at quit only the running download's end is collected (`dl::end`),
+  nothing new starts; `album.rs`,
   `dl.rs`; `disk.rs`: a mounted card found through the mount table and the sysfs product string, listed with one
   trailer per item (its first file; empty files left out), imported as `file://` download entries; the bar takes
   U-disk mode from a mounted disk of the camera's own, else from the scan's `Plug::Disk` (`070a:4027`, also the first
@@ -164,10 +169,12 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   it are queued, and a frame's release stops below the lowest decoder frame of the frames after it (`Pic::r`): a
   ring's release is one timeline in decode order. A seek starts at the last sync sample at or before the target in
   decode order that is not shown after it (an open GOP's leading frames need the GOP before). A seek that restarts
-  decoding there (`Plan::Go`) calls `Decoder::restart` on each decoder: the restart CRA's RASL frames show before it,
-  below the target, and their `Error::Skip` is no frame, no error. A clip's decoders get as many ring frames as
-  reordering keeps decoded for a consumer holding one frame (2 without B-frames, 4 for libx264 `-bf 1`, 7 for its
-  defaults) plus 2 to decode ahead (`Decoder::with_out`).
+  decoding there (`Plan::Go`) calls `Decoder::restart` on each decoder: the restart's leading frames (a CRA's RASL
+  frames, those before an H.264 non-IDR I picture) show before it, below the target, and their `Error::Skip` is no
+  frame, no error. A clip whose first sample has leading pictures the decoder skips (a stream copy cut at an open
+  GOP's CRA or non-IDR I picture) leaves those samples out of its frames (`times`); the media thread still hands them
+  to the decoder. A clip's decoders get as many ring frames as reordering keeps decoded for a consumer holding one
+  frame (2 without B-frames, 4 for libx264 `-bf 1`, 7 for its defaults) plus 2 to decode ahead (`Decoder::with_out`).
 - The editor's viewer redraws only from decks bound for the current edit (`schedule` runs before each redraw); while
   the playhead's frame is still decoding (seek, cut) the last picture stays. For a frame it takes the deck holding
   that frame (no seek pending) first, then one a few frames before it (decoding on), then any deck of the file
@@ -237,11 +244,12 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   `x5desk-cubecl` dir, or memory only), and `dest=` is also the download folder. Tokens:
   - player: `play`, `loop`, `vol=`, `view=`, `seek=`, `proxy`, `stats=<s>`, `novsync`, `full`,
     `stab=off|free|horizon|direction`, `smooth=<s>`, `aim=<yaw>/<pitch>/<fov>`, `max` (`play`, `seek=` and `vol=`
-    also drive the viewer of plain videos, `movie.rs`. `max` maximises the window, asked every 250 ms until the window
-    manager has done it: an X11 one ignores a maximise for a window it has not mapped, and eframe maps the window after
-    its first frame. Under XWayland on COSMIC's tiling the window is otherwise tiled, 602 × 996 here; with `max` it
-    fills the output's work area, 2488 × 1012 on a 2560 × 1080 output. The screenshot waits for it, 12 asks (about
-    3 s) at most; then the run logs the size it got and goes on);
+    also drive the viewer of plain videos, `movie.rs`. `max` maximises the window, asked every 250 ms whenever it is
+    not maximised, 12 times in all (about 3 s): an X11 window manager ignores a maximise for a window it has not mapped
+    (eframe maps it after its first frame), and COSMIC un-maximises it when another window opens on the workspace.
+    Under XWayland on COSMIC's tiling the window is otherwise tiled, 602 × 996 here; with `max` it fills the output's
+    work area, 2488 × 1012 on a 2560 × 1080 output. The screenshot is taken in a frame the window is maximised in;
+    once the asks are spent the run logs the size it got and goes on);
   - camera: `camera=album|downloads|settings|wireless`, `dl=<uri>`, `mount=<dir>` (repeatable fake card; the real
     mount table is not read), `import`, `ble=sim`, `ble=sta` (the simulated X5 on HomeNet from an earlier
     session: connect, pair, read its station connection; no join), `battery=<%>` (the `replay=` camera's level);
@@ -253,10 +261,12 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   - editor: `editor`, `project=<file>`, `clip=<file>` (repeatable), `undo=<n>`, `redo=<n>`, `at=<s>`, `sel=<k>`,
     `etab=clip|reframe|colour|audio|overlays`, `e360`, `epreset=<preset>`, `esave=<file>`,
     `tlexport=<preset>[:noraft][:qp=<n>]`, `eplay`;
-  - AI and Shot Lab: `box=<x0>/<y0>/<x1>/<y1>`, `restab=off|free|horizon|direction[/<σ>]`, `ebox=…`, `blur`,
-    `autoedit[=<preset>[:faces]]`, `lab=<effect>`, `lrange=<a>/<b>`, `lpre`, `lexp=<preset>[:faces]` (`box=` is 0..1
-    of the player's view at 16:9, as a flat 1080p export frames it, whatever the window's size or layout; the hook
-    prints its subject, `x5desk: box: subject at yaw …, pitch …, <w>° × <h>°`, so runs can be compared);
+  - AI and Shot Lab: `box=<x0>/<y0>/<x1>/<y1>`, `restab=off|free|horizon|direction[/<σ>]`, `ebox=<x0>/<y0>/<x1>/<y1>`,
+    `blur`, `autoedit[=<preset>[:faces]]`, `lab=<effect>`, `lrange=<a>/<b>`, `lpre`, `lexp=<preset>[:faces]` (`box=`
+    is 0..1 of the player's view at 16:9, as a flat 1080p export frames it, whatever the window's size or layout; the
+    hook prints its subject, `x5desk: box: subject at yaw …, pitch …, <w>° × <h>°`, so runs can be compared; `ebox=`
+    is 0..1 of the `epreset=` export preset's flat frame, whatever the window: a flat preset's own, as the viewer
+    letterboxes it, 16:9 for a 360 one as for `box=`; it prints its subject as `x5desk editor: box: …`);
   - other screens: `settings`, `help[=keys|about|<screen>]`.
 
   Real-camera tests that change the camera's state and restore it: `X5_CAMERA_WRITE=<dir>`
