@@ -14,10 +14,11 @@
 //! (serve the OBS source), `pwcam` (publish the PipeWire camera), `grab=<file.png>` (once the player is idle, e.g. a
 //! paused frame's RAFT stitch done: save the live outputs' `view` and `360` pictures as `<file>-view.png`,
 //! `<file>-360.png`), `min=<s>` (minimise the window after s seconds: the compositor stops drawing it, the live outputs
-//! run on), `max` (maximise the window: a tiling compositor gives it some size of its own otherwise; the screenshot
-//! waits for it, asked up to 12 times 250 ms apart, about 3 s). Under the hook the Live screen neither reads nor
-//! writes the user's live settings, and the live output thread prints its state every 5 s. Capture: `capture` (start
-//! on the Capture screen with the live preview running),
+//! run on), `max` (maximise the window: a tiling compositor gives it some size of its own otherwise, and may tile it
+//! again later; asked again whenever it is not, 3 s in all, and the screenshot is taken while it is maximised, or at
+//! the size it got once the asks are spent). Under the hook the Live screen neither reads nor writes the user's live
+//! settings, and the live output thread prints its state every 5 s. Capture: `capture` (start on the Capture screen
+//! with the live preview running),
 //! `replay=<rec.h264>` (a simulated camera streaming that `x5 live` recording in real time instead of the X5, with
 //! the calibration of `$X5_SAMPLES/v635.insv` and `/CONF` from `conf=<file>` or `$X5_CONF`; `battery=<%>`: the level it
 //! reports), `webcam[=1920|<file.mjpg>]`
@@ -412,7 +413,7 @@ struct App {
     /// the test hook saves the live outputs' pictures once the player is idle, and minimises the window after `min` s
     grab: Option<PathBuf>,
     min: Option<f64>,
-    /// the test hook's `max`: when to ask for it next and how many more times, until the window is maximised
+    /// the test hook's `max`: while the window is not maximised, when to ask for it next and how many more times
     max: Option<(Duration, u8)>,
     /// the test hook shows the Live screen scrolled to its end
     end: bool,
@@ -788,6 +789,7 @@ impl eframe::App for App {
             }
         });
         // test hooks
+        let maxed = ctx.input(|i| i.viewport().maximized) == Some(true);
         let ready = self.t0.elapsed() >= self.shot.as_ref().map_or(Duration::ZERO, |s| s.after)
             && self.lib.idle()
             && (self.tab != Tab::Camera || self.cam.idle())
@@ -798,16 +800,18 @@ impl eframe::App for App {
             && self.lab.idle()
             && self.lib.auto.is_none()
             && self.exp.idle()
-            && self.max.is_none();
+            && self.max.is_none_or(|_| maxed);
         // an X11 window manager ignores a maximise for a window it has not mapped, and eframe maps it after its first
-        // frame (winit sends `with_maximized` before): asked every 250 ms until it is, for 3 s (one without EWMH, or
-        // bare Xvfb, never maximises)
-        if let Some((t, n)) = self.max {
+        // frame (winit sends `with_maximized` before), and a tiling one tiles it again for a window opened later: asked
+        // every 250 ms while it is not, 12 times in all (3 s; one without EWMH, or bare Xvfb, never maximises), and the
+        // screenshot is taken in a frame it is maximised, or at the size it got once the asks are spent
+        if let Some((t, n)) = self.max
+            && !maxed
+        {
             let now = self.t0.elapsed();
-            self.max = match ctx.input(|i| i.viewport().maximized) {
-                Some(true) => None,
+            self.max = match n {
                 _ if now < t => self.max,
-                _ if n == 0 => {
+                0 => {
                     let s = ctx.input(|i| i.content_rect().size() * i.pixels_per_point);
                     eprintln!(
                         "x5desk: not maximised in 3 s; going on at {:.0} × {:.0}",
