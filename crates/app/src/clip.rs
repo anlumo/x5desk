@@ -7,7 +7,7 @@
 //! never got: frames decoded only to reach a seek target and the queue a seek discards. A ring's release frees every
 //! earlier decoder frame, so a release stops below the lowest decoder frame still to show (`Pic::r`).
 
-use media::mp4::{Codec, Mp4, Sample};
+use media::mp4::{Codec, Mp4, Sample, Track};
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -83,6 +83,54 @@ fn order(s: &[Sample]) -> (Vec<usize>, usize) {
     (ord, w)
 }
 
+/// The samples a decoder starting at the first one skips (`video::Error::Skip`) among those shown before it, its
+/// leading pictures: an H.265 IRAP's RASL pictures, all of an H.264 non-IDR I picture's.
+fn skipped(m: &Mp4, tr: &Track, n: usize) -> Result<Vec<usize>, String> {
+    let lead: Vec<usize> = (1..n)
+        .filter(|&s| tr.samples[s].pts < tr.samples[0].pts)
+        .collect();
+    let (Codec::Hevc { nal, ps } | Codec::Avc { nal, ps }) = &tr.codec else {
+        unreachable!()
+    };
+    let (h265, mut buf) = (matches!(tr.codec, Codec::Hevc { .. }), vec![]);
+    // H.265: the NAL unit type of the sample's first slice; H.264: whether it is a non-IDR I picture
+    let mut ty = |s: usize| -> Result<u8, String> {
+        m.read(&tr.samples[s], &mut buf)
+            .map_err(|e| e.to_string())?;
+        let mut au = [&[][..]; 64];
+        let c = nals(&buf, *nal as usize, &mut au);
+        let au = au[..c].iter().copied().filter(|n| n.len() > 2);
+        if h265 {
+            return Ok(au
+                .map(video::h265::nal_type)
+                .find(|&t| t < 32)
+                .unwrap_or(63));
+        }
+        let mut h4 = video::h264::State::default();
+        (ps.iter().map(Vec::as_slice))
+            .chain(au.clone())
+            .for_each(|n| _ = h4.put(n));
+        let mut sl = au.filter(|n| matches!(video::h264::nal_type(n), 1 | 5));
+        Ok(sl.all(|n| h4.slice(n).is_ok_and(|s| s.intra && !s.idr)) as u8)
+    };
+    if lead.is_empty() {
+        return Ok(lead);
+    }
+    Ok(match (h265, ty(0)?) {
+        (true, 16..=21) => {
+            let mut r = vec![];
+            for s in lead {
+                if matches!(ty(s)?, 8 | 9) {
+                    r.push(s);
+                }
+            }
+            r
+        }
+        (false, 1) => lead,
+        _ => vec![],
+    })
+}
+
 /// The sample decoding to frame `k` starts at: the last sync sample at or before `k`'s (decode order) that is not
 /// shown after `k` (an open GOP's leading frames need the GOP before), else 0. `pk`: the frame of each sample.
 fn start(sync: &[usize], ord: &[usize], pk: &[usize], k: usize) -> usize {
@@ -155,7 +203,10 @@ impl Video {
             return Err("empty video track".into());
         }
         let (d, ts) = (tr.shift(m.timescale), tr.timescale as f64);
-        let (ord, w) = order(&tr.samples[..n]);
+        let (mut ord, w) = order(&tr.samples[..n]);
+        // never decoded, so no frames (a stream copy cut at an open GOP's I picture)
+        let skip = skipped(m, tr, n)?;
+        ord.retain(|s| !skip.contains(s));
         let mut decs = vec![];
         for &(i, t) in &st {
             let tr = &mp4s[i].tracks[t];
@@ -171,7 +222,7 @@ impl Video {
         let times: Arc<[f64]> = (ord.iter())
             .map(|&s| (tr.samples[s].pts + d) as f64 / ts)
             .collect();
-        let s = tr.samples[ord[n - 1]];
+        let s = tr.samples[ord[ord.len() - 1]];
         let end = (s.pts + d + s.dur as i64) as f64 / ts;
         let sync: Vec<usize> = (0..n).filter(|&k| tr.samples[k].sync).collect();
         let sh = Arc::new(Sh {
@@ -183,7 +234,7 @@ impl Video {
         let (g, s, t) = (g.clone(), sh.clone(), times.clone());
         let th = thread::Builder::new()
             .name("media".into())
-            .spawn(move || run(&g, &s, &mp4s, &st, decs, &ord, &t, &sync, wake))
+            .spawn(move || run(&g, &s, &mp4s, &st, decs, n, &ord, &t, &sync, wake))
             .map_err(|e| e.to_string())?;
         Ok(Video {
             sh,
@@ -286,9 +337,9 @@ fn nals<'a>(mut b: &'a [u8], n: usize, out: &mut [&'a [u8]]) -> usize {
     c
 }
 
-/// The media thread: decodes every stream's sample `pos` into its decoder, queues the frames in presentation order
-/// (or releases them while running up to a seek target), and follows the UI's seeks. Backpressure is the rings:
-/// `decode` waits while the UI holds the slot it needs.
+/// The media thread: decodes every stream's sample `pos` (of `ns`) into its decoder, queues the frames in
+/// presentation order (or releases them while running up to a seek target), and follows the UI's seeks. Backpressure
+/// is the rings: `decode` waits while the UI holds the slot it needs.
 #[allow(clippy::too_many_arguments)]
 fn run(
     g: &Gpu,
@@ -296,13 +347,15 @@ fn run(
     mp4s: &[Mp4],
     st: &[(usize, usize)],
     mut decs: Vec<Decoder>,
+    ns: usize,
     ord: &[usize],
     times: &[f64],
     sync: &[usize],
     wake: impl Fn(),
 ) {
     let n = times.len();
-    let mut pk = vec![0; n];
+    // usize::MAX: no frame (a skipped leading picture)
+    let mut pk = vec![usize::MAX; ns];
     for (k, &s) in ord.iter().enumerate() {
         pk[s] = k;
     }
@@ -368,7 +421,7 @@ fn run(
                 }
             }
         }
-        if pos >= n {
+        if pos >= ns {
             thread::sleep(Duration::from_millis(5));
             continue;
         }
@@ -411,7 +464,7 @@ fn run(
         }
         let k = pk[pos];
         pos += 1;
-        if k >= nk {
+        if (nk..usize::MAX).contains(&k) {
             pend.push((k, ok.then_some(f)));
         } else if own {
             free(g, &decs, low(&decs, &pend));
@@ -795,12 +848,27 @@ pub(crate) mod tests {
         }
     }
 
+    /// FFmpeg's frames of `p`, all of them, as NV12 (test tool).
+    fn ffmpeg_all(p: &Path) -> Vec<u8> {
+        let o = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(p)
+            .args(["-fps_mode", "passthrough", "-f", "rawvideo"])
+            .args(["-pix_fmt", "nv12", "-"])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        o.stdout
+    }
+
     /// Open GOPs (ffmpeg CLI, frame numbers burned in): H.265 (libx265, a CRA every 50 frames with RASL frames before
     /// it) and H.264 (libx264, a non-IDR I picture every 32 frames with B-frames before it, sync samples in the MP4).
     /// A seek to such a random access point or just after it restarts there, its leading frames skipped (H.265: they
     /// reported "missing reference"; H.264: later frames showed other frames' pictures, frame 64 for 66); one to a
     /// leading frame decodes the GOP before. Each shows the frame asked for, and so does playback from before one
-    /// across it and from a restart across the later ones, every frame FFmpeg's to the byte, with no error.
+    /// across it and from a restart across the later ones, every frame FFmpeg's to the byte, with no error. A stream
+    /// copy cut that starts at one keeps its leading frames as samples, which no decoder shows: they are no frames
+    /// (a seek to one waited for ever), and the cut plays FFmpeg's frames.
     #[test]
     fn open_gop() {
         let dir = Tmp::new("opengop");
@@ -856,30 +924,16 @@ pub(crate) mod tests {
             );
             assert!(ra.len() >= 2 && lead.contains(&(ra[0] - 1)) && lead.contains(&(ra[1] - 1)));
             let (a, b) = (ra[0], ra[1]);
-            // FFmpeg's frames, all of them
-            let o = std::process::Command::new("ffmpeg")
-                .args(["-v", "error", "-i"])
-                .arg(&p)
-                .args([
-                    "-fps_mode",
-                    "passthrough",
-                    "-f",
-                    "rawvideo",
-                    "-pix_fmt",
-                    "nv12",
-                    "-",
-                ])
-                .output()
-                .unwrap();
-            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
             let fs = 640 * 360 * 3 / 2;
-            assert_eq!(o.stdout.len(), 200 * fs);
-            let check = |k: usize, px: &[u8], what: &str| {
-                let ff = &o.stdout[k * fs..(k + 1) * fs];
-                let bad = px.iter().zip(ff).filter(|(x, y)| x != y).count();
+            let ff = ffmpeg_all(&p);
+            assert_eq!(ff.len(), 200 * fs);
+            // frame k of `ff` is the one numbered k + k0
+            let check = |ff: &[u8], k0: usize, k: usize, px: &[u8], what: &str| {
+                let f = &ff[k * fs..(k + 1) * fs];
+                let bad = px.iter().zip(f).filter(|(x, y)| x != y).count();
                 assert_eq!(
                     (number(px, 640, 1), px.len(), bad),
-                    (k, fs, 0),
+                    (k + k0, fs, 0),
                     "{name}: {what} {k}"
                 );
             };
@@ -901,19 +955,52 @@ pub(crate) mod tests {
                 let s = start(&sync, &ord, &pk, k);
                 eprintln!("{name}: seek {k}: decoding restarts at frame {}", pk[s]);
                 assert_eq!(pk[s], r, "{name}: seek {k}");
-                check(k, &show(&g, &mut v, k, &mut held), "seek");
+                check(&ff, 0, k, &show(&g, &mut v, k, &mut held), "seek");
                 assert_eq!(v.err(), None, "{name}: seek {k}");
             }
             // across a random access point from before it, and from a restart at one across the later ones
             for (k0, k1) in [(a - 4, a + 4), (b + 1, 200)] {
-                check(k0, &show(&g, &mut v, k0, &mut held), "seek");
+                check(&ff, 0, k0, &show(&g, &mut v, k0, &mut held), "seek");
                 play(&g, &v, k0 + 1..k1, &mut held, name, |k, px| {
-                    check(k, px, "playback")
+                    check(&ff, 0, k, px, "playback")
                 });
                 eprintln!("{name}: played {k0}..{k1}: FFmpeg's frames");
             }
             v.release(&g, &held.take().unwrap());
             assert_eq!(v.err(), None);
+            drop(v);
+
+            // the cut: its first sample is frame a, its leading frames samples after it shown before it
+            let c = dir.0.join(format!("{name}-cut.mp4"));
+            let o = std::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-y", "-ss"])
+                .arg(format!("{}", a as f64 / 25.0))
+                .arg("-i")
+                .arg(&p)
+                .args(["-c", "copy"])
+                .arg(&c)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+            let s = Mp4::open(&c).unwrap().tracks[0].samples.clone();
+            let kept = (1..s.len()).filter(|&i| s[i].pts < s[0].pts).count();
+            let ff = ffmpeg_all(&c);
+            let n = ff.len() / fs;
+            eprintln!(
+                "{name} cut at {a}: {} samples, {kept} leading, FFmpeg shows {n} frames",
+                s.len()
+            );
+            assert!(kept > 0 && n + kept == s.len(), "{name}: cut");
+            let mut v = Video::open(&g, std::slice::from_ref(&c), || {}).unwrap();
+            assert_eq!(v.times.len(), n, "{name}: cut frames");
+            for k in [1, n - 1, 3, 0] {
+                check(&ff, a, k, &show(&g, &mut v, k, &mut held), "cut seek");
+            }
+            play(&g, &v, 1..n, &mut held, name, |k, px| {
+                check(&ff, a, k, px, "cut playback")
+            });
+            v.release(&g, &held.take().unwrap());
+            assert_eq!(v.err(), None, "{name}: cut");
         }
     }
 
