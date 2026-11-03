@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  x5desk.app's Info.plist keys beyond the ones cargo-packager writes (identifier, name, versions, minimum macOS,
+  category: [package.metadata.packager] in ../Cargo.toml). It merges these over its own.
+
+  The usage strings are what macOS shows when it asks for each permission. Run from a terminal, the app has the
+  terminal's grants instead; as a bundle without NSBluetoothAlwaysUsageDescription it would be killed at its first
+  Bluetooth scan.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>x5desk finds your Insta360 camera over Bluetooth, wakes it, pairs with it and sets up its Wi-Fi.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>x5desk talks to your Insta360 camera over its Wi-Fi network and streams to RTMP servers on your local network.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>x5desk lists and imports the recordings on your camera's card when it is connected as a disk.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>x5desk opens recordings, projects and music you keep in your Documents folder.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>x5desk opens recordings you keep in your Downloads folder, and downloads from the camera there if you choose it.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>x5desk opens recordings, projects and music you keep on your Desktop.</string>
+</dict>
+</plist>

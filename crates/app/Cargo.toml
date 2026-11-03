@@ -8,6 +8,27 @@ license.workspace = true
 name = "x5desk"
 path = "src/main.rs"
 
+# macOS: x5desk.app and a disk image with it in target/release, `cargo packager --release` (cargo-packager 0.11:
+# `cargo install cargo-packager --locked`; ARCHITECTURE.md, macOS). `macos.signing-identity` is the maintainer's Apple
+# Development certificate, which runs on Macs of that team and keeps macOS's privacy grants across rebuilds (an ad hoc
+# signature, "-", changes with every build); someone else puts their own there, or "-". A Developer ID Application
+# identity plus Apple credentials in the environment (APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID, or APPLE_API_KEY,
+# APPLE_API_ISSUER, APPLE_API_KEY_PATH) sign it for anyone and notarize it.
+[package.metadata.packager]
+product-name = "x5desk"
+identifier = "io.github.anlumo.x5desk"
+description = "Desktop app for the Insta360 X5: player, camera control, live output, export"
+category = "Video"
+binaries = [{ path = "x5desk", main = true }]
+before-packaging-command = "cargo build --release --locked -p app"
+formats = ["app", "dmg"]
+
+[package.metadata.packager.macos]
+# the face detector's Core ML package (crate track) targets macOS 15
+minimum-system-version = "15.0"
+info-plist-path = "macos/Info.plist"
+signing-identity = "Apple Development: Andreas Monitzer (SEVVD2J45G)"
+
 [dependencies]
 proto.workspace = true
 # `sim`: the simulated camera that replays a recorded live preview (the `replay=` hook, the capture tests)

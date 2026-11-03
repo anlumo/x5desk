@@ -219,6 +219,18 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   registry entry up from its IOMedia with `idVendor` and a product string) calls itself `Insta360 …`, as Linux's
   sysfs test (registry only, no I/O on the disk). Config and cache default to `~/Library/Application Support` and
   `~/Library/Caches` (the XDG variables still win), downloads and exports to `~/Movies`.
+- Bundle: `cargo packager --release` (cargo-packager 0.11, `[package.metadata.packager]` in `crates/app/Cargo.toml`)
+  builds the release binary and makes `target/release/x5desk.app` and `x5desk_<version>_aarch64.dmg`. Info.plist:
+  cargo-packager's keys (identifier `io.github.anlumo.x5desk`, versions, a UTC time stamp as the build number,
+  `LSMinimumSystemVersion` 15.0 for the Core ML package, the video category) with `crates/app/macos/Info.plist` merged
+  over them: the usage strings for Bluetooth (without it macOS kills the app at its first scan), the local network (the
+  camera's Wi-Fi, RTMP on the LAN), removable volumes, Documents, Downloads and Desktop. Signed with the hardened
+  runtime and a timestamp by `macos.signing-identity`, the maintainer's Apple Development certificate: macOS's
+  privacy grants follow the signature, which an ad hoc one (`-`) changes with every build. A Developer ID identity and
+  Apple credentials in the environment sign it for anyone and notarize it. The disk image's window is laid out by
+  Finder through AppleScript, which asks for Automation permission once; `CI=true` skips that, as where nobody can
+  answer (a locked screen). No icon and no file associations yet: winit 0.30 passes no Finder open-documents events
+  and the app reads a path from its arguments only; launched from Finder its stdout and stderr go nowhere.
 - Tests: `video`'s `tests/mac.rs` round-trips synthetic pictures through encode and decode (H.264, H.265, Main 10,
   RTMP's low-latency settings) with key requests, checked with `ffprobe`; `cbr` checks the rate within 10 % at 100 ms
   and 1 s and no filler, `renew` an invalidated session (`Encoder::invalidate`, a hidden hook), `hardware` every
