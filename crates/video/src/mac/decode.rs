@@ -8,6 +8,8 @@
 //!   that used it before, then submits its copy after the consumer's submits that sampled it, which Metal orders.
 //! - The parameter set parsers still do picture management, so leading pictures are `Error::Skip` exactly as on
 //!   Linux; VideoToolbox gets every other picture.
+//! - A picture VideoToolbox fails on shows the one before it (a copy of that slot): loss shows as concealment, as on
+//!   Linux.
 use super::sys::{self, CFTypeRef, CMSampleTimingInfo, CMTime, Cf, check};
 pub use crate::pic::{Codec, MAXS, OUT};
 pub(crate) use crate::pic::{Pic, Ref};
@@ -20,10 +22,11 @@ use std::{
     ffi::c_void,
     ptr,
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, RwLock, TryLockError,
         atomic::{AtomicU64, Ordering::Relaxed},
     },
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 use wgpu_hal::api::Metal as Mtl;
 
@@ -126,6 +129,12 @@ pub struct Decoder {
     pub view: [u32; 4],
     /// index of the next frame
     pub frame: u64,
+    /// frames that show the frame before them (concealment): VideoToolbox failed on their picture, or had nothing to
+    /// decode it against
+    pub failed: u64,
+    /// the time the last frame's `decode` took once it had its slot: parsing, VideoToolbox's synchronous decode and
+    /// the copy's submit (work Linux's decode queue does after `decode` returns)
+    pub took: Duration,
     deep: bool,
     codec: Codec,
     st: St,
@@ -135,6 +144,15 @@ pub struct Decoder {
     out: Box<Out>,
     sample: Vec<u8>,
     reset: bool,
+    /// the host's lock around the submits (`gated`)
+    gate: Option<&'static RwLock<()>>,
+    /// a picture decoded since the start or the last `restart`: frame − 1's slot holds it, or what stands in for it
+    good: bool,
+    /// a picture failed: the next random access point gets a new session
+    sick: bool,
+    /// VideoToolbox has nothing to decode against until the next random access point (its session went away, a
+    /// random access point failed): the pictures before it are concealed without decoding
+    lost: bool,
 }
 
 impl std::ops::Deref for Decoder {
@@ -242,6 +260,8 @@ impl Decoder {
             h,
             view,
             frame: 0,
+            failed: 0,
+            took: Duration::ZERO,
             deep,
             codec,
             st,
@@ -251,7 +271,21 @@ impl Decoder {
             out: Box::new(Mutex::new(None)),
             sample: vec![],
             reset: false,
+            gate: None,
+            good: false,
+            sick: false,
+            lost: false,
         })
+    }
+
+    /// Takes `gate` shared around each of its submits on wgpu's queue (the app's GATE: a surface configure fails while
+    /// another thread submits, and the app retries it holding GATE exclusively); VideoToolbox's decode stays outside
+    /// it. For a consumer that decodes outside that lock: one holding it around `decode` must not, as std's RwLock
+    /// queues a reader behind a waiting writer. A submit waits for it up to 50 ms, then goes without it: the thread
+    /// holding it may be waiting for this one (dropping a consumer joins its thread).
+    pub fn gated(mut self, gate: &'static RwLock<()>) -> Decoder {
+        self.gate = Some(gate);
+        self
     }
 
     /// A session for the current format description, decoding into IOSurfaces of the stream's own sample format
@@ -319,7 +353,8 @@ impl Decoder {
     /// which reference pictures before it, are `Error::Skip`. So are the pictures shown before an H.264 non-IDR I
     /// picture there.
     pub fn restart(&mut self) {
-        self.reset = true;
+        // nothing before it stands in for a picture that fails there
+        (self.reset, self.good, self.sick, self.lost) = (true, false, false, false);
         self.refs.fill(Ref::default());
         match &mut self.st {
             St::H264(s) => s.restart(),
@@ -330,8 +365,11 @@ impl Decoder {
     /// Decodes one access unit (the NAL units of one sample: its slices plus any in-band parameter sets) into
     /// slot `frame % slots()` and returns the frame index. Waits up to 50 ms for the consumer to release that slot;
     /// then returns `Error::Full` with nothing changed. A leading picture that may reference pictures before where
-    /// decoding started or restarted (`restart`) is `Error::Skip`, no frame. A picture VideoToolbox fails on (lost
-    /// packets of the live preview) still takes its frame, showing what the slot held.
+    /// decoding started or restarted (`restart`) is `Error::Skip`, no frame. A picture VideoToolbox fails on (the
+    /// live preview's lost packets) still takes its frame, which shows the frame before it (`failed` counts them);
+    /// with no picture decoded before it since the start or the restart it is an error. The next random access point
+    /// after a failure gets a new session; when VideoToolbox has nothing to decode against (its session went away, a
+    /// random access point failed), the pictures before the next one are concealed without being decoded.
     pub fn decode(&mut self, g: &Gpu, au: &[&[u8]]) -> Result<u64> {
         let (f, r) = (self.frame, self.ring.slots() as u64);
         let k = (f % r) as usize;
@@ -347,6 +385,7 @@ impl Decoder {
                 return Err(Error::Full);
             }
         }
+        let t0 = Instant::now();
         let mut dirty = false;
         for n in au {
             if n.len() > 2 && self.st.kind(n) == 2 {
@@ -395,18 +434,57 @@ impl Decoder {
         if std::mem::replace(&mut self.reset, false) {
             self.close();
         }
-        let session = self.session()?;
-        let image = unsafe { self.run(session) }?;
-        if let Some(image) = image {
-            self.copy(g, &image, k)?;
+        let key = self.key(au);
+        if self.sick && key {
+            self.close();
+            (self.sick, self.lost) = (false, false);
+        }
+        let image = match self.lost {
+            true => Err(Bad("no reference: waiting for a random access point")),
+            false => {
+                let session = self.session()?;
+                unsafe { self.run(session) }?
+            }
+        };
+        match image {
+            Ok(image) => {
+                self.copy(g, &image, k)?;
+                self.good = true;
+            }
+            Err(e) => {
+                // an invalidated session (the media server restarted, the machine slept): a new one at the next
+                // random access point, the first picture it can decode
+                let gone = matches!(e, Error::Os(_, -12903));
+                if gone {
+                    self.close();
+                }
+                (self.sick, self.lost) = (true, self.lost || gone || key || !self.good);
+                if !self.good {
+                    return Err(e);
+                }
+                self.conceal(g, k);
+                self.failed += 1;
+            }
         }
         self.ring.done.store(f + 1, Relaxed);
         self.frame += 1;
+        self.took = t0.elapsed();
         Ok(f)
     }
 
-    /// Decodes `self.sample` synchronously; the picture, or None when VideoToolbox reported an error for it.
-    unsafe fn run(&mut self, session: CFTypeRef) -> Result<Option<Cf>> {
+    /// A picture that references no other: an H.264 IDR or I picture, an H.265 IRAP picture.
+    fn key(&self, au: &[&[u8]]) -> bool {
+        let Some(n) = au.iter().find(|n| n.len() > 2 && self.st.kind(n) == 1) else {
+            return false;
+        };
+        match &self.st {
+            St::H264(s) => s.slice(n).is_ok_and(|s| s.idr || s.intra),
+            St::H265(_) => (16..=21).contains(&crate::h265::nal_type(n)),
+        }
+    }
+
+    /// Decodes `self.sample` synchronously: the picture, or the error VideoToolbox failed on it with.
+    unsafe fn run(&mut self, session: CFTypeRef) -> Result<Result<Cf>> {
         let mut block = ptr::null();
         let len = self.sample.len();
         check("CMBlockBufferCreateWithMemoryBlock", unsafe {
@@ -451,13 +529,9 @@ impl Decoder {
         unsafe { sys::VTDecompressionSessionWaitForAsynchronousFrames(session) };
         let got = self.out.lock().unwrap_or_else(|e| e.into_inner()).take();
         Ok(match (s, got) {
-            (0, Some((0, Some(image)))) => Some(image),
-            // an invalidated session (the media server restarted, the machine slept): a new one for the next picture
-            (-12903, _) | (_, Some((-12903, _))) => {
-                self.close();
-                None
-            }
-            _ => None,
+            (0, Some((0, Some(image)))) => Ok(image),
+            (0, Some((0, None))) | (0, None) => Err(Bad("VideoToolbox gave no picture")),
+            (0, Some((s, _))) | (s, _) => Err(Error::Os("VTDecompressionSessionDecodeFrame", s)),
         })
     }
 
@@ -501,8 +575,39 @@ impl Decoder {
                 },
             );
         }
-        g.queue.submit([e.finish()]);
+        self.submit(g, e.finish());
+        g.flush();
         Ok(())
+    }
+
+    /// Copies frame f − 1's planes into slot `k` (frame f's) on wgpu's queue: the last picture decoded, or what
+    /// stands in for it. Only frame f − 1 + `slots()` writes that slot again.
+    fn conceal(&self, g: &Gpu, k: usize) {
+        let t = &self.ring.tex;
+        let (src, dst) = (&t[(k + t.len() - 1) % t.len()], &t[k]);
+        let mut e = g.device.create_command_encoder(&Default::default());
+        for (s, d) in src.iter().zip(dst) {
+            e.copy_texture_to_texture(s.as_image_copy(), d.as_image_copy(), d.size());
+        }
+        self.submit(g, e.finish());
+    }
+
+    /// Submits `cb` holding the gate shared (`gated`): waits for it up to 50 ms, then submits without it.
+    fn submit(&self, g: &Gpu, cb: wgpu::CommandBuffer) {
+        let t = Instant::now();
+        let _g = self.gate.and_then(|l| {
+            loop {
+                match l.try_read() {
+                    Ok(x) => break Some(x),
+                    Err(TryLockError::Poisoned(x)) => break Some(x.into_inner()),
+                    Err(TryLockError::WouldBlock) if t.elapsed() < WAIT => {
+                        thread::sleep(Duration::from_micros(200))
+                    }
+                    Err(TryLockError::WouldBlock) => break None,
+                }
+            }
+        });
+        g.queue.submit([cb]);
     }
 }
 

@@ -13,7 +13,7 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     /// the device under wgpu's
     pub mtl: Retained<ProtocolObject<dyn MTLDevice>>,
-    /// IOSurface-backed pictures as Metal textures (CVMetalTextureCache)
+    /// IOSurface-backed pictures as Metal textures (CVMetalTextureCache; `flush` after making some)
     pub(crate) cache: Cf,
 }
 
@@ -68,5 +68,12 @@ impl Gpu {
             mtl,
             cache,
         })
+    }
+
+    /// The texture cache's housekeeping, which CoreVideo leaves to its user (CVMetalTextureCacheFlush): textures
+    /// nothing holds any more and older than its age-out (1 s) go, with the IOSurfaces they keep (old sessions'
+    /// pictures). Cheap: each decoded picture calls it.
+    pub(crate) fn flush(&self) {
+        unsafe { sys::CVMetalTextureCacheFlush(self.cache.0, 0) };
     }
 }

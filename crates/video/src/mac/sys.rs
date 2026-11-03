@@ -240,6 +240,7 @@ unsafe extern "C" {
         out: *mut CFTypeRef,
     ) -> i32;
     pub fn CVMetalTextureGetTexture(t: CFTypeRef) -> *mut c_void;
+    pub fn CVMetalTextureCacheFlush(cache: CFTypeRef, options: u64);
 }
 
 #[link(name = "VideoToolbox", kind = "framework")]
