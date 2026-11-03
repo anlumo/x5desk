@@ -504,7 +504,10 @@ fn encode(
             // nothing new: the oldest packet, looking at the channel every 2 ms
             Err(_) => match e.packet(&mut p, 2_000_000) {
                 Ok(true) => {
-                    r.video(p.pts as u32, 0, p.key, p.nal());
+                    // a frame VideoToolbox dropped comes back empty: no tag
+                    if !p.data.is_empty() {
+                        r.video(p.pts as u32, 0, p.key, p.nal());
+                    }
                     done.store(p.frame + 1, Relaxed);
                     (n, t) = (n - 1, Instant::now());
                 }
