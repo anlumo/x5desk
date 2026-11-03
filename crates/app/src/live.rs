@@ -803,10 +803,11 @@ impl Live {
             .spawn(move || {
                 while !q.load(Relaxed) {
                     // a surface configure the UI retries waits for this pass, the next pass for it
-                    let d = {
+                    let (d, held) = {
                         let _g = crate::GATE.read();
-                        o.step()
+                        (o.step(), o.held.take())
                     };
+                    drop(held);
                     thread::park_timeout(d);
                 }
             })
@@ -1116,6 +1117,9 @@ struct Outs {
     set: Set,
     sock: Option<PathBuf>,
     src: Option<Weak<Mutex<dyn Source + Send>>>,
+    /// the source `step` upgraded, dropped after GATE: dropping a source's last Arc joins its media thread, whose
+    /// decoders take GATE around their copies (macOS)
+    held: Option<Arc<Mutex<dyn Source + Send>>>,
     asc: Option<Vec<u8>>,
     /// the frame clock: the next tick (CLOCK_MONOTONIC ns), 0 = stopped
     next: u64,
@@ -1162,6 +1166,7 @@ impl Outs {
             set,
             sock,
             src: None,
+            held: None,
             asc: None,
             next: 0,
             tx: None,
@@ -1462,6 +1467,7 @@ impl Outs {
         });
         let aud = self.tx.is_some() || watched;
         let src = self.src.as_ref().and_then(Weak::upgrade);
+        self.held = src.clone();
         let Outs {
             tx,
             obs,
