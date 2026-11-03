@@ -41,9 +41,11 @@ ble = { workspace = true, features = ["sim"] }
 # the Settings screen names the video queues' codec operations
 ash.workspace = true
 
-# macOS, already in the tree through cubecl: the USB device a mounted disk sits on from the IOKit registry
-# (`disk.rs`)
+# macOS, already in the tree through winit, wgpu and cubecl: App Nap held off while long work runs (`awake.rs`), the
+# USB device a mounted disk sits on from the IOKit registry (`disk.rs`)
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSProcessInfo", "NSString"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFString"] }
 objc2-io-kit = { version = "0.3", default-features = false, features = ["std", "libc"] }
 

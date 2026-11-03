@@ -204,14 +204,14 @@ impl Queue {
     }
 }
 
-/// The running download: its destination and the link's result.
-pub type Cur = Option<(PathBuf, Pending<u64>)>;
+/// The running download: its destination, the link's result, App Nap held off (macOS) meanwhile.
+pub type Cur = Option<(PathBuf, Pending<u64>, crate::awake::Hold)>;
 
 /// Collects the end of the running download into the queue, which is saved then; starts nothing (also the app's
 /// quit). Returns the file that just finished.
 pub fn end(g: &mut Queue, cur: &mut Cur) -> Option<PathBuf> {
     let mut fin = None;
-    if let Some((dst, p)) = cur.as_ref()
+    if let Some((dst, p, _)) = cur.as_ref()
         && let Some(r) = p.poll()
     {
         if let Some(d) = g.v.iter_mut().find(|d| d.dst == *dst) {
@@ -281,7 +281,7 @@ pub fn step(
             .or_else(|| cam.map(|c| c.download(&d.uri, &d.dst, CONNS)))
         {
             (d.prog, d.st, d.rate, d.mark) = (dl.prog, St::Running, 0.0, None);
-            *cur = Some((d.dst.clone(), dl.done));
+            *cur = Some((d.dst.clone(), dl.done, crate::awake::hold()));
         }
     }
     if failed {

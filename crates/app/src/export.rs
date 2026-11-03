@@ -1037,6 +1037,7 @@ fn worker(g: Arc<Gpu>, cx: Ctx, ctx: egui::Context, rx: mpsc::Receiver<Task>) {
             t.it.set(St::Cancelled);
             continue;
         }
+        let _a = crate::awake::hold();
         let t0 = Instant::now();
         let r = scoped(&g.device, || match (&t.ed, t.spec.photo) {
             (Some(e), _) => k.timeline(&g, &cx, &t, e, &ctx),

@@ -1140,6 +1140,8 @@ struct Outs {
     hook: bool,
     told: Instant,
     frames: u64,
+    /// held while an output runs: App Nap (macOS) would stretch the frame clock while the window is hidden
+    awake: Option<crate::awake::Hold>,
 }
 
 impl Outs {
@@ -1178,6 +1180,7 @@ impl Outs {
             hook: hook.is_some(),
             told: Instant::now() + Duration::from_secs(5),
             frames: 0,
+            awake: None,
         };
         l.obs(l.set.obs);
         l.cam(l.set.cam);
@@ -1436,7 +1439,11 @@ impl Outs {
                 );
             }
         }
-        let on = self.tx.is_some() || watched || self.cam.is_some() || self.vis;
+        let out = self.tx.is_some() || watched || self.cam.is_some();
+        if out != self.awake.is_some() {
+            self.awake = out.then(crate::awake::hold);
+        }
+        let on = out || self.vis;
         let (now, period) = (mono(), 1_000_000_000 / self.set.fps as u64);
         if !on {
             self.next = 0;

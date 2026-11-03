@@ -616,6 +616,7 @@ impl Lab {
         thread::Builder::new()
             .name("shot lab preview".into())
             .spawn(move || {
+                let _a = crate::awake::hold();
                 let r = crate::export::scoped(&g.device, || {
                     let c = shotlab::Clip::open(&s.files[0])?;
                     let ps = ai::poses(&c, st)?;

@@ -59,6 +59,7 @@
 
 mod ai;
 mod album;
+mod awake;
 mod bt;
 mod camera;
 mod capture;
