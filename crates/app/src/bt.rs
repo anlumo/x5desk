@@ -113,6 +113,8 @@ struct W {
     todo: VecDeque<Cmd>,
     st: St,
     dirty: bool,
+    /// a scan asked for and refused while Bluetooth was off, resetting or not allowed: it starts once Bluetooth is back
+    again: bool,
 }
 
 /// `AuthorizationStatus` and `AuthorizationResult` as the user reads them.
@@ -134,9 +136,12 @@ fn why(e: &Error) -> String {
 fn down(e: &Error) -> String {
     match e {
         Error::Off => "Bluetooth is off.".into(),
-        Error::Denied => "x5desk may not use Bluetooth: allow it (or the terminal that started it) in System Settings \
-                          > Privacy & Security > Bluetooth."
-            .into(),
+        // btleplug reports an adapter that is resetting or has no LE as one that may not be used
+        Error::Denied => {
+            "Bluetooth is not available: allow x5desk (or the terminal that started it) in System \
+                          Settings > Privacy & Security > Bluetooth."
+                .into()
+        }
         e => format!("Bluetooth: {e}"),
     }
 }
@@ -232,9 +237,10 @@ impl W {
                         if on {
                             (self.st.seen, self.st.err) = Default::default()
                         }
-                        self.st.scan = on
+                        (self.st.scan, self.again) = (on, false)
                     }
                     Err(e) => {
+                        self.again = on && matches!(e, Error::Off | Error::Denied);
                         self.refused(&e);
                         self.note(format!("scan: {e}"), true)
                     }
@@ -469,7 +475,12 @@ impl W {
                 }
                 Event::Closed(d, e) if self.st.dev.as_ref() == Some(&d) => lost = Some(e),
                 // macOS: Bluetooth switched off or on, or allowed or not
-                Event::Adapter(e) => (self.st.err, self.dirty) = (e.as_ref().map(down), true),
+                Event::Adapter(e) => {
+                    if e.is_none() && std::mem::take(&mut self.again) {
+                        self.todo.push_back(Cmd::Scan(true));
+                    }
+                    (self.st.err, self.dirty) = (e.as_ref().map(down), true)
+                }
                 _ => {}
             }
         }
@@ -530,6 +541,7 @@ impl Bt {
             todo: first.into(),
             st: St::default(),
             dirty: false,
+            again: false,
         };
         let th = thread::Builder::new()
             .name("x5-bt".into())
