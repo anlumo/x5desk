@@ -1551,7 +1551,9 @@ impl Editor {
                 (
                     i.key_pressed(egui::Key::Space),
                     i.key_pressed(egui::Key::S) && !c,
-                    i.key_pressed(egui::Key::Delete),
+                    // the key Mac keyboards label delete is Backspace (fn+delete is Delete)
+                    i.key_pressed(egui::Key::Delete)
+                        || cfg!(target_os = "macos") && i.key_pressed(egui::Key::Backspace),
                     i.key_pressed(egui::Key::K),
                     c && i.key_pressed(egui::Key::Z),
                     c && i.key_pressed(egui::Key::Y),

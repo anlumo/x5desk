@@ -40,6 +40,20 @@ const PAGES: [(Page, &str, &str); 10] = [
     (Page::About, "About", "about"),
 ];
 
+/// The shortcuts' modifier: egui's `command`, which egui-winit takes from Cmd on macOS, Ctrl elsewhere.
+#[cfg(target_os = "macos")]
+macro_rules! cmd {
+    () => {
+        "Cmd"
+    };
+}
+#[cfg(not(target_os = "macos"))]
+macro_rules! cmd {
+    () => {
+        "Ctrl"
+    };
+}
+
 /// Where, keys, what.
 const KEYS: [(&str, &str, &str); 20] = [
     ("Viewers", "Drag", "Look around (360 views)"),
@@ -61,13 +75,17 @@ const KEYS: [(&str, &str, &str); 20] = [
         "K",
         "Reframing key at the playhead from the viewer's view",
     ),
-    ("Editor", "Ctrl+Z", "Undo"),
-    ("Editor", "Ctrl+Shift+Z, Ctrl+Y", "Redo"),
+    ("Editor", concat!(cmd!(), "+Z"), "Undo"),
+    (
+        "Editor",
+        concat!(cmd!(), "+Shift+Z, ", cmd!(), "+Y"),
+        "Redo",
+    ),
     ("Editor", "← / →", "Playhead one frame back / forward"),
     ("Album", "Click", "Select an item"),
     (
         "Album",
-        "Ctrl+click",
+        concat!(cmd!(), "+click"),
         "Add an item to the selection or take it out",
     ),
     (
@@ -87,7 +105,7 @@ const KEYS: [(&str, &str, &str); 20] = [
     ),
     (
         "Window",
-        "Ctrl+Plus / Ctrl+Minus / Ctrl+0",
+        concat!(cmd!(), "+Plus / ", cmd!(), "+Minus / ", cmd!(), "+0"),
         "Make the interface larger / smaller / normal",
     ),
 ];
@@ -142,10 +160,14 @@ fn guide(p: Page) -> &'static [&'static str] {
             "Connect the X5 by USB and choose Android App on the camera's USB menu (app mode). The camera connects \
              automatically (Auto-connect); battery and card space show at the top, and a low battery warns on every \
              screen.",
-            "Album: the camera's files grouped the way the official app groups them, with thumbnails. Select with \
-             click, Ctrl+click and Shift+click; Download copies the files into the download folder, four connections \
-             at a time; a stopped download resumes where it stopped, also after a restart. Favourite and Delete act \
-             on the camera after a confirmation.",
+            concat!(
+                "Album: the camera's files grouped the way the official app groups them, with thumbnails. Select with \
+                 click, ",
+                cmd!(),
+                "+click and Shift+click; Download copies the files into the download folder, four connections at a \
+                 time; a stopped download resumes where it stopped, also after a restart. Favourite and Delete act on \
+                 the camera after a confirmation."
+            ),
             "Mass storage: when the X5 is plugged in as a USB disk (or its card is in a reader) and the desktop mounts \
              it, the album offers it as a source. Import copies the selected items into the download folder; an \
              interrupted import resumes.",
@@ -295,7 +317,7 @@ impl Help {
         };
         Help {
             page: page.unwrap_or(Page::Keys),
-            gpu: format!("{}, {} {}", i.name, i.driver, i.driver_info),
+            gpu: format!("{}, {}", i.name, crate::settings::driver(&i)),
             #[cfg(not(target_os = "macos"))]
             os: format!(
                 "{}, Linux {}",
@@ -450,5 +472,45 @@ mod tests {
             );
         }
         assert!(env!("X5_DEPS").contains("eframe 0.37"));
+    }
+
+    /// The shortcuts name the modifier egui's `command` is on this system, the keys table and the guides alike.
+    #[test]
+    fn modifier() {
+        let (on, off) = match cfg!(target_os = "macos") {
+            true => ("Cmd+", "Ctrl+"),
+            false => ("Ctrl+", "Cmd+"),
+        };
+        assert!(
+            KEYS.iter()
+                .any(|k| k.1 == format!("{on}Z") && k.2 == "Undo")
+        );
+        let guides = PAGES.iter().flat_map(|p| guide(p.0));
+        for t in KEYS.iter().map(|k| k.1).chain(guides.copied()) {
+            assert!(!t.contains(off), "{t}");
+        }
+        assert!(
+            guide(Page::Camera)
+                .iter()
+                .any(|t| t.contains(&format!("{on}click")))
+        );
+    }
+
+    /// The driver as wgpu reports it; Metal reports none, and no separator dangles then.
+    #[test]
+    fn driver() {
+        let i = |d: &str, v: &str, b| wgpu::AdapterInfo {
+            name: "GPU".into(),
+            driver: d.into(),
+            driver_info: v.into(),
+            ..wgpu::AdapterInfo::new(wgpu::DeviceType::IntegratedGpu, b)
+        };
+        let d = crate::settings::driver;
+        assert_eq!(
+            d(&i("radv", "Mesa 25.1.0", wgpu::Backend::Vulkan)),
+            "radv Mesa 25.1.0"
+        );
+        assert_eq!(d(&i("radv", "", wgpu::Backend::Vulkan)), "radv");
+        assert_eq!(d(&i("", "", wgpu::Backend::Metal)), "Metal");
     }
 }

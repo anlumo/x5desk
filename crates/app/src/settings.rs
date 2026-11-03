@@ -215,6 +215,19 @@ pub struct Settings {
 
 type Usage = (usize, u64);
 
+/// The driver's name and version as wgpu has them, the backend when it has none (Metal: the system's own).
+pub fn driver(i: &wgpu::AdapterInfo) -> String {
+    let v: Vec<&str> = [&i.driver, &i.driver_info]
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    match v.is_empty() {
+        true => format!("{:?}", i.backend),
+        false => v.join(" "),
+    }
+}
+
 /// Codec operations of a video queue, as text.
 #[cfg(target_os = "linux")]
 fn ops(f: ash::vk::VideoCodecOperationFlagsKHR) -> String {
@@ -248,7 +261,7 @@ impl Settings {
                     i.device_type, i.vendor, i.device, i.backend
                 ),
             ),
-            ("Driver", format!("{} {}", i.driver, i.driver_info)),
+            ("Driver", driver(&i)),
         ];
         #[cfg(target_os = "linux")]
         let gpu = [
