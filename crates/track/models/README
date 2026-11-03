@@ -52,6 +52,19 @@ face_detection_yunet_2023mar.onnx
   a board of three black plates only at 15° (0.32 to 0.59), and on the samples (no plate near) it scored columns and
   façades at 0.6 to 0.74. Not included.
 
+yunet_b8.mlpackage (macOS)
+  What: face_detection_yunet_2023mar.onnx above as a Core ML ML Program, batch 8 (the face pass's runs), FP16, the
+        ONNX's input and output names, for the Neural Engine (src/coreml.rs). Made by coreml.py (next to this file:
+        the head reshapes' batch set to 8, onnx2torch, torch.jit.trace, coremltools convert_to="mlprogram",
+        macOS 15 target) with coremltools 9.0, torch 2.15.0, onnx 1.23.2, onnx2torch 1.5.15 (Python 3.12). Checked
+        against burn's YuNet on the same crops of a synthetic picture (src/tests.rs `coreml`: scores within 0.006,
+        boxes within 0.008 of 3.0; few anchors score above 0.3 there, no faces) and on footage at the face pass's
+        thresholds (tests/footage.rs `privacy`, X5_YUNET=burn for burn's: the same faces and tracks on 90 frames).
+  Licence: as the ONNX (MIT) -> LICENSE-yunet
+  sha256: Data/com.apple.CoreML/model.mlmodel bd31bfb179ebb86b875d3e50d756d4609e9ebd27b171857a2b4d1545e423848d
+          Data/com.apple.CoreML/weights/weight.bin d6296bc3ae3048bf3815ef7df8ee934fde48018276c0b2278f93ba359556103b
+          Manifest.json eb729aa53ae2a728111b925ab0e4b56ecf09d5da7034d04b5abfc584e96f1cbe
+
 No model: person re-identification (src/reid.rs)
   What: LOMO, the local maximal occurrence feature of Liao, Hu, Zhu, Li, "Person Re-identification by Local Maximal
         Occurrence Representation and Metric Learning", CVPR 2015 (https://arxiv.org/abs/1406.4216), written by us

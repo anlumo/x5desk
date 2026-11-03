@@ -52,11 +52,40 @@ pub fn face_tiles() -> Vec<Cam> {
     t
 }
 
-/// YuNet and its input, made on first use (80 MB of inputs).
+/// YuNet and its input, made on first use (80 MB of inputs); macOS: its Core ML form, made on its first use (None
+/// inside when it won't load).
 pub(crate) struct Nets {
     pub face: yunet::Model,
     pub fi: In,
     pub fc: Crops,
+    #[cfg(target_os = "macos")]
+    pub ml: Option<Option<crate::coreml::Yunet>>,
+}
+
+impl Nets {
+    /// burn's YuNet on the first `n` crops of `fi`: per tile, strides 8, 16, 32, per anchor √(cls · obj) (each clamped to
+    /// 0..1) and the box, read back.
+    pub(crate) fn burn(&self, n: usize) -> Vec<f32> {
+        let o = self.face.forward(self.fi.t.clone().narrow(0, 0, n));
+        // per stride: score √(cls · obj), box; strides 8, 16, 32 in one row block per tile
+        read(Tensor::cat(
+            vec![
+                Tensor::cat(
+                    vec![(o.0.clamp(0.0, 1.0) * o.3.clamp(0.0, 1.0)).sqrt(), o.6],
+                    2,
+                ),
+                Tensor::cat(
+                    vec![(o.1.clamp(0.0, 1.0) * o.4.clamp(0.0, 1.0)).sqrt(), o.7],
+                    2,
+                ),
+                Tensor::cat(
+                    vec![(o.2.clamp(0.0, 1.0) * o.5.clamp(0.0, 1.0)).sqrt(), o.8],
+                    2,
+                ),
+            ],
+            1,
+        ))
+    }
 }
 
 impl Ai {
@@ -70,6 +99,8 @@ impl Ai {
             face: yunet::Model::from_embedded(&self.dev),
             fi: In::new(&self.dev, [MAX, 3, f, f])?,
             fc: Crops::new(&self.wd, &self.g[1], MAX, MAX * 3 * f * f),
+            #[cfg(target_os = "macos")]
+            ml: None,
         }))
     }
 
@@ -77,7 +108,17 @@ impl Ai {
     /// suppression (IoU 0.3, as OpenCV's `FaceDetectorYN`), then across tiles as `detect`. YuNet's own threshold is
     /// 0.9; privacy wants the faces it is less sure of too (0.5 to 0.6).
     pub fn faces(&mut self, p: &Pano, tiles: &[Cam], min: f32) -> Result<Vec<Region>, String> {
-        let n = self.nets()?;
+        #[allow(unused_mut)]
+        let mut n = self.nets()?;
+        #[cfg(target_os = "macos")]
+        if self.coreml && n.ml.is_none() {
+            const _: () = assert!(MAX == crate::coreml::B);
+            n.ml = Some(
+                crate::coreml::Yunet::new(&self.wd)
+                    .inspect_err(|e| eprintln!("track: YuNet on Core ML: {e}; on burn instead"))
+                    .ok(),
+            );
+        }
         let s = FS as usize;
         let mut all = vec![];
         for ch in tiles.chunks(MAX) {
@@ -89,25 +130,26 @@ impl Ai {
             let d = self.crop(&n.fc, p, &jobs, &n.fi);
             self.spent(0, d);
             let t = Instant::now();
-            let o = n.face.forward(n.fi.t.clone().narrow(0, 0, ch.len()));
-            // per stride: score √(cls · obj), box; strides 8, 16, 32 in one row block per tile
-            let v = read(Tensor::cat(
-                vec![
-                    Tensor::cat(
-                        vec![(o.0.clamp(0.0, 1.0) * o.3.clamp(0.0, 1.0)).sqrt(), o.6],
-                        2,
-                    ),
-                    Tensor::cat(
-                        vec![(o.1.clamp(0.0, 1.0) * o.4.clamp(0.0, 1.0)).sqrt(), o.7],
-                        2,
-                    ),
-                    Tensor::cat(
-                        vec![(o.2.clamp(0.0, 1.0) * o.5.clamp(0.0, 1.0)).sqrt(), o.8],
-                        2,
-                    ),
-                ],
-                1,
-            ));
+            #[cfg(target_os = "macos")]
+            let v = {
+                let ml =
+                    n.ml.as_ref()
+                        .and_then(Option::as_ref)
+                        .filter(|_| self.coreml);
+                match ml.map(|y| y.run(&self.wd, &self.q, &n.fc.dst, ch.len())) {
+                    Some(Ok(v)) => v,
+                    // a run Core ML fails (the Neural Engine after sleep, memory pressure): burn's from here on, the
+                    // crops are in its input already
+                    Some(Err(e)) => {
+                        eprintln!("track: YuNet on Core ML: {e}; on burn instead");
+                        n.ml = Some(None);
+                        n.burn(ch.len())
+                    }
+                    None => n.burn(ch.len()),
+                }
+            };
+            #[cfg(not(target_os = "macos"))]
+            let v = n.burn(ch.len());
             let m = v.len() / ch.len() / 5;
             for (ti, cam) in ch.iter().enumerate() {
                 let mut a = ti * m;

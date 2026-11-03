@@ -782,3 +782,154 @@ fn blur() {
     }
     assert_eq!(same, 4, "pixels outside the regions changed");
 }
+
+/// macOS: YuNet through Core ML (FP16 on the Neural Engine) against burn's (f32 on the GPU) on the same crops of a
+/// busy panorama (sinusoids and blocky noise, 3072 × 1536), 8 face tiles in one run: scores within 0.02, boxes within
+/// 2 % of their range, the tiles past a short run untouched by it. A compiled model in the cache that is cut short is
+/// made again.
+#[cfg(target_os = "macos")]
+#[test]
+fn coreml() {
+    let (inst, ad, dev, q) = open();
+    let (w, h) = (3072u32, 1536u32);
+    let px: Vec<u8> = (0..w * h)
+        .flat_map(|i| {
+            let (x, y) = ((i % w) as f32, (i / w) as f32);
+            let n = ((i / w / 24).wrapping_mul(0x9e37_79b9)
+                ^ (i % w / 24).wrapping_mul(0x85eb_ca6b))
+                >> 24;
+            let v = |a: f32, b: f32| {
+                (127.0 + 60.0 * (x * a + y * b).sin() + (n as f32 - 128.0) * 0.5) as u8
+            };
+            [v(0.013, 0.007), v(0.005, 0.021), v(0.031, 0.002), 255]
+        })
+        .collect();
+    let tex = dev.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    q.write_texture(
+        tex.as_image_copy(),
+        &px,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * w),
+            rows_per_image: None,
+        },
+        tex.size(),
+    );
+    let mut ai = Ai::new(&inst, &ad, &dev, &q).unwrap();
+    let p = ai.pano(&tex.create_view(&Default::default()));
+    let nets = ai.nets().unwrap();
+    let s = privacy::FS as usize;
+    let tiles = privacy::face_tiles();
+    // a cache of its own: the shared one is the app's and other tests'
+    struct Rm(PathBuf);
+    impl Drop for Rm {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let root = Rm(std::env::temp_dir().join(format!("x5desk-coreml-test-{}", std::process::id())));
+    std::fs::create_dir_all(&root.0).unwrap();
+    let ml = crate::coreml::Yunet::at(&dev, &root.0).unwrap();
+    // a full run, then a short one of other tiles: the buffer's tiles past it still hold the full run's
+    let mut last = vec![];
+    for (n, t) in [(8, &tiles[..8]), (3, &tiles[tiles.len() - 3..])] {
+        let jobs: Vec<Job> = t
+            .iter()
+            .enumerate()
+            .map(|(i, c)| Job::new(c, [privacy::FS; 2], i * 3 * s * s, &privacy::NORM, p.w))
+            .collect();
+        let _ = ai.crop(&nets.fc, &p, &jobs, &nets.fi);
+        let a = nets.burn(n);
+        // the second run's time: the first one sets up the Neural Engine's buffers
+        let mut ms = 0.0;
+        let b = (0..2)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                let b = ml.run(&dev, &q, &nets.fc.dst, n).unwrap();
+                ms = t.elapsed().as_secs_f64() * 1e3;
+                b
+            })
+            .last()
+            .unwrap();
+        assert_eq!(a.len(), b.len());
+        let (mut ds, mut db, mut mb) = (0f32, 0f32, 0f32);
+        for (x, y) in a.chunks(5).zip(b.chunks(5)) {
+            ds = ds.max((x[0] - y[0]).abs());
+            for k in 1..5 {
+                (db, mb) = (db.max((x[k] - y[k]).abs()), mb.max(x[k].abs()));
+            }
+        }
+        let hot = a.chunks(5).filter(|r| r[0] > 0.3).count();
+        eprintln!(
+            "{n} tiles: Core ML {ms:.1} ms; max |Core ML − burn| score {ds:.4}, box {db:.3} of {mb:.1}; {hot} anchors \
+             above 0.3"
+        );
+        assert!(
+            ds < 0.02 && db < 0.02 * mb,
+            "{n} tiles: score {ds}, box {db} of {mb}"
+        );
+        last = b;
+    }
+    // the compiled model cut short: made again, and the same as before
+    drop(ml);
+    let at = crate::coreml::cached(&root.0);
+    let mut cut = vec![];
+    for e in std::fs::read_dir(&at).unwrap().flatten() {
+        let p = e.path();
+        match p.is_dir() {
+            true => std::fs::remove_dir_all(p).unwrap(),
+            false => {
+                std::fs::write(&p, b"cut").unwrap();
+                cut.push(p)
+            }
+        }
+    }
+    assert!(!cut.is_empty());
+    let ml = crate::coreml::Yunet::at(&dev, &root.0).unwrap();
+    assert!(
+        cut.iter().all(|p| std::fs::read(p).unwrap() != b"cut"),
+        "{cut:?}"
+    );
+    let again = ml.run(&dev, &q, &nets.fc.dst, 3).unwrap();
+    let d = again
+        .iter()
+        .zip(&last)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    assert!(d <= 1e-6, "rebuilt model: {d}");
+    ai.pv = Some(nets);
+}
+
+/// Half to single precision: zero, normals, the infinities, subnormals (the smallest, one in the middle, the largest).
+#[cfg(target_os = "macos")]
+#[test]
+fn half() {
+    use crate::coreml::half;
+    for (h, f) in [
+        (0x0000, 0.0),
+        (0x8000, -0.0),
+        (0x3c00, 1.0),
+        (0xc000, -2.0),
+        (0x0400, 2f32.powi(-14)),
+        (0x7bff, 65504.0),
+        (0x7c00, f32::INFINITY),
+        (0x0001, 2f32.powi(-24)),
+        (0x0200, 2f32.powi(-15)),
+        (0x03ff, 1023.0 * 2f32.powi(-24)),
+    ] {
+        assert_eq!(half(h).to_bits(), f.to_bits(), "{h:#06x}");
+    }
+}

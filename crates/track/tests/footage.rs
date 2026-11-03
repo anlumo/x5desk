@@ -1215,7 +1215,7 @@ fn covered(r: &[Region], x: &Region) -> bool {
 /// detector's flicker, for comparison: frames inside a track of every-frame detections where the detector missed it.
 /// Fails if more than 1 % of the confident faces (≥ 0.8) are not covered.
 /// Writes blurred equirects of four frames per clip (`<clip>_blur_<k>.png`, and `_orig_`) with the regions outlined
-/// in the original.
+/// in the original. macOS: faces through Core ML, `X5_YUNET=burn` for burn's YuNet.
 #[test]
 fn privacy() {
     let Some(d) = samples() else { return };
@@ -1223,6 +1223,11 @@ fn privacy() {
     let cap: usize = std::env::var("X5_FRAMES").map_or(usize::MAX, |v| v.parse().unwrap());
     let g = gpu();
     let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
+    // macOS: Core ML's YuNet, or X5_YUNET=burn for burn's
+    #[cfg(target_os = "macos")]
+    {
+        ai.coreml = std::env::var("X5_YUNET").map_or(true, |v| v != "burn");
+    }
     let ft = face_tiles();
     let mut blur = Blur::new(&g.dev, wgpu::TextureFormat::Rgba8Unorm);
     for name in names.split(',') {
@@ -1269,6 +1274,13 @@ fn privacy() {
             }
         }
         ai.timing = false;
+        // a model that won't load falls back to burn's quietly: the run says which it measured
+        #[cfg(target_os = "macos")]
+        {
+            let on = ai.coreml_used();
+            eprintln!("  YuNet: {}", if on { "Core ML" } else { "burn" });
+            assert_eq!(on, ai.coreml, "Core ML asked for, burn ran");
+        }
         drop(dec);
         let mut f = std::io::BufWriter::new(
             std::fs::File::create(fixtures().join(format!("{name}_faces.txt"))).unwrap(),
