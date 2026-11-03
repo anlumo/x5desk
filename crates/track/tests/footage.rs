@@ -142,6 +142,13 @@ fn clip(d: &Path, name: &'static str) -> Clip {
     }
 }
 
+/// ffmpeg's hardware decoder: Vulkan Video, as crate video on Linux; VideoToolbox on macOS.
+const HWACCEL: &str = if cfg!(target_os = "macos") {
+    "videotoolbox"
+} else {
+    "vulkan"
+};
+
 /// Both lens streams as NV12 at S × S, frame by frame (two ffmpeg processes).
 struct Dec {
     kids: Vec<Child>,
@@ -155,7 +162,7 @@ impl Dec {
         let kids = tracks
             .map(|t| {
                 Command::new("ffmpeg")
-                    .args(["-v", "error", "-hwaccel", "vulkan", "-i"])
+                    .args(["-v", "error", "-hwaccel", HWACCEL, "-i"])
                     .arg(&c.path)
                     .args(["-map", &format!("0:v:{t}"), "-frames:v", &n.to_string()])
                     .args(["-vf", &format!("scale={S}:{S}"), "-f", "rawvideo"])
@@ -189,9 +196,11 @@ impl Drop for Dec {
     }
 }
 
-/// Lens textures, the equirect stitcher, a preview from the lenses into a VW × VH view.
+/// Lens textures, the equirect stitcher, a preview from the lenses into a VW × VH view. A lens is one NV12 texture,
+/// written and sampled through its plane aspects as crate video decodes on Linux, or an R8 and an RG8 texture as on
+/// macOS (Metal has no NV12 textures).
 struct Rig {
-    tex: [wgpu::Texture; 2],
+    tex: [[(wgpu::Texture, wgpu::TextureAspect); 2]; 2],
     src: [Src; 2],
     st: Stitcher,
     pv: Preview,
@@ -217,15 +226,23 @@ impl Rig {
                 view_formats: &[],
             })
         };
-        use wgpu::TextureUsages as U;
-        let tex = [0, 1].map(|_| {
-            t(
-                S,
-                S,
-                wgpu::TextureFormat::NV12,
-                U::TEXTURE_BINDING | U::COPY_DST,
-            )
+        use wgpu::{TextureAspect as A, TextureFormat as F, TextureUsages as U};
+        let tex = [0, 1].map(|_| match cfg!(target_os = "macos") {
+            true => [(F::R8Unorm, 1), (F::Rg8Unorm, 2)]
+                .map(|(f, s)| (t(S / s, S / s, f, U::TEXTURE_BINDING | U::COPY_DST), A::All)),
+            false => {
+                let nv = t(S, S, F::NV12, U::TEXTURE_BINDING | U::COPY_DST);
+                [(nv.clone(), A::Plane0), (nv, A::Plane1)]
+            }
         });
+        let planes = |l: &[(wgpu::Texture, A); 2]| {
+            l.each_ref().map(|(t, aspect)| {
+                t.create_view(&wgpu::TextureViewDescriptor {
+                    aspect: *aspect,
+                    ..Default::default()
+                })
+            })
+        };
         let blend = c.m.blend.unwrap_or(6.0);
         let o = stitch::Opts {
             blend,
@@ -233,7 +250,7 @@ impl Rig {
         };
         let rgba = wgpu::TextureFormat::Rgba8Unorm;
         Rig {
-            src: [cx.src(&tex[0]), cx.src(&tex[1])],
+            src: [0, 1].map(|l| cx.rect(&planes(&tex[l]), [0, 0, S, S])),
             st: Stitcher::new(&cx, &c.cal, c.fr, EW, EH, o).unwrap(),
             pv: Preview::new(&cx, &c.cal, c.fr, blend, Some(0.1), rgba),
             view: t(VW, VH, rgba, U::RENDER_ATTACHMENT | U::COPY_SRC),
@@ -243,17 +260,16 @@ impl Rig {
 
     fn upload(&self, g: &Gpu, nv: &[Vec<u8>; 2]) {
         let n = (S * S) as usize;
-        for (t, nv) in self.tex.iter().zip(nv) {
-            for (aspect, data, w, bpp) in [
-                (wgpu::TextureAspect::Plane0, &nv[..n], S, 1),
-                (wgpu::TextureAspect::Plane1, &nv[n..], S / 2, 2),
-            ] {
+        for (l, nv) in self.tex.iter().zip(nv) {
+            for ((t, aspect), data, w, bpp) in
+                [(&l[0], &nv[..n], S, 1), (&l[1], &nv[n..], S / 2, 2)]
+            {
                 g.q.write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture: t,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
-                        aspect,
+                        aspect: *aspect,
                     },
                     data,
                     wgpu::TexelCopyBufferLayout {
@@ -1233,10 +1249,12 @@ fn privacy() {
             rig.st.out.create_view(&Default::default()),
             out.create_view(&Default::default()),
         );
-        // pass 1: detections per frame
+        // pass 1: detections per frame; from the second frame on, the crops' and the network's own times (each
+        // waited for), the first compiling the kernels
         let mut dec = Dec::new(&c, n);
-        let (mut all, mut fms) = (vec![], vec![]);
+        let (mut all, mut fms, mut crops, mut nets) = (vec![], vec![], vec![], vec![]);
         for k in 0..n {
+            (ai.timing, ai.times) = (k > 0, Default::default());
             assert!(dec.next());
             rig.upload(&g, &dec.buf);
             rig.stitch(&g, &c.poses[k]);
@@ -1244,7 +1262,13 @@ fn privacy() {
             let t = Instant::now();
             all.push(ai.faces(&pano, &ft, 0.6).unwrap());
             fms.push(t.elapsed().as_secs_f64() * 1e3);
+            if k > 0 {
+                let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+                crops.push(ms(ai.times.crop));
+                nets.push(ms(ai.times.det) / ai.times.n[2].max(1) as f64);
+            }
         }
+        ai.timing = false;
         drop(dec);
         let mut f = std::io::BufWriter::new(
             std::fs::File::create(fixtures().join(format!("{name}_faces.txt"))).unwrap(),
@@ -1325,6 +1349,12 @@ fn privacy() {
         eprintln!(
             "  ms per frame, median / p95 / max: faces ({} tiles) {f50:.1} / {f95:.1} / {fmx:.1}",
             ft.len()
+        );
+        let (c50, _, _) = pct(&mut crops);
+        let (y50, y95, _) = pct(&mut nets);
+        eprintln!(
+            "  of it (median, waited for): crops {c50:.1} ms per frame; YuNet and its read {y50:.1} ms (p95 {y95:.1}) \
+             per run of up to 8 tiles of 640²"
         );
         assert!(
             miss.len() * 100 <= conf.len(),
