@@ -47,7 +47,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 | `fx` | Image effects on the shared device: colour adjustments (incl. brightness, brilliance), automatic colour and underwater correction, `.cube` LUTs and our own looks, defringe (purple / green / blue), clarity, overlays (watermark, stickers, text) |
 | `edit` | Editor model: timeline, clips with a look and colour adjustments each (`fx::Params`: edit depends on fx), trim / split / speed / freeze, reframing keyframes and camera-movement presets, undo (a drag that ends where it started leaves no undo step and keeps the redo list), project files |
 | `export` | Render jobs: decode → stitch → stabilise → effects → encode → mux, 360 and flat, queue; editor timelines (`Cut::Edit`: speed ramps, freeze frames, views, each clip's adjustments and look via `fx`, audio mixed with music, RNNoise-denoised after the time-stretch when `Edit::denoise` is set, and AAC-encoded, or copied for plain 1× cuts without denoise); photo frame grabs (JPEG with GPano). `export::locks(gate, burn)` hands it the app's GATE / BURN; `Job::flat` keeps a flat 2:1 picture from a 360 hook untagged |
-| `track` | AI with open models (burn on the shared device): subject tracker on the sphere with re-identification (LOMO colour and texture histograms with Fisher weights learnt per session, no model), detector, auto framing, face privacy blur regions, highlights → `edit::Timeline`. The tracker finds a lost subject again only within its reach (`Seen::prior`, `Seen::speed`: the speed, in its own heights a second, it needs to be a candidate since it was last seen for sure, its heading carried on for up to a second; beyond what it reaches setting off at a walk and speeding up by 3 heights/s² to a sprint's 3, it is someone else; within it, its similarity loses 0.1 × (speed / 1 height a second)²), and a person only with the pick's template's box on it (`vit::hit`: never on the detector's box alone); a person at least as like one `find` took and the tracker lost again before VitTrack was sure of them as like the subject (`vit::Tried`, the last 8; not added to the gallery, as the subject can be one) needs VitTrack 0.5, not 0.25 (`Tried::need`, also for whoever the tracker takes on its own after a gap). `Tracker::fps` is the clip's frame rate (30 until set) |
+| `track` | AI with open models (burn on the shared device; macOS: the face detector through Core ML, `coreml.rs`): subject tracker on the sphere with re-identification (LOMO colour and texture histograms with Fisher weights learnt per session, no model), detector, auto framing, face privacy blur regions, highlights → `edit::Timeline`. The tracker finds a lost subject again only within its reach (`Seen::prior`, `Seen::speed`: the speed, in its own heights a second, it needs to be a candidate since it was last seen for sure, its heading carried on for up to a second; beyond what it reaches setting off at a walk and speeding up by 3 heights/s² to a sprint's 3, it is someone else; within it, its similarity loses 0.1 × (speed / 1 height a second)²), and a person only with the pick's template's box on it (`vit::hit`: never on the detector's box alone); a person at least as like one `find` took and the tracker lost again before VitTrack was sure of them as like the subject (`vit::Tried`, the last 8; not added to the gallery, as the subject can be one) needs VitTrack 0.5, not 0.25 (`Tried::need`, also for whoever the tracker takes on its own after a gap). `Tracker::fps` is the clip's frame rate (30 until set) |
 | `ble` | Camera BLE: scan, wake, pairing, Wi-Fi credentials (btleplug). The X5's wake-up brings up its radios and session, never its screen. Feature `sim`: `Ble::sim`, a simulated adapter and camera on the real session code ; macOS: `Error::Off` / `Error::Denied` and `Event::Adapter` (Bluetooth off, not allowed, back) |
 | `live` | FLV and RTMP client, OBS frame protocol (Unix socket + DMA-BUF fds), PipeWire camera node (the last three Linux only: elsewhere `stub.rs` keeps their API and refuses to start) |
 | `obs` | OBS source plugin (`cdylib`) that imports our frames |
@@ -191,6 +191,19 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   does. CoreAudio pauses a stream on a picked device that goes away or changes rate under it: the player's error
   callback then hands its clock to a stand-in on wall time (`Shared::lost`, from a seek to where it stood), so
   playback and seeks go on in silence (on Linux too).
+- Faces: `track`'s face pass runs YuNet through Core ML on the Neural Engine and the CPU (`track/src/coreml.rs`,
+  `models/yunet_b8.mlpackage`: batch 8, FP16, made from the ONNX by `models/coreml.py`; `models/README`), leaving the
+  GPU to the stitcher. The compiled model is kept in `x5desk-coreml` in the temp dir (made 0700; used only if it is
+  this user's and nobody else can write to it, else compiled into a dir of the process's own), one per package (its
+  hash), compiled beside it and renamed into place by the first process that needs it, a stale one moved aside first;
+  Core ML keeps its own Neural Engine cache under `~/Library/Caches/<process name>`, test-hook runs too. The first face
+  pass loads it (≈ 0.6 s, against burn's 11 s of kernel compiles). The crops reach it through a mapped copy of the crop
+  pass's buffer; its scores and boxes come back in burn's layout, so the decoding after is the same. Every Core ML call
+  runs in an autorelease pool (the app's threads have none: a prediction autoreleases 12 MB of outputs). M4, footage
+  medians (`tests/footage.rs` `privacy`, `X5_YUNET=burn` for burn's): 42 ms per frame of 20 tiles instead of 80, a run
+  of up to 8 tiles with copies, read-back and decoding 11.5 ms instead of 24 (Core ML's prediction of 8 alone: 9 ms),
+  the same faces and tracks. `Ai::coreml` (on) picks it, `Ai::coreml_used` tells whether it runs; a model that won't
+  load, or a run it fails, leaves burn's YuNet, which the other platforms run.
 - App Nap: long work holds an `awake::Hold` (one ref-counted NSProcessInfo activity, user initiated, idle system sleep
   allowed; a no-op elsewhere): each job on the export thread (exports, frame grabs, Shot Lab exports), Deep Track and
   auto edit, Shot Lab previews, the live outputs while one runs (RTMP, a watched OBS output, the PipeWire camera; not
@@ -337,7 +350,9 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   camera's session (after its `/CONF` attempt, which may fail). `X5DESK_TEST=<tokens>` drives the app; under it
   nothing of the user's config or cache is read, written or trimmed (app and camera settings, the recent list; the
   download queue is the run's own; no thumbnail cache: `settings::Prefs::thumbs`; burn's cache is the hook's shared
-  `x5desk-cubecl` dir, or memory only), and `dest=` is also the download folder. Tokens:
+  `x5desk-cubecl` dir, or memory only; macOS: Core ML keeps its Neural Engine cache in `~/Library/Caches/x5desk`
+  anyway, named after the process, and the face model's compiled form is the temp dir's shared one), and `dest=` is
+  also the download folder. Tokens:
   - player: `play`, `loop`, `vol=`, `view=`, `seek=`, `proxy`, `stats=<s>`, `novsync`, `full`,
     `stab=off|free|horizon|direction`, `smooth=<s>`, `aim=<yaw>/<pitch>/<fov>`, `max` (`play`, `seek=` and `vol=`
     also drive the viewer of plain videos, `movie.rs`. `max` maximises the window, asked every 250 ms whenever it is
