@@ -43,7 +43,12 @@ fn matrices(b: &mut Bits, n: usize) -> Result<()> {
             let (mut last, mut next) = (8i32, 8i32);
             for _ in 0..if i < 6 { 16 } else { 64 } {
                 if next != 0 {
-                    next = (last + b.se() + 256) % 256;
+                    // delta_scale is −128..=127; past the end (a truncated set) se() reads i32::MIN
+                    let d = b.se();
+                    if !(-128..=127).contains(&d) {
+                        return Err(Bad("H.264 scaling list"));
+                    }
+                    next = (last + d + 256) % 256;
                 }
                 last = if next == 0 { last } else { next };
             }
