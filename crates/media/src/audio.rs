@@ -2,7 +2,8 @@
 //! a decode thread fills a lock-free single-producer / single-consumer ring, the device callback drains it and
 //! counts the frames it consumed. Without sound (no AAC track, no device) [`Player::silent`] runs the same clock on
 //! wall time. The stream may run at another rate and channel count than the source ([`Conv`]): the clock still counts
-//! source frames.
+//! source frames. A stream that stops for good (its device unplugged, or its rate changed under it: CoreAudio pauses
+//! such a stream) hands the clock to a stand-in that runs on wall time, as the silent player's, from where it stood.
 
 use crate::{
     mp4::{Codec, Mp4, asc_info},
@@ -13,7 +14,7 @@ use std::{
     io,
     path::Path,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::*},
     },
     thread,
@@ -181,6 +182,9 @@ struct Shared {
     paused: AtomicBool,
     quit: AtomicBool,
     vol: AtomicU32,
+    /// The stream stopped for good; `stand` runs the callback's part on wall time instead.
+    dead: AtomicBool,
+    stand: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl Shared {
@@ -207,7 +211,30 @@ impl Shared {
             paused: AtomicBool::new(true),
             quit: AtomicBool::new(false),
             vol: AtomicU32::new(1f32.to_bits()),
+            dead: AtomicBool::new(false),
+            stand: Mutex::new(None),
         })
+    }
+
+    /// The stream reported `e`. One that stopped for good leaves the clock to a stand-in on wall time, from a seek
+    /// to where it stood (unless one is pending): the decode thread restarts there, and the stand-in's first buffer
+    /// takes the seek as a fresh callback would, so the clock goes on and later seeks still complete.
+    fn lost(self: &Arc<Shared>, e: &cpal::Error) {
+        use cpal::ErrorKind::{DeviceNotAvailable, StreamInvalidated};
+        if !matches!(e.kind(), DeviceNotAvailable | StreamInvalidated)
+            || self.dead.swap(true, AcqRel)
+        {
+            return;
+        }
+        if self.ack.load(Acquire) == self.req.load(Relaxed) {
+            self.target.store(self.clock.load(Relaxed), Relaxed);
+            self.req.fetch_add(1, Release);
+        }
+        let s = self.clone();
+        let th = thread::Builder::new()
+            .name("audio stand-in".into())
+            .spawn(move || tick(&s, false));
+        *self.stand.lock().unwrap_or_else(|e| e.into_inner()) = th.ok();
     }
 }
 
@@ -348,6 +375,10 @@ impl Player {
         };
         let (s, mut p) = (sh.clone(), Play::default());
         let cb = move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
+            // the stand-in has the clock: a stream that comes back must not move it too
+            if s.dead.load(Relaxed) {
+                return out.fill(0.0);
+            }
             let ts = info.timestamp();
             p.fill(
                 &s,
@@ -355,9 +386,12 @@ impl Player {
                 ts.playback.duration_since(ts.callback).as_secs_f64(),
             );
         };
-        let stream = dev
-            .build_output_stream(cfg, cb, |e| eprintln!("audio output: {e}"), None)
-            .map_err(err)?;
+        let d = sh.clone();
+        let lost = move |e: cpal::Error| {
+            eprintln!("audio output: {e}");
+            d.lost(&e)
+        };
+        let stream = dev.build_output_stream(cfg, cb, lost, None).map_err(err)?;
         stream.play().map_err(err)?;
         let s = sh.clone();
         let th = thread::Builder::new()
@@ -379,7 +413,7 @@ impl Player {
         let s = sh.clone();
         let th = thread::Builder::new()
             .name("silent clock".into())
-            .spawn(move || tick(&s))
+            .spawn(move || tick(&s, true))
             .ok();
         Player {
             sh,
@@ -418,6 +452,17 @@ impl Drop for Player {
     fn drop(&mut self) {
         self.sh.quit.store(true, Relaxed);
         if let Some(t) = self.th.take() {
+            let _ = t.join();
+        }
+        // after the stream: its error callback can't start one any more
+        drop(self._stream.take());
+        let st = self
+            .sh
+            .stand
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(t) = st {
             let _ = t.join();
         }
     }
@@ -492,14 +537,14 @@ fn feed(s: &Shared, mp4: &Mp4, t: usize, mut aac: Aac, mut cv: Conv) {
     }
 }
 
-/// The silent player's device: takes seek requests (the decode thread's part) and fills silence for the wall time
-/// that passed (the callback's part).
-fn tick(s: &Shared) {
+/// The silent player's device: takes seek requests (the decode thread's part, when `seeks`) and fills silence for the
+/// wall time that passed (the callback's part). A dead stream's stand-in has a decode thread for the seeks.
+fn tick(s: &Shared, seeks: bool) {
     let (mut p, mut out, mut cur) = (Play::default(), [0f32; 960], 0);
     let (t0, mut done) = (Instant::now(), 0u64);
     while !s.quit.load(Relaxed) {
         let e = s.req.load(Acquire);
-        if e != cur {
+        if seeks && e != cur {
             s.base.store(s.target.load(Relaxed), Relaxed);
             s.seen.store(e, Release);
             cur = e;
@@ -839,6 +884,71 @@ mod tests {
         assert_eq!(got.len(), full.len());
         assert!(got[a..a + 2048].iter().all(|&x| x == 0.0));
         assert!(same(0..a) && same(z..full.len()));
+    }
+
+    /// A stream that stops for good (its device unplugged) leaves the clock to the stand-in: it goes on from where it
+    /// stood at wall-clock pace, and a later seek still completes. An error that leaves the stream running changes
+    /// nothing.
+    #[test]
+    fn stream_lost() {
+        let sh = Shared::new(48000, 48000, 1);
+        sh.eof.store(true, Relaxed); // an empty ring at the end: the clock runs on silence
+        sh.paused.store(false, Relaxed);
+        // the decode thread's part of a seek
+        let (s, quit) = (sh.clone(), Arc::new(AtomicBool::new(false)));
+        let q = quit.clone();
+        let feed = thread::spawn(move || {
+            let mut cur = 0;
+            while !q.load(Relaxed) {
+                let e = s.req.load(Acquire);
+                if e != cur {
+                    s.base.store(s.target.load(Relaxed), Relaxed);
+                    s.fence.store(s.w.load(Relaxed), Relaxed);
+                    s.seen.store(e, Release);
+                    cur = e;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        sh.clock.store(48000, Relaxed);
+        let c = Clock(sh.clone());
+        sh.lost(&cpal::ErrorKind::DeviceChanged.into());
+        assert!(!sh.dead.load(Relaxed) && sh.stand.lock().unwrap().is_none());
+        let t0 = Instant::now();
+        sh.lost(&cpal::ErrorKind::DeviceNotAvailable.into());
+        let wait = |want: &dyn Fn(f64) -> bool| {
+            let t = Instant::now();
+            loop {
+                if let Some(v) = c.get().filter(|&v| want(v)) {
+                    return v;
+                }
+                assert!(
+                    t.elapsed() < Duration::from_secs(2),
+                    "clock stuck at {}",
+                    c.secs()
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        thread::sleep(Duration::from_millis(300));
+        let a = wait(&|v| v > 1.0);
+        let wall = t0.elapsed().as_secs_f64();
+        let player = Player {
+            sh: sh.clone(),
+            th: None,
+            _stream: None,
+            duration: 10.0,
+        };
+        player.seek(5.0);
+        let b = wait(&|v| v >= 5.0);
+        println!(
+            "clock 1.0 → {a:.3} s over {wall:.3} s wall after the stream was lost; seek 5 → {b:.3}"
+        );
+        assert!((a - 1.0 - wall).abs() < 0.05, "clock {a} after {wall} s");
+        assert!(b < 5.1, "{b}");
+        drop(player);
+        quit.store(true, Relaxed);
+        feed.join().unwrap();
     }
 
     /// The silent player's clock: holds at open and while paused, follows wall time while playing, lands exactly on
