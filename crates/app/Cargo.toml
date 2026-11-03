@@ -41,6 +41,12 @@ ble = { workspace = true, features = ["sim"] }
 # the Settings screen names the video queues' codec operations
 ash.workspace = true
 
+# macOS, already in the tree through cubecl: the USB device a mounted disk sits on from the IOKit registry
+# (`disk.rs`)
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFString"] }
+objc2-io-kit = { version = "0.3", default-features = false, features = ["std", "libc"] }
+
 [dev-dependencies]
 # Already in the tree through eframe: the UI test runs its event loop off the main thread.
 winit = { version = "0.30", default-features = false }

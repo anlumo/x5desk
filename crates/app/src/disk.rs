@@ -4,8 +4,9 @@
 //! removable-media mount point counts as a card when it holds a `DCIM` tree. Its files are listed as the app lists
 //! them (§8.7) and grouped like the camera's album, with each main file's trailer metadata and thumbnail and the
 //! favourites of `DCIM/.editinfo_list.list`. Imports go through the download queue (`dl`) as [`copy`]: resumable from
-//! `<dst>.part`. On macOS the volumes are the ones under `/Volumes`, and the camera's is the one labelled with its
-//! product string (the X5 labels its card so): there is no sysfs to ask the USB device.
+//! `<dst>.part`. On macOS the mount table is the kernel's (`getfsstat` without waiting, so a share whose server went
+//! away holds nothing up), the volumes are block devices under `/Volumes`, and the USB ancestor is looked up in the
+//! IOKit registry, up from the disk's IOMedia.
 
 use crate::album::{self, Item};
 use link::{Error, Prog, pb};
@@ -36,7 +37,7 @@ impl Vol {
             .file_name()
             .map_or("".into(), |n| n.to_string_lossy());
         match &self.cam {
-            // udisks2 names the mount point after the volume label, and the X5 labels its card with its product string
+            // udisks2 and macOS name the mount point after the volume label, the X5 its card after its product
             Some(c) if *c == l => c.clone(),
             Some(c) => format!("{c} ({l})"),
             None => format!("Card {l}"),
@@ -48,8 +49,9 @@ impl Vol {
 /// camera disks (test hook).
 #[derive(Clone, Debug)]
 pub struct Watch {
-    pub info: PathBuf,
     #[cfg_attr(target_os = "macos", allow(dead_code))] // the mount table and sysfs are Linux's
+    pub info: PathBuf,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub sys: PathBuf,
     pub media: Vec<PathBuf>,
     pub fake: Vec<PathBuf>,
@@ -69,9 +71,18 @@ impl Watch {
         }
     }
 
+    /// The test hook's: the directories `fake` only, nothing of the mount table or of what is mounted.
+    pub fn hook(fake: Vec<PathBuf>) -> Watch {
+        Watch {
+            info: PathBuf::new(),
+            media: vec![],
+            ..Watch::new(fake)
+        }
+    }
+
     pub fn vols(&self) -> Vec<Vol> {
         #[cfg(target_os = "macos")]
-        let mut v = volumes(&self.media);
+        let mut v = volumes(&table(), &self.media, usb);
         #[cfg(not(target_os = "macos"))]
         let mut v = vols(
             &fs::read_to_string(&self.info).unwrap_or_default(),
@@ -157,40 +168,104 @@ pub fn vols(info: &str, sys: &Path, media: &[PathBuf]) -> Vec<Vol> {
     v
 }
 
-/// macOS: the volumes mounted at a directory of `media` (`/Volumes`) with a `DCIM` directory; one labelled
-/// `Insta360 …` is the camera.
-#[cfg(target_os = "macos")]
-fn volumes(media: &[PathBuf]) -> Vec<Vol> {
-    let mut v = vec![];
-    for e in media.iter().flat_map(fs::read_dir).flatten().flatten() {
-        let root = e.path();
-        let Some(dev) = mounted(&root).filter(|_| root.join("DCIM").is_dir()) else {
+/// Volumes of the mount table `t` (macOS's: source, mount point, shown by Finder) with a `DCIM` directory: block
+/// devices mounted under a `media` directory; `cam` names the camera's by its source. Only those paths are looked at:
+/// a network share's can block, and the hidden mounts (`nobrowse`) are the system's.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // macOS's mount table
+fn volumes(
+    t: &[(String, PathBuf, bool)],
+    media: &[PathBuf],
+    cam: impl Fn(&str) -> Option<String>,
+) -> Vec<Vol> {
+    let mut v: Vec<Vol> = vec![];
+    for (src, root, shown) in t {
+        if !shown
+            || !src.starts_with("/dev/")
+            || !media.iter().any(|m| root.starts_with(m))
+            || v.iter().any(|x| x.root == *root)
+        {
             continue;
-        };
-        let l = e.file_name().to_string_lossy().into_owned();
-        v.push(Vol {
-            cam: l.starts_with("Insta360").then(|| l.clone()),
-            root,
-            dev,
-        })
+        }
+        if root.join("DCIM").is_dir() {
+            v.push(Vol {
+                root: root.clone(),
+                dev: src.clone(),
+                cam: cam(src),
+            })
+        }
     }
     v
 }
 
-/// The block device mounted exactly at `p` (not a symlink to another mount, as `/Volumes/Macintosh HD` is).
+/// macOS: the mount table as the kernel keeps it (`MNT_NOWAIT`: no file system is asked): source, mount point,
+/// whether Finder shows it.
 #[cfg(target_os = "macos")]
-fn mounted(p: &Path) -> Option<String> {
-    use std::{ffi::CStr, os::unix::ffi::OsStrExt};
-    let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
-    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
-    // SAFETY: `c` is a C string, `s` a statfs to fill
-    if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
-        return None;
+fn table() -> Vec<(String, PathBuf, bool)> {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    // SAFETY: no buffer: the count
+    let n = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    // room for mounts made in between
+    let mut v = vec![libc::statfs::default(); n.max(0) as usize + 8];
+    let len = (v.len() * size_of::<libc::statfs>()) as libc::c_int;
+    // SAFETY: `v` holds `len` bytes of statfs records to fill
+    let n = unsafe { libc::getfsstat(v.as_mut_ptr(), len, libc::MNT_NOWAIT) };
+    v.truncate(n.max(0) as usize);
+    let s = |b: &[libc::c_char]| -> Vec<u8> {
+        b.iter()
+            .take_while(|c| **c != 0)
+            .map(|c| *c as u8)
+            .collect()
+    };
+    v.iter()
+        .map(|m| {
+            (
+                String::from_utf8_lossy(&s(&m.f_mntfromname)).into_owned(),
+                PathBuf::from(OsString::from_vec(s(&m.f_mntonname))),
+                m.f_flags & libc::MNT_DONTBROWSE as u32 == 0,
+            )
+        })
+        .collect()
+}
+
+/// macOS: the USB product string of the device the BSD disk `dev` (`/dev/disk4s1`) sits on, if it is an Insta360
+/// camera, from the IOKit registry (no I/O on the disk).
+#[cfg(target_os = "macos")]
+fn usb(dev: &str) -> Option<String> {
+    use objc2_core_foundation::{CFDictionary, CFRetained, CFString};
+    use objc2_io_kit::{
+        IOBSDNameMatching, IOObjectRelease, IORegistryEntryCreateCFProperty,
+        IORegistryEntryGetParentEntry, IOServiceGetMatchingService, io_registry_entry_t,
+        kIOServicePlane,
+    };
+    let n = std::ffi::CString::new(dev.strip_prefix("/dev/")?).ok()?;
+    let prop = |e: io_registry_entry_t, k: &str| {
+        // SAFETY: a live entry, a key; the property comes retained
+        unsafe { IORegistryEntryCreateCFProperty(e, Some(&CFString::from_str(k)), None, 0) }
+    };
+    // SAFETY: the default main port (0: `kIOMainPortDefault` needs macOS 12), a C string; a matching dictionary is a
+    // CFDictionary, which the lookup consumes
+    let mut e = unsafe {
+        let m = IOBSDNameMatching(0, 0, n.as_ptr());
+        IOServiceGetMatchingService(0, m.map(|m| CFRetained::cast_unchecked::<CFDictionary>(m)))
+    };
+    // the USB device is the first entry up from the IOMedia with a vendor id and a product string (newer macOS also
+    // names it kUSBProductString, which nusb reads first)
+    let mut s = None;
+    while e != 0 {
+        if prop(e, "idVendor").is_some() {
+            s = ["kUSBProductString", "USB Product Name"]
+                .into_iter()
+                .find_map(|k| prop(e, k)?.downcast::<CFString>().ok());
+        }
+        let mut p = 0;
+        let plane = kIOServicePlane.as_ptr().cast_mut().cast();
+        // SAFETY: a live entry, the plane's name (an io_name_t to IOKit, which only reads it), a handle to fill
+        let up = s.is_none() && unsafe { IORegistryEntryGetParentEntry(e, plane, &mut p) } == 0;
+        IOObjectRelease(e);
+        e = if up { p } else { 0 };
     }
-    let on = unsafe { CStr::from_ptr(s.f_mntonname.as_ptr()) };
-    let from = unsafe { CStr::from_ptr(s.f_mntfromname.as_ptr()) }.to_string_lossy();
-    (on.to_bytes() == p.as_os_str().as_bytes() && from.starts_with("/dev/"))
-        .then(|| from.into_owned())
+    let s = s?.to_string();
+    s.starts_with("Insta360").then_some(s)
 }
 
 /// A file the app collects from a card (`DocumentFileUtils`): its prefixes and extensions, no `__`, 4–6 parts.

@@ -511,11 +511,11 @@ impl App {
         let (mount, ble) = test
             .as_ref()
             .map_or((vec![], None), |t| (t.mount.clone(), t.ble));
-        let mut disks = disk::Watch::new(mount.clone());
-        if test.is_some() {
+        let disks = match test.is_some() {
             // the hook's directories only
-            disks.info = PathBuf::new();
-        }
+            true => disk::Watch::hook(mount.clone()),
+            false => disk::Watch::new(mount.clone()),
+        };
         let mut first = vec![
             bt::Cmd::Scan(true),
             bt::Cmd::Connect(::ble::Dev("sim/X5 SIM001".into())),

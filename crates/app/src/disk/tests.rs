@@ -1,6 +1,6 @@
-//! Mount detection against a fake mount table and sysfs; a fake card (a DCIM tree in the fixtures directory, with the
-//! samples of `X5_SAMPLES` as its recordings when set); the import copy's resume rules, and imports through the
-//! download queue.
+//! Mount detection against a fake mount table and sysfs, and a fake macOS mount table; a fake card (a DCIM tree in
+//! the fixtures directory, with the samples of `X5_SAMPLES` as its recordings when set); the import copy's resume
+//! rules, and imports through the download queue.
 
 use super::*;
 use crate::dl::{self, St};
@@ -99,6 +99,71 @@ fn mounts() {
     println!(
         "mounted camera disks and cards here: {:?}",
         Watch::new(vec![]).vols()
+    );
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// macOS's mount table: block devices under `/Volumes` with a DCIM tree, the camera's named by its USB device (the
+/// registry lookup stands in, asked about block devices only); not: a network share, a volume Finder hides (the
+/// system's), a disk mounted elsewhere, a volume without DCIM, a second mount. The test hook's watch lists its
+/// directories and nothing mounted.
+#[test]
+fn mac_mounts() {
+    let d = dir("mac-mounts");
+    let vs = d.join("Volumes");
+    let (x5, sd, share, rec, empty, other) = (
+        vs.join("Insta360 X5"),
+        vs.join("SD"),
+        vs.join("share"),
+        vs.join("Recovery"),
+        vs.join("EMPTY"),
+        d.join("elsewhere"),
+    );
+    for p in [&x5, &sd, &share, &rec, &other] {
+        fs::create_dir_all(p.join("DCIM/Camera01")).unwrap()
+    }
+    fs::create_dir_all(&empty).unwrap();
+    let t = [
+        ("/dev/disk4s1", &x5, true),
+        ("/dev/disk5s1", &sd, true),
+        ("//me@nas._smb._tcp.local/share", &share, true),
+        ("/dev/disk3s3", &rec, false),
+        ("/dev/disk6s1", &empty, true),
+        ("/dev/disk7s1", &other, true),
+        ("/dev/disk4s1", &x5, true),
+    ]
+    .map(|(s, p, b)| (s.to_string(), p.clone(), b));
+    let cam = |s: &str| {
+        assert!(s.starts_with("/dev/"), "{s} looked up");
+        (s == "/dev/disk4s1").then(|| "Insta360 X5".to_string())
+    };
+    let v = volumes(&t, std::slice::from_ref(&vs), cam);
+    assert_eq!(
+        v,
+        [
+            Vol {
+                root: x5,
+                dev: "/dev/disk4s1".into(),
+                cam: Some("Insta360 X5".into()),
+            },
+            Vol {
+                root: sd.clone(),
+                dev: "/dev/disk5s1".into(),
+                cam: None,
+            },
+        ]
+    );
+    assert_eq!(
+        (v[0].name(), v[1].name()),
+        ("Insta360 X5".into(), "Card SD".into())
+    );
+    assert_eq!(
+        Watch::hook(vec![sd.clone()]).vols(),
+        [Vol {
+            root: sd,
+            dev: "fake".into(),
+            cam: Some("Insta360 X5, simulated".into()),
+        }]
     );
     fs::remove_dir_all(&d).unwrap();
 }

@@ -384,6 +384,8 @@ dependencies = [
  "link",
  "live",
  "media",
+ "objc2-core-foundation",
+ "objc2-io-kit",
  "pollster 1.0.1",
  "prost",
  "proto",
