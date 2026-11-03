@@ -39,7 +39,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 | Crate | Content |
 |---|---|
 | `video` | `Gpu` (one Vulkan device via wgpu-hal with decode and encode queues; macOS: the Metal device), H.265 / H.264 parsers, Vulkan Video (macOS: VideoToolbox, `mac/`) decode and encode, NV12 / P010 pictures for wgpu (`Ring::planes`) |
-| `media` | MP4 demux and mux (`sv3d` / `st3d`), `.insv` / `.insp` trailer (calibration, gyro, exposure), AAC decode (symphonia) and AAC-LC encode (`aacenc`), editor mixer with ducking and limiter (`mix`), music import (`music`), resampler, RNNoise denoise, audio output and master clock (cpal; `audio::Player::open_on` plays on a picked device, `audio::device(id)` resolves the settings' device id by exact match: it lists the devices, so resolve when the choice changes, never per open), MJPEG decode, UVC capture of the X5's Webcam Mode |
+| `media` | MP4 demux and mux (`sv3d` / `st3d`), `.insv` / `.insp` trailer (calibration, gyro, exposure), AAC decode (symphonia) and AAC-LC encode (`aacenc`), editor mixer with ducking and limiter (`mix`), music import (`music`), resampler, RNNoise denoise, audio output and master clock (cpal; `audio::Player::open_on` plays on a picked device, `audio::device(id)` resolves the settings' device id by exact match: it lists the devices, so resolve when the choice changes, never per open; macOS: the app's settings look a gone or missing picked device up again on the opening thread), `audio::Conv` to a stream's format (`Conv::on`: macOS the device's own rate and up to 2 channels, else the source's; the clock counts source frames), MJPEG decode, UVC capture of the X5's Webcam Mode |
 | `proto` | Protobuf messages for the camera (prost, compiled with protox from `proto/`) |
 | `link` | Camera link: UCD framing, session, requests, notifications, HTTP tunnel with several connections, downloads; USB (nusb), Wi-Fi (TCP); BLE lives in `ble`. Connections start as `link::Opening` (dropping it cancels the sync); `Error::Silent` after 30 s without a sync answer; `Camera::set_time` sends the app's two SET_OPTIONS at once and returns both pending answers; `scan` / `watch` report `Plug::Disk` for an Insta360 product string under vendor 070a (the X5 in U-disk mode, or the first seconds of app mode); feature `sim`: a simulated camera (a handler status 0 leaves the request unanswered) |
 | `stitch` | Dual fisheye → equirect / perspective on the shared device from NV12 / P010 textures: template seam, RAFT flow, colour matching, stabilisation rotation; burn's attachment per device (`attach`) and its cache dir (`cache`: a slot of the process's own, else memory only) |
@@ -48,7 +48,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 | `edit` | Editor model: timeline, clips with a look and colour adjustments each (`fx::Params`: edit depends on fx), trim / split / speed / freeze, reframing keyframes and camera-movement presets, undo (a drag that ends where it started leaves no undo step and keeps the redo list), project files |
 | `export` | Render jobs: decode → stitch → stabilise → effects → encode → mux, 360 and flat, queue; editor timelines (`Cut::Edit`: speed ramps, freeze frames, views, each clip's adjustments and look via `fx`, audio mixed with music, RNNoise-denoised after the time-stretch when `Edit::denoise` is set, and AAC-encoded, or copied for plain 1× cuts without denoise); photo frame grabs (JPEG with GPano). `export::locks(gate, burn)` hands it the app's GATE / BURN; `Job::flat` keeps a flat 2:1 picture from a 360 hook untagged |
 | `track` | AI with open models (burn on the shared device): subject tracker on the sphere with re-identification (LOMO colour and texture histograms with Fisher weights learnt per session, no model), detector, auto framing, face privacy blur regions, highlights → `edit::Timeline`. The tracker finds a lost subject again only within its reach (`Seen::prior`, `Seen::speed`: the speed, in its own heights a second, it needs to be a candidate since it was last seen for sure, its heading carried on for up to a second; beyond what it reaches setting off at a walk and speeding up by 3 heights/s² to a sprint's 3, it is someone else; within it, its similarity loses 0.1 × (speed / 1 height a second)²), and a person only with the pick's template's box on it (`vit::hit`: never on the detector's box alone); a person at least as like one `find` took and the tracker lost again before VitTrack was sure of them as like the subject (`vit::Tried`, the last 8; not added to the gallery, as the subject can be one) needs VitTrack 0.5, not 0.25 (`Tried::need`, also for whoever the tracker takes on its own after a gap). `Tracker::fps` is the clip's frame rate (30 until set) |
-| `ble` | Camera BLE: scan, wake, pairing, Wi-Fi credentials (btleplug). The X5's wake-up brings up its radios and session, never its screen. Feature `sim`: `Ble::sim`, a simulated adapter and camera on the real session code |
+| `ble` | Camera BLE: scan, wake, pairing, Wi-Fi credentials (btleplug). The X5's wake-up brings up its radios and session, never its screen. Feature `sim`: `Ble::sim`, a simulated adapter and camera on the real session code ; macOS: `Error::Off` / `Error::Denied` and `Event::Adapter` (Bluetooth off, not allowed, back) |
 | `live` | FLV and RTMP client, OBS frame protocol (Unix socket + DMA-BUF fds), PipeWire camera node (the last three Linux only: elsewhere `stub.rs` keeps their API and refuses to start) |
 | `obs` | OBS source plugin (`cdylib`) that imports our frames |
 | `app` | egui (eframe 0.37) UI, binary `x5desk` |
@@ -134,25 +134,86 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   stream's own range and depth (no conversion), and a copy on wgpu's queue moves its planes into the slot. All of it
   is on wgpu's one queue, which Metal orders by resource, so `acquire` stages nothing and `release` is a counter the
   decoder waits on (`Full` after 50 ms as on Linux). `restart` makes a new session. A picture VideoToolbox fails on
-  still takes its frame (the live preview's loss). The parsers step over scaling lists here (VideoToolbox applies
-  them; its own HEVC encoder writes them); on Linux they stay refused.
+  still takes its frame and shows the frame before it (a copy of that slot: concealment, as on Linux;
+  `Decoder::failed` counts them); with nothing decoded since the start or a `restart` it is an error. The next random
+  access point (H.264 IDR or I picture, H.265 IRAP) after a failure gets a new session; while VideoToolbox has nothing
+  to decode against (its session invalidated, -12903; a random access point failed), the pictures before the next one
+  are concealed without decoding. Each copy flushes the CVMetalTextureCache (`Gpu::flush`; CoreVideo evicts only
+  then). `Decoder::took`: the decode's own time once it has its slot (parsing, VideoToolbox, the copy), which the
+  preview's pacing and decode stats use in place of Linux's done timeline. The parsers step over scaling lists here
+  (VideoToolbox applies them; its own HEVC encoder writes them), rejecting a delta_scale outside −128..=127; on Linux
+  they stay refused.
+- `Decoder::gated(&GATE)`: the decoder holds GATE shared around its copy submits only, not the decode, waiting for it
+  at most 50 ms (a GATE holder may be joining its thread). For consumers that decode outside GATE (the live preview,
+  `clip::Video`); one that holds GATE around `decode` (crate export, shotlab's frames) must not, since std's RwLock
+  queues a reader behind a waiting writer.
 - Encode: each input slot is a CVPixelBuffer whose planes wgpu writes through Metal textures over the IOSurface;
   `copy_buffer` copies stitch's YUV buffer with a render pass (any even pitch; the buffer needs STORAGE usage).
   `release` stages an MTLSharedEvent signal (`filled`) on wgpu's queue as Linux stages its semaphore; `encode` waits
   for it, forces IDRs where the GOP or `Input::key` wants them, frame reordering off (dts = pts). `params` come from a
-  picture a throwaway session encodes in `new`. `Rate::Qp` is VideoToolbox's min = max frame QP; `levels` is 1.
+  picture a throwaway session encodes in `new`; each session's first sample must carry them, or `packet` fails.
+  Hardware encoders only: H.264 7680 × 3840 fails on the M4 rather than run in software (about 1 fps). Every
+  session is RealTime: off, as Apple advises for files, an 8K H.265 Main 10 stream encodes at 16.6 instead of 30.3
+  fps on the M4 for 0.2 dB (`tests/mac.rs` `speed`). A `Cfg.vbv` under 1000 is a low-latency stream (RTMP); a file's
+  session is asked to hold back one frame, an RTMP one none, but the M4's encoders don't take MaxFrameDelayCount (and
+  hold nothing back with frame reordering off): `encode` makes one that holds `SLOTS` − 1 emit them, or the
+  producer's `acquire` would wait for good, and `packet` makes a file's emit what it holds after 20 ms of waiting; a
+  session invalidated with frames held back loses them there. `Rate::Cbr` is AverageBitRate with DataRateLimits
+  of two buffers per `vbv` window (one undershoots by 30 %), not ConstantBitRate (it pads, overshoots 32 % with
+  DataRateLimits, and its VBVBufferDuration changes no IDR); no mode caps an IDR at the buffer. `Rate::Qp` is
+  VideoToolbox's min = max frame QP. `levels` is 1. `Packet::key` is the sample's sync flag. A frame VideoToolbox
+  drops, or loses with an invalidated session, comes back without data and never as key, and the next frame is an IDR
+  if the lost one was to be: RTMP sends no tag for it, `Mux::write` lengthens the previous sample. kVTInvalidSessionErr
+  (sleep, a media server restart) makes `encode` start a new session at that frame with an IDR.
 - USB app mode: macOS sets a device's configuration only for a driver of its own, and none takes the X5's app mode
   (`2e1a:0002`), so it stays unconfigured, without interfaces. `link::usb`'s `plug` counts such a device as
   `Plug::App` there, and `Usb::open` sets the configuration with the vendor interface 0 before claiming it (Linux's
   kernel sets it itself). The X5 gives up after about 15 s without a session ("switching mode failed" on its screen)
   and goes back to `070a:4027`: the app has to be running while the camera switches.
+- BLE (btleplug's CoreBluetooth backend): a `Dev` is the peripheral's UUID. btleplug forgets a peripheral at every
+  disconnect (also a failed or timed-out connect); a connect that misses it in `peripherals()` takes it back with
+  `retrieve_peripherals` (`retrievePeripheralsWithIdentifiers`), so a listed camera reconnects without a scan.
+  CoreBluetooth accepts a scan or connect in any state, so both check the adapter state first: `Error::Off`, or
+  `Error::Denied` (btleplug folds unauthorized, unsupported and resetting into one state; `Ble::open` maps its
+  PermissionDenied to it too). Each state update arrives as `Event::Adapter` and forgets the scan; a scan or find
+  that was running starts again once Bluetooth is back (CoreBluetooth never resumes one), and so does one the
+  Wireless pane asked for while it was off or not available (`bt.rs` `again`). Notifications and adapter events come
+  through broadcast channels of 16 that drop what overflows: a pump task per link moves notifications to an unbounded
+  channel as they come (also while the link writes) and asks `is_connected` every 2 s, since a lost
+  DeviceDisconnected would leave the link up.
+- Audio: cpal's CoreAudio backend sets a device's physical format, else its nominal rate, to the rate a stream asks
+  for, for every app and for good, and fails on a rate the device lacks. Streams therefore open at the device's own
+  rate and up to 2 of its channels (`media::audio::Conv::on`, from `default_output_config`); the player resamples its
+  AAC in the decode thread and the editor its 48 kHz mix, and stream frame n is source time n / rate, so the clocks
+  keep source time. A cpal device is a CoreAudio object id, which lasts while the device is connected:
+  `settings::output` checks the kept device's UID and looks a picked device up again on the opening thread when it is
+  gone or was missing at its pick (under 1 ms); the editor's preview falls back to the system default as the player
+  does. CoreAudio pauses a stream on a picked device that goes away or changes rate under it: the player's error
+  callback then hands its clock to a stand-in on wall time (`Shared::lost`, from a seek to where it stood), so
+  playback and seeks go on in silence (on Linux too).
+- App Nap: long work holds an `awake::Hold` (one ref-counted NSProcessInfo activity, user initiated, idle system sleep
+  allowed; a no-op elsewhere): each job on the export thread (exports, frame grabs, Shot Lab exports), Deep Track and
+  auto edit, Shot Lab previews, the live outputs while one runs (RTMP, a watched OBS output, the PipeWire camera; not
+  the Live screen's preview alone), and the running download or card import (`dl::Cur`).
+- Keys: egui's `command` is Cmd here (egui-winit), so Help and the editor's tooltips name Cmd for the shortcuts, Ctrl
+  elsewhere (`help.rs` `cmd!`); Ctrl-click is a plain click. The key Mac keyboards label delete is Backspace to winit
+  (fn+delete is Delete): the editor's clip delete takes both. wgpu's Metal adapter reports no driver: Settings' Driver
+  row and About's Graphics line show the backend then (`settings::driver`).
 - Elsewhere in the app: Webcam Mode (V4L2 UVC), OBS, the PipeWire camera and the BLE wake advertisement (BlueZ) are
-  Linux only. Mounted cards are the volumes under `/Volumes` with a `DCIM` tree, the camera's the one labelled
-  `Insta360 …`. Config and cache default to `~/Library/Application Support` and `~/Library/Caches` (the XDG
-  variables still win), downloads and exports to `~/Movies`.
-- Tests: `video`'s `tests/mac.rs` round-trips synthetic pictures through encode and decode (H.264, H.265, Main 10),
-  checked with `ffprobe`. Vulkan-only tests are `cfg(target_os = "linux")`. Test tools that read `/proc` (the RTMP
-  listeners' readiness) use `lsof` elsewhere; `PR_SET_PDEATHSIG` is Linux only.
+  Linux only. Mounted cards come from the kernel's mount table (`getfsstat`, `MNT_NOWAIT`: no file system is asked,
+  so a share whose server went away holds nothing up): block devices under `/Volumes` that Finder shows (not
+  `nobrowse`) with a `DCIM` tree, only then looked at. The camera's is the one whose USB device (the first IOKit
+  registry entry up from its IOMedia with `idVendor` and a product string) calls itself `Insta360 …`, as Linux's
+  sysfs test (registry only, no I/O on the disk). Config and cache default to `~/Library/Application Support` and
+  `~/Library/Caches` (the XDG variables still win), downloads and exports to `~/Movies`.
+- Tests: `video`'s `tests/mac.rs` round-trips synthetic pictures through encode and decode (H.264, H.265, Main 10,
+  RTMP's low-latency settings) with key requests, checked with `ffprobe`; `cbr` checks the rate within 10 % at 100 ms
+  and 1 s and no filler, `renew` an invalidated session (`Encoder::invalidate`, a hidden hook), `hardware` every
+  export preset on the media engine and no software H.264 at 8K. `tests/mac_decode.rs` decodes hand-made H.264
+  (Baseline, I_PCM, one luma value per picture): a failed picture concealed with the one before, never the slot's old
+  content or a pre-restart picture; the gate; scaling lists cut short or out of range rejected. Vulkan-only tests are
+  `cfg(target_os = "linux")`. Test tools that read `/proc` (the RTMP listeners' readiness) use `lsof` elsewhere;
+  `PR_SET_PDEATHSIG` is Linux only.
 
 ## App (`crates/app`)
 
@@ -174,7 +235,8 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   trailer per item (its first file; empty files left out), imported as `file://` download entries; the bar takes
   U-disk mode from a mounted disk of the camera's own, else from the scan's `Plug::Disk` (`070a:4027`, also the first
   seconds of app mode); `bt.rs`: Bluetooth and station-mode Wi-Fi: join, a read of the camera's existing station
-  connection over BLE, a typed camera address); `capture.rs` (worker on the camera session through `camera::Tap`; its
+  connection over BLE, a typed camera address; the scan row says when Bluetooth is off or not allowed, macOS: System
+  Settings > Privacy & Security > Bluetooth); `capture.rs` (worker on the camera session through `camera::Tap`; its
   reports carry the session (`Tap::sid`) they belong to, and the screen drops those of an earlier one; `conf.rs`: the
   `/CONF` model and its wire values; `feed.rs`: live preview decode thread, pictures handed over under one lock and
   taken as they fall due, paced on the camera clock from the slowest of the last 32 deliveries, IMU levelling;
@@ -243,7 +305,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   "no stream key", quoting the server only (`<scheme>://<host>[:<port>]`).
 - Device policy (`main.rs` `GATE: RwLock`, `BURN: Mutex`): the app's own submitting threads hold `GATE` shared around
   each piece of GPU work (live output thread per pass, RTMP encoder per frame, export threads and decoders, photo
-  exports); threads whose work runs through burn (RAFT worker, the AI models, shotlab's person network) hold `BURN`
+  exports; macOS: `clip::Video`'s and the live preview's decoders around their copies, `Decoder::gated`); threads whose work runs through burn (RAFT worker, the AI models, shotlab's person network) hold `BURN`
   for a whole job instead. Lock order: GATE is dropped before BURN is taken; BURN never nests. A new submitter takes
   one of them.
 - burn's cache: burn keeps its device measurements and autotune results (burn feature `persistence`) in a slot of
@@ -284,8 +346,8 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
     Under XWayland on COSMIC's tiling the window is otherwise tiled, 602 × 996 here; with `max` it fills the output's
     work area, 2488 × 1012 on a 2560 × 1080 output. The screenshot is taken in a frame the window is maximised in;
     once the asks are spent the run logs the size it got and goes on);
-  - camera: `camera=album|downloads|settings|wireless`, `dl=<uri>`, `mount=<dir>` (repeatable fake card; the real
-    mount table is not read), `import`, `ble=sim`, `ble=sta` (the simulated X5 on HomeNet from an earlier
+  - camera: `camera=album|downloads|settings|wireless`, `dl=<uri>`, `mount=<dir>` (repeatable fake card; neither the
+    mount table nor what is mounted, `/Volumes` on macOS, is read: `disk::Watch::hook`), `import`, `ble=sim`, `ble=sta` (the simulated X5 on HomeNet from an earlier
     session: connect, pair, read its station connection; no join), `battery=<%>` (the `replay=` camera's level);
   - capture: `capture`, `replay=<rec.h264>`, `conf=<file>`, `webcam[=1920|<file.mjpg>]`, `cstats=<s>`, `yaw=<deg>`,
     `level=off`, `pace=off` (viewer only), `src=preview|webcam`;
