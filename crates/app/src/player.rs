@@ -204,7 +204,7 @@ impl Src {
         let pv = Preview::new(cx, &cal, fr, blend, Some(0.1), FMT);
         let bg = lens.map(|(r, rect)| {
             (0..v.rings[r].slots() as u64)
-                .map(|s| cx.rect(v.rings[r].texture(s), rect))
+                .map(|s| cx.rect(&v.rings[r].planes(s), rect))
                 .collect()
         });
         // a lens's 200° across its picture: 360° need about 1.8 × its width
@@ -249,7 +249,7 @@ impl Src {
     ) -> Job {
         let (w, h) = (self.fr.w, self.fr.h);
         // the lens planes as they are: R8 / RG8, or R16 / RG16 for P010 (H.265 Main 10)
-        let deep = self.v.rings[0].texture(0).format() == wgpu::TextureFormat::P010;
+        let deep = self.v.rings[0].deep();
         let (fy, fc, b) = match deep {
             true => (
                 wgpu::TextureFormat::R16Unorm,
@@ -301,16 +301,11 @@ impl Src {
         let mut e = g.device.create_command_encoder(&Default::default());
         for i in 0..2 {
             let (r, [rx, ry, _, _]) = self.lens[i];
-            let tex = self.v.rings[r].texture(p.f[r]);
+            let ring = &self.v.rings[r];
             let o = (i as u64) * bpr as u64 * h as u64 * 3 / 2;
-            for (aspect, d, off, dst) in [
-                (wgpu::TextureAspect::Plane0, 1, o, &x.y[i]),
-                (
-                    wgpu::TextureAspect::Plane1,
-                    2,
-                    o + bpr as u64 * h as u64,
-                    &x.uv[i],
-                ),
+            for (pl, d, off, dst) in [
+                (0, 1, o, &x.y[i]),
+                (1, 2, o + bpr as u64 * h as u64, &x.uv[i]),
             ] {
                 let layout = wgpu::TexelCopyBufferLayout {
                     offset: off,
@@ -324,14 +319,12 @@ impl Src {
                 };
                 e.copy_texture_to_buffer(
                     wgpu::TexelCopyTextureInfo {
-                        texture: tex,
-                        mip_level: 0,
                         origin: wgpu::Origin3d {
                             x: rx / d,
                             y: ry / d,
                             z: 0,
                         },
-                        aspect,
+                        ..ring.plane(p.f[r], pl)
                     },
                     wgpu::TexelCopyBufferInfo {
                         buffer: &x.buf,
@@ -351,8 +344,9 @@ impl Src {
         }
         // decoder pictures go back to their home state before the decoder reuses them
         let home: Vec<_> = (0..self.v.rings.len())
-            .map(|r| wgpu::TextureTransition {
-                texture: self.v.rings[r].texture(p.f[r]),
+            .flat_map(|r| self.v.rings[r].textures(p.f[r]))
+            .map(|texture| wgpu::TextureTransition {
+                texture,
                 selector: None,
                 state: wgpu::TextureUses::RESOURCE,
             })

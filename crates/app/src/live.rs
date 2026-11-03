@@ -1823,6 +1823,7 @@ impl Outs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use std::os::fd::AsRawFd;
 
     #[test]
@@ -2023,6 +2024,8 @@ mod tests {
             // only async-signal-safe calls between fork and exec
             unsafe {
                 c.pre_exec(move || {
+                    // Linux only: elsewhere a killed test process can leave its listener running
+                    #[cfg(target_os = "linux")]
                     libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                     // the parent died before the prctl
                     if libc::getppid() as u32 != pp {
@@ -2437,22 +2440,9 @@ mod tests {
         );
         // until it listens, on a socket of its own: another run's listener may hold the port. A probe connection
         // would be taken as the publisher
-        let (hex, pid) = (format!("0100007F:{port:04X}"), ff.0.id());
-        let own = |i: &str| {
-            let s = format!("socket:[{i}]");
-            std::fs::read_dir(format!("/proc/{pid}/fd"))
-                .into_iter()
-                .flatten()
-                .flatten()
-                .any(|e| std::fs::read_link(e.path()).is_ok_and(|l| l.as_os_str() == &*s))
-        };
+        let pid = ff.0.id();
         let t = Instant::now();
-        while !std::fs::read_to_string("/proc/net/tcp")
-            .unwrap()
-            .lines()
-            .map(|l| l.split_whitespace().collect::<Vec<_>>())
-            .any(|l| l.len() > 9 && l[1] == hex && l[3] == "0A" && own(l[9]))
-        {
+        while !listens(pid, port) {
             if ff.0.try_wait().unwrap().is_some() {
                 return None;
             }
@@ -2463,6 +2453,36 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
         Some((ff, url))
+    }
+
+    /// Whether process `pid` has a socket of its own listening on 127.0.0.1:`port`: on Linux through `/proc` (the
+    /// socket's inode among the process's fds), elsewhere through `lsof`.
+    fn listens(pid: u32, port: u16) -> bool {
+        if cfg!(target_os = "linux") {
+            let hex = format!("0100007F:{port:04X}");
+            let own = |i: &str| {
+                let s = format!("socket:[{i}]");
+                std::fs::read_dir(format!("/proc/{pid}/fd"))
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|e| std::fs::read_link(e.path()).is_ok_and(|l| l.as_os_str() == &*s))
+            };
+            return std::fs::read_to_string("/proc/net/tcp")
+                .unwrap()
+                .lines()
+                .map(|l| l.split_whitespace().collect::<Vec<_>>())
+                .any(|l| l.len() > 9 && l[1] == hex && l[3] == "0A" && own(l[9]));
+        }
+        std::process::Command::new("lsof")
+            .args(["-nP", "-a", "-p", &pid.to_string()])
+            .args([
+                format!("-iTCP@127.0.0.1:{port}"),
+                "-sTCP:LISTEN".into(),
+                "-t".into(),
+            ])
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == pid.to_string())
     }
 
     /// A listener into `file` on a port the kernel found free, its URL and the port; should another process take it
@@ -2587,6 +2607,7 @@ mod tests {
     /// An OBS client on our socket: the source list, the `view` source's frames (DMA-BUF, LINEAR, read through a
     /// mapping after their sync_file) in order and paced at 30 fps, its audio as f32; nothing is rendered once it
     /// selects no source.
+    #[cfg(target_os = "linux")]
     #[test]
     fn obs() {
         let Some(d) = samples() else { return };

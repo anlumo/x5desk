@@ -258,12 +258,29 @@ impl Test {
     }
 }
 
-/// `$<var>` if absolute, else `~/<home>` (XDG base directories; the other platforms' come with their ports).
+/// `$<var>` if absolute, else `~/<home>` (XDG base directories). On macOS `~/.config` and `~/.cache` are
+/// `~/Library/Application Support` and `~/Library/Caches`; the XDG variables still override them.
 pub fn xdg(var: &str, home: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let home = match home {
+        ".config" => "Library/Application Support",
+        ".cache" => "Library/Caches",
+        h => h,
+    };
     std::env::var_os(var)
         .map(PathBuf::from)
         .filter(|d| d.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(home)))
+}
+
+/// The user's video folder: `~/Videos`, on macOS `~/Movies`.
+pub fn videos() -> Option<PathBuf> {
+    let d = if cfg!(target_os = "macos") {
+        "Movies"
+    } else {
+        "Videos"
+    };
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(d))
 }
 
 /// `d`, made owner-only if missing, if it is a dir of this user's that no other can write to: in a shared tmp another

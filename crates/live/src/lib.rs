@@ -10,5 +10,9 @@ pub mod obs;
 #[cfg(target_os = "linux")]
 pub mod pw;
 pub mod rtmp;
+#[cfg(not(target_os = "linux"))]
+mod stub;
+#[cfg(not(target_os = "linux"))]
+pub use stub::{dmabuf, obs, pw, unsupported};
 #[cfg(all(test, target_os = "linux"))]
 mod tests;

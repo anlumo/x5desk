@@ -353,46 +353,41 @@ impl Ctx {
 
     /// A whole NV12 or P010 texture, through its plane views (`R8Unorm`, `Rg8Unorm`; P010: `R16Unorm`, `Rg16Unorm`).
     pub fn src(&self, nv12: &wgpu::Texture) -> Src {
-        self.rect(nv12, [0, 0, nv12.width(), nv12.height()])
+        self.rect(&views(nv12), [0, 0, nv12.width(), nv12.height()])
     }
 
-    /// The lens picture at `r` = (x, y, w, h) luma pixels (all even) of an NV12 or P010 texture (full range, BT.709,
-    /// as the X5 records), e.g. a decoder output slot:
+    /// The lens picture at `r` = (x, y, w, h) luma pixels (all even) of an NV12 or P010 picture's luma and chroma
+    /// views (full range, BT.709, as the X5 records), e.g. a decoder output slot's (`video::Ring::planes`):
     /// its display window (`Decoder::view`; the texture may be larger than the picture), or half of it for both
     /// lenses side by side. It samples like a texture of its own: the other half never bleeds in, and the stitch is
     /// identical to one from two separate textures. The `.lrv` proxy (checked against the `.insv`) and the live
     /// preview (plausibility check on a capture) put lens 0 on the left: lens 0 = (x, y, w/2, h), lens 1 =
     /// (x + w/2, y, w/2, h) of the window (x, y, w, h); both H.264 streams code their exact size (no cropping).
-    pub fn rect(&self, nv12: &wgpu::Texture, r: [u32; 4]) -> Src {
+    pub fn rect(&self, [y, uv]: &[wgpu::TextureView; 2], r: [u32; 4]) -> Src {
+        let t = y.texture();
         assert!(
-            r.iter().all(|v| v % 2 == 0)
-                && r[0] + r[2] <= nv12.width()
-                && r[1] + r[3] <= nv12.height(),
+            r.iter().all(|v| v % 2 == 0) && r[0] + r[2] <= t.width() && r[1] + r[3] <= t.height(),
             "lens rect {r:?}: even and inside the {}x{} texture",
-            nv12.width(),
-            nv12.height()
+            t.width(),
+            t.height()
         );
-        use wgpu::{TextureAspect as A, TextureFormat as F};
-        let v = |aspect| {
-            nv12.create_view(&wgpu::TextureViewDescriptor {
-                aspect,
-                ..Default::default()
-            })
-        };
-        // each plane's view format is the one wgpu derives from the aspect: R8 / RG8, or R16 / RG16 for P010
-        let deep = nv12.format() == F::P010;
-        self.sub(&v(A::Plane0), &v(A::Plane1), r, deep)
+        // each plane's view format is R8 / RG8, or R16 / RG16 for P010: the one wgpu derives from an NV12 / P010
+        // texture's plane aspect (`video::Ring::planes`, Linux), or a plane texture's own (macOS)
+        self.sub(y, uv, r, Self::deep(t))
+    }
+
+    fn deep(t: &wgpu::Texture) -> bool {
+        matches!(
+            t.format(),
+            wgpu::TextureFormat::P010 | wgpu::TextureFormat::R16Unorm
+        )
     }
 
     /// Luma (R8) and chroma (RG8, half size) planes from any two whole views; R16 / RG16 hold P010 samples (10 bits
     /// at the top): the plane views of a P010 texture, or textures of their own.
     pub fn planes(&self, y: &wgpu::TextureView, uv: &wgpu::TextureView) -> Src {
         let t = y.texture();
-        let deep = matches!(
-            t.format(),
-            wgpu::TextureFormat::P010 | wgpu::TextureFormat::R16Unorm
-        );
-        self.sub(y, uv, [0, 0, t.width(), t.height()], deep)
+        self.sub(y, uv, [0, 0, t.width(), t.height()], Self::deep(t))
     }
 
     fn sub(&self, y: &wgpu::TextureView, uv: &wgpu::TextureView, r: [u32; 4], deep: bool) -> Src {
@@ -852,4 +847,14 @@ fn map<T>(dev: &wgpu::Device, b: &wgpu::Buffer, f: impl FnOnce(&[u8]) -> T) -> T
     let v = f(&b.get_mapped_range(..).expect("mapped range"));
     b.unmap();
     v
+}
+
+/// The luma and chroma plane views of an NV12 or P010 texture, as `Ctx::rect` takes them.
+pub fn views(nv12: &wgpu::Texture) -> [wgpu::TextureView; 2] {
+    [wgpu::TextureAspect::Plane0, wgpu::TextureAspect::Plane1].map(|aspect| {
+        nv12.create_view(&wgpu::TextureViewDescriptor {
+            aspect,
+            ..Default::default()
+        })
+    })
 }

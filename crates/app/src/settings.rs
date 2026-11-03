@@ -216,6 +216,7 @@ pub struct Settings {
 type Usage = (usize, u64);
 
 /// Codec operations of a video queue, as text.
+#[cfg(target_os = "linux")]
 fn ops(f: ash::vk::VideoCodecOperationFlagsKHR) -> String {
     use ash::vk::VideoCodecOperationFlagsKHR as V;
     let v: Vec<&str> = [
@@ -248,19 +249,39 @@ impl Settings {
                 ),
             ),
             ("Driver", format!("{} {}", i.driver, i.driver_info)),
-            ("Video decode", ops(g.dec.ops)),
-            (
-                "Video encode",
-                g.enc.as_ref().map_or("none".into(), |q| ops(q.ops)),
-            ),
-            (
-                "DMA-BUF export",
-                match g.mem_fd.is_some() {
-                    true => "yes (OBS, PipeWire camera)".into(),
-                    false => "no".into(),
-                },
-            ),
         ];
+        #[cfg(target_os = "linux")]
+        let gpu = [
+            gpu,
+            vec![
+                ("Video decode", ops(g.dec.ops)),
+                (
+                    "Video encode",
+                    g.enc.as_ref().map_or("none".into(), |q| ops(q.ops)),
+                ),
+                (
+                    "DMA-BUF export",
+                    match g.mem_fd.is_some() {
+                        true => "yes (OBS, PipeWire camera)".into(),
+                        false => "no".into(),
+                    },
+                ),
+            ],
+        ]
+        .concat();
+        #[cfg(target_os = "macos")]
+        let gpu = [
+            gpu,
+            vec![
+                ("Video decode", "VideoToolbox: H.264, H.265".into()),
+                ("Video encode", "VideoToolbox: H.264, H.265".into()),
+                (
+                    "DMA-BUF export",
+                    "no (OBS, PipeWire camera: Linux only)".into(),
+                ),
+            ],
+        ]
+        .concat();
         let cache = p.thumbs();
         AUDIO.pick(p.audio.clone());
         Settings {

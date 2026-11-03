@@ -16,6 +16,12 @@ burn-cubecl = { version = "0.22", default-features = false }
 # names the pinned storage of a tensor (`ManagedResource`)
 cubecl-runtime = { version = "0.11", default-features = false }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+burn = { workspace = true, features = ["vulkan"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+burn = { workspace = true, features = ["metal"] }
+
 [build-dependencies]
 burn-onnx.workspace = true
 

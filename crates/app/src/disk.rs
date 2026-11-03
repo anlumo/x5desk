@@ -4,7 +4,8 @@
 //! removable-media mount point counts as a card when it holds a `DCIM` tree. Its files are listed as the app lists
 //! them (§8.7) and grouped like the camera's album, with each main file's trailer metadata and thumbnail and the
 //! favourites of `DCIM/.editinfo_list.list`. Imports go through the download queue (`dl`) as [`copy`]: resumable from
-//! `<dst>.part`.
+//! `<dst>.part`. On macOS the volumes are the ones under `/Volumes`, and the camera's is the one labelled with its
+//! product string (the X5 labels its card so): there is no sysfs to ask the USB device.
 
 use crate::album::{self, Item};
 use link::{Error, Prog, pb};
@@ -48,6 +49,7 @@ impl Vol {
 #[derive(Clone, Debug)]
 pub struct Watch {
     pub info: PathBuf,
+    #[cfg_attr(target_os = "macos", allow(dead_code))] // the mount table and sysfs are Linux's
     pub sys: PathBuf,
     pub media: Vec<PathBuf>,
     pub fake: Vec<PathBuf>,
@@ -58,15 +60,24 @@ impl Watch {
         Watch {
             info: "/proc/self/mountinfo".into(),
             sys: "/sys".into(),
-            // udisks2's places (`/media` on some distributions) and the usual manual one
-            media: ["/run/media", "/media", "/mnt"].map(PathBuf::from).into(),
+            // udisks2's places (`/media` on some distributions) and the usual manual one; macOS's one
+            media: match cfg!(target_os = "macos") {
+                true => vec!["/Volumes".into()],
+                false => ["/run/media", "/media", "/mnt"].map(PathBuf::from).into(),
+            },
             fake,
         }
     }
 
     pub fn vols(&self) -> Vec<Vol> {
-        let i = fs::read_to_string(&self.info).unwrap_or_default();
-        let mut v = vols(&i, &self.sys, &self.media);
+        #[cfg(target_os = "macos")]
+        let mut v = volumes(&self.media);
+        #[cfg(not(target_os = "macos"))]
+        let mut v = vols(
+            &fs::read_to_string(&self.info).unwrap_or_default(),
+            &self.sys,
+            &self.media,
+        );
         v.extend(
             self.fake
                 .iter()
@@ -82,6 +93,7 @@ impl Watch {
 }
 
 /// `\040` and the other octal escapes of the mount table.
+#[cfg_attr(target_os = "macos", allow(dead_code))] // the mount table and sysfs are Linux's
 fn unesc(s: &str) -> String {
     let b = s.as_bytes();
     let mut o = Vec::with_capacity(b.len());
@@ -102,6 +114,7 @@ fn unesc(s: &str) -> String {
 }
 
 /// The USB product string of the device a block device sits on, if it is an Insta360 camera.
+#[cfg_attr(target_os = "macos", allow(dead_code))] // the mount table and sysfs are Linux's
 fn cam(sys: &Path, dev: &str) -> Option<String> {
     let n = Path::new(dev).file_name()?;
     let sys = fs::canonicalize(sys).ok()?;
@@ -118,6 +131,7 @@ fn cam(sys: &Path, dev: &str) -> Option<String> {
 
 /// Volumes of the mount table `info` with a `DCIM` directory: block devices on an Insta360 camera, and ones mounted
 /// under a `media` directory.
+#[cfg_attr(target_os = "macos", allow(dead_code))] // the mount table and sysfs are Linux's
 pub fn vols(info: &str, sys: &Path, media: &[PathBuf]) -> Vec<Vol> {
     let mut v = vec![];
     for l in info.lines() {
@@ -141,6 +155,42 @@ pub fn vols(info: &str, sys: &Path, media: &[PathBuf]) -> Vec<Vol> {
         }
     }
     v
+}
+
+/// macOS: the volumes mounted at a directory of `media` (`/Volumes`) with a `DCIM` directory; one labelled
+/// `Insta360 …` is the camera.
+#[cfg(target_os = "macos")]
+fn volumes(media: &[PathBuf]) -> Vec<Vol> {
+    let mut v = vec![];
+    for e in media.iter().flat_map(fs::read_dir).flatten().flatten() {
+        let root = e.path();
+        let Some(dev) = mounted(&root).filter(|_| root.join("DCIM").is_dir()) else {
+            continue;
+        };
+        let l = e.file_name().to_string_lossy().into_owned();
+        v.push(Vol {
+            cam: l.starts_with("Insta360").then(|| l.clone()),
+            root,
+            dev,
+        })
+    }
+    v
+}
+
+/// The block device mounted exactly at `p` (not a symlink to another mount, as `/Volumes/Macintosh HD` is).
+#[cfg(target_os = "macos")]
+fn mounted(p: &Path) -> Option<String> {
+    use std::{ffi::CStr, os::unix::ffi::OsStrExt};
+    let c = std::ffi::CString::new(p.as_os_str().as_bytes()).ok()?;
+    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is a C string, `s` a statfs to fill
+    if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
+        return None;
+    }
+    let on = unsafe { CStr::from_ptr(s.f_mntonname.as_ptr()) };
+    let from = unsafe { CStr::from_ptr(s.f_mntfromname.as_ptr()) }.to_string_lossy();
+    (on.to_bytes() == p.as_os_str().as_bytes() && from.starts_with("/dev/"))
+        .then(|| from.into_owned())
 }
 
 /// A file the app collects from a card (`DocumentFileUtils`): its prefixes and extensions, no `__`, 4–6 parts.

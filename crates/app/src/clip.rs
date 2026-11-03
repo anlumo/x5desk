@@ -612,9 +612,8 @@ pub(crate) mod tests {
     /// The window of frame `f` of `ring` read back as NV12, or P010 (2 bytes per sample, little-endian) from a 10-bit
     /// ring, through copies of its plane views; the caller acquires and releases it.
     fn read(g: &Gpu, ring: &Ring, [x, y, w, h]: [u32; 4], f: u64) -> Vec<u8> {
-        let tex = ring.texture(f);
         // bytes per sample: a P010 row of either plane is 2 · w bytes
-        let b = 1 + (tex.format() == wgpu::TextureFormat::P010) as usize;
+        let b = 1 + ring.deep() as usize;
         let (w, h) = (w as usize, h as usize);
         let bpr = (b * w).next_multiple_of(256);
         let buf = g.device.create_buffer(&wgpu::BufferDescriptor {
@@ -624,20 +623,15 @@ pub(crate) mod tests {
             mapped_at_creation: false,
         });
         let mut e = g.device.create_command_encoder(&Default::default());
-        for (aspect, s, offset) in [
-            (wgpu::TextureAspect::Plane0, 1, 0),
-            (wgpu::TextureAspect::Plane1, 2, bpr * h),
-        ] {
+        for (pl, s, offset) in [(0, 1, 0), (1, 2, bpr * h)] {
             e.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
-                    texture: tex,
-                    mip_level: 0,
                     origin: wgpu::Origin3d {
                         x: x / s,
                         y: y / s,
                         z: 0,
                     },
-                    aspect,
+                    ..ring.plane(f, pl)
                 },
                 wgpu::TexelCopyBufferInfo {
                     buffer: &buf,
@@ -657,12 +651,11 @@ pub(crate) mod tests {
         // back home before the decoder reuses the image
         e.transition_resources(
             std::iter::empty(),
-            [wgpu::TextureTransition {
-                texture: tex,
+            ring.textures(f).map(|texture| wgpu::TextureTransition {
+                texture,
                 selector: None,
                 state: wgpu::TextureUses::RESOURCE,
-            }]
-            .into_iter(),
+            }),
         );
         let i = g.queue.submit([e.finish()]);
         buf.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
@@ -1025,7 +1018,7 @@ pub(crate) mod tests {
         }
         let g = Arc::new(Gpu::new().unwrap());
         let mut v = Video::open(&g, std::slice::from_ref(&p), || {}).unwrap();
-        assert_eq!(v.rings[0].texture(0).format(), wgpu::TextureFormat::P010);
+        assert!(v.rings[0].deep());
         let (mut held, k) = (None, 30);
         let px = show(&g, &mut v, k, &mut held);
         let bad = px

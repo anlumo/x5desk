@@ -1,12 +1,12 @@
 # x5desk
 
-Desktop app for the Insta360 X5: player, camera control, live output, export. Linux (Wayland, RADV) first.
+Desktop app for the Insta360 X5: player, camera control, live output, export. Linux (Wayland, RADV) first; macOS (Metal, VideoToolbox) as well.
 The plan with decisions, measurements and milestones is `../insta360/PLAN.md`; the camera protocol and file formats
 are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 
 ## Rules
 
-- No FFmpeg. Video goes through Vulkan Video on the one shared device.
+- No FFmpeg. Video goes through Vulkan Video (Linux) or VideoToolbox (macOS) on the one shared device.
 - No Insta360 data in this repo unless the code needs it to run (the `.proto` files the app uses). Lens calibration
   comes from each file's trailer, never from the repo. Seam flow uses RAFT (open model), no Insta360 models.
 - The UI thread never paces playback. Media threads decode ahead of the audio clock.
@@ -38,7 +38,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 
 | Crate | Content |
 |---|---|
-| `video` | `Gpu` (one Vulkan device via wgpu-hal with decode and encode queues), H.265 / H.264 parsers, Vulkan Video decode and encode, NV12 / P010 textures for wgpu |
+| `video` | `Gpu` (one Vulkan device via wgpu-hal with decode and encode queues; macOS: the Metal device), H.265 / H.264 parsers, Vulkan Video (macOS: VideoToolbox, `mac/`) decode and encode, NV12 / P010 pictures for wgpu (`Ring::planes`) |
 | `media` | MP4 demux and mux (`sv3d` / `st3d`), `.insv` / `.insp` trailer (calibration, gyro, exposure), AAC decode (symphonia) and AAC-LC encode (`aacenc`), editor mixer with ducking and limiter (`mix`), music import (`music`), resampler, RNNoise denoise, audio output and master clock (cpal; `audio::Player::open_on` plays on a picked device, `audio::device(id)` resolves the settings' device id by exact match: it lists the devices, so resolve when the choice changes, never per open), MJPEG decode, UVC capture of the X5's Webcam Mode |
 | `proto` | Protobuf messages for the camera (prost, compiled with protox from `proto/`) |
 | `link` | Camera link: UCD framing, session, requests, notifications, HTTP tunnel with several connections, downloads; USB (nusb), Wi-Fi (TCP); BLE lives in `ble`. Connections start as `link::Opening` (dropping it cancels the sync); `Error::Silent` after 30 s without a sync answer; `Camera::set_time` sends the app's two SET_OPTIONS at once and returns both pending answers; `scan` / `watch` report `Plug::Disk` for an Insta360 product string under vendor 070a (the X5 in U-disk mode, or the first seconds of app mode); feature `sim`: a simulated camera (a handler status 0 leaves the request unanswered) |
@@ -49,7 +49,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 | `export` | Render jobs: decode → stitch → stabilise → effects → encode → mux, 360 and flat, queue; editor timelines (`Cut::Edit`: speed ramps, freeze frames, views, each clip's adjustments and look via `fx`, audio mixed with music, RNNoise-denoised after the time-stretch when `Edit::denoise` is set, and AAC-encoded, or copied for plain 1× cuts without denoise); photo frame grabs (JPEG with GPano). `export::locks(gate, burn)` hands it the app's GATE / BURN; `Job::flat` keeps a flat 2:1 picture from a 360 hook untagged |
 | `track` | AI with open models (burn on the shared device): subject tracker on the sphere with re-identification (LOMO colour and texture histograms with Fisher weights learnt per session, no model), detector, auto framing, face privacy blur regions, highlights → `edit::Timeline`. The tracker finds a lost subject again only within its reach (`Seen::prior`, `Seen::speed`: the speed, in its own heights a second, it needs to be a candidate since it was last seen for sure, its heading carried on for up to a second; beyond what it reaches setting off at a walk and speeding up by 3 heights/s² to a sprint's 3, it is someone else; within it, its similarity loses 0.1 × (speed / 1 height a second)²), and a person only with the pick's template's box on it (`vit::hit`: never on the detector's box alone); a person at least as like one `find` took and the tracker lost again before VitTrack was sure of them as like the subject (`vit::Tried`, the last 8; not added to the gallery, as the subject can be one) needs VitTrack 0.5, not 0.25 (`Tried::need`, also for whoever the tracker takes on its own after a gap). `Tracker::fps` is the clip's frame rate (30 until set) |
 | `ble` | Camera BLE: scan, wake, pairing, Wi-Fi credentials (btleplug). The X5's wake-up brings up its radios and session, never its screen. Feature `sim`: `Ble::sim`, a simulated adapter and camera on the real session code |
-| `live` | FLV and RTMP client, OBS frame protocol (Unix socket + DMA-BUF fds), PipeWire camera node |
+| `live` | FLV and RTMP client, OBS frame protocol (Unix socket + DMA-BUF fds), PipeWire camera node (the last three Linux only: elsewhere `stub.rs` keeps their API and refuses to start) |
 | `obs` | OBS source plugin (`cdylib`) that imports our frames |
 | `app` | egui (eframe 0.37) UI, binary `x5desk` |
 
@@ -119,6 +119,35 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   memory before any decode (RADV frees outgrown upload buffers at a command buffer's next reset).
 - The player's paused RAFT snapshot copies the lens planes as R8 / RG8, or R16 / RG16 for P010 (2 bytes per sample
   in the row stride).
+
+## macOS (`video::mac`)
+
+- wgpu runs on Metal (`Gpu::new`: every adapter feature, the experimental ones; needs `TEXTURE_FORMAT_16BIT_NORM`).
+  burn compiles its kernels to MSL (stitch's manifest picks burn's `metal` feature there, `vulkan` on Linux). Metal
+  compiles shaders with fast math (wgpu leaves the default): `pow` is approximate, ≈ 4 10-bit levels in fx's `blend`.
+- wgpu's Metal backend has no NV12 / P010 textures, so a decoder slot is two textures, luma R8 / R16 and chroma RG8 /
+  RG16 (half size). Consumers take a frame's planes through `Ring::planes(f)` (views), `Ring::plane(f, i)` (copies)
+  and `Ring::textures(f)` (transitions), which both backends have; `Ring::texture(f)` (one NV12 / P010 texture) is
+  Linux only. `stitch::Ctx::rect` takes the two views; `stitch::views` makes them from an NV12 / P010 texture.
+- Decode: the parameter set parsers still do picture management (POC, references, `Error::Skip` for leading
+  pictures, the same as on Linux), VideoToolbox decodes every other picture synchronously into an IOSurface of the
+  stream's own range and depth (no conversion), and a copy on wgpu's queue moves its planes into the slot. All of it
+  is on wgpu's one queue, which Metal orders by resource, so `acquire` stages nothing and `release` is a counter the
+  decoder waits on (`Full` after 50 ms as on Linux). `restart` makes a new session. A picture VideoToolbox fails on
+  still takes its frame (the live preview's loss). The parsers step over scaling lists here (VideoToolbox applies
+  them; its own HEVC encoder writes them); on Linux they stay refused.
+- Encode: each input slot is a CVPixelBuffer whose planes wgpu writes through Metal textures over the IOSurface;
+  `copy_buffer` copies stitch's YUV buffer with a render pass (any even pitch; the buffer needs STORAGE usage).
+  `release` stages an MTLSharedEvent signal (`filled`) on wgpu's queue as Linux stages its semaphore; `encode` waits
+  for it, forces IDRs where the GOP or `Input::key` wants them, frame reordering off (dts = pts). `params` come from a
+  picture a throwaway session encodes in `new`. `Rate::Qp` is VideoToolbox's min = max frame QP; `levels` is 1.
+- Elsewhere in the app: Webcam Mode (V4L2 UVC), OBS, the PipeWire camera and the BLE wake advertisement (BlueZ) are
+  Linux only. Mounted cards are the volumes under `/Volumes` with a `DCIM` tree, the camera's the one labelled
+  `Insta360 …`. Config and cache default to `~/Library/Application Support` and `~/Library/Caches` (the XDG
+  variables still win), downloads and exports to `~/Movies`.
+- Tests: `video`'s `tests/mac.rs` round-trips synthetic pictures through encode and decode (H.264, H.265, Main 10),
+  checked with `ffprobe`. Vulkan-only tests are `cfg(target_os = "linux")`. Test tools that read `/proc` (the RTMP
+  listeners' readiness) use `lsof` elsewhere; `PR_SET_PDEATHSIG` is Linux only.
 
 ## App (`crates/app`)
 

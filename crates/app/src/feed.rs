@@ -641,10 +641,10 @@ impl Feed {
             let w2 = w / 2;
             self.bg = (0..OUT as u64)
                 .map(|s| {
-                    let t = r.texture(s);
+                    let t = r.planes(s);
                     [
-                        self.cx.rect(t, [*x, *y, w2, *hh]),
-                        self.cx.rect(t, [x + w2, *y, w2, *hh]),
+                        self.cx.rect(&t, [*x, *y, w2, *hh]),
+                        self.cx.rect(&t, [x + w2, *y, w2, *hh]),
                     ]
                 })
                 .collect();

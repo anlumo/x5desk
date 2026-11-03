@@ -379,38 +379,65 @@ fn write(
     );
 }
 
-/// An NV12 texture holding `nv` (Y plane, then interleaved Cb Cr), bound like a decoder output slot.
+/// An NV12 picture holding `nv` (Y plane, then interleaved Cb Cr), bound like a decoder output slot.
 fn upload(g: &Gpu, cx: &Ctx, nv: &[u8], w: u32, h: u32) -> Src {
-    cx.src(&slot(g, nv, w, h))
+    cx.rect(&slot(g, nv, w, h), [0, 0, w, h])
 }
 
-fn slot(g: &Gpu, nv: &[u8], w: u32, h: u32) -> wgpu::Texture {
-    let t = g.dev.create_texture(&wgpu::TextureDescriptor {
-        label: Some("nv12"),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::NV12,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    let n = (w * h) as usize;
-    write(g, &t, wgpu::TextureAspect::Plane0, &nv[..n], w, h, 1);
+/// A decoder output slot's plane views holding NV12 (`b` bytes per sample, 1) or P010 (2) samples `px`: those of
+/// one NV12 / P010 texture as the Vulkan decoder writes it, or of an R8 / RG8 (R16 / RG16) texture pair as the
+/// VideoToolbox one does (wgpu's Metal backend has no NV12 / P010 textures).
+fn picture(g: &Gpu, px: &[u8], w: u32, h: u32, b: u32) -> [wgpu::TextureView; 2] {
+    use wgpu::TextureFormat as F;
+    let n = (w * h * b) as usize;
+    if cfg!(target_os = "linux") {
+        let t = g.dev.create_texture(&wgpu::TextureDescriptor {
+            label: Some("nv12"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: if b == 2 { F::P010 } else { F::NV12 },
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        write(g, &t, wgpu::TextureAspect::Plane0, &px[..n], w, h, b);
+        write(
+            g,
+            &t,
+            wgpu::TextureAspect::Plane1,
+            &px[n..],
+            w / 2,
+            h / 2,
+            2 * b,
+        );
+        return stitch::views(&t);
+    }
+    let (fy, fc) = match b {
+        2 => (F::R16Unorm, F::Rg16Unorm),
+        _ => (F::R8Unorm, F::Rg8Unorm),
+    };
+    let y = texture(g, w, h, fy);
+    let uv = texture(g, w / 2, h / 2, fc);
+    write(g, &y, wgpu::TextureAspect::All, &px[..n], w, h, b);
     write(
         g,
-        &t,
-        wgpu::TextureAspect::Plane1,
-        &nv[n..],
+        &uv,
+        wgpu::TextureAspect::All,
+        &px[n..],
         w / 2,
         h / 2,
-        2,
+        2 * b,
     );
-    t
+    [y, uv].map(|t| t.create_view(&Default::default()))
+}
+
+fn slot(g: &Gpu, nv: &[u8], w: u32, h: u32) -> [wgpu::TextureView; 2] {
+    picture(g, nv, w, h, 1)
 }
 
 /// The same picture as separate R8 / RG8 textures (`Ctx::planes`).
@@ -813,26 +840,9 @@ fn synthetic() {
 
 /// A P010 texture (Y, then interleaved Cb Cr; 10-bit codes, stored in the high bits as crate video decodes H.265
 /// Main 10) holding `p`.
-fn slot10(g: &Gpu, p: &[u16], w: u32, h: u32) -> wgpu::Texture {
-    let t = g.dev.create_texture(&wgpu::TextureDescriptor {
-        label: Some("p010"),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::P010,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
+fn slot10(g: &Gpu, p: &[u16], w: u32, h: u32) -> [wgpu::TextureView; 2] {
     let b: Vec<u8> = p.iter().flat_map(|&v| (v << 6).to_le_bytes()).collect();
-    let n = (w * h) as usize * 2;
-    write(g, &t, wgpu::TextureAspect::Plane0, &b[..n], w, h, 2);
-    write(g, &t, wgpu::TextureAspect::Plane1, &b[n..], w / 2, h / 2, 4);
-    t
+    picture(g, &b, w, h, 2)
 }
 
 /// P010 lens pictures (H.265 Main 10 as crate video decodes it): whole textures, rects of one side-by-side texture and
@@ -874,7 +884,7 @@ fn p010() {
             })
             .collect();
         let t = slot10(&g, &px, 64, 64);
-        let src = cx.src(&t);
+        let src = cx.rect(&t, [0, 0, 64, 64]);
         let st = Stitcher::new(&cx, &cal, fr, 64, 32, wide).unwrap();
         let out = rgb_of(&run(&g, &st, [&src, &src]), true);
         let (l, b, r) = (
@@ -908,7 +918,9 @@ fn p010() {
             })
             .collect()
     });
-    let whole = p.each_ref().map(|v| cx.src(&slot10(&g, v, 64, 64)));
+    let whole = p
+        .each_ref()
+        .map(|v| cx.rect(&slot10(&g, v, 64, 64), [0, 0, 64, 64]));
     // both lenses side by side at (4, 2) of a 136 × 68 texture, noise around them
     let (tw, at) = (136usize, [4usize, 2usize]);
     let mut sbs: Vec<u16> = (0..tw * 68 * 3 / 2)

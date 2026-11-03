@@ -947,9 +947,8 @@ struct Set {
 impl Set {
     fn load(file: Option<PathBuf>) -> Set {
         let mut s = Set {
-            dest: std::env::var_os("HOME")
-                .map_or_else(|| PathBuf::from("."), PathBuf::from)
-                .join("Videos")
+            dest: crate::videos()
+                .unwrap_or_else(|| PathBuf::from("."))
                 .join("x5desk"),
             auto: true,
             file,

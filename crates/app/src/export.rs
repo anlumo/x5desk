@@ -354,7 +354,7 @@ pub struct Exp {
 }
 
 impl Exp {
-    /// `dest`: the output directory (default `~/Videos`); `log`: print each job's end (test hook).
+    /// `dest`: the output directory (default `~/Videos`, macOS `~/Movies`); `log`: print each job's end (test hook).
     pub fn new(
         g: &Arc<Gpu>,
         cx: &Ctx,
@@ -373,9 +373,7 @@ impl Exp {
             src: None,
             set: Set::default(),
             range: [0.0; 2],
-            dest: dest
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Videos")))
-                .unwrap_or_else(|| ".".into()),
+            dest: dest.or_else(crate::videos).unwrap_or_else(|| ".".into()),
             items: vec![],
             tx,
             th: Some(th),

@@ -105,8 +105,7 @@ fn decode(g: &Gpu, d: &mut Decoder, au: &[&[u8]]) -> u64 {
 /// P010 as it is (FFmpeg's `p010le`: Y, then interleaved Cb Cr, little-endian words); the caller acquires and
 /// releases `f`.
 fn read(g: &Gpu, d: &Ring, [x, y, w, h]: [u32; 4], f: u64) -> Vec<u8> {
-    let tex = d.texture(f);
-    let deep = tex.format() == wgpu::TextureFormat::P010;
+    let deep = d.deep();
     let (w, h, b) = (w as usize, h as usize, 1 + deep as usize);
     let bpr = (w * b).next_multiple_of(256); // both planes have w samples per row
     let buf = g.device.create_buffer(&wgpu::BufferDescriptor {
@@ -116,21 +115,16 @@ fn read(g: &Gpu, d: &Ring, [x, y, w, h]: [u32; 4], f: u64) -> Vec<u8> {
         mapped_at_creation: false,
     });
     let mut e = g.device.create_command_encoder(&Default::default());
-    for (aspect, s, offset) in [
-        (wgpu::TextureAspect::Plane0, 1, 0),
-        (wgpu::TextureAspect::Plane1, 2, bpr * h),
-    ] {
+    for (pl, s, offset) in [(0, 1, 0), (1, 2, bpr * h)] {
         let (pw, ph) = (w / s, h / s);
         e.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: tex,
-                mip_level: 0,
                 origin: wgpu::Origin3d {
                     x: x / s as u32,
                     y: y / s as u32,
                     z: 0,
                 },
-                aspect,
+                ..d.plane(f, pl)
             },
             wgpu::TexelCopyBufferInfo {
                 buffer: &buf,
@@ -148,12 +142,12 @@ fn read(g: &Gpu, d: &Ring, [x, y, w, h]: [u32; 4], f: u64) -> Vec<u8> {
         );
     }
     // back to the home state before the decoder reuses the image
-    let home = wgpu::TextureTransition {
-        texture: tex,
+    let home = d.textures(f).map(|texture| wgpu::TextureTransition {
+        texture,
         selector: None,
         state: wgpu::TextureUses::RESOURCE,
-    };
-    e.transition_resources(std::iter::empty(), [home].into_iter());
+    });
+    e.transition_resources(std::iter::empty(), home);
     let i = g.queue.submit([e.finish()]);
     buf.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
     let i = wgpu::PollType::Wait {
@@ -302,6 +296,7 @@ fn hash(b: &[u8]) -> u64 {
 }
 
 /// The shared device: every adapter feature, both video queues, and the encode function tables answer.
+#[cfg(target_os = "linux")]
 #[test]
 fn gpu_setup() {
     use ash::vk;
@@ -487,6 +482,7 @@ fn h265_matches_ffmpeg() {
     let g = Gpu::new().unwrap();
     // the device has every adapter feature (plus the experimental ones) and still decodes
     assert_eq!(g.device.features(), g.adapter.features());
+    #[cfg(target_os = "linux")]
     println!(
         "{} adapter features enabled; decode family {}, encode {:?}",
         g.device.features().iter().count(),
@@ -590,6 +586,7 @@ fn h264_matches_ffmpeg() {
 
 /// A consumer that stops: decode() returns Full instead of blocking, recovers on a release that nothing submits (an
 /// idle UI), and dropping the decoder with frames never released returns.
+#[cfg(target_os = "linux")]
 #[test]
 fn full_and_drop() {
     let Some(path) = sample_file("v635.lrv") else {
@@ -668,6 +665,7 @@ fn full_and_drop() {
 }
 
 /// The process's GPU memory as amdgpu counts it (KiB over our DRM clients, each once); None without one.
+#[cfg(target_os = "linux")]
 fn gpu_kib() -> Option<u64> {
     let (mut n, mut seen) = (None, vec![]);
     for e in std::fs::read_dir("/proc/self/fdinfo").ok()?.flatten() {
@@ -694,6 +692,7 @@ fn gpu_kib() -> Option<u64> {
 /// Nothing is freed or allocated while a decoder decodes, nor when it goes and the next one of its shape comes:
 /// amdgpu holds graphics submissions back behind the decode queue for memory freed meanwhile (`decode::Bin`). The
 /// next decoder takes the first one's textures, numbers its frames from 0 again, and decodes the stream as it did.
+#[cfg(target_os = "linux")]
 #[test]
 fn recycle() {
     let Some(path) = sample_file("v635.lrv") else {
@@ -1089,7 +1088,7 @@ fn x26x_matches_ffmpeg() {
         let mut full = vec![];
         for (pre, start) in runs {
             let mut d = Decoder::new(&g, codec, &params, 0, 0).unwrap();
-            let p010 = d.texture(0).format() == wgpu::TextureFormat::P010;
+            let p010 = d.deep();
             assert_eq!(p010, deep, "{name}: texture format");
             let (mut got, mut skipped) = (vec![], 0);
             for (i, au) in aus[..pre].iter().chain(&aus[start..]).enumerate() {
@@ -1166,7 +1165,7 @@ fn main10_matches_ffmpeg() {
     let t = &tracks[0];
     let g = Gpu::new().unwrap();
     let mut d = Decoder::new(&g, t.codec, &t.params, t.width, t.height).unwrap();
-    assert_eq!(d.texture(0).format(), wgpu::TextureFormat::P010);
+    assert!(d.deep());
     let [_, _, w, h] = d.view;
     let fs = (w * h * 3) as usize;
     let mut c = Command::new("ffmpeg")
@@ -1257,17 +1256,7 @@ fn rgb(g: &Gpu, decs: &[Decoder]) -> impl Fn(u64) -> wgpu::CommandBuffer + use<>
             });
             (0..video::decode::OUT as u64)
                 .map(|f| {
-                    let v = |format, aspect| {
-                        d.texture(f).create_view(&wgpu::TextureViewDescriptor {
-                            format: Some(format),
-                            aspect,
-                            ..Default::default()
-                        })
-                    };
-                    let (y, uv) = (
-                        v(wgpu::TextureFormat::R8Unorm, wgpu::TextureAspect::Plane0),
-                        v(wgpu::TextureFormat::Rg8Unorm, wgpu::TextureAspect::Plane1),
-                    );
+                    let [y, uv] = d.planes(f);
                     let o = out.create_view(&Default::default());
                     dv.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: None,

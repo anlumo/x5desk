@@ -228,7 +228,7 @@ impl Clip {
         let st = Stitcher::new(cx, &self.cal, fr, w, w / 2, o)?;
         let src: [Vec<stitch::Src>; 2] = [0, 1].map(|l| {
             (0..OUT as u64)
-                .map(|s| cx.rect(d[l].texture(s), d[l].view))
+                .map(|s| cx.rect(&d[l].planes(s), d[l].view))
                 .collect()
         });
         let nal = tr.map(|t| match t.codec {

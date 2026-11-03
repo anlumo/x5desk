@@ -159,7 +159,8 @@ pub fn unframe(b: &[u8]) -> Result<Option<Frame<'_>>, ()> {
 
 /// Manufacturer data (company [`APPLE`]) of the phone's wake advertisement for the camera whose serial ends in `s`
 /// (§2.6): an iBeacon whose UUID is `"\tORBIT\t\xff\x0f\0"` plus `s` zero-padded, major and minor 0, tx −28, then
-/// `01`. `None` when `s` is longer than 6 bytes (the app fails the same way).
+/// `01`. `None` when `s` is longer than 6 bytes (the app fails the same way). Sent through BlueZ only.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn wake(s: &str) -> Option<[u8; 24]> {
     let s = s.as_bytes();
     (s.len() <= 6).then(|| {

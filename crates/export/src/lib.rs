@@ -1395,7 +1395,7 @@ fn render(
                 let rings = [d0.ring.clone(), d1.ring.clone()];
                 let bg: [Vec<stitch::Src>; 2] = [&d0, &d1].map(|d| {
                     (0..OUT as u64)
-                        .map(|s| cx.rect(d.texture(s), d.view))
+                        .map(|s| cx.rect(&d.planes(s), d.view))
                         .collect()
                 });
                 let j = (&job.out, job.enc, job.raft, job.colour);

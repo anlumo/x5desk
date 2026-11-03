@@ -160,7 +160,8 @@ fn guide(p: Page) -> &'static [&'static str] {
              camera itself: its modes and, for the mode on, its settings with the values it allows.",
             "The shutter takes a photo or starts and stops a recording (timelapse too); the self-timer counts down \
              here. A highlight mark flags the moment in the recording.",
-            "The X5's Webcam Mode (UVC) can be the source instead: it shows the camera's own equirect or flat picture.",
+            "The X5's Webcam Mode (UVC) can be the source instead: it shows the camera's own equirect or flat picture \
+             (Linux only).",
             "Settings the app has not verified on a real X5 are marked ⚠.",
         ],
         Page::Live => &[
@@ -168,7 +169,7 @@ fn guide(p: Page) -> &'static [&'static str] {
              Mode.",
             "RTMP: enter the server URL and stream key, choose resolution, frame rate and bitrate, then go live. OBS: \
              add the x5desk source in OBS (plugin x5desk-obs.so); frames arrive without copies. PipeWire camera: \
-             other apps see x5desk as a camera.",
+             other apps see x5desk as a camera. OBS and the PipeWire camera are Linux only.",
             "The outputs keep running while the window is hidden or minimised.",
         ],
         Page::Export => &[
@@ -183,9 +184,12 @@ fn guide(p: Page) -> &'static [&'static str] {
         Page::Settings => &[
             "The download folder (camera downloads and card imports), the default export preset, the audio output of \
              the player, the live outputs and the editor's preview, and the thumbnail cache's limit and clearing.",
-            "Graphics shows the shared Vulkan device: decode, encode and DMA-BUF export capabilities. The client id \
-             is what the camera remembers when you allow this computer on it.",
+            "Graphics shows the shared device (Vulkan on Linux, Metal on macOS): decode, encode and DMA-BUF export \
+             capabilities. The client id is what the camera remembers when you allow this computer on it.",
+            #[cfg(not(target_os = "macos"))]
             "Settings are kept in ~/.config/x5desk; thumbnails in ~/.cache/x5desk.",
+            #[cfg(target_os = "macos")]
+            "Settings are kept in ~/Library/Application Support/x5desk; thumbnails in ~/Library/Caches/x5desk.",
         ],
         Page::Keys | Page::About => &[],
     }
@@ -280,6 +284,7 @@ pub struct Help {
 impl Help {
     pub fn new(g: &video::Gpu, page: Option<Page>) -> Help {
         let i = g.adapter.get_info();
+        #[cfg(not(target_os = "macos"))]
         let rel = |f: &str, k: &str| {
             let s = std::fs::read_to_string(f).unwrap_or_default();
             let v = s
@@ -291,10 +296,23 @@ impl Help {
         Help {
             page: page.unwrap_or(Page::Keys),
             gpu: format!("{}, {} {}", i.name, i.driver, i.driver_info),
+            #[cfg(not(target_os = "macos"))]
             os: format!(
                 "{}, Linux {}",
                 rel("/etc/os-release", "PRETTY_NAME="),
                 rel("/proc/sys/kernel/osrelease", "")
+            ),
+            // the version is the <string> after the ProductVersion key
+            #[cfg(target_os = "macos")]
+            os: format!(
+                "macOS {}",
+                std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist")
+                    .ok()
+                    .and_then(|s| {
+                        let v = s.split("<key>ProductVersion</key>").nth(1)?;
+                        Some(v.split("<string>").nth(1)?.split('<').next()?.to_owned())
+                    })
+                    .unwrap_or_default()
             ),
         }
     }

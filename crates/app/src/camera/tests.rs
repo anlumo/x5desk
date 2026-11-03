@@ -1708,6 +1708,8 @@ fn real_camera() {
 /// The Camera screen in a window against the fake card, through the screenshots of `X5DESK_UI_SIM=<dir>` (thumbnails
 /// from wave 1's real captures in `X5_LINK` if set): album with a selection, downloads in flight, the camera page, the
 /// delete and format confirmations. Under XWayland when the display is off (no frame callbacks on Wayland then).
+/// Linux only: elsewhere winit runs its event loop on the main thread alone.
+#[cfg(target_os = "linux")]
 #[test]
 fn ui_sim() {
     use winit::platform::{wayland::EventLoopBuilderExtWayland, x11::EventLoopBuilderExtX11};

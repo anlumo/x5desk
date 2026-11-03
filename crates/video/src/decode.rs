@@ -7,9 +7,12 @@
 //!   `done ≥ f + 1` (`Ring::acquire`), the next submit after the last of them signals f + 1 (`Ring::release`); the
 //!   decode into a slot waits for `free` and `done` from the frame that used the slot before.
 //! - A dropped decoder's memory is kept for the next decoder of its shape (`Bin`) instead of freed.
+pub use crate::pic::{Codec, MAXS, OUT};
+pub(crate) use crate::pic::{Pic, Ref};
 use crate::{
     Error::{self, Bad},
     Gpu, Result, h264, h265,
+    pic::St,
 };
 use ash::vk::{self, native::*};
 use std::{
@@ -20,11 +23,6 @@ use std::{
 };
 use wgpu_hal::api::Vulkan as Vk;
 
-/// Output ring size (the least; `Decoder::with_out` makes it larger): how far decoding runs ahead of the consumer.
-/// Also the bitstream and command buffer ring.
-pub const OUT: usize = 4;
-/// Most DPB slots: 16 references and the current picture.
-pub const MAXS: usize = 17;
 const BS: u64 = 8 << 20; // bitstream bytes per access unit
 const WAIT: u64 = 50_000_000; // ns decode() waits for its slot before returning Full
 const PARK: usize = 2; // parked bodies and rings per shape: a deck's two lenses, while another deck opens
@@ -133,64 +131,6 @@ impl Bin {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Codec {
-    H264,
-    H265,
-}
-
-/// The picture in a DPB slot. `num`: H.264 FrameNum, or LongTermFrameIdx when `long`. `none`: an H.264
-/// "non-existing" frame (8.2.5.2) with no picture in its slot, never a reference slot of a decode.
-#[derive(Clone, Copy, Default, Debug)]
-pub(crate) struct Ref {
-    pub live: bool,
-    pub long: bool,
-    pub num: u32,
-    pub poc: [i32; 2],
-    pub none: bool,
-}
-
-/// Picture management's answer: the current picture's slot, how many reference slots it listed, its coded size,
-/// display window and bit depth (10 when `deep`, else 8).
-pub(crate) struct Pic {
-    pub setup: usize,
-    pub n: usize,
-    pub w: u32,
-    pub h: u32,
-    pub view: [u32; 4],
-    pub deep: bool,
-}
-
-enum St {
-    H264(h264::State),
-    H265(h265::State),
-}
-
-impl St {
-    /// 1: slice, 2: parameter set, 0: anything else
-    fn kind(&self, n: &[u8]) -> u8 {
-        match self {
-            St::H264(_) => match h264::nal_type(n) {
-                1..=5 => 1,
-                7 | 8 => 2,
-                _ => 0,
-            },
-            St::H265(_) => match h265::nal_type(n) {
-                0..=31 => 1,
-                32..=34 => 2,
-                _ => 0,
-            },
-        }
-    }
-
-    fn put(&mut self, n: &[u8]) -> Result<bool> {
-        match self {
-            St::H264(s) => s.put(n),
-            St::H265(s) => s.put(n),
-        }
-    }
-}
-
 /// A decoder's output: the NV12 (8-bit) or P010 (10-bit) textures and the two timelines. Share it (`Arc`) with the
 /// thread that samples.
 pub struct Ring {
@@ -216,6 +156,39 @@ impl Ring {
     /// read the 10-bit sample `d` as `64·d / 65535` (P010 keeps it in the high bits, the low 6 are zero).
     pub fn texture(&self, f: u64) -> &wgpu::Texture {
         &self.tex[(f % self.tex.len() as u64) as usize]
+    }
+
+    /// P010 (H.265 Main 10) rather than NV12.
+    pub fn deep(&self) -> bool {
+        self.tex[0].format() == wgpu::TextureFormat::P010
+    }
+
+    /// Frame `f`'s luma and chroma (half size) plane views: R8Unorm / Rg8Unorm, or R16Unorm / Rg16Unorm for P010.
+    /// What both backends have: macOS keeps the planes in textures of their own.
+    pub fn planes(&self, f: u64) -> [wgpu::TextureView; 2] {
+        let t = self.texture(f);
+        [wgpu::TextureAspect::Plane0, wgpu::TextureAspect::Plane1].map(|aspect| {
+            t.create_view(&wgpu::TextureViewDescriptor {
+                aspect,
+                ..Default::default()
+            })
+        })
+    }
+
+    /// Plane `i` of frame `f` (0 luma, 1 chroma) as a copy source or destination at the plane's origin; chroma
+    /// coordinates are half the picture's.
+    pub fn plane(&self, f: u64, i: usize) -> wgpu::TexelCopyTextureInfo<'_> {
+        wgpu::TexelCopyTextureInfo {
+            texture: self.texture(f),
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: [wgpu::TextureAspect::Plane0, wgpu::TextureAspect::Plane1][i],
+        }
+    }
+
+    /// Frame `f`'s textures (here its one NV12 / P010 texture), e.g. to transition them back home.
+    pub fn textures(&self, f: u64) -> impl Iterator<Item = &wgpu::Texture> {
+        std::iter::once(self.texture(f))
     }
 
     /// Its frames at once: frame `f` is in slot `f % slots()` ([`OUT`] unless [`Decoder::with_out`] asked for more).

@@ -32,6 +32,26 @@ pub struct Sps {
     pub crop: Option<[u32; 4]>,
 }
 
+/// `n` scaling lists (4:2:0: 6 of 4×4, then the 8×8 ones): VideoToolbox (macOS) applies them itself, so they are
+/// stepped over (7.3.2.1.1.1); the Vulkan decoder takes none.
+fn matrices(b: &mut Bits, n: usize) -> Result<()> {
+    if cfg!(not(target_os = "macos")) {
+        return Err(Bad("H.264 scaling matrices unsupported"));
+    }
+    for i in 0..n {
+        if b.f() {
+            let (mut last, mut next) = (8i32, 8i32);
+            for _ in 0..if i < 6 { 16 } else { 64 } {
+                if next != 0 {
+                    next = (last + b.se() + 256) % 256;
+                }
+                last = if next == 0 { last } else { next };
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn sps(n: &[u8]) -> Result<Sps> {
     let mut b = Bits::new(&n[1..]);
     let mut s = Sps {
@@ -60,7 +80,7 @@ pub fn sps(n: &[u8]) -> Result<Sps> {
         }
         s.qpprime_bypass = b.f();
         if b.f() {
-            return Err(Bad("H.264 scaling matrices unsupported"));
+            matrices(&mut b, 8)?;
         }
     }
     s.log2_max_frame_num = b.ue().min(12) + 4;
@@ -139,7 +159,7 @@ pub fn pps(n: &[u8]) -> Result<Pps> {
     if b.more() {
         p.t8x8 = b.f();
         if b.f() {
-            return Err(Bad("H.264 scaling matrices unsupported"));
+            matrices(&mut b, 6 + 2 * p.t8x8 as usize)?;
         }
         p.chroma_qp2 = b.se() as i8;
     }
@@ -249,6 +269,13 @@ impl State {
                 .and_then(Option::as_ref)
                 .ok_or(Bad("missing SPS"))?,
         ))
+    }
+
+    /// Every stored parameter set as received (SPS, then PPS, each by id): what VideoToolbox's format description is
+    /// made from.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn raw(&self) -> impl Iterator<Item = &[u8]> {
+        self.raw.iter().filter(|n| !n.is_empty()).map(Vec::as_slice)
     }
 
     pub fn slice(&self, n: &[u8]) -> Result<Slice> {

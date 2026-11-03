@@ -7,8 +7,23 @@ license.workspace = true
 [dependencies]
 wgpu.workspace = true
 wgpu-hal.workspace = true
+# Vulkan Video on Linux; on macOS only the Std* structs of the parameter set parsers
 ash.workspace = true
 pollster.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu-hal = { workspace = true, features = ["vulkan"] }
+
+# VideoToolbox decode and encode into IOSurfaces that Metal (wgpu's backend there) copies from and to
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu-hal = { workspace = true, features = ["metal"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString", "CFArray"] }
+objc2-metal = { version = "0.3", default-features = false, features = ["std", "MTLDevice", "MTLTexture", "MTLResource", "MTLPixelFormat", "MTLCommandBuffer", "MTLCommandQueue", "MTLBlitCommandEncoder", "MTLCommandEncoder", "MTLBuffer", "MTLTypes"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "objc2", "objc2-metal", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVMetalTexture", "CVMetalTextureCache", "CVReturn", "CVPixelFormatDescription"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime", "CMFormatDescriptionBridge", "CMSync", "objc2-core-video"] }
+objc2-video-toolbox = { version = "0.3", default-features = false, features = ["std", "VTBase", "VTSession", "VTDecompressionSession", "VTDecompressionProperties", "VTCompressionSession", "VTCompressionProperties", "VTErrors", "VTVideoEncoderList", "objc2-core-media", "objc2-core-video"] }
 
 [dev-dependencies]
 media.workspace = true

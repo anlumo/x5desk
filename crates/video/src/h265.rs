@@ -351,6 +351,32 @@ pub struct Sps {
     pub vui: Option<Vui>,
 }
 
+/// Scaling lists (on, `data`: coded here rather than the defaults): VideoToolbox (macOS) applies them itself, so
+/// they are stepped over (7.3.4); the Vulkan decoder takes none.
+fn lists(b: &mut Bits, data: bool) -> Result<()> {
+    if cfg!(not(target_os = "macos")) {
+        return Err(Bad("H.265 scaling lists unsupported"));
+    }
+    if !data {
+        return Ok(());
+    }
+    for size in 0..4u32 {
+        for _ in (0..6).step_by(if size == 3 { 3 } else { 1 }) {
+            if !b.f() {
+                b.ue(); // scaling_list_pred_matrix_id_delta
+                continue;
+            }
+            if size > 1 {
+                b.se(); // scaling_list_dc_coef_minus8
+            }
+            for _ in 0..64.min(1 << (4 + (size << 1))) {
+                b.se();
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn sps(n: &[u8]) -> Result<Sps> {
     let mut b = Bits::new(&n[2..]);
     let mut s = Sps {
@@ -389,7 +415,8 @@ pub fn sps(n: &[u8]) -> Result<Sps> {
     s.max_th_inter = b.ue() as u8;
     s.max_th_intra = b.ue() as u8;
     if b.f() {
-        return Err(Bad("H.265 scaling lists unsupported"));
+        let data = b.f();
+        lists(&mut b, data)?;
     }
     (s.amp, s.sao) = (b.f(), b.f());
     if b.f() {
@@ -503,7 +530,7 @@ pub fn pps(n: &[u8]) -> Result<Pps> {
         p.deblock = Some((ov, dis, beta, tc));
     }
     if b.f() {
-        return Err(Bad("H.265 scaling lists unsupported"));
+        lists(&mut b, true)?;
     }
     (p.lists_mod, p.log2_parallel_merge_minus2, p.slice_ext) = (b.f(), b.ue() as u8, b.f());
     if b.f() {
@@ -590,6 +617,13 @@ impl State {
         self.raw[k].clear();
         self.raw[k].extend_from_slice(n);
         Ok(true)
+    }
+
+    /// Every stored parameter set as received (VPS, SPS, then PPS, each by id): what VideoToolbox's format description is
+    /// made from.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn raw(&self) -> impl Iterator<Item = &[u8]> {
+        self.raw.iter().filter(|n| !n.is_empty()).map(Vec::as_slice)
     }
 
     pub fn slice(&self, n: &[u8]) -> Result<Slice> {
