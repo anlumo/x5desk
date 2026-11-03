@@ -217,6 +217,9 @@ impl Video {
             };
             // decoding runs as far ahead of a consumer holding one frame as without B-frames (2 frames, OUT slots)
             let d = Decoder::with_out(g, c, ps, tr.width, tr.height, w + OUT - 2);
+            // its copies go on wgpu's queue: under GATE, as the app's other submits
+            #[cfg(target_os = "macos")]
+            let d = d.map(|d| d.gated(&crate::GATE));
             decs.push(d.map_err(|e| e.to_string())?);
         }
         let times: Arc<[f64]> = (ord.iter())

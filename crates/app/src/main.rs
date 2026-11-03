@@ -316,7 +316,8 @@ pub fn private(d: &Path) -> std::io::Result<()> {
 /// configure the UI thread holds it and [`BURN`] exclusively from the end of its next frame's UI until egui has
 /// configured the surface again and acquired that frame ([`Retry`]). The player's decoders' empty flush submits stay
 /// outside: a decoder waiting for a slot would wait for the UI's next submit (the export's renderer releases its
-/// decoders' slots without the lock).
+/// decoders' slots without the lock). On macOS each decoded picture is a copy on wgpu's queue: `clip::Video`'s and
+/// the live preview's decoders take this around those copies themselves (`Decoder::gated`), not around the decode.
 pub static GATE: RwLock<()> = RwLock::new(());
 /// Held for a whole job by the threads whose GPU work runs through burn (the RAFT worker): burn submits throughout
 /// it. Apart from [`GATE`], because a waiting writer closes GATE to new readers: a retry waits for the job here first
