@@ -124,7 +124,8 @@ impl Mux {
     }
 
     /// Appends one sample (length-prefixed NALs for video, a raw AAC frame for audio). A track's samples come in
-    /// decode order; `pts - dts` must fit i32. A track switch starts a new chunk.
+    /// decode order; `pts - dts` must fit i32. A track switch starts a new chunk. An empty one (a frame the encoder
+    /// dropped) is not written: the previous sample lasts `dur` longer, or the track starts later.
     ///
     /// `dts` / `pts` are in the track's timescale on one timeline shared by all tracks, with any origin: the file
     /// starts at the earliest pts of all tracks, or at 0 when that is negative, since negative pts are not presented
@@ -140,6 +141,13 @@ impl Mux {
         sync: bool,
     ) -> io::Result<()> {
         let k = &mut self.tracks[t];
+        if data.is_empty() {
+            if let Some(d) = k.dur.last_mut() {
+                *d += dur;
+                k.pend = k.pend.max(pts + dur as i64);
+            }
+            return Ok(());
+        }
         if self.last != t {
             k.chunks.push((self.pos, k.size.len() as u32));
             self.last = t;
@@ -1112,5 +1120,27 @@ mod tests {
         decodes_clean(&dst);
         let back = Mp4::open(&dst).unwrap();
         assert_eq!(back.tracks[0].codec, m.tracks[0].codec);
+    }
+
+    /// Empty samples (frames the encoder dropped) are not written: the one before lasts longer, a track that starts
+    /// with one starts at the next.
+    #[test]
+    fn empty_samples() {
+        let dst = fixtures().join("empty_samples.mp4");
+        let mut x = Mux::create(&dst).unwrap();
+        let aac = Codec::Aac {
+            asc: vec![0x11, 0x90],
+            rate: 48000,
+            ch: 2,
+        };
+        x.track(aac, 48000, 0, 0, false).unwrap();
+        for (i, d) in [&b""[..], b"a", b"", b"", b"bc"].into_iter().enumerate() {
+            let t = 1024 * i as i64;
+            x.write(0, d, t, t, 1024, true).unwrap();
+        }
+        x.finish(false).unwrap();
+        let s = &Mp4::open(&dst).unwrap().tracks[0].samples;
+        let got: Vec<_> = s.iter().map(|s| (s.dts, s.dur, s.size)).collect();
+        assert_eq!(got, [(0, 3072, 1), (3072, 1024, 2)]);
     }
 }
