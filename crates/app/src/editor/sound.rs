@@ -157,10 +157,18 @@ impl Drop for Sound {
     }
 }
 
-/// The output stream draining its ring, playing, the mix's conversion to its format and the ring.
+/// The output stream draining its ring, playing, the mix's conversion to its format and the ring. macOS: a stream that
+/// fails on the device picked plays on the system default, as the player's does.
 fn open(sh: &Arc<Sh>) -> Option<(cpal::Stream, Conv, Ring)> {
     let dev = crate::settings::output()?;
-    stream(sh, &dev).ok()
+    let r = stream(sh, &dev);
+    #[cfg(target_os = "macos")]
+    let r = r.or_else(|e| {
+        use cpal::traits::HostTrait;
+        eprintln!("editor audio: {e}: the default output");
+        stream(sh, &cpal::default_host().default_output_device().ok_or(e)?)
+    });
+    r.ok()
 }
 
 /// [`open`] on `dev`, in the format `Conv::on` picks for the mix.
