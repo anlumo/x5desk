@@ -1,9 +1,13 @@
 //! AAC-LC decode (symphonia) from demuxed packets, and playback through cpal. The audio clock is the master clock:
 //! a decode thread fills a lock-free single-producer / single-consumer ring, the device callback drains it and
 //! counts the frames it consumed. Without sound (no AAC track, no device) [`Player::silent`] runs the same clock on
-//! wall time.
+//! wall time. The stream may run at another rate and channel count than the source ([`Conv`]): the clock still counts
+//! source frames.
 
-use crate::mp4::{Codec, Mp4, asc_info};
+use crate::{
+    mp4::{Codec, Mp4, asc_info},
+    resample::Resampler,
+};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::{
     io,
@@ -68,6 +72,89 @@ impl Aac {
     }
 }
 
+/// Interleaved audio of a source's rate and channels to the format a stream runs at ([`Conv::on`]): resampled
+/// (stream frame n is at source time n / `rate` s exactly), then mono on both sides or the two sides mixed to mono.
+pub struct Conv {
+    rs: Resampler,
+    from: u32,
+    /// The stream's rate and channels.
+    pub rate: u32,
+    pub ch: u16,
+    tmp: Vec<f32>,
+}
+
+impl Conv {
+    /// `ch` to `och` channels: the same, or one to two and back.
+    pub fn new(rate: u32, ch: u16, out: u32, och: u16) -> io::Result<Conv> {
+        if ch != och && (ch.min(och), ch.max(och)) != (1, 2) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("{ch} channels to {och}"),
+            ));
+        }
+        Ok(Conv {
+            rs: Resampler::new(rate, out, ch as usize)?,
+            from: rate,
+            rate: out,
+            ch: och,
+            tmp: vec![],
+        })
+    }
+
+    /// The format a stream on `dev` runs at for audio of `rate` Hz and `ch` channels. macOS: the device's own rate
+    /// and up to two of its channels (cpal's CoreAudio backend sets the device's hardware rate to the one asked for,
+    /// for every app, and leaves it there; it fails on a rate the device lacks), else the source's. Elsewhere the
+    /// source's: ALSA's plugins and PipeWire convert.
+    pub fn on(dev: &cpal::Device, rate: u32, ch: u16) -> io::Result<Conv> {
+        #[cfg(target_os = "macos")]
+        if let Some(c) = (dev.default_output_config().ok())
+            .and_then(|c| Conv::new(rate, ch, c.sample_rate(), c.channels().clamp(1, 2)).ok())
+        {
+            return Ok(c);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = dev;
+        Conv::new(rate, ch, rate, ch)
+    }
+
+    /// The most samples [`Conv::run`] appends for `n` source frames.
+    pub fn most(&self, n: usize) -> usize {
+        (n as u64 * self.rate as u64).div_ceil(self.from as u64) as usize * self.ch as usize
+    }
+
+    /// Appends the stream's samples for source samples `x`.
+    pub fn run(&mut self, x: &[f32], out: &mut Vec<f32>) {
+        if self.rs.ch == self.ch as usize {
+            return self.rs.run(x, out);
+        }
+        self.tmp.clear();
+        self.rs.run(x, &mut self.tmp);
+        self.map(out)
+    }
+
+    /// Ends the stream: appends the resampler's last frames.
+    pub fn finish(&mut self, out: &mut Vec<f32>) {
+        if self.rs.ch == self.ch as usize {
+            return self.rs.finish(out);
+        }
+        self.tmp.clear();
+        self.rs.finish(&mut self.tmp);
+        self.map(out)
+    }
+
+    /// Forgets the stream (seek): the next sample is time 0 again.
+    pub fn reset(&mut self) {
+        self.rs.reset()
+    }
+
+    fn map(&self, out: &mut Vec<f32>) {
+        match self.ch {
+            1 => out.extend(self.tmp.chunks_exact(2).map(|f| 0.5 * (f[0] + f[1]))),
+            _ => out.extend(self.tmp.iter().flat_map(|&v| [v, v])),
+        }
+    }
+}
+
 const RING: usize = 1 << 16; // f32 samples: 0.68 s of 48 kHz stereo
 
 struct Shared {
@@ -75,7 +162,9 @@ struct Shared {
     /// Samples written / read since start; only the producer moves `w`, only the callback `r`.
     w: AtomicUsize,
     r: AtomicUsize,
+    /// The source's rate (the clock's and seeks' frames); the stream's rate and channels (the ring's frames).
     rate: u32,
+    out: u32,
     ch: usize,
     /// Source frame being heard now.
     clock: AtomicU64,
@@ -95,12 +184,17 @@ struct Shared {
 }
 
 impl Shared {
-    fn new(rate: u32, ch: u16) -> Arc<Shared> {
+    /// Source frames at `rate`, a stream at `out` Hz with `ch` channels.
+    fn new(rate: u32, out: u32, ch: u16) -> Arc<Shared> {
+        // 0.68 s at the stream's format, at least
+        let k = (out as usize * ch as usize).div_ceil(96000);
+        let n = RING * k.next_power_of_two();
         Arc::new(Shared {
-            ring: (0..RING).map(|_| AtomicU32::new(0)).collect(),
+            ring: (0..n).map(|_| AtomicU32::new(0)).collect(),
             w: AtomicUsize::new(0),
             r: AtomicUsize::new(0),
             rate,
+            out,
             ch: ch as usize,
             clock: AtomicU64::new(0),
             req: AtomicU32::new(0),
@@ -119,15 +213,15 @@ impl Shared {
 
 const HIST: usize = 32;
 
-/// Device-callback state: `pos` = source frame of the next sample handed to the device, `floor` = the last seek
-/// target (the clock never reads earlier), `ack` = last flushed epoch, `sent` = frames handed to the device.
-/// `hist` = the last device buffers: (`sent` before it, source frame of its first sample, source frames in it). The
-/// sample heard now is looked up there by its place in the hand-over stream, so queued silence (pause, underrun)
-/// holds the clock only while it plays.
+/// Device-callback state, in stream frames from the last seek target `base` (a source frame; the clock never reads
+/// earlier): `d` = the next sample handed to the device, `ack` = last flushed epoch, `sent` = frames handed to the
+/// device. `hist` = the last device buffers: (`sent` before it, `d` of its first sample, frames in it). The sample
+/// heard now is looked up there by its place in the hand-over stream, so queued silence (pause, underrun) holds the
+/// clock only while it plays.
 #[derive(Default)]
 struct Play {
-    pos: u64,
-    floor: u64,
+    base: u64,
+    d: u64,
     ack: u32,
     sent: u64,
     hist: [(u64, u64, u64); HIST],
@@ -135,40 +229,42 @@ struct Play {
 }
 
 impl Play {
+    /// Source frame of stream frame `d`: the resampler's output n is at source time n / `out` s.
+    fn src(&self, s: &Shared, d: u64) -> u64 {
+        self.base + d * s.rate as u64 / s.out as u64
+    }
+
     /// Fills one device buffer; `queued` = seconds until its first sample is heard.
     fn fill(&mut self, s: &Shared, out: &mut [f32], queued: f64) {
         let e = s.seen.load(Acquire);
         if e != self.ack {
             s.r.store(s.fence.load(Relaxed), Relaxed);
-            (self.pos, self.ack) = (s.base.load(Relaxed), e);
-            self.floor = self.pos;
+            (self.base, self.d, self.ack) = (s.base.load(Relaxed), 0, e);
             // audio from before the seek still in the device reads as the seek target
-            self.hist
-                .iter_mut()
-                .for_each(|b| (b.1, b.2) = (self.pos, 0));
+            self.hist.iter_mut().for_each(|b| (b.1, b.2) = (0, 0));
         }
-        let start = self.pos;
+        let start = self.d;
         if s.paused.load(Relaxed) {
             out.fill(0.0);
         } else {
-            let eof = s.eof.load(Acquire);
+            let (eof, n) = (s.eof.load(Acquire), s.ring.len());
             let (r, w) = (s.r.load(Relaxed), s.w.load(Acquire));
             let k = (w - r).min(out.len()) / s.ch * s.ch;
             let v = f32::from_bits(s.vol.load(Relaxed));
             for (i, o) in out[..k].iter_mut().enumerate() {
-                *o = f32::from_bits(s.ring[(r + i) % RING].load(Relaxed)) * v;
+                *o = f32::from_bits(s.ring[(r + i) % n].load(Relaxed)) * v;
             }
             out[k..].fill(0.0);
             s.r.store(r + k, Release);
             // past the end the clock runs on silence; an underrun mid-stream holds it
-            self.pos += (if eof && r + k == w { out.len() } else { k } / s.ch) as u64;
+            self.d += (if eof && r + k == w { out.len() } else { k } / s.ch) as u64;
         }
-        self.hist[self.n % HIST] = (self.sent, start, self.pos - start);
+        self.hist[self.n % HIST] = (self.sent, start, self.d - start);
         self.n += 1;
         // the sample heard now was handed over `queued` before this buffer's first one
-        let h = self.sent.saturating_sub((queued * s.rate as f64) as u64);
+        let h = self.sent.saturating_sub((queued * s.out as f64) as u64);
         self.sent += (out.len() / s.ch) as u64;
-        let mut c = self.floor;
+        let mut c = 0;
         for i in 1..=self.n.min(HIST) {
             let b = self.hist[(self.n - i) % HIST];
             c = b.1 + h.saturating_sub(b.0).min(b.2);
@@ -176,7 +272,7 @@ impl Play {
                 break; // else: the device holds more than the history, read its oldest buffer
             }
         }
-        s.clock.store(c.max(self.floor), Relaxed);
+        s.clock.store(self.src(s, c), Relaxed);
         // after the clock: a reader that sees the ack sees the clock of the seek it acknowledges (`Clock::get`)
         s.ack.store(e, Release);
     }
@@ -200,7 +296,8 @@ impl Clock {
 
 /// The output device with this id (`cpal::DeviceId` as text, as the app's settings keep it from
 /// `output_devices`), else the system default. An id lists the devices (ALSA: every hint and card): resolve it when
-/// the choice changes and keep the device, never per open.
+/// the choice changes and keep the device, never per open. macOS: the device kept names it while it is connected
+/// (CoreAudio's object id); the app's settings look a gone one up again.
 pub fn device(id: Option<&str>) -> Option<cpal::Device> {
     let h = cpal::default_host();
     // an exact match: cpal 0.18's device_by_id rewrites ALSA's `sysdefault:CARD=x` to `...,DEV=0`, which no listed
@@ -225,9 +322,9 @@ impl Player {
         Player::open_on(path, None)
     }
 
-    /// [`Player::open`] on output device `dev` (from [`device`]; None: the default). A stream that fails to build or
-    /// start comes back as an `io::Error` holding the `cpal::Error` (`get_ref`); file, track, decoder and missing
-    /// device errors do not (the app's `player::lost` tells them apart by it).
+    /// [`Player::open`] on output device `dev` (from [`device`]; None: the default), in the format [`Conv::on`] picks.
+    /// A stream that fails to build or start comes back as an `io::Error` holding the `cpal::Error` (`get_ref`);
+    /// file, track, decoder and missing device errors do not (the app's `player::lost` tells them apart by it).
     pub fn open_on(path: impl AsRef<Path>, dev: Option<cpal::Device>) -> io::Result<Player> {
         let mp4 = Mp4::open(path)?;
         let t = mp4
@@ -240,12 +337,13 @@ impl Player {
         };
         let aac = Aac::new(asc)?;
         let duration = mp4.tracks[t].secs();
-        let sh = Shared::new(aac.rate, aac.ch);
         let dev = (dev.or_else(|| cpal::default_host().default_output_device()))
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no audio output device"))?;
+        let cv = Conv::on(&dev, aac.rate, aac.ch)?;
+        let sh = Shared::new(aac.rate, cv.rate, cv.ch);
         let cfg = cpal::StreamConfig {
-            channels: aac.ch,
-            sample_rate: aac.rate,
+            channels: cv.ch,
+            sample_rate: cv.rate,
             buffer_size: cpal::BufferSize::Default,
         };
         let (s, mut p) = (sh.clone(), Play::default());
@@ -264,7 +362,7 @@ impl Player {
         let s = sh.clone();
         let th = thread::Builder::new()
             .name("audio decode".into())
-            .spawn(move || feed(&s, &mp4, t, aac))?;
+            .spawn(move || feed(&s, &mp4, t, aac, cv))?;
         Ok(Player {
             sh,
             th: Some(th),
@@ -276,7 +374,7 @@ impl Player {
     /// The same controls and clock without sound, for files without audio or without an output device: a thread
     /// stands in for the device and feeds it silence at wall-clock pace.
     pub fn silent(duration: f64) -> Player {
-        let sh = Shared::new(48000, 1);
+        let sh = Shared::new(48000, 48000, 1);
         sh.eof.store(true, Relaxed); // an empty ring at the end: the clock runs on silence
         let s = sh.clone();
         let th = thread::Builder::new()
@@ -325,12 +423,14 @@ impl Drop for Player {
     }
 }
 
-/// Decode thread: keeps the ring full, restarts on seek requests.
-fn feed(s: &Shared, mp4: &Mp4, t: usize, mut aac: Aac) {
-    let tr = &mp4.tracks[t];
-    let (ts, rate) = (tr.timescale as u64, s.rate as u64);
+/// Decode thread: keeps the ring full, restarts on seek requests. A packet goes through `cv` and waits for room.
+fn feed(s: &Shared, mp4: &Mp4, t: usize, mut aac: Aac, mut cv: Conv) {
+    let (tr, len) = (&mp4.tracks[t], s.ring.len());
+    let (ts, rate, ch) = (tr.timescale as u64, s.rate as u64, aac.ch as usize);
     let (mut i, mut skip, mut cur, mut buf) = (0, 0u64, 0u32, vec![]);
-    let zero = vec![0f32; 2048 * s.ch]; // the most one packet may write (see the space check)
+    // the packet for the ring; whether the resampler's last frames followed the last one
+    let (mut o, mut tail) = (vec![], false);
+    let zero = vec![0f32; 2048 * ch]; // the most one packet holds
     let nap = |ms| thread::sleep(Duration::from_millis(ms));
     while !s.quit.load(Relaxed) {
         let e = s.req.load(Acquire);
@@ -351,33 +451,44 @@ fn feed(s: &Shared, mp4: &Mp4, t: usize, mut aac: Aac) {
                 nap(1);
             }
             aac.reset();
-            cur = e;
+            cv.reset();
+            (cur, tail) = (e, false);
+            o.clear();
             continue;
         }
-        if i >= tr.samples.len() {
-            s.eof.store(true, Release);
-            nap(10);
-            continue;
+        if o.is_empty() {
+            if i >= tr.samples.len() {
+                if !tail {
+                    cv.finish(&mut o);
+                    tail = true;
+                    continue;
+                }
+                s.eof.store(true, Release);
+                nap(10);
+                continue;
+            }
+            i += 1;
+            let x = tr.samples[i - 1];
+            // a packet that fails to read or decode becomes silence of its duration: the clock keeps source time
+            let n = ((x.dur as u64 * rate / ts) as usize * ch).min(zero.len());
+            let pcm = match mp4.read(&x, &mut buf) {
+                Ok(()) => aac.decode(&buf).unwrap_or(&zero[..n]),
+                Err(_) => &zero[..n],
+            };
+            let d = (skip as usize * ch).min(pcm.len());
+            skip -= (d / ch) as u64;
+            cv.run(&pcm[d..], &mut o);
         }
         let w = s.w.load(Relaxed);
-        if RING - (w - s.r.load(Acquire)) < 2048 * s.ch {
+        if len - (w - s.r.load(Acquire)) < o.len() {
             nap(5);
             continue;
         }
-        i += 1;
-        let x = tr.samples[i - 1];
-        // a packet that fails to read or decode becomes silence of its duration: the clock keeps source time
-        let n = ((x.dur as u64 * rate / ts) as usize * s.ch).min(zero.len());
-        let pcm = match mp4.read(&x, &mut buf) {
-            Ok(()) => aac.decode(&buf).unwrap_or(&zero[..n]),
-            Err(_) => &zero[..n],
-        };
-        let d = (skip as usize * s.ch).min(pcm.len());
-        skip -= (d / s.ch) as u64;
-        for (k, x) in pcm[d..].iter().enumerate() {
-            s.ring[(w + k) % RING].store(x.to_bits(), Relaxed);
+        for (k, x) in o.iter().enumerate() {
+            s.ring[(w + k) % len].store(x.to_bits(), Relaxed);
         }
-        s.w.store(w + pcm.len() - d, Release);
+        s.w.store(w + o.len(), Release);
+        o.clear();
     }
 }
 
@@ -393,7 +504,7 @@ fn tick(s: &Shared) {
             s.seen.store(e, Release);
             cur = e;
         }
-        let due = (t0.elapsed().as_secs_f64() * s.rate as f64) as u64;
+        let due = (t0.elapsed().as_secs_f64() * s.out as f64) as u64;
         while done < due {
             let n = ((due - done) as usize).min(out.len());
             p.fill(s, &mut out[..n], 0.0);
@@ -484,10 +595,11 @@ mod tests {
         let Codec::Aac { asc, .. } = &m.tracks[2].codec else {
             panic!()
         };
-        let sh = Shared::new(48000, 2);
+        let sh = Shared::new(48000, 48000, 2);
         sh.paused.store(false, Relaxed);
         let (s, a) = (sh.clone(), Aac::new(asc).unwrap());
-        let th = thread::spawn(move || feed(&s, &m, 2, a));
+        let cv = Conv::new(48000, 2, 48000, 2).unwrap();
+        let th = thread::spawn(move || feed(&s, &m, 2, a, cv));
         let mut p = Play::default();
         let mut out = vec![0f32; 960];
         let mut epoch = 0;
@@ -523,18 +635,18 @@ mod tests {
                 got.len()
             );
             assert_eq!(exact, got.len(), "seek {secs}");
-            assert_eq!(p.pos, f + want as u64);
-            assert!(clock >= f && clock < p.pos);
+            assert_eq!(p.src(&sh, p.d), f + want as u64);
+            assert!(clock >= f && clock < p.src(&sh, p.d));
         }
         // past the end the clock keeps running on silence
         while !sh.eof.load(Acquire) {
             thread::yield_now();
         }
-        let pos = p.pos;
+        let pos = p.src(&sh, p.d);
         for _ in 0..10 {
             p.fill(&sh, &mut out, 0.0);
         }
-        assert_eq!(p.pos, pos + 10 * 480);
+        assert_eq!(p.src(&sh, p.d), pos + 10 * 480);
         assert!(out.iter().all(|&x| x == 0.0));
         sh.quit.store(true, Relaxed);
         th.join().unwrap();
@@ -544,7 +656,7 @@ mod tests {
     /// last sample while paused, no step back on resume.
     #[test]
     fn clock_counts_queued_silence() {
-        let sh = Shared::new(48000, 2);
+        let sh = Shared::new(48000, 48000, 2);
         sh.w.store(RING, Release); // a ring full of (silent) audio
         sh.paused.store(false, Relaxed);
         let (mut p, mut out) = (Play::default(), vec![0f32; 960]);
@@ -559,10 +671,10 @@ mod tests {
         }
         assert_eq!(
             *c.last().unwrap(),
-            p.pos - 480 - 1440,
+            p.src(&sh, p.d) - 480 - 1440,
             "heard = handed over − queued"
         );
-        let at = p.pos;
+        let at = p.src(&sh, p.d);
         sh.paused.store(true, Relaxed);
         let pause: Vec<_> = (0..6).map(|_| tick(&mut p)).collect();
         sh.paused.store(false, Relaxed);
@@ -572,6 +684,107 @@ mod tests {
         assert_eq!(play, [at, at, at, at, at + 480, at + 960]);
         c.extend(pause.iter().chain(&play));
         assert!(c.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    /// On a stream at another rate and channel count (48 kHz audio on a 44.1 kHz mono device) the clock still counts
+    /// source frames: it lands on a seek target and reads what a 48 kHz stereo stream reads after the same time, the
+    /// device's queue included.
+    #[test]
+    fn clock_resampled() {
+        let (a, b) = (Shared::new(48000, 48000, 2), Shared::new(48000, 44100, 1));
+        let (mut pa, mut pb) = (Play::default(), Play::default());
+        for s in [&a, &b] {
+            s.w.store(s.ring.len(), Release); // a ring full of (silent) audio
+            s.paused.store(false, Relaxed);
+            // a seek to 2 s, as the decode thread takes it
+            s.base.store(96000, Relaxed);
+            s.req.store(1, Relaxed);
+            s.seen.store(1, Release);
+        }
+        // 10 ms buffers, 1/32 s queued in the device
+        let (mut oa, mut ob, mut c) = (vec![0f32; 2 * 480], vec![0f32; 441], vec![]);
+        for _ in 0..50 {
+            pa.fill(&a, &mut oa, 0.03125);
+            pb.fill(&b, &mut ob, 0.03125);
+            c.push((a.clock.load(Relaxed), b.clock.load(Relaxed)));
+        }
+        println!("48 kHz stereo, 44.1 kHz mono: {:?} … {:?}", &c[..5], c[49]);
+        assert_eq!(c[0], (96000, 96000), "the seek target");
+        assert!(c.iter().all(|(x, y)| x.abs_diff(*y) <= 1), "{c:?}");
+        assert_eq!(pb.src(&b, pb.d), 96000 + 50 * 480);
+        assert_eq!(Clock(b.clone()).get(), Some(c[49].1 as f64 / 48000.0));
+    }
+
+    /// The decode thread for a stream at another rate and channel count (48 kHz stereo AAC on a 44.1 kHz mono device):
+    /// from a seek it hands over the track's decode from the target resampled and mixed down, bit-exact to its last
+    /// frames; the clock starts on the target and ends on the track's last frame. The track: two tones made with the
+    /// ffmpeg CLI (skipped without it).
+    #[test]
+    fn feed_resampled() {
+        let f = fixtures().join(format!("tones-{}.m4a", std::process::id()));
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("aevalsrc=sin(2*PI*1000*t)/2|sin(2*PI*1500*t)/2:s=48000:d=3")
+            // no PNS: its noise after a decoder restart is not a continuous decode's
+            .args(["-c:a", "aac", "-aac_pns", "0"])
+            .arg(&f)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !made {
+            eprintln!("ffmpeg could not make the tones: skipped");
+            return;
+        }
+        let m = Mp4::open(&f).unwrap();
+        let Codec::Aac { asc, .. } = &m.tracks[0].codec else {
+            panic!()
+        };
+        let (mut a, mut full, mut b) = (Aac::new(asc).unwrap(), vec![], vec![]);
+        for s in &m.tracks[0].samples {
+            m.read(s, &mut b).unwrap();
+            full.extend_from_slice(a.decode(&b).unwrap());
+        }
+        let (f0, mut want) = (30000, vec![]);
+        let mut cv = Conv::new(48000, 2, 44100, 1).unwrap();
+        cv.run(&full[2 * f0..], &mut want);
+        cv.finish(&mut want);
+        let sh = Shared::new(48000, 44100, 1);
+        sh.paused.store(false, Relaxed);
+        let (s, a) = (sh.clone(), Aac::new(asc).unwrap());
+        let cv = Conv::new(48000, 2, 44100, 1).unwrap();
+        let th = thread::spawn(move || feed(&s, &m, 0, a, cv));
+        sh.target.store(f0 as u64, Relaxed);
+        sh.req.fetch_add(1, Release);
+        let (mut p, mut out, mut got) = (Play::default(), vec![0f32; 441], vec![]);
+        while p.ack != 1 {
+            p.fill(&sh, &mut out, 0.0);
+        }
+        let c0 = sh.clock.load(Relaxed);
+        loop {
+            let t0 = Instant::now();
+            while sh.w.load(Acquire) - sh.r.load(Acquire) < out.len() && !sh.eof.load(Acquire) {
+                assert!(t0.elapsed().as_secs() < 5, "decoder stalled");
+                thread::yield_now();
+            }
+            let n = (sh.w.load(Acquire) - sh.r.load(Acquire)).min(out.len());
+            if n == 0 {
+                break; // the end, all of it heard
+            }
+            p.fill(&sh, &mut out[..n], 0.0);
+            got.extend_from_slice(&out[..n]);
+        }
+        sh.quit.store(true, Relaxed);
+        th.join().unwrap();
+        std::fs::remove_file(&f).unwrap();
+        let (end, last) = (p.src(&sh, p.d), full.len() as u64 / 2);
+        println!(
+            "from frame {f0}: {} of {} frames as resampled alone, clock {c0} → {end} (track {last})",
+            got.iter().zip(&want).filter(|(a, b)| a == b).count(),
+            want.len()
+        );
+        assert_eq!(c0, f0 as u64, "the seek target");
+        assert!(got == want, "not the decode resampled");
+        // the stream's last frame is at most one source frame after the track's
+        assert!((last..=last + 1).contains(&end), "ends at {end}");
     }
 
     /// A packet that fails to decode becomes silence of its length: everything after it plays at its source time.
@@ -597,10 +810,11 @@ mod tests {
             Aac::new(asc).unwrap().decode(&b).is_err(),
             "corrupt packet decodes"
         );
-        let sh = Shared::new(48000, 2);
+        let sh = Shared::new(48000, 48000, 2);
         sh.paused.store(false, Relaxed);
         let (s2, a) = (sh.clone(), Aac::new(asc).unwrap());
-        let th = thread::spawn(move || feed(&s2, &m, 1, a));
+        let cv = Conv::new(48000, 2, 48000, 2).unwrap();
+        let th = thread::spawn(move || feed(&s2, &m, 1, a, cv));
         let (mut p, mut out, mut got) = (Play::default(), vec![0f32; 960], vec![]);
         loop {
             let eof = sh.eof.load(Acquire);
