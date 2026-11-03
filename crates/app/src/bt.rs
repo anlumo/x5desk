@@ -62,7 +62,7 @@ pub enum Conn {
 /// What the worker reports.
 #[derive(Clone, Debug, Default)]
 pub struct St {
-    /// the adapter could not be opened
+    /// the adapter could not be opened, is off or may not be used: the scan row's words
     pub err: Option<String>,
     pub scan: bool,
     pub seen: Vec<Seen>,
@@ -130,6 +130,17 @@ fn why(e: &Error) -> String {
     }
 }
 
+/// The scan row's words for an adapter that is off, may not be used, or could not be opened.
+fn down(e: &Error) -> String {
+    match e {
+        Error::Off => "Bluetooth is off.".into(),
+        Error::Denied => "x5desk may not use Bluetooth: allow it (or the terminal that started it) in System Settings \
+                          > Privacy & Security > Bluetooth."
+            .into(),
+        e => format!("Bluetooth: {e}"),
+    }
+}
+
 /// `WifiConnectionResult` of station mode.
 pub fn joined(r: i32) -> &'static str {
     match r {
@@ -158,12 +169,19 @@ impl W {
             match (self.open)() {
                 Ok(b) => (self.ble, self.st.err) = (Some(b), None),
                 Err(e) => {
-                    self.st.err = Some(e.to_string());
+                    self.st.err = Some(down(&e));
                     return None;
                 }
             }
         }
         self.ble.as_ref().map(|b| b.0.clone())
+    }
+
+    /// A command refused because Bluetooth is off or may not be used: the scan row says so until it is back.
+    fn refused(&mut self, e: &Error) {
+        if matches!(e, Error::Off | Error::Denied) {
+            (self.st.err, self.dirty) = (Some(down(e)), true)
+        }
     }
 
     fn run(mut self, rx: Receiver<Cmd>) {
@@ -212,11 +230,14 @@ impl W {
                 match b.scan(on).wait() {
                     Ok(()) => {
                         if on {
-                            self.st.seen.clear()
+                            (self.st.seen, self.st.err) = Default::default()
                         }
                         self.st.scan = on
                     }
-                    Err(e) => self.note(format!("scan: {e}"), true),
+                    Err(e) => {
+                        self.refused(&e);
+                        self.note(format!("scan: {e}"), true)
+                    }
                 }
             }
             Cmd::Connect(d) => {
@@ -319,7 +340,7 @@ impl W {
                 true,
             )
         }
-        (self.st.conn, self.st.link) = (Conn::On, Some(l));
+        (self.st.conn, self.st.link, self.st.err) = (Conn::On, Some(l), None);
         self.st.dev = Some(c.dev().clone());
         self.cam = Some(c);
         self.dirty = true
@@ -337,6 +358,7 @@ impl W {
                 }
                 Err(e) => {
                     (self.st.conn, self.st.dev) = (Conn::Off, None);
+                    self.refused(&e);
                     self.note(format!("connect: {e}"), true)
                 }
             }
@@ -356,7 +378,10 @@ impl W {
                     self.st.paired = true;
                     ("camera awake, its Wi-Fi is up".into(), false)
                 }
-                Err(e) => (format!("wake-up: {}", why(&e)), true),
+                Err(e) => {
+                    self.refused(&e);
+                    (format!("wake-up: {}", why(&e)), true)
+                }
             }),
             Flow::Ap(p) => p.poll().map(|r| match r {
                 Ok(w) => {
@@ -443,6 +468,8 @@ impl W {
                     self.dirty = true
                 }
                 Event::Closed(d, e) if self.st.dev.as_ref() == Some(&d) => lost = Some(e),
+                // macOS: Bluetooth switched off or on, or allowed or not
+                Event::Adapter(e) => (self.st.err, self.dirty) = (e.as_ref().map(down), true),
                 _ => {}
             }
         }
@@ -570,7 +597,7 @@ impl Bt {
             }
             match (&s.err, s.scan, s.seen.len()) {
                 (Some(e), ..) => {
-                    ui.colored_label(ui.visuals().error_fg_color, format!("Bluetooth: {e}"));
+                    ui.colored_label(ui.visuals().error_fg_color, e);
                 }
                 (_, true, 0) => {
                     ui.label("Looking for cameras…");
