@@ -8,6 +8,10 @@
 //!   picture. `acquire` waits for `done ≥ f + 1 − SLOTS`, `encode` for `filled ≥ f + 1`.
 //! - GOP: an IDR every `gop` frames or on request (`Input::key`), no B-frames (frame reordering off), so no reordering
 //!   and dts = pts.
+//! - A buffer (`Cfg::vbv`) under the files' 1 s is a low-latency stream (RTMP): real time, no frame held back. A file
+//!   is not real time (Apple's advice for exports: 8K HEVC +0.2 dB at 2 % fewer bits, 16 instead of 28 fps on the M4;
+//!   1080p is the same stream either way), and VideoToolbox may hold `SLOTS` − 1 frames back.
+//! - Hardware only: no software fallback (H.264 7680x3840 fails on the M4 instead of encoding at 1 fps).
 use super::sys::{self, CFTypeRef, CMTime, Cf, check};
 pub use crate::stream::{Cfg, Packet, Rate};
 use crate::{
@@ -33,6 +37,9 @@ use wgpu_hal::api::Metal as Mtl;
 /// before `Encoder::packet` must collect one.
 pub const SLOTS: usize = 4;
 const WAIT: Duration = Duration::from_millis(50); // acquire() waits for its slot before returning Full
+const PUSH: Duration = Duration::from_millis(20); // packet() makes VideoToolbox emit held-back frames after this wait
+const KEY: u64 = 1 << 63; // in a frame's refcon: it was to be an IDR
+const INVALID: i32 = -12903; // kVTInvalidSessionErr
 
 /// The encoder's input: per slot a picture and its two plane textures, and the two timelines. Share it (`Arc`) with
 /// the thread that submits the wgpu work that fills it.
@@ -307,7 +314,11 @@ unsafe extern "C" fn output(
         0 => Cf::retain(sample),
         _ => None,
     };
-    let f = frame as u64;
+    let f = frame as u64 & !KEY;
+    // an IDR dropped or lost: the next frame is one
+    if let (None, true, Some(i)) = (&sample, frame as u64 & KEY != 0, &out.input) {
+        i.key.store(true, Relaxed);
+    }
     out.q
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -336,8 +347,11 @@ pub struct Encoder {
     c: Cfg,
     idr: u64,  // the last IDR's frame
     next: u64, // the next packet
-    meta: [(i64, bool); SLOTS],
+    pts: [i64; SLOTS],
     session: Cf,
+    since: u64,  // the session's first frame
+    check: bool, // its parameter sets are still to be compared with `params`
+    lost: bool,  // VideoToolbox invalidated it
     out: Box<Out>,
 }
 
@@ -345,8 +359,8 @@ pub struct Encoder {
 unsafe impl Send for Encoder {}
 
 impl Encoder {
-    /// An encoder on the media engine for `c`. Fails when VideoToolbox can't: no hardware encoder for the codec, a
-    /// size or rate control setting it refuses.
+    /// An encoder on the media engine for `c`. Fails when VideoToolbox can't: no hardware encoder for the codec and
+    /// size, a rate control setting it refuses.
     pub fn new(g: &Gpu, c: &Cfg) -> Result<Encoder> {
         if c.w % 2 != 0 || c.h % 2 != 0 || c.w == 0 || c.h == 0 {
             return Err(Bad("picture size not even"));
@@ -465,15 +479,19 @@ impl Encoder {
             c: *c,
             idr: 0,
             next: 0,
-            meta: [(0, false); SLOTS],
+            pts: [0; SLOTS],
             session,
+            since: 0,
+            check: true,
+            lost: false,
             out,
         })
     }
 
     /// Encodes frame `self.frame`, which the producer has released (`Input::release`), and returns its index;
     /// `pts` comes back with its packet. Returns `Error::Full` with nothing encoded while `SLOTS` frames are in
-    /// flight: collect one with `packet` first.
+    /// flight: collect one with `packet` first. A session VideoToolbox invalidated (the machine slept, the media
+    /// server restarted) is replaced by a new one that starts with this frame as an IDR.
     pub fn encode(&mut self, g: &Gpu, pts: i64) -> Result<u64> {
         let (f, r) = (self.frame, SLOTS as u64);
         if f >= self.next + r {
@@ -495,62 +513,118 @@ impl Encoder {
         let k = (f % r) as usize;
         // the request is taken even when this frame is an IDR anyway, or it would make the next one an IDR too
         let req = self.input.key.swap(false, Relaxed);
-        let key = req || f == 0 || f - self.idr >= self.c.gop as u64;
-        if key {
-            self.idr = f;
+        // `packet` met the invalidation, or the encode call below does
+        let mut new = self.lost;
+        if new {
+            self.renew()?;
         }
-        let props = key.then(|| {
-            let d = Cf::dict();
-            unsafe {
-                d.set(
-                    sys::kVTEncodeFrameOptionKey_ForceKeyFrame,
-                    sys::kCFBooleanTrue,
-                )
-            };
-            d
-        });
         let [n, d] = self.c.fps;
         let t = |f: u64| CMTime::new(f as i64 * d as i64, n as i32);
-        self.meta[k] = (pts, key);
-        let s = unsafe {
-            sys::VTCompressionSessionEncodeFrame(
-                self.session.0,
-                self.input.pics[k].0,
-                t(f),
-                t(1),
-                props.as_ref().map_or(ptr::null(), |p| p.0),
-                f as *mut c_void,
-                ptr::null_mut(),
-            )
-        };
-        check("VTCompressionSessionEncodeFrame", s)?;
+        self.pts[k] = pts;
+        loop {
+            let key = new || req || f == 0 || f - self.idr >= self.c.gop as u64;
+            if key {
+                self.idr = f;
+            }
+            let props = key.then(|| {
+                let d = Cf::dict();
+                unsafe {
+                    d.set(
+                        sys::kVTEncodeFrameOptionKey_ForceKeyFrame,
+                        sys::kCFBooleanTrue,
+                    )
+                };
+                d
+            });
+            let s = unsafe {
+                sys::VTCompressionSessionEncodeFrame(
+                    self.session.0,
+                    self.input.pics[k].0,
+                    t(f),
+                    t(1),
+                    props.as_ref().map_or(ptr::null(), |p| p.0),
+                    (f | if key { KEY } else { 0 }) as *mut c_void,
+                    ptr::null_mut(),
+                )
+            };
+            match s {
+                INVALID if !new => {
+                    self.renew()?;
+                    new = true;
+                }
+                s => break check("VTCompressionSessionEncodeFrame", s)?,
+            }
+        }
         self.frame += 1;
         Ok(f)
     }
 
+    /// A new session for an invalidated one, from frame `self.frame` on. The frames still in flight in the old one
+    /// come back empty (`packet`); VideoToolbox is done with their pictures.
+    fn renew(&mut self) -> Result<()> {
+        let f = self.frame;
+        // emits what the old session still can
+        unsafe { sys::VTCompressionSessionInvalidate(self.session.0) };
+        let mut q = self.out.q.lock().unwrap_or_else(|e| e.into_inner());
+        for g in self.next..f {
+            if !q.iter().any(|x| x.0 == g) {
+                q.push_back((g, INVALID, None));
+            }
+        }
+        drop(q);
+        let mut d = self.input.done.lock().unwrap_or_else(|e| e.into_inner());
+        *d = (*d).max(f);
+        self.input.freed.notify_all();
+        drop(d);
+        self.session = session(&self.c, &self.out)?;
+        (self.since, self.check, self.lost) = (f, true, false);
+        Ok(())
+    }
+
     /// The oldest frame in flight into `p`, once encoded: waits up to `ns`, returns false when nothing is in flight
-    /// or it timed out. An error is final (the frame stays the oldest, `encode` returns `Full` once the ring is
-    /// full): the stream is broken from there, make a new encoder.
+    /// or it timed out. A frame VideoToolbox dropped, or lost with an invalidated session, comes back without data
+    /// and never as a key frame (the next frame is an IDR if it was to be one). An error is final (the frame stays
+    /// the oldest, `encode` returns `Full` once the ring is full): the stream is broken from there, make a new
+    /// encoder.
     pub fn packet(&mut self, p: &mut Packet, ns: u64) -> Result<bool> {
         let f = self.next;
         if f >= self.frame {
             return Ok(false);
         }
-        let end = Instant::now() + Duration::from_nanos(ns);
+        let now = Instant::now();
+        let end = now + Duration::from_nanos(ns);
+        // a file's session may hold frames back for its look-ahead: past half the wait, 20 ms at most, it is made to
+        // emit them (the end of the stream); a low-latency one holds none
+        let push = match live(&self.c) {
+            true => end,
+            false => now + Duration::from_nanos(ns / 2).min(PUSH),
+        };
         let mut q = self.out.q.lock().unwrap_or_else(|e| e.into_inner());
         let mut pushed = false;
         loop {
             if let Some(i) = q.iter().position(|x| x.0 == f) {
                 let (_, st, sample) = q.remove(i).unwrap();
                 drop(q);
-                check("encode", st)?;
-                let k = (f % SLOTS as u64) as usize;
-                let (pts, key) = self.meta[k];
-                (p.frame, p.pts, p.dts, p.key) = (f, pts, pts, key);
+                match st {
+                    0 => {}
+                    // the next `encode` makes a new session (the old one's last frames are lost with it)
+                    INVALID => self.lost |= f >= self.since,
+                    st => return Err(Error::Os("encode", st)),
+                }
+                let pts = self.pts[(f % SLOTS as u64) as usize];
+                (p.frame, p.pts, p.dts, p.key) = (f, pts, pts, false);
                 p.data.clear();
                 p.nals.clear();
                 if let Some(s) = sample {
-                    p.key |= unsafe { sync(&s) };
+                    // a session's first: `params` (from `new`'s own session) must describe it, RTMP's avcC and the
+                    // MP4's sample entry stay as they are
+                    if self.check && f >= self.since {
+                        self.check = false;
+                        if sets(self.c.codec, &s)? != self.params {
+                            return Err(Bad("the session's parameter sets differ from params"));
+                        }
+                    }
+                    p.key = unsafe { sync(&s) };
                     unsafe { annex_b(&s, p) }?;
                 }
                 self.next += 1;
@@ -560,8 +634,7 @@ impl Encoder {
             if now >= end {
                 return Ok(false);
             }
-            // VideoToolbox may hold frames back for its own look-ahead: past half the wait it is made to emit them
-            if !pushed && end - now < Duration::from_nanos(ns / 2) {
+            if !pushed && now >= push {
                 pushed = true;
                 drop(q);
                 unsafe {
@@ -570,13 +643,20 @@ impl Encoder {
                 q = self.out.q.lock().unwrap_or_else(|e| e.into_inner());
                 continue;
             }
+            let until = if pushed { end } else { push };
             q = self
                 .out
                 .got
-                .wait_timeout(q, end - now)
+                .wait_timeout(q, until - now)
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
+    }
+
+    /// Invalidates the session as sleep or a media server restart can (tests): the next `encode` makes a new one.
+    #[doc(hidden)]
+    pub fn invalidate(&self) {
+        unsafe { sys::VTCompressionSessionInvalidate(self.session.0) };
     }
 }
 
@@ -610,12 +690,17 @@ fn picture(w: u32, h: u32, fmt: u32) -> Result<Cf> {
         .ok_or(Error::Os("CVPixelBufferCreate", r))
 }
 
+/// Whether `c` is a low-latency stream: a buffer under the files' 1 s (RTMP's 100 ms).
+fn live(c: &Cfg) -> bool {
+    c.vbv < 1000
+}
+
 /// A compression session for `c` that reports to `out`.
 fn session(c: &Cfg, out: &Out) -> Result<Cf> {
     let spec = Cf::dict();
     unsafe {
         spec.set(
-            sys::kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
+            sys::kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
             sys::kCFBooleanTrue,
         );
     }
@@ -624,7 +709,7 @@ fn session(c: &Cfg, out: &Out) -> Result<Cf> {
         Codec::H265 => sys::kCMVideoCodecType_HEVC,
     };
     let mut s = ptr::null();
-    check("VTCompressionSessionCreate", unsafe {
+    check("hardware encoder (VTCompressionSessionCreate)", unsafe {
         sys::VTCompressionSessionCreate(
             ptr::null(),
             c.w as i32,
@@ -650,7 +735,11 @@ fn session(c: &Cfg, out: &Out) -> Result<Cf> {
             "profile",
             set(sys::kVTCompressionPropertyKey_ProfileLevel, profile),
         )?;
-        set(sys::kVTCompressionPropertyKey_RealTime, sys::kCFBooleanTrue);
+        let (real, delay) = match live(c) {
+            true => (sys::kCFBooleanTrue, 0),
+            false => (sys::kCFBooleanFalse, SLOTS as i32 - 1),
+        };
+        set(sys::kVTCompressionPropertyKey_RealTime, real);
         check(
             "frame reordering",
             set(
@@ -658,9 +747,10 @@ fn session(c: &Cfg, out: &Out) -> Result<Cf> {
                 sys::kCFBooleanFalse,
             ),
         )?;
+        // frame N − delay is out when the encode of N returns, so `acquire` finds N + 1's slot free
         set(
             sys::kVTCompressionPropertyKey_MaxFrameDelayCount,
-            Cf::i32(0).0,
+            Cf::i32(delay).0,
         );
         // IDRs are forced where the GOP wants them; VideoToolbox inserts none of its own before
         set(
@@ -692,21 +782,22 @@ fn session(c: &Cfg, out: &Out) -> Result<Cf> {
             Cf::array(&[&bytes, &secs])
         };
         match c.rate {
+            // The average, with at most the buffer plus its refill in any `vbv` window (the VBV's bound; one buffer
+            // undershoots by 30 %). Not ConstantBitRate: the M4 takes it, but it pads, overshoots by 32 % with
+            // DataRateLimits, and its VBVBufferDuration (macOS 26) leaves the IDRs as they are (H.264 1080p60
+            // 8 Mbit/s, 100 ms). Neither caps an IDR at the buffer.
             Rate::Cbr(bps) => {
-                if set(
-                    sys::kVTCompressionPropertyKey_ConstantBitRate,
-                    Cf::i64(bps as i64).0,
-                ) != 0
-                {
-                    check(
-                        "bitrate",
-                        set(
-                            sys::kVTCompressionPropertyKey_AverageBitRate,
-                            Cf::i64(bps as i64).0,
-                        ),
-                    )?;
-                    set(sys::kVTCompressionPropertyKey_DataRateLimits, window(bps).0);
-                }
+                check(
+                    "bitrate",
+                    set(
+                        sys::kVTCompressionPropertyKey_AverageBitRate,
+                        Cf::i64(bps as i64).0,
+                    ),
+                )?;
+                set(
+                    sys::kVTCompressionPropertyKey_DataRateLimits,
+                    window(2 * bps).0,
+                );
             }
             Rate::Vbr(avg, peak) => {
                 check(

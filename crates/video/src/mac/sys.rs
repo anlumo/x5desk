@@ -250,7 +250,6 @@ unsafe extern "C" {
     pub static kVTCompressionPropertyKey_MaxKeyFrameInterval: CFTypeRef;
     pub static kVTCompressionPropertyKey_ExpectedFrameRate: CFTypeRef;
     pub static kVTCompressionPropertyKey_AverageBitRate: CFTypeRef;
-    pub static kVTCompressionPropertyKey_ConstantBitRate: CFTypeRef;
     pub static kVTCompressionPropertyKey_DataRateLimits: CFTypeRef;
     pub static kVTCompressionPropertyKey_ProfileLevel: CFTypeRef;
     pub static kVTCompressionPropertyKey_MinAllowedFrameQP: CFTypeRef;
@@ -263,7 +262,7 @@ unsafe extern "C" {
     pub static kVTProfileLevel_HEVC_Main_AutoLevel: CFTypeRef;
     pub static kVTProfileLevel_HEVC_Main10_AutoLevel: CFTypeRef;
     pub static kVTEncodeFrameOptionKey_ForceKeyFrame: CFTypeRef;
-    pub static kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: CFTypeRef;
+    pub static kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: CFTypeRef;
 
     pub fn VTDecompressionSessionCreate(
         alloc: CFTypeRef,
