@@ -3,10 +3,11 @@
 //! mode and access-point credentials, station mode, any other request, notifications.
 //!
 //! [`Ble`] owns one thread per adapter with a private tokio runtime (btleplug is async); nothing async leaves the
-//! crate. Calls return [`Pending`], which the caller blocks on or polls. Advertisements, notifications and lost links
-//! arrive on the [`Event`] receiver returned by [`Ble::open`]. A [`Camera`] is a cheap, cloneable handle; the link
-//! closes on [`Camera::close`] or when the last handle is dropped, and that drop waits (up to 5 s) until BlueZ has
-//! the link down: a process that exits right after an error must not leave the LE link up.
+//! crate. Calls return [`Pending`], which the caller blocks on or polls. Advertisements, notifications, lost links and
+//! (macOS) Bluetooth going off and on arrive on the [`Event`] receiver returned by [`Ble::open`]. A [`Camera`] is a
+//! cheap, cloneable handle; the link closes on [`Camera::close`] or when the last handle is dropped, and that drop
+//! waits (up to 5 s) until BlueZ has the link down: a process that exits right after an error must not leave the LE
+//! link up.
 //!
 //! Waking a sleeping camera: [`Ble::wake_up`], the app's way. Its first part is the phone advertising, not a GATT
 //! operation ([`wake`], BlueZ only); the rest is the app's BLE session up to "camera ready".
@@ -223,6 +224,11 @@ pub enum Error {
     Refused(i32),
     /// Wake advertising needs BlueZ, and a serial suffix of at most 6 bytes.
     Unsupported,
+    /// Bluetooth is off (macOS; BlueZ's own errors say so on Linux).
+    Off,
+    /// This app may not use Bluetooth (macOS: Privacy & Security > Bluetooth; btleplug reports an adapter that is
+    /// resetting or has no LE alike).
+    Denied,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -244,6 +250,8 @@ impl fmt::Display for Error {
             Error::Unauthorized(s) => write!(f, "not authorized ({s})"),
             Error::Refused(r) => write!(f, "refused on the camera ({r})"),
             Error::Unsupported => f.write_str("not supported here"),
+            Error::Off => f.write_str("Bluetooth is off"),
+            Error::Denied => f.write_str("not allowed to use Bluetooth"),
         }
     }
 }
@@ -292,7 +300,8 @@ pub(crate) fn pend<T>() -> (SyncSender<Result<T>>, Pending<T>) {
 pub(crate) type Done = Box<dyn FnOnce(Result<Vec<u8>>) + Send>;
 
 /// A peripheral as the adapter names it (BlueZ: `hci0/dev_AA_BB_CC_DD_EE_FF`; macOS: a UUID). It stays valid while
-/// the OS remembers the device, so it can be stored to reconnect without a scan.
+/// the OS remembers the device, so it can be stored to reconnect without a scan (macOS: btleplug forgets a device at
+/// every disconnect; a connect asks CoreBluetooth for it by its UUID).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Dev(pub String);
 
@@ -412,6 +421,9 @@ pub enum Event {
     Note(Dev, Note),
     /// The link to this camera is gone (not sent after [`Camera::close`] or dropping the last handle).
     Closed(Dev, Error),
+    /// Bluetooth went off or may no longer be used (`Some`), or is back (`None`), when a scan or find that was
+    /// running takes up again. macOS only.
+    Adapter(Option<Error>),
 }
 
 /// Progress of [`Ble::wake_up`], in order.
@@ -459,7 +471,8 @@ pub struct Link {
 pub struct Ble(UnboundedSender<io::Cmd>);
 
 impl Ble {
-    /// The first Bluetooth adapter.
+    /// The first Bluetooth adapter. macOS: [`Error::Denied`] when this app may not use Bluetooth; one that is off
+    /// opens, and a scan, find or connect fails with [`Error::Off`] until it is on.
     pub fn open() -> Result<(Ble, Receiver<Event>)> {
         let (tx, rx) = unbounded_channel();
         let (etx, erx) = mpsc::channel();
@@ -472,7 +485,8 @@ impl Ble {
     }
 
     /// Starts or stops scanning (no filter, like the app; BlueZ: LE only). Every advertisement arrives as
-    /// [`Event::Seen`].
+    /// [`Event::Seen`]. macOS: a scan that runs while Bluetooth goes off takes up again when it is back
+    /// ([`Event::Adapter`]).
     pub fn scan(&self, on: bool) -> Pending<()> {
         let (tx, p) = pend();
         let _ = self.0.send(io::Cmd::Scan(on, tx));
