@@ -1,6 +1,7 @@
 //! The VideoToolbox decoder on hand-made H.264 (Baseline, 64 × 64, I_PCM pictures of one luma value each, so every
 //! picture decodes exactly): a picture VideoToolbox fails on shows the one before it, never what its slot held; the
-//! decoder's gate; the scaling list parser on garbage.
+//! decoder's gate; the scaling list parser on garbage. And an open-GOP H.265 stream from the ffmpeg CLI (a test tool)
+//! with a broken picture.
 #![cfg(target_os = "macos")]
 
 use std::{
@@ -8,7 +9,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use video::{Codec, Decoder, Error, Gpu, h264};
+use video::{Codec, Decoder, Error, Gpu, h264, h265};
 
 /// GPU tests run one at a time: each opens its own device.
 static GPU: Mutex<()> = Mutex::new(());
@@ -210,8 +211,9 @@ fn conceal() {
     assert_eq!(take(&g, &mut d, &flat(1, 180)).unwrap(), (0, 180.0));
 }
 
-/// A gated decoder submits its copies holding its lock shared: a writer holds them back, but only for 50 ms (the
-/// writer may be waiting for this thread).
+/// A gated decoder submits its copies holding its lock shared: a free lock costs nothing, a writer holds them back
+/// until it lets go (taken then, not at the timeout), and one that never does only for 500 ms (the writer may be
+/// waiting for this thread).
 #[test]
 fn gate() {
     static L: RwLock<()> = RwLock::new(());
@@ -220,7 +222,11 @@ fn gate() {
     let mut d = Decoder::new(&g, Codec::H264, &sets(), S, S)
         .unwrap()
         .gated(&L);
+    let t = Instant::now();
     assert_eq!(take(&g, &mut d, &flat(0, 50)).unwrap(), (0, 50.0));
+    let e = t.elapsed();
+    println!("lock free: decode and read back {e:?}");
+    assert!(e < Duration::from_millis(250), "{e:?}");
     let (tx, rx) = mpsc::channel();
     let w = thread::spawn(move || {
         let _w = L.write().unwrap();
@@ -234,7 +240,7 @@ fn gate() {
     w.join().unwrap();
     println!("behind a writer: decode {e:?}, of it the decoder's {took:?}");
     assert!(
-        e >= Duration::from_millis(25) && took <= e,
+        e >= Duration::from_millis(25) && e < Duration::from_millis(250) && took <= e,
         "{e:?} {took:?}"
     );
     assert_eq!(luma(&g, &d, f), 60.0);
@@ -246,7 +252,7 @@ fn gate() {
     drop(w);
     println!("lock held by its own thread: decode {e:?}");
     assert!(
-        (Duration::from_millis(45)..Duration::from_secs(1)).contains(&e),
+        (Duration::from_millis(450)..Duration::from_secs(2)).contains(&e),
         "{e:?}"
     );
     assert_eq!(luma(&g, &d, f), 70.0);
@@ -323,4 +329,140 @@ fn scaling() {
     assert_eq!(p.chroma_qp2, -2);
     let e = h264::pps(&pps(true));
     assert!(matches!(e, Err(Error::Bad(_))), "{e:?}");
+}
+
+/// NAL units of an Annex B stream, without start codes, grouped into access units: a new one at each slice segment
+/// that starts a picture (H.265 first_slice_segment_in_pic_flag); parameter sets go to `params` and to their unit.
+fn units(b: &[u8], params: &mut Vec<Vec<u8>>) -> Vec<Vec<Vec<u8>>> {
+    let mut nals = vec![];
+    let (mut i, mut s) = (0, None);
+    while i + 3 <= b.len() {
+        if b[i..i + 3] == [0, 0, 1] {
+            if let Some(s) = s {
+                let mut e = i;
+                while e > s && b[e - 1] == 0 {
+                    e -= 1;
+                }
+                nals.push(b[s..e].to_vec());
+            }
+            (i, s) = (i + 3, Some(i + 3));
+        } else {
+            i += 1;
+        }
+    }
+    if let Some(s) = s {
+        nals.push(b[s..].to_vec());
+    }
+    let mut aus: Vec<Vec<Vec<u8>>> = vec![];
+    let mut cur: Vec<Vec<u8>> = vec![];
+    for n in nals {
+        let t = h265::nal_type(&n);
+        if t < 32 && n.len() > 2 && n[2] & 0x80 != 0 && cur.iter().any(|c| h265::nal_type(c) < 32) {
+            aus.push(std::mem::take(&mut cur));
+        }
+        if (32..=34).contains(&t) {
+            params.push(n.clone());
+        }
+        if t < 32 || (32..=34).contains(&t) {
+            cur.push(n);
+        }
+    }
+    aus.push(cur);
+    aus
+}
+
+/// An open-GOP H.265 stream (libx265: a CRA every 10 frames, RASL pictures after it that reference the GOP before)
+/// with a picture of the first GOP broken: the pictures after it are concealed until the next CRA, which gets a new
+/// session; that session's RASL pictures, whose references it never had, are concealed without being decoded rather
+/// than failing (or decoding garbage) every GOP from then on. The GOPs after decode clean. Skips without the ffmpeg
+/// CLI or its libx265.
+#[test]
+fn open_gop() {
+    let _l = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("x5desk-open-gop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("open.hevc");
+    let ok = std::process::Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=256x256:rate=30",
+        ])
+        .args(["-frames:v", "40", "-c:v", "libx265", "-pix_fmt", "yuv420p"])
+        .args([
+            "-x265-params",
+            "keyint=10:min-keyint=10:open-gop=1:bframes=3:b-adapt=0:scenecut=0:log-level=error",
+        ])
+        .args(["-f", "hevc"])
+        .arg(&p)
+        .status()
+        .is_ok_and(|s| s.success());
+    let b = std::fs::read(&p).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+    if !ok || b.is_empty() {
+        eprintln!("ffmpeg with libx265 could not make the clip: skipped");
+        return;
+    }
+    let mut params = vec![];
+    let aus = units(&b, &mut params);
+    let ty = |au: &[Vec<u8>]| {
+        au.iter()
+            .map(|n| h265::nal_type(n))
+            .find(|&t| t < 32)
+            .unwrap()
+    };
+    let cra: Vec<usize> = (0..aus.len()).filter(|&i| ty(&aus[i]) == 21).collect();
+    let rasl = |a: usize| {
+        (a + 1..aus.len())
+            .take_while(|&i| matches!(ty(&aus[i]), 8 | 9))
+            .count()
+    };
+    assert!(
+        cra.len() >= 3 && rasl(cra[1]) > 0,
+        "no open GOPs: CRAs at {cra:?}"
+    );
+    let g = Gpu::new().unwrap();
+    let mut d = Decoder::new(&g, Codec::H265, &params, 256, 256).unwrap();
+    // a trailing picture of the first GOP, cut short
+    let bad = (1..cra[0].max(cra[1]))
+        .find(|&i| matches!(ty(&aus[i]), 0 | 1) && i > 2)
+        .unwrap();
+    let mut failed = vec![];
+    for (i, au) in aus.iter().enumerate() {
+        let mut au: Vec<&[u8]> = au.iter().map(Vec::as_slice).collect();
+        let cut;
+        if i == bad {
+            let s = au.iter().position(|n| h265::nal_type(n) < 32).unwrap();
+            cut = au[s][..au[s].len().min(12)].to_vec();
+            au[s] = &cut;
+        }
+        let before = d.failed;
+        match d.decode(&g, &au) {
+            Ok(f) => d.release(&g, f),
+            Err(Error::Skip) => {}
+            Err(e) => panic!("unit {i}: {e}"),
+        }
+        if d.failed > before {
+            failed.push(i);
+        }
+    }
+    let (c1, c2) = (
+        cra.iter().find(|&&c| c > bad).copied().unwrap(),
+        cra.iter().filter(|&&c| c > bad).nth(1),
+    );
+    println!("CRAs at {cra:?}, unit {bad} broken; concealed: {failed:?}");
+    assert!(failed.contains(&bad), "{failed:?}");
+    // the new session's RASL pictures are concealed, all of them
+    assert!(
+        (c1 + 1..=c1 + rasl(c1)).all(|i| failed.contains(&i)),
+        "{failed:?}"
+    );
+    // and nothing from the CRA after
+    if let Some(&c2) = c2 {
+        assert!(failed.iter().all(|&i| i < c2), "{failed:?}");
+    }
 }

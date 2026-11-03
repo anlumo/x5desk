@@ -31,6 +31,8 @@ use std::{
 use wgpu_hal::api::Metal as Mtl;
 
 const WAIT: Duration = Duration::from_millis(50); // decode() waits for its slot before returning Full
+// a submit waits this long for the gate (`gated`) before it goes without: a holder that joins this thread
+const GATE_WAIT: Duration = Duration::from_millis(500);
 const USAGE: wgpu::TextureUsages = wgpu::TextureUsages::TEXTURE_BINDING
     .union(wgpu::TextureUsages::COPY_SRC)
     .union(wgpu::TextureUsages::COPY_DST);
@@ -153,6 +155,14 @@ pub struct Decoder {
     /// VideoToolbox has nothing to decode against until the next random access point (its session went away, a
     /// random access point failed): the pictures before it are concealed without decoding
     lost: bool,
+    /// A new session started at an open random access point (an H.265 CRA, an H.264 non-IDR I picture) of this POC:
+    /// its leading pictures reference the GOP before, which the session never had, so they are concealed without
+    /// decoding until the next random access point
+    lead: Option<i32>,
+    /// What each slot shows: the POC period it belongs to (a new one at every IDR, BLA or `restart`) and its POC.
+    /// Concealment copies the latest picture shown before the failed one.
+    pocs: Vec<Option<(u64, i32)>>,
+    period: u64,
 }
 
 impl std::ops::Deref for Decoder {
@@ -275,14 +285,18 @@ impl Decoder {
             good: false,
             sick: false,
             lost: false,
+            lead: None,
+            pocs: vec![None; out],
+            period: 0,
         })
     }
 
     /// Takes `gate` shared around each of its submits on wgpu's queue (the app's GATE: a surface configure fails while
     /// another thread submits, and the app retries it holding GATE exclusively); VideoToolbox's decode stays outside
     /// it. For a consumer that decodes outside that lock: one holding it around `decode` must not, as std's RwLock
-    /// queues a reader behind a waiting writer. A submit waits for it up to 50 ms, then goes without it: the thread
-    /// holding it may be waiting for this one (dropping a consumer joins its thread).
+    /// queues a reader behind a waiting writer. A submit waits for it up to 500 ms, then goes without it, in case the
+    /// thread holding it waits for this one (dropping a consumer joins its thread; the app's live thread drops the
+    /// source it uses after GATE).
     pub fn gated(mut self, gate: &'static RwLock<()>) -> Decoder {
         self.gate = Some(gate);
         self
@@ -355,6 +369,7 @@ impl Decoder {
     pub fn restart(&mut self) {
         // nothing before it stands in for a picture that fails there
         (self.reset, self.good, self.sick, self.lost) = (true, false, false, false);
+        (self.lead, self.period) = (None, self.period + 1);
         self.refs.fill(Ref::default());
         match &mut self.st {
             St::H264(s) => s.restart(),
@@ -434,21 +449,50 @@ impl Decoder {
         if std::mem::replace(&mut self.reset, false) {
             self.close();
         }
-        let key = self.key(au);
+        let (key, open) = self.key(au);
+        let poc = match self.codec {
+            Codec::H265 => p5.PicOrderCntVal,
+            Codec::H264 => p4.PicOrderCnt[0],
+        };
+        if key && !open {
+            self.period += 1; // POC starts over
+        }
+        if key {
+            self.lead = None;
+        }
         if self.sick && key {
             self.close();
             (self.sick, self.lost) = (false, false);
+            self.lead = open.then_some(poc);
+        }
+        // a leading picture of that random access point: before it in presentation order, after it in decode order
+        let lead = self.lead.is_some_and(|p| match &self.st {
+            St::H265(_) => au
+                .iter()
+                .find(|n| n.len() > 2 && self.st.kind(n) == 1)
+                .is_some_and(|n| matches!(crate::h265::nal_type(n), 8 | 9)),
+            St::H264(_) => poc < p,
+        });
+        if lead && self.good {
+            self.conceal(g, k, poc);
+            self.failed += 1;
+            return Ok(self.next(f, t0));
         }
         let image = match self.lost {
             true => Err(Bad("no reference: waiting for a random access point")),
-            false => {
-                let session = self.session()?;
-                unsafe { self.run(session) }?
-            }
+            false => match self.session() {
+                Ok(session) => unsafe { self.run(session) }?,
+                // nothing to decode with: as an invalidated session, the next random access point tries again
+                Err(e) => {
+                    self.lost = true;
+                    Err(e)
+                }
+            },
         };
         match image {
             Ok(image) => {
                 self.copy(g, &image, k)?;
+                self.pocs[k] = Some((self.period, poc));
                 self.good = true;
             }
             Err(e) => {
@@ -462,24 +506,36 @@ impl Decoder {
                 if !self.good {
                     return Err(e);
                 }
-                self.conceal(g, k);
+                self.conceal(g, k, poc);
                 self.failed += 1;
             }
         }
+        Ok(self.next(f, t0))
+    }
+
+    /// Frame `f` is in its slot: the next one is due.
+    fn next(&mut self, f: u64, t0: Instant) -> u64 {
         self.ring.done.store(f + 1, Relaxed);
         self.frame += 1;
         self.took = t0.elapsed();
-        Ok(f)
+        f
     }
 
-    /// A picture that references no other: an H.264 IDR or I picture, an H.265 IRAP picture.
-    fn key(&self, au: &[&[u8]]) -> bool {
+    /// Whether `au` is a picture that references no other (an H.264 IDR or I picture, an H.265 IRAP picture), and
+    /// whether that random access point is open: later pictures in decode order may still reference earlier ones (an
+    /// H.265 CRA, an H.264 non-IDR I picture).
+    fn key(&self, au: &[&[u8]]) -> (bool, bool) {
         let Some(n) = au.iter().find(|n| n.len() > 2 && self.st.kind(n) == 1) else {
-            return false;
+            return (false, false);
         };
         match &self.st {
-            St::H264(s) => s.slice(n).is_ok_and(|s| s.idr || s.intra),
-            St::H265(_) => (16..=21).contains(&crate::h265::nal_type(n)),
+            St::H264(s) => s
+                .slice(n)
+                .map_or((false, false), |s| (s.idr || s.intra, !s.idr)),
+            St::H265(_) => {
+                let t = crate::h265::nal_type(n);
+                ((16..=21).contains(&t), t == 21)
+            }
         }
     }
 
@@ -580,11 +636,21 @@ impl Decoder {
         Ok(())
     }
 
-    /// Copies frame f − 1's planes into slot `k` (frame f's) on wgpu's queue: the last picture decoded, or what
-    /// stands in for it. Only frame f − 1 + `slots()` writes that slot again.
-    fn conceal(&self, g: &Gpu, k: usize) {
+    /// Copies into slot `k` (frame f's, POC `poc`) on wgpu's queue the latest picture of the ring shown before it
+    /// (with B-frames that is not always the one decoded last), else frame f − 1's: the last picture decoded, or what
+    /// stands in for it. The ring's other frames are written again only `slots()` frames after them.
+    fn conceal(&mut self, g: &Gpu, k: usize, poc: i32) {
         let t = &self.ring.tex;
-        let (src, dst) = (&t[(k + t.len() - 1) % t.len()], &t[k]);
+        let n = t.len();
+        let before = (1..n)
+            .map(|i| (k + n - i) % n)
+            .filter_map(|j| Some((j, self.pocs[j]?)))
+            .filter(|(_, (e, p))| *e == self.period && *p < poc)
+            .max_by_key(|(_, (_, p))| *p)
+            .map(|x| x.0);
+        let j = before.unwrap_or((k + n - 1) % n);
+        self.pocs[k] = self.pocs[j];
+        let (src, dst) = (&t[j], &t[k]);
         let mut e = g.device.create_command_encoder(&Default::default());
         for (s, d) in src.iter().zip(dst) {
             e.copy_texture_to_texture(s.as_image_copy(), d.as_image_copy(), d.size());
@@ -592,7 +658,7 @@ impl Decoder {
         self.submit(g, e.finish());
     }
 
-    /// Submits `cb` holding the gate shared (`gated`): waits for it up to 50 ms, then submits without it.
+    /// Submits `cb` holding the gate shared (`gated`): waits for it up to `GATE_WAIT`, then submits without it.
     fn submit(&self, g: &Gpu, cb: wgpu::CommandBuffer) {
         let t = Instant::now();
         let _g = self.gate.and_then(|l| {
@@ -600,7 +666,7 @@ impl Decoder {
                 match l.try_read() {
                     Ok(x) => break Some(x),
                     Err(TryLockError::Poisoned(x)) => break Some(x.into_inner()),
-                    Err(TryLockError::WouldBlock) if t.elapsed() < WAIT => {
+                    Err(TryLockError::WouldBlock) if t.elapsed() < GATE_WAIT => {
                         thread::sleep(Duration::from_micros(200))
                     }
                     Err(TryLockError::WouldBlock) => break None,
