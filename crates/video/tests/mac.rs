@@ -495,3 +495,71 @@ fn hardware() {
         Err(e) => println!("H.264 7680x3840: {e}"),
     }
 }
+
+/// Encode speed of an 8K 360 export's stream (7680 × 3840 H.265 Main 10, 200 Mbit/s) with a file's settings and
+/// with RTMP's (real time, no frames held back), on moving value noise; prints frames per second. A measurement,
+/// not a check: `cargo test -p video --test mac speed -- --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement: 8K encode speed in both modes"]
+fn speed() {
+    let _l = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    let g = Gpu::new().unwrap();
+    let (w, h, n) = (7680u32, 3840u32, 60u64);
+    let pitch = w * 2;
+    let pics: Vec<Vec<u8>> = (0..4u32)
+        .map(|f| {
+            let mut o = vec![0u8; (pitch * (h + h / 2)) as usize];
+            let v = |x: u32, y: u32| {
+                let c = ((x + 4 * f) / 8).wrapping_mul(0x9e37_79b9)
+                    ^ ((y + 2 * f) / 8).wrapping_mul(0x85eb_ca6b);
+                (c ^ c >> 13).wrapping_mul(0xc2b2_ae35) >> 22 // 10 bits
+            };
+            for y in 0..h {
+                for x in 0..w {
+                    let at = (y * pitch + x * 2) as usize;
+                    o[at..at + 2].copy_from_slice(&((v(x, y) as u16) << 6).to_le_bytes());
+                }
+            }
+            for y in 0..h / 2 {
+                for x in 0..w {
+                    let at = ((h + y) * pitch + x * 2) as usize;
+                    o[at..at + 2].copy_from_slice(&(512u16 << 6).to_le_bytes());
+                }
+            }
+            o
+        })
+        .collect();
+    for vbv in [1000, 100] {
+        let c = Cfg {
+            codec: Codec::H265,
+            deep: true,
+            w,
+            h,
+            fps: [30, 1],
+            gop: 30,
+            rate: Rate::Cbr(200_000_000),
+            vbv,
+            quality: 0,
+            full: true,
+            chroma: 0,
+        };
+        let mut enc = Encoder::new(&g, &c).unwrap();
+        let t = Instant::now();
+        let ps = encode(
+            &g,
+            &mut enc,
+            n,
+            pitch,
+            |f| pics[(f % 4) as usize].clone(),
+            |_, _| {},
+        );
+        let s = t.elapsed().as_secs_f64();
+        let bytes: usize = ps.iter().map(|p| p.data.len()).sum();
+        println!(
+            "vbv {vbv} ms ({}): {n} frames in {s:.2} s, {:.1} fps, {:.1} Mbit/s",
+            if vbv < 1000 { "real time" } else { "file" },
+            n as f64 / s,
+            bytes as f64 * 8.0 / (n as f64 / 30.0) / 1e6
+        );
+    }
+}

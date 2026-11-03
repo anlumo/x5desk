@@ -556,6 +556,12 @@ impl Encoder {
             }
         }
         self.frame += 1;
+        // an encoder holding back as many frames as the ring has but one would leave the producer's `acquire`
+        // waiting for good (the M4's take no MaxFrameDelayCount, which would bound it): it emits them first
+        let done = *self.input.done.lock().unwrap_or_else(|e| e.into_inner());
+        if self.frame - done >= SLOTS as u64 - 1 {
+            unsafe { sys::VTCompressionSessionCompleteFrames(self.session.0, t(f)) };
+        }
         Ok(f)
     }
 
@@ -637,10 +643,18 @@ impl Encoder {
             if !pushed && now >= push {
                 pushed = true;
                 drop(q);
-                unsafe {
+                let r = unsafe {
                     sys::VTCompressionSessionCompleteFrames(self.session.0, CMTime::invalid())
                 };
                 q = self.out.q.lock().unwrap_or_else(|e| e.into_inner());
+                // a session invalidated with frames held back never calls them back: they are lost with it
+                if r == INVALID {
+                    for g in self.next..self.frame {
+                        if !q.iter().any(|x| x.0 == g) {
+                            q.push_back((g, INVALID, None));
+                        }
+                    }
+                }
                 continue;
             }
             let until = if pushed { end } else { push };
@@ -735,11 +749,13 @@ fn session(c: &Cfg, out: &Out) -> Result<Cf> {
             "profile",
             set(sys::kVTCompressionPropertyKey_ProfileLevel, profile),
         )?;
-        let (real, delay) = match live(c) {
-            true => (sys::kCFBooleanTrue, 0),
-            false => (sys::kCFBooleanFalse, SLOTS as i32 - 1),
+        // RealTime off (Apple's advice for files) costs an 8K H.265 Main 10 stream 45 % of its speed on the M4 (16.6
+        // instead of 30.3 fps, `tests/mac.rs` `speed`) for 0.2 dB: files run in real time too
+        let delay = match live(c) {
+            true => 0,
+            false => 1,
         };
-        set(sys::kVTCompressionPropertyKey_RealTime, real);
+        set(sys::kVTCompressionPropertyKey_RealTime, sys::kCFBooleanTrue);
         check(
             "frame reordering",
             set(
@@ -747,11 +763,16 @@ fn session(c: &Cfg, out: &Out) -> Result<Cf> {
                 sys::kCFBooleanFalse,
             ),
         )?;
-        // frame N − delay is out when the encode of N returns, so `acquire` finds N + 1's slot free
-        set(
+        // frame N − delay is out when the encode of N returns, so `acquire` finds N + 1's slot free. The M4's
+        // encoders don't take it (kVTPropertyNotSupportedErr) and hold nothing back with frame reordering off; `encode`
+        // bounds what one holds anyway.
+        match set(
             sys::kVTCompressionPropertyKey_MaxFrameDelayCount,
             Cf::i32(delay).0,
-        );
+        ) {
+            0 | -12900 => {}
+            s => check("frame delay", s)?,
+        }
         // IDRs are forced where the GOP wants them; VideoToolbox inserts none of its own before
         set(
             sys::kVTCompressionPropertyKey_MaxKeyFrameInterval,
