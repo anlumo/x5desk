@@ -56,13 +56,19 @@ pub enum Plug {
 
 /// The PID is not fixed (the app checks the VID only); Webcam Mode shares the VID but has no vendor interface. As a
 /// disk the X5 is `070a:4027` (§8.1), the vendor id of its USB stack, not Insta360's: the product string tells, as in
-/// the app's mass-storage test.
+/// the app's mass-storage test. macOS sets a device's configuration only for a driver of its own, and none takes the
+/// X5's app mode (`2e1a:0002`): it stays unconfigured, without interfaces, until [`Usb::open`] configures it. The X5
+/// gives up after about 15 s without a session ("switching mode failed") and goes back to `070a:4027`. Webcam Mode
+/// has its UVC interfaces there too (the system's composite driver configures it).
 fn plug(d: &DeviceInfo) -> Plug {
     match d.vendor_id() {
         0x2e1a | 0x4255
             if d.interfaces()
                 .any(|i| i.interface_number() == 0 && i.class() == 0xff) =>
         {
+            Plug::App
+        }
+        0x2e1a | 0x4255 if cfg!(target_os = "macos") && d.interfaces().next().is_none() => {
             Plug::App
         }
         0x2e1a | 0x4255 => Plug::Other,
@@ -83,6 +89,39 @@ pub fn scan() -> Plug {
         .ok()
         .and_then(|ds| ds.map(|d| plug(&d)).max())
         .unwrap_or(Plug::None)
+}
+
+/// Sets the configuration that has the vendor interface 0 unless it is the active one: macOS leaves the X5's app mode
+/// unconfigured ([`plug`]), Linux's kernel sets its first configuration itself.
+fn configure(dev: &nusb::Device) -> Result<()> {
+    let vendor = |c: &nusb::descriptors::ConfigurationDescriptor| {
+        c.interface_alt_settings()
+            .any(|i| i.interface_number() == 0 && i.class() == 0xff)
+    };
+    if dev.active_configuration().is_ok_and(|c| vendor(&c)) {
+        return Ok(());
+    }
+    let v = dev
+        .configurations()
+        .find(vendor)
+        .map(|c| c.configuration_value())
+        .ok_or(Error::NoDevice)?;
+    dev.set_configuration(v).wait()?;
+    Ok(())
+}
+
+/// Claims interface 0, retrying for up to a second while it is not there yet: the system publishes a new
+/// configuration's interfaces after `set_configuration` returns.
+fn claim(dev: &nusb::Device) -> Result<Interface> {
+    let end = Instant::now() + Duration::from_secs(1);
+    loop {
+        match dev.detach_and_claim_interface(0).wait() {
+            Err(e) if e.kind() == nusb::ErrorKind::NotFound && Instant::now() < end => {
+                thread::sleep(Duration::from_millis(20))
+            }
+            r => return Ok(r?),
+        }
+    }
 }
 
 struct Unpark(thread::Thread);
@@ -142,7 +181,9 @@ impl Usb {
             .wait()?
             .find(|d| plug(d) == Plug::App)
             .ok_or(Error::NoDevice)?;
-        let iface = di.open().wait()?.detach_and_claim_interface(0).wait()?;
+        let dev = di.open().wait()?;
+        configure(&dev)?;
+        let iface = claim(&dev)?;
         let out = iface.endpoint::<Bulk, Out>(0x01)?;
         let mut inp = iface.endpoint::<Bulk, In>(0x81)?;
         // Reads pending before anything is sent (§8.9).

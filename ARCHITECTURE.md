@@ -141,6 +141,11 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   `release` stages an MTLSharedEvent signal (`filled`) on wgpu's queue as Linux stages its semaphore; `encode` waits
   for it, forces IDRs where the GOP or `Input::key` wants them, frame reordering off (dts = pts). `params` come from a
   picture a throwaway session encodes in `new`. `Rate::Qp` is VideoToolbox's min = max frame QP; `levels` is 1.
+- USB app mode: macOS sets a device's configuration only for a driver of its own, and none takes the X5's app mode
+  (`2e1a:0002`), so it stays unconfigured, without interfaces. `link::usb`'s `plug` counts such a device as
+  `Plug::App` there, and `Usb::open` sets the configuration with the vendor interface 0 before claiming it (Linux's
+  kernel sets it itself). The X5 gives up after about 15 s without a session ("switching mode failed" on its screen)
+  and goes back to `070a:4027`: the app has to be running while the camera switches.
 - Elsewhere in the app: Webcam Mode (V4L2 UVC), OBS, the PipeWire camera and the BLE wake advertisement (BlueZ) are
   Linux only. Mounted cards are the volumes under `/Volumes` with a `DCIM` tree, the camera's the one labelled
   `Insta360 …`. Config and cache default to `~/Library/Application Support` and `~/Library/Caches` (the XDG
