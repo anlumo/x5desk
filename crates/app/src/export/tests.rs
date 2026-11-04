@@ -110,6 +110,8 @@ fn presets() {
         ([3840, 1920], false, Some(20), Some(fx::Look::Mono))
     );
     assert!(parse(d, "nope").is_err() && parse(d, "pano4k:sepia").is_err());
+    let x = parse(d, "pano4k:plates").unwrap();
+    assert!(x.plates && !x.faces && !parse(d, "pano4k:faces").unwrap().plates);
     let s = Spec {
         files: vec!["v.insv".into()],
         photo: false,
@@ -121,6 +123,7 @@ fn presets() {
         smooth: 0.5,
         follow: None,
         faces: false,
+        plates: false,
     };
     let h264 = Set {
         codec: Codec::H264,
@@ -144,7 +147,8 @@ fn presets() {
     );
 }
 
-/// A source brings its face blur: one the player previewed blurred turns it on, the next one turns it off again.
+/// A source brings its face and plate blur: one the player previewed blurred turns it on, the next one turns it off
+/// again.
 #[test]
 fn source_faces() {
     let (_l, g, cx) = gpu();
@@ -166,11 +170,119 @@ fn source_faces() {
         smooth: 0.5,
         follow: None,
         faces: true,
+        plates: false,
     };
     e.source(s.clone());
     assert!(e.set.faces);
-    e.source(Spec { faces: false, ..s });
+    e.source(Spec {
+        faces: false,
+        ..s.clone()
+    });
     assert!(!e.set.faces, "the blur stayed on for the next source");
+    e.source(Spec {
+        plates: true,
+        ..s.clone()
+    });
+    assert!(e.set.plates && e.set.faces);
+    e.source(Spec { faces: false, ..s });
+    assert!(
+        !e.set.plates,
+        "the plate blur stayed on for the next source"
+    );
+}
+
+/// The player's blur previews go into its export spec, faces and plates each on its own (the player on v606,
+/// `X5_SAMPLES`).
+#[test]
+fn player_spec() {
+    let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+        eprintln!("X5_SAMPLES unset: skipped");
+        return;
+    };
+    let (_l, g, cx) = gpu();
+    let mut p = crate::player::Player::open(
+        &g,
+        &cx,
+        crate::library::pair(&d.join("v606.insv")),
+        &egui::Context::default(),
+        &mpsc::channel().0,
+        &gyro::worker(),
+        None,
+    )
+    .unwrap();
+    for (faces, plates) in [(true, false), (false, true), (true, true), (false, false)] {
+        (p.blur, p.plates) = (faces, plates);
+        let s = p.spec().unwrap();
+        assert_eq!((s.faces, s.plates), (faces, plates));
+    }
+}
+
+/// Licence plates on v606 (`X5_SAMPLES`) through the privacy pass as an export runs it (no stabilisation): with plates
+/// alone, frame 120 has a region on the parked Mercedes's front plate (yaw 118.1°, pitch −8.6° unstabilised, measured and
+/// checked on a view aimed there; wider than tall); with faces alone none lies there.
+#[test]
+fn plates() {
+    let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+        eprintln!("X5_SAMPLES unset: skipped");
+        return;
+    };
+    let (_l, g, cx) = gpu();
+    let f = d.join("v606.insv");
+    let (fps, dur) = probe(&f).unwrap();
+    let a = shotlab::Clip::open(&f).unwrap().times[120];
+    let spec = Spec {
+        files: vec![f],
+        photo: false,
+        dur,
+        t: a,
+        view: View::default(),
+        look: Look::Perspective,
+        stab: None,
+        smooth: 0.0,
+        follow: None,
+        faces: false,
+        plates: false,
+    };
+    let (mut k, ctx, range) = (Keep::default(), egui::Context::default(), [a, a + 0.02]);
+    let mut run = |faces, plates| {
+        let set = Set {
+            faces,
+            plates,
+            stab: None,
+            ..Set::default()
+        };
+        let t = task(spec.clone(), set, fixture("plates.mp4"), range, false);
+        let (_, r) = k
+            .privacy(
+                &g,
+                &cx,
+                &t,
+                &spec.files,
+                None,
+                range,
+                fps,
+                &mut [0; 7],
+                &ctx,
+            )
+            .unwrap();
+        eprintln!("faces {faces}, plates {plates}: {}", t.it.note());
+        r.into_iter().nth(120).unwrap()
+    };
+    let want = track::dir(118.1, -8.6);
+    let on = |r: &[track::Region]| {
+        r.iter()
+            .any(|r| r.dir.angle_between(want).to_degrees() < 1.5 && r.size.x > r.size.y)
+    };
+    let p = run(false, true);
+    for r in &p {
+        let [y, x] = track::yaw_pitch(r.dir);
+        eprintln!(
+            "  plate region yaw {y:.1} pitch {x:.1}, {:.1}° × {:.1}°, score {:.2}",
+            r.size.x, r.size.y, r.score
+        );
+    }
+    assert!(on(&p), "no plate region on the Mercedes");
+    assert!(!on(&run(true, false)), "a face region on the plate");
 }
 
 /// One device for the GPU tests, one test at a time.
@@ -437,6 +549,7 @@ fn photo() {
         smooth: 0.0,
         follow: None,
         faces: false,
+        plates: false,
     };
     let mut k = Keep::default();
     let run = |k: &mut Keep, set: Set, name: &str| {
@@ -575,6 +688,7 @@ fn faces() {
         smooth: 0.0,
         follow: None,
         faces: false,
+        plates: false,
     };
     let set = Set {
         preset: None,
@@ -592,7 +706,7 @@ fn faces() {
     let (mut k, ctx, range) = (Keep::default(), egui::Context::default(), [0.0, 0.3]);
     let t = task(spec.clone(), set, fixture("x.mp4"), range, false);
     let t0 = Instant::now();
-    let (_, regs) = (k.faces(
+    let (_, regs) = (k.privacy(
         &g,
         &cx,
         &t,
@@ -600,7 +714,7 @@ fn faces() {
         None,
         range,
         fps,
-        &mut [0; 5],
+        &mut [0; 7],
         &ctx,
     ))
     .unwrap();
@@ -708,6 +822,7 @@ fn timeline_faces() {
         smooth: 0.0,
         follow: None,
         faces: false,
+        plates: false,
     };
     let set = Set {
         preset: None,
@@ -724,7 +839,7 @@ fn timeline_faces() {
     };
     let (mut k, ctx) = (Keep::default(), egui::Context::default());
     let t = task(spec.clone(), set, fixture("y.mp4"), [0.0, 0.3], false);
-    let (_, regs) = (k.faces(
+    let (_, regs) = (k.privacy(
         &g,
         &cx,
         &t,
@@ -732,7 +847,7 @@ fn timeline_faces() {
         None,
         [0.0, 0.3],
         fps,
-        &mut [0; 5],
+        &mut [0; 7],
         &ctx,
     ))
     .unwrap();

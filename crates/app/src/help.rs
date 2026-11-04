@@ -110,8 +110,8 @@ fn guide(p: Page) -> &'static [&'static str] {
              frame to the end on the AI models (loaded on first use, a minute's warm-up the first time); the bar \
              under the seek bar shows where it was tracked (green), checked by the detector (teal), missing (amber), \
              lost (red) and found again (blue). Then the view follows it, and a flat export takes that follow view.",
-            "Blur faces previews the export's privacy blur on the paused frame. Auto edit makes an editor timeline of \
-             the clip's highlights, framed automatically.",
+            "Blur faces and Blur license plates preview the export's privacy blur on the paused frame. Auto edit makes \
+             an editor timeline of the clip's highlights, framed automatically.",
         ],
         Page::Editor => &[
             "Drag recordings from the media list onto the timeline. Trim clips at their edges, split them at the \
@@ -136,7 +136,8 @@ fn guide(p: Page) -> &'static [&'static str] {
              they stitch with the direction lock. The editing presets (Stop Motion, Fly Lapse, Flip My Day, Center \
              Stage, Spin Me Around, Fly Out, Dolly Zoom) export flat or go onto the editor's timeline.",
             "Shadow Clone, Clone Loop and the subject presets follow the subject tracked with Deep Track in the \
-             player. With Blur faces on in the Export screen, a pass blurs the faces before the effect runs.",
+             player. With Blur faces or Blur license plates on in the Export screen, a pass blurs them before the \
+             effect runs.",
         ],
         Page::Camera => &[
             "Connect the X5 by USB and choose Android App on the camera's USB menu (app mode). The camera connects \
@@ -176,7 +177,8 @@ fn guide(p: Page) -> &'static [&'static str] {
              Pick a preset or set resolution, codec (H.265 8 or 10-bit, H.264), bitrate or constant quality, and \
              frame rate.",
             "360 exports carry spherical metadata; flat ones follow the view. Options: AI seam (RAFT), colour \
-             matching between the lenses, stabilisation, a look and adjustments, and privacy blur of faces.",
+             matching between the lenses, stabilisation, a look and adjustments, and privacy blur of faces and license \
+             plates (plates are found on the vehicles the detector sees).",
             "Jobs run one after another; each shows its progress and can be cancelled. Open shows the result in the \
              Library.",
         ],
@@ -202,7 +204,7 @@ struct Model(
     &'static str,
 );
 
-const MODELS: [Model; 7] = [
+const MODELS: [Model; 8] = [
     Model(
         "RAFT-small",
         "seam flow (stitch)",
@@ -241,6 +243,20 @@ const MODELS: [Model; 7] = [
         "⚠ Trained on WIDER FACE, released under CC BY-NC-ND (non-commercial); the weights are published under MIT \
          by their authors. Check the dataset's terms before any commercial use.",
         include_str!("../../track/models/LICENSE-yunet"),
+    ),
+    Model(
+        "YOLOv9-t license plates",
+        "license plate detection for the privacy blur (track)",
+        "MIT (the repository)",
+        "ankandrew/open-image-models release assets, yolo-v9-t-256-license-plates-end2end (cut before its NMS); \
+         Copyright (c) 2024 ankandrew",
+        "⚠ Its author trained it with his fork of WongKinYiu/yolov9 (GPL-3.0) on about 11,000 images collected from \
+         the web, mostly from free and open datasets, in large part those of his earlier plate detector: Open Images, \
+         a Romanian licence plate dataset (MIT) and the OpenALPR benchmark (AGPL-3.0). He calls the weights MIT from \
+         his side (no licence file names them) and leaves open whether YOLOv9's GPL-3.0 reaches them; the open \
+         questions with their sources: crates/track/models/plate-detector-licensing.md. Check before any commercial \
+         use.",
+        include_str!("../../track/models/LICENSE-yolov9-plates"),
     ),
     Model(
         "PP-HumanSeg v1 (mobile)",

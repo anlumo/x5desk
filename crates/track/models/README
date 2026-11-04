@@ -1,7 +1,9 @@
 Networks compiled into crate track by burn-onnx (build.rs), all under permissive licences whose texts are next to
-this file. Checked against onnxruntime on crops of a real frame, two crops per batch against one run each:
-src/tests.rs `vs_onnxruntime`, largest output differences 1.6e-6 (VitTrack), 2.2e-4 (YOLOX-nano, outputs up to 3.2),
-8.8e-6 (YuNet, up to 8.4). Person re-identification uses no network (last section).
+this file, but for the plate detector: its repository is MIT, its weights have no licence of their own and were trained
+with GPL-3.0 code (plate-detector-licensing.md). Checked against onnxruntime on crops of a real frame, two crops per
+batch against one run each: src/tests.rs `vs_onnxruntime`, largest output differences 1.6e-6 (VitTrack), 2.2e-4
+(YOLOX-nano, outputs up to 3.2), 8.8e-6 (YuNet, up to 8.4), 6.7e-4 on the plate detector's boxes (pixels, up to 554)
+and 2.1e-6 on its scores (up to 0.91). Person re-identification uses no network (last section).
 
 object_tracking_vittrack_2023sep.onnx
   What: VitTrack, single-object tracker (OSTrack-style one-stream ViT), template 1x3x128x128 + search 1x3x256x256 ->
@@ -51,6 +53,64 @@ face_detection_yunet_2023mar.onnx
   views 15°, 30° and 60° wide it found the EU plate on a car only at 60° (score 0.38; the zoo's threshold is 0.8) and
   a board of three black plates only at 15° (0.32 to 0.59), and on the samples (no plate near) it scored columns and
   façades at 0.6 to 0.74. Not included.
+
+yolo-v9-t-256-license-plates.onnx
+  What: YOLOv9-t licence plate detector (one class, 1.9 M parameters), 1x3x256x256 RGB 0..1 -> 1x5x1344 (centre x, y,
+        width, height in input pixels, score after sigmoid; anchors of strides 8 / 16 / 32, row-major). It is the
+        published yolo-v9-t-256-license-plates-end2end.onnx cut before its NMS by onnx.utils.Extractor at
+        /model/model.22/Concat_5_output_0 (renamed "output"), nothing else changed: the source's producer fields
+        (pytorch 2.3.1) are kept, which the sha256 below depends on (as the Extractor writes them, the same graph
+        hashes 338bef273b8449253383b7088712720ae6fd1b003483de91280950f0181e4c4a). The end2end graph ends in
+        Transpose, a MatMul (centre to corners) and NonMaxSuppression (IoU 0.45, score 0.001, 100 boxes per class)
+        with Gathers to n x 7 (batch, x0, y0, x1, y1, class, score). burn-onnx 0.22 generates code for that NMS, but it
+        needs burn's `vision` feature (whose NMS on cubecl reads boxes and scores back to the CPU per batch entry), and
+        that feature's dependencies do not resolve in this workspace (burn-dataset, globwalk, aws-lc-rs missing from
+        the local registry index), so the NMS runs in Rust (src/plates.rs, IoU 0.45 as the graph's). Plates are
+        searched on square crops around YOLOX's vehicles (src/plates.rs `plate_crops`).
+  Source: https://github.com/ankandrew/open-image-models, release "assets", the URL the package's hub.py downloads:
+          https://github.com/ankandrew/open-image-models/releases/download/assets/yolo-v9-t-256-license-plates-end2end.onnx
+          No checksum is published (GitHub's asset digest is empty for the 2024 uploads). sha256 of the download
+          938a34ce868da69432fd5a872f24337b86e3dc8753426e16ae18163f615c2a2c, of the cut file here
+          2104d7433b65dc49de4a215e652b6271c27371a0d2b96ff7843994769359bcf1.
+  Licence: repository MIT, Copyright (c) 2024 ankandrew -> LICENSE-yolov9-plates. The weights carry no licence of
+           their own; the author calls everything MIT from his side but leaves open whether YOLOv9's GPL-3.0 reaches
+           exported weights (open-image-models issue #20, 2026-06-08). He trained with his fork of WongKinYiu/yolov9,
+           ankandrew/yolov9 (GPL-3.0; issue #22, fast-alpr issue #47). The open questions, with sources:
+           plate-detector-licensing.md.
+  Training data: not published. The author: about 11,000 images collected from the web, mostly from free and open
+           datasets (issue #14), most of them the training sets of his earlier detector LocalizadorPatentes (issue #9):
+           Open Images, the Romanian licence plate dataset (RobertLucian/license-plate-dataset, MIT) and the OpenALPR
+           benchmarks (openalpr/benchmarks, AGPL-3.0); not UFPR-ALPR (issue #24).
+  Chosen on the samples (2026-11-03): v606 (daylight) and v627 (night) at Pariser Platz have distant parked and passing
+    cars, v635 (a zoo hall) none. Every frame stitched from full-resolution lenses to a 7680 wide equirect, YOLOX
+    vehicles (score >= 0.1) over sphere() every 3rd frame and every 10th, every variant on their crops. Labels by eye:
+    candidates of all six variants (score >= 0.2) linked into tracks, each track judged on patches of its crops, then
+    every resulting label on every 20th frame checked on a patch (100 kept of 158; position interpolated only between
+    detections at most 12 frames apart). So the labels are plates some variant found: plates no variant found are
+    missing (one seen by eye: a blue van's front plate on v606 frame 780, half hidden). Labels are under the fixtures
+    dir as <clip>_plates.txt (tests/footage.rs `plates`), never in git.
+    Uncovered after Hide (detections every 3rd frame, as the export), per width at 7680 <10 / 10-20 / 20-40 px, of
+    v606 30 / 26 / 1 and v627 0 / 9 / 34 labelled plates, at score 0.2; and the area (deg^2 per labelled frame) of the
+    regions that hold no labelled plate, v606 / v627 / v635; offline from the scan (scratch test plates_eval):
+      t-256: v606 11 / 5 / 0, v627 0 / 2 / 0 (18 of 100); area 24.2 / 31.1 / 10.6
+      t-384: 14 / 8 / 0, 0 / 3 / 3 (28); area 68.5 / 190.5 / 2.2 (boxes up to 18 degrees on facades)
+      t-416: 16 / 6 / 0, 0 / 7 / 5 (34); 26.1 / 39.8 / 3.7
+      t-512: 17 / 10 / 1, 0 / 9 / 20 (57); 35.0 / 64.9 / 55.8
+      s-608: 15 / 12 / 0, 0 / 3 / 5 (35); 4.6 / 70.9 / 3.9
+      t-640: 17 / 12 / 0, 0 / 6 / 8 (43); 12.7 / 12.2 / 0.3
+    t-256 at 0.1 / 0.15 / 0.25 / 0.3: 13 / 16 / 23 / 28 of 100, area on v606 36.9 / 27.9 / 19.5 / 16.9. The vehicle
+    score: a third of the labels (26 of 57 by day, 8 of 43 at night) lie only in crops of vehicles scored 0.1 to 0.25;
+    the real pass (tests/footage.rs `plates` with the vehicle score at 0.1 / 0.15 / 0.25, plate score 0.2) leaves
+    18 / 26 / 41 of 100 uncovered (v606 16 / 22 / 33, v627 2 / 4 / 8), area 24.1 / 16.6 / 6.7 (v606), 31.3 / 17.6 / 8.3
+    (v627), 9.1 / 4.5 / 0 (v635). The threshold (0.2, export.rs PMIN) and the vehicle score (0.1, src/plates.rs VMIN:
+    the coverage end) were chosen on the same labels they are judged on. Milliseconds per searched frame, median, scan (6 variants in
+    turn on the same crops; v606 3 crops a frame, v627 10): YOLOX vehicles 16.6 / 16.4, plates t-256 13.2 / 25.5,
+    t-384 11.5 / 28.1, t-416 11.9 / 32.4, t-512 13.2 / 44.3, s-608 69.9 / 250.8, t-640 30.3 / 77.1; faces (20 tiles)
+    31.9 / 31.1.
+  Considered: EgoBlur's licence plate models (Meta, ego_blur_lp gen1 / gen2, Apache-2.0 per the repository and the
+    model licence page, TorchScript Faster R-CNN) as the accuracy reference: not evaluated, as their only documented
+    source is a form at https://www.projectaria.com/tools/egoblur that takes an e-mail address and the acceptance of
+    the model licence. LPD-YuNet: see YuNet above.
 
 No model: person re-identification (src/reid.rs)
   What: LOMO, the local maximal occurrence feature of Liao, Hu, Zhu, Li, "Person Re-identification by Local Maximal

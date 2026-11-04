@@ -2,9 +2,10 @@
 //! another on the export thread. A video job is a one-clip editor timeline (crate edit) that crate export renders:
 //! 360 or the player's view, H.265 8 / 10-bit or H.264 at a bitrate or a constant QP, the source's or another frame
 //! rate, RAFT or template seam, colour matching, stabilisation, a look and adjustments (crate fx). A frame grab is the
-//! same job into a JPEG (GPano for 360). Privacy blur: a pass first finds the faces on the clip stitched as the export
-//! stitches it (crate track: YuNet on `face_tiles`, linked over frames by `Hide`), then the job's effect hook blurs
-//! their regions: `track::Blur` in a 360 frame, [`Blur`] in a flat view (an editor timeline: a pass per clip over its
+//! same job into a JPEG (GPano for 360). Privacy blur: a pass first finds the faces and licence plates on the clip
+//! stitched as the export stitches it (crate track: YuNet on `face_tiles`, the plate detector on crops around YOLOX's
+//! vehicles; each linked over frames by a `Hide` of its own), then the job's effect hook blurs their regions:
+//! `track::Blur` in a 360 frame, [`Blur`] in a flat view (an editor timeline: a pass per clip over its
 //! source span, each output frame blurred with its clip's regions in its view). Photos (the camera's equirect JPEGs)
 //! render here too: the view through the preview, the effects, the blur, a JPEG. A Deep Track follow view
 //! (`Spec::follow`) turns a flat output onto the subject, the track's directions turned into the frame the export
@@ -34,6 +35,10 @@ const CANCELLED: &str = "cancelled";
 const MIN: f32 = 0.5;
 const STEP: usize = 3;
 const FACES_W: u32 = 3072;
+/// Plate detection: the plate detector's score, on an equirect this wide (the lenses' own resolution: a plate is a few
+/// pixels wide), faces then on it too.
+pub(crate) const PMIN: f32 = 0.2;
+pub(crate) const PLATES_W: u32 = 7680;
 
 /// What a job is made from: the player's or the library's file and how it shows it.
 #[derive(Clone, Debug)]
@@ -50,8 +55,9 @@ pub struct Spec {
     pub smooth: f64,
     /// a flat output follows this Deep Track subject instead of `view`'s direction
     pub follow: Option<Arc<crate::ai::Track>>,
-    /// the player previews the face blur: the export starts with it on
+    /// the player previews the face or plate blur: the export starts with it on
     pub faces: bool,
+    pub plates: bool,
 }
 
 impl Spec {
@@ -81,6 +87,7 @@ impl Spec {
             smooth: gyro::SMOOTH,
             follow: None,
             faces: false,
+            plates: false,
         })
     }
 
@@ -93,8 +100,8 @@ impl Spec {
     }
 }
 
-/// `x` with `<preset key>[:<look>][:faces][:noraft][:qp=<n>]` (a look by its name's first word, any case: vivid,
-/// warm, cool, film, black, teal).
+/// `x` with `<preset key>[:<look>][:faces][:plates][:noraft][:qp=<n>]` (a look by its name's first word, any case:
+/// vivid, warm, cool, film, black, teal).
 pub(crate) fn parse(mut x: Set, tok: &str) -> Result<Set, String> {
     let mut w = tok.split(':');
     let k = w.next().unwrap_or("");
@@ -102,6 +109,7 @@ pub(crate) fn parse(mut x: Set, tok: &str) -> Result<Set, String> {
     for o in w {
         match o {
             "faces" => x.faces = true,
+            "plates" => x.plates = true,
             "noraft" => x.raft = false,
             _ if o.starts_with("qp=") => {
                 x.qp = Some(o[3..].parse().map_err(|_| format!("bad {o}"))?)
@@ -193,6 +201,7 @@ pub struct Set {
     pub amt: f32,
     pub adj: fx::Params,
     pub faces: bool,
+    pub plates: bool,
     /// JPEG quality of grabs and photos
     pub jq: u8,
 }
@@ -249,6 +258,7 @@ impl Default for Set {
             amt: 1.0,
             adj: fx::Params::default(),
             faces: false,
+            plates: false,
             jq: 92,
         };
         s.apply(0);
@@ -259,8 +269,8 @@ impl Default for Set {
 #[derive(Clone, Debug, PartialEq)]
 pub enum St {
     Queued,
-    /// face detection: frames done of all
-    Faces(usize, usize),
+    /// privacy pass: frames done of all, what it finds
+    Privacy(usize, usize, &'static str),
     Run(export::Progress),
     /// the final progress, wall time (s)
     Done(export::Progress, f64),
@@ -268,7 +278,8 @@ pub enum St {
     Cancelled,
 }
 
-/// A queued job: what it makes, its state (the export thread writes it), its cancel flag, a note (faces found).
+/// A queued job: what it makes, its state (the export thread writes it), its cancel flag, a note (faces and plates
+/// found).
 pub struct Item {
     pub name: String,
     pub path: PathBuf,
@@ -385,13 +396,13 @@ impl Exp {
         }
     }
 
-    /// Makes `s` the source: the whole clip, its stabilisation, its face blur.
+    /// Makes `s` the source: the whole clip, its stabilisation, its face and plate blur.
     pub fn source(&mut self, s: Spec) {
         self.range = [0.0, s.dur];
         if !s.photo {
             (self.set.stab, self.set.smooth) = (s.stab, s.smooth);
         }
-        self.set.faces = s.faces;
+        (self.set.faces, self.set.plates) = (s.faces, s.plates);
         self.src = Some(s);
         self.err = None;
     }
@@ -525,6 +536,7 @@ impl Exp {
             smooth: e.smooth,
             follow: None,
             faces: false,
+            plates: false,
         };
         if let Some(m) = x.check(&s, false, [0.0, dur]) {
             return Err(m);
@@ -832,8 +844,14 @@ impl Exp {
                 });
                 ui.end_row();
                 ui.label("Privacy");
-                ui.checkbox(&mut x.faces, "Blur faces")
-                    .on_hover_text("Find faces first (YuNet), then blur them in every frame");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut x.faces, "Blur faces")
+                        .on_hover_text("Find faces first (YuNet), then blur them in every frame");
+                    ui.checkbox(&mut x.plates, "Blur license plates").on_hover_text(
+                        "Find license plates first (YOLOv9 on the vehicles YOLOX finds), then blur them in every \
+                         frame",
+                    );
+                });
                 ui.end_row();
                 ui.label("Destination");
                 ui.horizontal_wrapped(|ui| {
@@ -927,7 +945,7 @@ impl Exp {
                         .on_hover_text(i.path.display().to_string());
                     let st = i.st();
                     ui.horizontal(|ui| match &st {
-                        St::Queued | St::Faces(..) | St::Run(_) => {
+                        St::Queued | St::Privacy(..) | St::Run(_) => {
                             if ui.button("Cancel").clicked() {
                                 i.stop.store(true, Relaxed);
                             }
@@ -945,9 +963,9 @@ impl Exp {
                     });
                     let (f, s) = match &st {
                         St::Queued => (0.0, "queued".into()),
-                        St::Faces(k, n) => (
+                        St::Privacy(k, n, w) => (
                             *k as f32 / (*n).max(1) as f32,
-                            format!("finding faces: {k} of {n} frames"),
+                            format!("finding {w}: {k} of {n} frames"),
                         ),
                         St::Run(p) if p.done == 0 => (0.0, "starting…".into()),
                         St::Run(p) => (
@@ -1024,8 +1042,8 @@ pub(crate) fn scoped<T>(
     }
 }
 
-/// What the export thread keeps between jobs: the RAFT model, the effects' pipelines (the face detector is the app's
-/// `ai::MODELS`).
+/// What the export thread keeps between jobs: the RAFT model, the effects' pipelines (the face and plate detectors are
+/// the app's `ai::MODELS`).
 #[derive(Default)]
 struct Keep {
     raft: Option<stitch::Raft>,
@@ -1054,7 +1072,7 @@ fn worker(g: Arc<Gpu>, cx: Ctx, ctx: egui::Context, rx: mpsc::Receiver<Task>) {
     }
 }
 
-/// Face regions per frame.
+/// Privacy regions per frame.
 type Regs = Vec<Vec<track::Region>>;
 
 impl Keep {
@@ -1075,8 +1093,8 @@ impl Keep {
             false => t.range,
         };
         let a = a.min(b - fps.t(1)).max(0.0);
-        let faces = match x.faces {
-            true => Some(self.faces(g, cx, t, &s.files, stab, [a, b], src, &mut [0; 5], ctx)?),
+        let faces = match x.faces || x.plates {
+            true => Some(self.privacy(g, cx, t, &s.files, stab, [a, b], src, &mut [0; 7], ctx)?),
             false => None,
         };
         let mut tl = edit::Timeline::new(fps);
@@ -1197,7 +1215,7 @@ impl Keep {
     }
 
     /// An editor timeline: its cuts, speeds, freeze frames, views (flat output), looks and soundtrack through
-    /// `export::Cut::Edit`, with the job's output, codec, seam and face blur settings.
+    /// `export::Cut::Edit`, with the job's output, codec, seam and privacy blur settings.
     fn timeline(
         &mut self,
         g: &Arc<Gpu>,
@@ -1208,14 +1226,14 @@ impl Keep {
     ) -> Result<export::Progress, String> {
         let (x, fps) = (&t.set, e.tl.out.fps);
         let stab = e.stab.map(|l| (l, e.smooth));
-        let fx = match x.faces {
+        let fx = match x.faces || x.plates {
             true => {
-                // a face pass per clip over its source span; an output frame takes its clip's regions and view
-                let (mut sets, mut sum) = (vec![], [0; 5]);
+                // a privacy pass per clip over its source span; an output frame takes its clip's regions and view
+                let (mut sets, mut sum) = (vec![], [0; 7]);
                 for c in &e.tl.clips {
                     let f = &e.files[c.file as usize];
                     let (r, _) = probe(&f[0])?;
-                    sets.push(self.faces(g, cx, t, f, stab, [c.a, c.b], r, &mut sum, ctx)?);
+                    sets.push(self.privacy(g, cx, t, f, stab, [c.a, c.b], r, &mut sum, ctx)?);
                 }
                 let tl = e.tl.clone();
                 Some(hook(g, !x.pano, sets, move |n, _| {
@@ -1267,11 +1285,13 @@ impl Keep {
         })
     }
 
-    /// The faces of source span `[a, b]` (s) of clip `f` every `STEP` frames, found on the clip stitched with the
-    /// poses the export stitches with, linked into regions for every frame; the frame times. Adds its counts to `sum`
-    /// (detections, frames searched, tracks, frames blurred, frames) and notes the totals.
+    /// The faces and licence plates (as the job's settings ask) of source span `[a, b]` (s) of clip `f` every `STEP`
+    /// frames, found on the clip stitched with the poses the export stitches with (`PLATES_W` wide with plates, else
+    /// `FACES_W`), each linked into regions for every frame by a `Hide` of its own; the frame times. Adds its counts to
+    /// `sum` (face and plate detections, frames searched, face and plate tracks, frames blurred, frames) and notes the
+    /// totals.
     #[allow(clippy::too_many_arguments)]
-    fn faces(
+    fn privacy(
         &mut self,
         g: &Arc<Gpu>,
         cx: &Ctx,
@@ -1280,26 +1300,33 @@ impl Keep {
         stab: Option<(stab::Lock, f64)>,
         [a, b]: [f64; 2],
         fps: edit::Rate,
-        sum: &mut [usize; 5],
+        sum: &mut [usize; 7],
         ctx: &egui::Context,
     ) -> Result<(Vec<f64>, Regs), String> {
         if f.len() > 1 {
-            return Err("face blur: recordings in a file per lens are not supported yet".into());
+            return Err("privacy blur: recordings in a file per lens are not supported yet".into());
         }
         let c = shotlab::Clip::open(&f[0])?;
         let poses = match stab {
             Some((l, s)) => Some(
                 c.poses(l, s)
-                    .ok_or("face blur: no IMU record to stabilise with")?,
+                    .ok_or("privacy blur: no IMU record to stabilise with")?,
             ),
             None => None,
+        };
+        let (fa, pl) = (t.set.faces, t.set.plates);
+        let what = match (fa, pl) {
+            (true, false) => "faces",
+            (false, true) => "license plates",
+            _ => "faces and license plates",
         };
         let k0 = clip::frame_at(&c.times, a);
         let k1 = c.times.partition_point(|&x| x < b - 1e-3).max(k0 + 1) - 1;
         let ks: Vec<usize> = (k0..=k1).step_by(STEP).collect();
         let (it, n, tiles) = (&t.it, ks.len(), track::face_tiles());
-        let (mut hide, mut pano, mut i, mut found) = (track::Hide::new(), None, 0, 0);
-        it.set(St::Faces(0, n));
+        let (mut hide, mut pano, mut i, mut found) =
+            ([track::Hide::new(), track::Hide::new()], None, 0, [0; 2]);
+        it.set(St::Privacy(0, n, what));
         crate::ai::MODELS.with(g, false, Some(ctx), |ai| {
             // shotlab decodes and submits each stitch on this thread between the calls: a surface configure the UI
             // retries waits for that (no wait there depends on another thread); the detection runs under BURN instead,
@@ -1308,7 +1335,7 @@ impl Keep {
             c.frames(
                 g,
                 cx,
-                FACES_W,
+                if pl { PLATES_W } else { FACES_W },
                 false,
                 &ks,
                 |k| c.pose(k, poses.as_deref()),
@@ -1322,34 +1349,57 @@ impl Keep {
                     // burn submits throughout
                     let r = {
                         let _b = crate::BURN.lock();
-                        ai.faces(p, &tiles, MIN)
+                        let f = if fa {
+                            ai.faces(p, &tiles, MIN)
+                        } else {
+                            Ok(vec![])
+                        };
+                        let q = if pl { ai.plates(p, PMIN) } else { Ok(vec![]) };
+                        f.and_then(|f| Ok([f, q?]))
                     };
                     gate = Some(crate::GATE.read());
-                    let r = r?;
-                    found += r.len();
-                    hide.push(k, r);
+                    for (j, r) in r?.into_iter().enumerate() {
+                        found[j] += r.len();
+                        hide[j].push(k, r);
+                    }
                     i += 1;
-                    it.set(St::Faces(i, n));
+                    it.set(St::Privacy(i, n, what));
                     ctx.request_repaint();
                     Ok(())
                 },
             )
         })?;
-        let r = hide.regions(c.times.len(), fps.num as f32 / fps.den as f32);
+        let fps = fps.num as f32 / fps.den as f32;
+        let [rf, rp] = hide.each_ref().map(|h| h.regions(c.times.len(), fps));
+        let r: Regs = rf
+            .into_iter()
+            .zip(rp)
+            .map(|(a, b)| [a, b].concat())
+            .collect();
         let on = r[k0..=k1].iter().filter(|r| !r.is_empty()).count();
-        let tr = hide.tracks(fps.num as f32 / fps.den as f32).len();
-        for (s, x) in sum.iter_mut().zip([found, n, tr, on, k1 + 1 - k0]) {
+        let tr = hide.each_ref().map(|h| h.tracks(fps).len());
+        for (s, x) in sum
+            .iter_mut()
+            .zip([found[0], found[1], n, tr[0], tr[1], on, k1 + 1 - k0])
+        {
             *s += x;
         }
-        let [found, n, tr, on, all] = *sum;
-        *it.note.lock().unwrap_or_else(|e| e.into_inner()) = format!(
-            "{found} face detections on {n} frames, {tr} tracks, blurred on {on} of {all} frames"
-        );
+        let [ff, fp, n, tf, tp, on, all] = *sum;
+        let (d, tr) = match (fa, pl) {
+            (true, false) => (format!("{ff} face"), tf.to_string()),
+            (false, true) => (format!("{fp} plate"), tp.to_string()),
+            _ => (
+                format!("{ff} face and {fp} plate"),
+                format!("{tf} and {tp}"),
+            ),
+        };
+        *it.note.lock().unwrap_or_else(|e| e.into_inner()) =
+            format!("{d} detections on {n} frames, {tr} tracks, blurred on {on} of {all} frames");
         Ok((c.times, r))
     }
 
-    /// A photo: its 360 or its view through the preview, the look and adjustments, the faces blurred; a JPEG (GPano
-    /// for 360).
+    /// A photo: its 360 or its view through the preview, the look and adjustments, the faces and plates blurred; a JPEG
+    /// (GPano for 360).
     fn photo(&mut self, g: &Arc<Gpu>, cx: &Ctx, t: &Task) -> Result<export::Progress, String> {
         let (s, x) = (&t.spec, &t.set);
         let (px, w0, h0) = photo::load(&s.files[0])?;
@@ -1383,27 +1433,34 @@ impl Keep {
             mode: Mode::Equirect,
             ..View::default()
         };
-        // faces on an equirect of the photo at the face tiles' resolution, in the photo's frame
-        let regs = match x.faces {
+        // faces and plates on an equirect of the photo at the face tiles' resolution (`PLATES_W` with plates), in the
+        // photo's frame
+        let (regs, nf) = match x.faces || x.plates {
             true => {
-                let d = tex(
-                    FACES_W,
-                    FACES_W / 2,
-                    U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
-                );
+                let ew = if x.plates { PLATES_W } else { FACES_W };
+                let d = tex(ew, ew / 2, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING);
                 let dv = d.create_view(&Default::default());
                 let mut e = g.device.create_command_encoder(&Default::default());
-                pv.render(&mut e, &dv, [FACES_W, FACES_W / 2], &eq, &pano);
+                pv.render(&mut e, &dv, [ew, ew / 2], &eq, &pano);
                 {
                     let _g = crate::GATE.read();
                     g.queue.submit([e.finish()]);
                 }
                 crate::ai::MODELS.with(g, false, None, |ai| {
                     let _b = crate::BURN.lock();
-                    ai.faces(&ai.pano(&dv), &track::face_tiles(), MIN)
+                    let p = ai.pano(&dv);
+                    let mut r = match x.faces {
+                        true => ai.faces(&p, &track::face_tiles(), MIN)?,
+                        false => vec![],
+                    };
+                    let nf = r.len();
+                    if x.plates {
+                        r.extend(ai.plates(&p, PMIN)?);
+                    }
+                    Ok((r, nf))
                 })?
             }
-            false => vec![],
+            false => (vec![], 0),
         };
         let out = tex(
             w,
@@ -1449,9 +1506,12 @@ impl Keep {
             g.queue.submit([e.finish()]);
             stitch::read_texture(&g.device, &g.queue, &out)
         };
-        *t.it.note.lock().unwrap_or_else(|e| e.into_inner()) = match x.faces {
-            true => format!("{} faces blurred", regs.len()),
-            false => String::new(),
+        let np = regs.len() - nf;
+        *t.it.note.lock().unwrap_or_else(|e| e.into_inner()) = match (x.faces, x.plates) {
+            (true, false) => format!("{nf} faces blurred"),
+            (false, true) => format!("{np} plates blurred"),
+            (true, true) => format!("{nf} faces and {np} plates blurred"),
+            _ => String::new(),
         };
         let b = export::jpeg::encode(
             &px,
@@ -1473,8 +1533,8 @@ impl Keep {
     }
 }
 
-/// The export's effect hook that blurs the face regions of each output frame: `pick(k, t)` gives output frame k at
-/// time t (s) its face pass (an index into `sets`: frame times, regions per frame), source time and view (that of a
+/// The export's effect hook that blurs the privacy regions of each output frame: `pick(k, t)` gives output frame k at
+/// time t (s) its privacy pass (an index into `sets`: frame times, regions per frame), source time and view (that of a
 /// `flat` output; unused on a 360 one); the regions of the pass's frame with the latest time ≤ that source time blur.
 fn hook(
     g: &Gpu,

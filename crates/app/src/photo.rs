@@ -206,6 +206,7 @@ impl Photo {
             smooth: 0.0,
             follow: None,
             faces: false,
+            plates: false,
         }
     }
 

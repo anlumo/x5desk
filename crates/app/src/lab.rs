@@ -559,7 +559,8 @@ impl Lab {
         x.apply(self.pano);
         let st = self.stab(&s);
         // output frame k is source frame k0 + k: the source's frame rate
-        // (the Export screen's face blur runs before the effect, on the sphere: what the effect keeps is blurred)
+        // (the Export screen's face and plate blur runs before the effect, on the sphere: what the effect keeps is
+        // blurred)
         (x.stab, x.smooth, x.fps) = (st.0, st.1, None);
         self.ask = Some(Ask::Export(
             s,

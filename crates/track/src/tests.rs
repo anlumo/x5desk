@@ -2,7 +2,7 @@
 //! crops of a real frame (`X5_SAMPLES`): both see the same input tensors, read back from the GPU. Scratch files (a
 //! 19 MB frame among them) go to `X5_FIXTURES` (default: the system temp dir).
 
-use crate::{Ai, Cam, Crops, In, Job, SIDE, det, dir, privacy, read, reid, vit};
+use crate::{Ai, Cam, Crops, In, Job, SIDE, det, dir, plates, privacy, read, reid, vit};
 use glam::{Vec2, Vec3};
 use std::{path::PathBuf, process::Command, sync::OnceLock};
 
@@ -273,6 +273,61 @@ fn vs_onnxruntime() {
             "YuNet tile {t}: max |burn − ort| {e:.2e} over 12 outputs (max |ort| {m:.1}, {faces} stride-8 cells > 0.6)"
         );
         assert!(e < 1e-3 * m.max(1.0), "YuNet tile {t}");
+    }
+
+    // plates: a 45° crop and the 16° crop of a grid over the frame the detector is surest of (scores near a decision
+    // compared too) in one batch against one run each
+    let nets = ai.plate_nets().unwrap();
+    let s = plates::PS as usize;
+    let a = (s / 8).pow(2) + (s / 16).pow(2) + (s / 32).pow(2);
+    let run = |ai: &Ai, c: &[Cam]| {
+        let jobs: Vec<Job> = (c.iter().enumerate())
+            .map(|(i, c)| Job::new(c, [plates::PS; 2], i * 3 * s * s, &plates::NORM, p.w))
+            .collect();
+        let _ = ai.crop(&nets.pc, &p, &jobs, &nets.pi);
+        nets.pi.t.clone().narrow(0, 0, c.len())
+    };
+    let grid: Vec<Cam> = (0..420)
+        .map(|i| {
+            let d = dir((i / 7) as f32 * 6.0, (i % 7) as f32 * 10.0 - 30.0);
+            Cam::new(d, Vec3::Z, Vec2::splat(0.14))
+        })
+        .collect();
+    let mut best = (0f32, grid[0]);
+    for ch in grid.chunks(8) {
+        let v = read(nets.net.forward(run(&ai, ch)));
+        for (i, c) in ch.iter().enumerate() {
+            let m = v[i * 5 * a + 4 * a..][..a]
+                .iter()
+                .fold(0f32, |m, &x| m.max(x));
+            if m > best.0 {
+                best = (m, *c);
+            }
+        }
+    }
+    let x = run(
+        &ai,
+        &[
+            Cam::new(dir(90.0, -5.0), Vec3::Z, Vec2::splat(0.41)),
+            best.1,
+        ],
+    );
+    let o = read(nets.net.forward(x.clone()));
+    let xi = read(x);
+    for t in 0..2 {
+        let r = ort(
+            &py,
+            "yolo-v9-t-256-license-plates.onnx",
+            &d,
+            &[("images", &xi[t * 3 * s * s..][..3 * s * s], &[1, 3, s, s])],
+        );
+        // boxes (pixels) and scores (0..1) apart: the boxes' scale would hide a score's error
+        let (e, m) = diff(&o[t * 5 * a..][..4 * a], &r[0][..4 * a]);
+        let (es, ms) = diff(&o[t * 5 * a + 4 * a..][..a], &r[0][4 * a..]);
+        eprintln!(
+            "Plates crop {t}: max |burn − ort| boxes {e:.2e} (max |ort| {m:.1}), scores {es:.2e} (max {ms:.3})"
+        );
+        assert!(e < 1e-3 * m.max(1.0) && es < 1e-4, "plates crop {t}");
     }
 }
 
@@ -607,6 +662,111 @@ fn hide() {
             "frame {k}: the other"
         );
     }
+}
+
+/// Plate decoding: rows centre x, y, width, height, score per anchor; boxes over the threshold, non-maximum suppression
+/// at IoU 0.45 (two boxes of one plate are one, a box beside it stays), and a box's place on the sphere through its
+/// crop.
+#[test]
+fn plate_decode() {
+    let n = 6;
+    // (cx, cy, w, h, score): a plate, the same plate shifted 4 px, another one, one under the threshold
+    let rows = [
+        (100.0, 200.0, 60.0, 14.0, 0.9),
+        (104.0, 201.0, 60.0, 14.0, 0.6),
+        (300.0, 120.0, 40.0, 10.0, 0.3),
+        (50.0, 50.0, 30.0, 8.0, 0.1),
+    ];
+    let mut v = vec![0f32; 5 * n];
+    for (a, r) in rows.iter().enumerate() {
+        for (i, x) in [r.0, r.1, r.2, r.3, r.4].into_iter().enumerate() {
+            v[i * n + a] = x;
+        }
+    }
+    let b = plates::boxes(&v, n, 0.25);
+    assert_eq!(b.len(), 3, "{b:?}");
+    assert_eq!(b[0], ([70.0, 193.0, 130.0, 207.0], 0.9));
+    let k = privacy::nms(b, 0.45);
+    assert_eq!(
+        k.iter().map(|x| x.1).collect::<Vec<_>>(),
+        [0.9, 0.3],
+        "{k:?}"
+    );
+    // a box a quarter of a 20° crop wide and a sixteenth high, in its middle: a quarter, a sixteenth of the crop's
+    // tangent-plane width, on its axis
+    let s = plates::PS as f32;
+    let c = Cam::new(
+        dir(40.0, -10.0),
+        Vec3::Z,
+        Vec2::splat(10f32.to_radians().tan()),
+    );
+    let (edge, r) = privacy::place(
+        &c,
+        [
+            s / 2.0 - s / 8.0,
+            s / 2.0 - s / 32.0,
+            s / 2.0 + s / 8.0,
+            s / 2.0 + s / 32.0,
+        ],
+        s,
+        0.7,
+    );
+    let w = 2.0 * (0.25 * 10f32.to_radians().tan()).atan().to_degrees();
+    let h = 2.0 * (0.0625 * 10f32.to_radians().tan()).atan().to_degrees();
+    assert!(!edge && r.dir.angle_between(c.f) < 1e-4, "{r:?}");
+    assert!(
+        (r.size - Vec2::new(w, h)).abs().max_element() < 1e-3,
+        "{r:?} against {w} × {h}"
+    );
+}
+
+/// Crops around vehicles: other classes left out, one crop per object (car and truck boxes of one van), the surest
+/// first and at most `CMAX`; each centred on its vehicle and upright, its side the vehicle's larger one times `GROW`
+/// within `FMIN`..`FMAX`, so the whole vehicle is in it.
+#[test]
+fn plate_crops() {
+    use crate::{Det, VEHICLES, plate_crops};
+    let d = |cls, y: f32, w: f32, h: f32, score| Det {
+        dir: dir(y, -3.0),
+        size: Vec2::new(w, h),
+        cls,
+        score,
+    };
+    let v = [
+        d(2, 30.0, 12.0, 5.0, 0.8),
+        d(7, 30.2, 12.5, 5.2, 0.5),
+        d(0, 60.0, 3.0, 9.0, 0.9),
+        d(5, -90.0, 120.0, 40.0, 0.7),
+        d(3, 150.0, 2.0, 2.5, 0.6),
+    ];
+    let c = plate_crops(&v);
+    assert_eq!(c.len(), 3, "{c:?}");
+    let side = |c: &Cam| 2.0 * c.ext.x.atan().to_degrees();
+    for (c, x, want) in [
+        (&c[0], &v[0], 12.0 * plates::GROW),
+        (&c[1], &v[3], plates::FMAX),
+        (&c[2], &v[4], plates::FMIN),
+    ] {
+        assert!(c.f.angle_between(x.dir) < 1e-4 && c.u.z > 0.0 && (c.ext.x - c.ext.y).abs() < 1e-6);
+        assert!((side(c) - want).abs() < 1e-3, "{} against {want}", side(c));
+        if want > x.size.max_element() {
+            let t = (x.size / 2.0).to_array().map(|a| a.to_radians().tan());
+            let b = Cam::new(x.dir, Vec3::Z, Vec2::from(t));
+            for p in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                let q = c.px(b.ray(Vec2::new(p.0, p.1))).unwrap();
+                assert!(q.abs().max_element() < 1.0, "vehicle corner at {q}");
+            }
+        }
+    }
+    let many: Vec<Det> = (0..40)
+        .map(|i| d(VEHICLES[i % 4], i as f32 * 9.0, 4.0, 3.0, i as f32 / 40.0))
+        .collect();
+    let c = plate_crops(&many);
+    assert_eq!(c.len(), plates::CMAX);
+    assert!(
+        c[0].f.angle_between(many[39].dir) < 1e-4,
+        "the surest first"
+    );
 }
 
 /// Synthetic signals over 30 s: people from 10 to 14 s, loud from 20 to 23 s, the camera turning from 4 to 6 s. The

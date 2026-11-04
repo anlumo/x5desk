@@ -1,8 +1,7 @@
 //! Privacy: faces (YuNet, OpenCV zoo, MIT) found on perspective tiles of the sphere, then linked over frames into
 //! tracks ([`Hide`]) that are interpolated between detections and carried on a little past their ends, so that a
-//! face the detector misses for a few frames stays hidden; [`crate::Blur`] blurs the regions in the equirect. No licence
-//! plates: the open one (LPD-YuNet, OpenCV zoo, Apache-2.0) is trained on Chinese plates and found an EU plate at
-//! score 0.38 or not at all (`models/README`).
+//! face the detector misses for a few frames stays hidden; [`crate::Blur`] blurs the regions in the equirect. Licence
+//! plates take the same path (`plates`).
 
 use crate::{Ai, Cam, Crops, In, Job, Norm, Pano, det::px_iou, iou, read};
 use burn::tensor::Tensor;
@@ -27,7 +26,7 @@ pub(crate) const NORM: Norm = Norm {
     bgr: true,
 };
 
-/// A face on the sphere: centre, angular width and height (degrees; upright as `Cam::new(dir, Z)`), score.
+/// A face or plate on the sphere: centre, angular width and height (degrees; upright as `Cam::new(dir, Z)`), score.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Region {
     pub dir: Vec3,
@@ -140,7 +139,7 @@ impl Ai {
 }
 
 /// Per tile non-maximum suppression on pixel boxes, best first.
-fn nms(mut b: Vec<([f32; 4], f32)>, t: f32) -> Vec<([f32; 4], f32)> {
+pub(crate) fn nms(mut b: Vec<([f32; 4], f32)>, t: f32) -> Vec<([f32; 4], f32)> {
     b.sort_by(|x, y| y.1.total_cmp(&x.1));
     let mut keep: Vec<([f32; 4], f32)> = vec![];
     for x in b {
@@ -152,7 +151,7 @@ fn nms(mut b: Vec<([f32; 4], f32)>, t: f32) -> Vec<([f32; 4], f32)> {
 }
 
 /// A pixel box of a tile `s` pixels wide of `cam` on the sphere, and whether it touches the tile's edge.
-fn place(cam: &Cam, b: [f32; 4], s: f32, score: f32) -> (bool, Region) {
+pub(crate) fn place(cam: &Cam, b: [f32; 4], s: f32, score: f32) -> (bool, Region) {
     let b = b.map(|v| 2.0 * v / s - 1.0);
     let (dir, size) = cam.boxed(b);
     (
@@ -163,7 +162,7 @@ fn place(cam: &Cam, b: [f32; 4], s: f32, score: f32) -> (bool, Region) {
 
 /// Across tiles: a box touching its tile's edge yields to one that doesn't, then the higher score wins (overlap over
 /// the smaller box > 0.5).
-fn merge(mut all: Vec<(bool, Region)>) -> Vec<Region> {
+pub(crate) fn merge(mut all: Vec<(bool, Region)>) -> Vec<Region> {
     all.sort_by(|x, y| x.0.cmp(&y.0).then(y.1.score.total_cmp(&x.1.score)));
     let mut out: Vec<Region> = vec![];
     for (_, d) in all {
@@ -175,19 +174,22 @@ fn merge(mut all: Vec<(bool, Region)>) -> Vec<Region> {
 }
 
 /// Seconds: detections of one track at most this far apart are bridged; a track goes on this long before its first
-/// and after its last detection, at the speed it came and went (the frames between detections the face was already or
-/// still there: a key frame's detection is too weak to start or continue a track, the face is not gone).
+/// and after its last detection, at the speed it came and went (the frames between detections the face or plate was
+/// already or still there: a key frame's detection is too weak to start or continue a track, it is not gone).
 const GAP: f32 = 1.0;
 const PAD: f32 = 0.25;
 /// Regions grow by this over the detected box (hair, ears, a chin turned away: the same both ways, since a box's
 /// axes are its tile's, turned up to 27° against the region's upright frame on the tiles at ±60°), plus degrees (the
-/// box's jitter, about the same in pixels for any face: ±4 px for the smallest ones).
+/// box's jitter, about the same in pixels for any face: ±4 px for the smallest ones). Tuned on faces; plates take the
+/// same, checked on the samples' parked and slow cars only (tests/footage.rs `plates`), not on passing traffic near the
+/// camera.
 const GROW: f32 = 1.5;
 const MARGIN: f32 = 1.0;
 
 /// Privacy regions of a clip: detections per frame (every frame, or every few: the tracks bridge them), linked over
-/// frames. Directions are in the frame of the equirect the faces were found on: blur frames stitched with the same
-/// poses (another pose, say another stabilisation, moves the faces away from their regions).
+/// frames; faces and plates each in a `Hide` of their own. Directions are in the frame of the equirect they were found
+/// on: blur frames stitched with the same poses (another pose, say another stabilisation, moves them away from their
+/// regions).
 #[derive(Default)]
 pub struct Hide {
     keys: Vec<(usize, Vec<Region>)>,
@@ -198,7 +200,7 @@ impl Hide {
         Self::default()
     }
 
-    /// The faces of frame `k`, in frame order.
+    /// The faces (or plates) of frame `k`, in frame order.
     pub fn push(&mut self, k: usize, d: Vec<Region>) {
         self.keys.push((k, d));
     }

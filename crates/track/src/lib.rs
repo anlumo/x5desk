@@ -1,9 +1,11 @@
 //! AI tracking and framing for 360 video with open models on the app's shared wgpu device (PLAN.md group 11):
-//! VitTrack (OpenCV zoo) follows one subject, YOLOX-nano (Megvii) detects people and objects, YuNet (OpenCV zoo) finds
-//! faces for the privacy blur ([`Hide`], [`Blur`]); people are told apart by LOMO (Liao et al.), a hand-made appearance
+//! VitTrack (OpenCV zoo) follows one subject, YOLOX-nano (Megvii) detects people and objects; for the privacy blur
+//! ([`Hide`], [`Blur`]) YuNet (OpenCV zoo) finds faces and a YOLOv9-t plate detector (open-image-models) finds licence
+//! plates on crops around YOLOX's vehicles; people are told apart by LOMO (Liao et al.), a hand-made appearance
 //! feature with no model, so the tracker finds its subject again; [`Scorer`] picks highlights and [`timeline`] cuts
-//! them into an editor timeline. The networks are Apache-2.0 or MIT (`models/README`), compiled in by burn-onnx
-//! (`build.rs`) and run by burn.
+//! them into an editor timeline. The networks are Apache-2.0 or MIT (`models/README`), but for the plate detector: its
+//! repository is MIT, its weights have no licence of their own and were trained with GPL-3.0 code
+//! (`models/plate-detector-licensing.md`). They are compiled in by burn-onnx (`build.rs`) and run by burn.
 //!
 //! Everything happens on the sphere: a network only ever sees a perspective crop of the stitched equirect, centred
 //! where it should look and written straight into its input tensor by `crop.wgsl`, so seams and poles never reach it.
@@ -15,6 +17,7 @@ mod blur;
 mod det;
 mod frame;
 mod high;
+mod plates;
 mod privacy;
 mod reid;
 #[cfg(test)]
@@ -25,6 +28,7 @@ pub use blur::Blur;
 pub use det::{CLASSES, Det, SIDE, ring, sphere};
 pub use frame::{Framer, LOW, Shot};
 pub use high::{BIN, Highlight, Scorer, Sig, timeline};
+pub use plates::{VEHICLES, plate_crops};
 pub use privacy::{Hide, Region, face_tiles};
 pub use reid::{DIM, Emb, Gallery, sim};
 pub use vit::{Sample, Seen, State, Subject, Tracker, smooth};
@@ -307,6 +311,8 @@ pub struct Ai {
     rc: Crops,
     /// Face detection, made on first use.
     pv: Option<Box<privacy::Nets>>,
+    /// Plate detection, made on first use.
+    pl: Option<Box<plates::Nets>>,
     /// Thumbnail crops, made on first use.
     th: Option<(Crops, In)>,
     /// Wait for each crop pass and sum the times into `times` (a GPU sync per crop).
@@ -377,6 +383,7 @@ impl Ai {
             ri: In::new(&bd, [reid::MAX, 3, rh, rw])?,
             rc: Crops::new(dev, &g[1], reid::MAX, reid::MAX * 3 * rw * rh),
             pv: None,
+            pl: None,
             th: None,
             dev: bd,
             wd: dev.clone(),
@@ -418,7 +425,8 @@ impl Ai {
     /// Runs the tracker and the detector at every batch size (1 to 9 tiles) once on a black panorama, so that the
     /// kernels of each shape are compiled and autotuned before the first frame that needs them instead of stalling it
     /// (seconds on the first use of each; 16 to 39 s in all here). Call once after `new`, off the UI thread. Faces
-    /// (`faces`) compile on their first call (11 to 17 s here); re-identification and thumbnails run no network.
+    /// (`faces`) and plates (`plates`) compile on their first call (11 to 17 s here for faces); re-identification and
+    /// thumbnails run no network.
     pub fn warm(&mut self) -> Result<(), String> {
         let t = self.wd.create_texture(&wgpu::TextureDescriptor {
             label: None,

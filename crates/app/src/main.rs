@@ -25,8 +25,9 @@
 //! (the Webcam Mode instead, 2880 × 1440, 1920 × 1080 or a capture replayed), `cstats=<s>` (print the preview's
 //! statistics after s seconds of pictures, exit), `view=` / `yaw=<deg>` (its view), `level=off`, `pace=off` (the viewer shows the newest
 //! picture instead of going at the camera's pace; the live outputs keep it), `src=preview|webcam`
-//! (the Live screen's source). Export: `export=<preset>[:<look>][:faces][:noraft][:qp=<n>]` (repeatable; queue an
-//! export of the first file once it shows, from the player's view and stabilisation; presets by key, e.g. `pano57`,
+//! (the Live screen's source). Export: `export=<preset>[:<look>][:faces][:plates][:noraft][:qp=<n>]` (repeatable;
+//! queue an export of the first file once it shows, from the player's view and stabilisation; presets by key, e.g.
+//! `pano57`,
 //! `flat1080`; looks by their first word: vivid, warm, cool, film, black, teal), `frame=360|flat` (a frame grab of the
 //! frame shown, repeatable), `dest=<dir>` (where they go), `aim=<yaw>/<pitch>[/<fov>]` (the first file's view, degrees); the Export screen shows, each job's end is printed, and the run ends
 //! (or takes its screenshot) once the queue is done. Editor: `editor` (start on the Editor screen), `project=<file>`
@@ -49,13 +50,14 @@
 //! the run is over, and an `export=` waits for it and takes the follow view),
 //! `restab=off|free|horizon|direction[/<σ>]` (once that run is over, the player's stabilisation changes to this, as its
 //! controls would: the follow view turns into the new frame), `blur`
-//! (the player's face blur preview), `autoedit[=<preset>]` (an auto edit of the first file onto the editor's
-//! timeline; with a preset key exported once made, the run ending with the queue), `ebox=<x0>/<y0>/<x1>/<y1>` (Deep
+//! (the player's face blur preview), `plates` (its licence plate blur preview), `autoedit[=<preset>]` (an auto edit
+//! of the first file onto the editor's timeline; with a preset key exported once made, the run ending with the
+//! queue), `ebox=<x0>/<y0>/<x1>/<y1>` (Deep
 //! Track in the editor's viewer at the playhead once it is set up: that box, 0..1 of the export preset's flat frame
 //! (`epreset=`; 16:9 for a 360 one, as `box=`) whatever the window, its subject printed), `lab=<effect>` (start on
 //! Shot Lab with that effect, e.g. `trails`, `shadow`, `center`), `lrange=<a>/<b>` (its range, s), `lpre` (make its
-//! preview), `lexp=<preset>[:faces]` (export it with that preset, and the face blur, once the clip, and for the subject
-//! effects the `box=` run, is there; the run ends with the queue).
+//! preview), `lexp=<preset>[:faces][:plates]` (export it with that preset, and the face or plate blur, once the clip,
+//! and for the subject effects the `box=` run, is there; the run ends with the queue).
 
 mod ai;
 mod album;
@@ -131,10 +133,11 @@ pub struct Test {
     pub import: bool,
     /// the simulated Bluetooth adapter: its camera on HomeNet from an earlier session
     pub ble: Option<bool>,
-    /// the player's Deep Track box, face blur preview, an auto edit (and the preset to export it with)
+    /// the player's Deep Track box, face and plate blur preview, an auto edit (and the preset to export it with)
     pub tbox: Option<[f32; 4]>,
     pub restab: Option<(gyro::Mode, f64)>,
     pub blur: bool,
+    pub plates: bool,
     pub autoedit: Option<String>,
     pub lab: lab::Hook,
 }
@@ -243,6 +246,7 @@ impl Test {
                 }
                 "ebox" => t.ed.tbox = quad(v),
                 "blur" => t.blur = true,
+                "plates" => t.plates = true,
                 "autoedit" => t.autoedit = Some(v.into()),
                 "lab" => (t.lab.on, t.lab.fx) = (true, lab::Fx::parse(v)),
                 "lrange" => {

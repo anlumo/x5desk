@@ -2,7 +2,7 @@
 //! per app run on first use and warmed up off the UI thread. Deep Track ([`Track`]): a subject the user boxes in a
 //! view, followed through the clip on a background thread (the player's follow view, the editor's reframing keys,
 //! Shot Lab's subject). Auto edit ([`Auto`]): highlights cut along the auto framer's path into an editor timeline.
-//! [`faces`]: the faces of one frame for the viewers' privacy preview.
+//! [`privacy`]: the faces and licence plates of one frame for the viewers' privacy preview.
 //!
 //! Frames come from `shotlab::Clip` (decoded and stitched on the shared device) with the stabilisation the result is
 //! for: directions are in the frame of that stitch, which is the frame the player's and the exporter's views turn in.
@@ -519,31 +519,44 @@ pub fn outline(v: &View, r: egui::Rect, dir: Vec3, size: Vec2) -> Option<[egui::
     Some(o)
 }
 
-/// The faces on frame `k` of `file` stitched with `stab` (the viewer's frame), for the privacy preview.
-pub fn faces(
+/// The faces and licence plates (`find`: faces, plates) on frame `k` of `file` stitched with `stab` (the viewer's
+/// frame), for the privacy preview: the regions, the faces first, and how many of them are faces. With plates the
+/// equirect is the export's `PLATES_W` wide, faces then on it too.
+pub fn privacy(
     g: &Arc<Gpu>,
     cx: &stitch::Ctx,
     file: &std::path::Path,
     stab: (gyro::Mode, f64),
     k: usize,
-) -> Result<Vec<track::Region>, String> {
+    [fa, pl]: [bool; 2],
+) -> Result<(Vec<track::Region>, usize), String> {
     let c = shotlab::Clip::open(file)?;
     let poses = poses(&c, stab)?;
     let tiles = track::face_tiles();
     MODELS.with(g, false, None, |ai| {
-        let mut out = vec![];
+        let mut out = (vec![], 0);
         let mut gate = Some(GATE.read());
         c.frames(
             g,
             cx,
-            W,
+            if pl { crate::export::PLATES_W } else { W },
             false,
             &[k],
             |k| c.pose(k, poses.as_deref()),
             |tex, _| {
                 gate.take();
                 let _b = BURN.lock();
-                out = ai.faces(&ai.pano(&tex.create_view(&Default::default())), &tiles, 0.5)?;
+                let p = ai.pano(&tex.create_view(&Default::default()));
+                let mut r = if fa {
+                    ai.faces(&p, &tiles, 0.5)?
+                } else {
+                    vec![]
+                };
+                let n = r.len();
+                if pl {
+                    r.extend(ai.plates(&p, crate::export::PMIN)?);
+                }
+                out = (r, n);
                 Ok(())
             },
         )?;

@@ -6,8 +6,8 @@
 //!
 //! Deep Track (`ai`): with Deep Track armed, a box dragged around a subject in the perspective view starts a run from
 //! the frame shown; the run's states show under the seek bar, the box on the picture, and once it is over the view
-//! follows the subject (the follow view the export takes). Privacy preview: the faces of the paused frame blurred as
-//! the export blurs them. Auto edit hands the clip to the editor.
+//! follows the subject (the follow view the export takes). Privacy preview: the faces and licence plates of the
+//! paused frame blurred as the export blurs them. Auto edit hands the clip to the editor.
 //!
 //! The library shares the player with the live output thread (`Arc<Mutex<Player>>`), which takes the frame due and
 //! draws it on its own clock while the UI may not run (a hidden window); the audio player sits on a thread of its own
@@ -377,9 +377,10 @@ impl Src {
 
 /// Source id, frame, rolling-shutter term on.
 pub(crate) type Key = (u64, usize, bool);
-/// The faces of a frame of the main file under a stabilisation (lock, σ bits).
-type FaceKey = (usize, gyro::Mode, u64);
-type Faces = Result<Vec<track::Region>, String>;
+/// The faces and plates (as asked: faces, plates) of a frame of the main file under a stabilisation (lock, σ bits).
+type FaceKey = (usize, gyro::Mode, u64, [bool; 2]);
+/// The regions, the faces first, and how many of them are faces.
+type Faces = Result<(Vec<track::Region>, usize), String>;
 pub(crate) type Reply = Result<(Key, wgpu::Texture), String>;
 
 /// A RAFT stitch request: copies of the paused frame's lens pictures and what to stitch them with.
@@ -765,10 +766,11 @@ pub struct Player {
     arm: bool,
     pub follow: bool,
     from: Option<egui::Pos2>,
-    /// privacy preview: the paused frame's faces blurred; the faces found, a search out, the unblurred picture and the
-    /// pass
+    /// privacy preview: the paused frame's faces, plates blurred; the regions found (and how many are faces), a search
+    /// out, the unblurred picture and the pass
     pub blur: bool,
-    regs: Option<(FaceKey, Vec<track::Region>)>,
+    pub plates: bool,
+    regs: Option<(FaceKey, Vec<track::Region>, usize)>,
     fq: Option<(FaceKey, mpsc::Receiver<Faces>)>,
     bt: Option<(wgpu::Texture, wgpu::TextureView, crate::export::Blur)>,
     /// the editor is to make an auto edit of this clip
@@ -872,6 +874,7 @@ impl Player {
             follow: false,
             from: None,
             blur: false,
+            plates: false,
             regs: None,
             fq: None,
             bt: None,
@@ -881,7 +884,7 @@ impl Player {
         };
         if let Some(t) = test {
             (p.tbox, p.restab) = (t.tbox, t.restab);
-            p.blur = t.blur;
+            (p.blur, p.plates) = (t.blur, t.plates);
             p.auto = t.autoedit.is_some();
             p.vol = t.vol.unwrap_or(p.vol).clamp(0.0, 1.0);
             p.audio.cmd(Cmd::Vol(p.vol));
@@ -1004,7 +1007,12 @@ impl Player {
 
     fn fkey(&self) -> Option<FaceKey> {
         let p = self.held?;
-        Some((self.main_k(&p), self.stab.mode, self.stab.smooth.to_bits()))
+        Some((
+            self.main_k(&p),
+            self.stab.mode,
+            self.stab.smooth.to_bits(),
+            [self.blur, self.plates],
+        ))
     }
 
     /// Deep Track of subject `s` (`ai::subject` of a box in the perspective view), from the frame shown to the clip's
@@ -1194,12 +1202,15 @@ impl Player {
             && let Ok(x) = r.try_recv()
         {
             match x {
-                Ok(v) => self.regs = Some((*k, v)),
-                Err(e) => (self.note, self.blur) = (Some(format!("Face blur preview: {e}")), false),
+                Ok((v, n)) => self.regs = Some((*k, v, n)),
+                Err(e) => {
+                    (self.note, self.blur, self.plates) =
+                        (Some(format!("Blur preview: {e}")), false, false)
+                }
             }
             (self.fq, self.dirty) = (None, true);
         }
-        if self.blur
+        if (self.blur || self.plates)
             && !self.playing
             && self.want.is_none()
             && self.fq.is_none()
@@ -1217,7 +1228,7 @@ impl Player {
             );
             thread::spawn(move || {
                 let _ = tx.send(crate::export::scoped(&g.device, || {
-                    ai::faces(&g, &cx, &f, st, k.0)
+                    ai::privacy(&g, &cx, &f, st, k.0, k.3)
                 }));
                 ctx.request_repaint();
             });
@@ -1281,7 +1292,7 @@ impl Player {
             || self
                 .held
                 .is_some_and(|p| self.pano.as_ref().is_some_and(|x| x.0 == self.pose(&p).1));
-        let faces = !self.blur
+        let faces = !(self.blur || self.plates)
             || self.playing
             || (self.fkey()).is_some_and(|k| self.regs.as_ref().is_some_and(|r| r.0 == k));
         self.want.is_none()
@@ -1311,6 +1322,7 @@ impl Player {
             smooth: self.stab.smooth,
             follow: (self.trk.clone()).filter(|t| self.follow && t.st() == ai::St::Done),
             faces: self.blur,
+            plates: self.plates,
         })
     }
 
@@ -1321,7 +1333,7 @@ impl Player {
         let Some(p) = self.held else { return };
         // the privacy preview: the picture into a texture of its own, blurred from there into the viewer's
         let regs = (self.regs.as_ref())
-            .filter(|r| self.blur && !self.playing && Some(r.0) == self.fkey())
+            .filter(|r| (self.blur || self.plates) && !self.playing && Some(r.0) == self.fkey())
             .map(|r| &r.1);
         let mut bt = self.bt.take();
         if regs.is_some()
@@ -1516,6 +1528,15 @@ impl Player {
                 self.dirty = true;
             }
             if ui
+                .toggle_value(&mut self.plates, "Blur license plates")
+                .on_hover_text(
+                    "Preview the export's license plate blur on the paused frame (the export starts with it on)",
+                )
+                .changed()
+            {
+                self.dirty = true;
+            }
+            if ui
                 .add_enabled(main, egui::Button::new("Auto edit"))
                 .on_hover_text("Highlights of this clip, framed automatically, as an editor timeline")
                 .clicked()
@@ -1628,14 +1649,26 @@ impl Player {
                 st => st.line("Deep Track"),
             });
         }
-        if self.blur {
+        if self.blur || self.plates {
             let n = (self.regs.as_ref())
                 .filter(|r| Some(r.0) == self.fkey())
-                .map(|r| r.1.len());
+                .map(|r| (r.2, r.1.len() - r.2));
+            let (w, f) = match (self.blur, self.plates) {
+                (true, false) => ("Face", "faces"),
+                (false, true) => ("Plate", "plates"),
+                _ => ("Face and plate", "faces and plates"),
+            };
             lines.push(match (self.playing, n) {
-                (true, _) => "Face blur preview: pause on a frame".into(),
-                (_, Some(n)) => format!("Face blur preview: {n} faces"),
-                _ => "Face blur preview: finding faces…".into(),
+                (true, _) => format!("{w} blur preview: pause on a frame"),
+                (_, Some((n, p))) => {
+                    let c = |n: usize, s| format!("{n} {s}{}", if n == 1 { "" } else { "s" });
+                    match (self.blur, self.plates) {
+                        (true, false) => format!("{w} blur preview: {}", c(n, "face")),
+                        (false, true) => format!("{w} blur preview: {}", c(p, "plate")),
+                        _ => format!("{w} blur preview: {}, {}", c(n, "face"), c(p, "plate")),
+                    }
+                }
+                _ => format!("{w} blur preview: finding {f}…"),
             });
         }
         if let Some(h) = self.held

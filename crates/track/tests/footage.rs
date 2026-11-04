@@ -150,6 +150,11 @@ struct Dec {
 
 impl Dec {
     fn new(c: &Clip, n: usize) -> Dec {
+        Dec::sized(c, n, S)
+    }
+
+    /// At `ls` × `ls`.
+    fn sized(c: &Clip, n: usize, ls: u32) -> Dec {
         // DUAL_STREAM_TRACK_REVERSE (4): track 0 holds lens 1
         let tracks = if c.m.stream == 4 { [1, 0] } else { [0, 1] };
         let kids = tracks
@@ -158,14 +163,14 @@ impl Dec {
                     .args(["-v", "error", "-hwaccel", "vulkan", "-i"])
                     .arg(&c.path)
                     .args(["-map", &format!("0:v:{t}"), "-frames:v", &n.to_string()])
-                    .args(["-vf", &format!("scale={S}:{S}"), "-f", "rawvideo"])
+                    .args(["-vf", &format!("scale={ls}:{ls}"), "-f", "rawvideo"])
                     .args(["-pix_fmt", "nv12", "-"])
                     .stdout(Stdio::piped())
                     .spawn()
                     .expect("ffmpeg")
             })
             .into();
-        let n = (S * S * 3 / 2) as usize;
+        let n = (ls * ls * 3 / 2) as usize;
         Dec {
             kids,
             buf: [vec![0; n], vec![0; n]],
@@ -200,6 +205,16 @@ struct Rig {
 
 impl Rig {
     fn new(g: &Gpu, c: &Clip) -> Rig {
+        Rig::sized(g, c, S, EW)
+    }
+
+    /// Lenses `ls` × `ls` (S in `new`), the equirect `ew` × `ew` / 2 (EW × EH).
+    fn sized(g: &Gpu, c: &Clip, ls: u32, ew: u32) -> Rig {
+        let fr = Frame {
+            w: ls,
+            h: ls,
+            ..c.fr
+        };
         let cx = Ctx::new(&g.dev, &g.q);
         let t = |w, h, format, usage| {
             g.dev.create_texture(&wgpu::TextureDescriptor {
@@ -220,8 +235,8 @@ impl Rig {
         use wgpu::TextureUsages as U;
         let tex = [0, 1].map(|_| {
             t(
-                S,
-                S,
+                ls,
+                ls,
                 wgpu::TextureFormat::NV12,
                 U::TEXTURE_BINDING | U::COPY_DST,
             )
@@ -234,19 +249,20 @@ impl Rig {
         let rgba = wgpu::TextureFormat::Rgba8Unorm;
         Rig {
             src: [cx.src(&tex[0]), cx.src(&tex[1])],
-            st: Stitcher::new(&cx, &c.cal, c.fr, EW, EH, o).unwrap(),
-            pv: Preview::new(&cx, &c.cal, c.fr, blend, Some(0.1), rgba),
+            st: Stitcher::new(&cx, &c.cal, fr, ew, ew / 2, o).unwrap(),
+            pv: Preview::new(&cx, &c.cal, fr, blend, Some(0.1), rgba),
             view: t(VW, VH, rgba, U::RENDER_ATTACHMENT | U::COPY_SRC),
             tex,
         }
     }
 
     fn upload(&self, g: &Gpu, nv: &[Vec<u8>; 2]) {
-        let n = (S * S) as usize;
+        let ls = self.tex[0].width();
+        let n = (ls * ls) as usize;
         for (t, nv) in self.tex.iter().zip(nv) {
             for (aspect, data, w, bpp) in [
-                (wgpu::TextureAspect::Plane0, &nv[..n], S, 1),
-                (wgpu::TextureAspect::Plane1, &nv[n..], S / 2, 2),
+                (wgpu::TextureAspect::Plane0, &nv[..n], ls, 1),
+                (wgpu::TextureAspect::Plane1, &nv[n..], ls / 2, 2),
             ] {
                 g.q.write_texture(
                     wgpu::TexelCopyTextureInfo {
@@ -1362,6 +1378,139 @@ fn privacy() {
             eprintln!("  frame {k}: {} regions blurred", reg.len());
         }
     }
+}
+
+/// Labelled frames; plates with their frames.
+type Labels = (Vec<usize>, Vec<(usize, Region)>);
+
+/// Plates of a clip labelled by eye (`<clip>_plates.txt` in `X5_FIXTURES`: `f <k>` for each labelled frame, every plate
+/// on it as `p <k> <x> <y> <z> <w> <h>`, its direction and angular width and height); None without the file.
+fn labels(name: &str) -> Option<Labels> {
+    let s = std::fs::read_to_string(fixtures().join(format!("{name}_plates.txt"))).ok()?;
+    let (mut f, mut p) = (vec![], vec![]);
+    for l in s.lines() {
+        let v: Vec<&str> = l.split_whitespace().collect();
+        let x = |i: usize| v[i].parse::<f32>().unwrap();
+        match v.first() {
+            Some(&"f") => f.push(v[1].parse().unwrap()),
+            Some(&"p") => p.push((
+                v[1].parse().unwrap(),
+                Region {
+                    dir: Vec3::new(x(2), x(3), x(4)).normalize(),
+                    size: Vec2::new(x(5), x(6)),
+                    score: 1.0,
+                },
+            )),
+            _ => {}
+        }
+    }
+    Some((f, p))
+}
+
+/// Licence plates against plates labelled by eye (`labels`; `X5_PLATES` = comma-separated clip names, default all
+/// three; clips without labels are skipped): lenses at full resolution, the equirect at the export's 7680 (a plate is
+/// a few pixels wide), plates every 3rd frame (`plates`, score ≥ 0.2 as the export) linked by `Hide`. Prints per
+/// width bin (pixels at 7680) the labelled plates the regions leave uncovered (`covered`), the area of the regions on
+/// labelled frames that hold no labelled plate, and the time per searched frame of the plate pass against the face
+/// pass on the same equirect. Fails if more than 10 % of the labelled plates 20 px wide or more are left uncovered.
+#[test]
+fn plates() {
+    let Some(d) = samples() else { return };
+    let names = std::env::var("X5_PLATES").unwrap_or_else(|_| "v635,v606,v627".into());
+    let all: Vec<_> = (names.split(','))
+        .filter_map(|n| match n {
+            "v635" => Some("v635"),
+            "v606" => Some("v606"),
+            "v627" => Some("v627"),
+            _ => None,
+        })
+        .filter_map(|n| match labels(n) {
+            Some(l) => Some((n, l)),
+            None => {
+                eprintln!("{n}: no {n}_plates.txt in X5_FIXTURES: skipped");
+                None
+            }
+        })
+        .collect();
+    if all.is_empty() {
+        return;
+    }
+    const W: u32 = 7680;
+    let ppd = W as f32 / 360.0;
+    let bins = [0.0, 10.0, 20.0, 40.0, f32::MAX];
+    let g = gpu();
+    let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
+    let ft = face_tiles();
+    let mut big = [0; 2];
+    for (name, (lf, lp)) in all {
+        let c = clip(&d, name);
+        let rig = Rig::sized(&g, &c, 3840, W);
+        let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
+        let mut dec = Dec::sized(&c, c.n, 3840);
+        let (mut h, mut tp, mut tf, mut found) = (Hide::new(), vec![], vec![], 0);
+        for k in 0..c.n {
+            assert!(dec.next());
+            if k % 3 != 0 {
+                continue;
+            }
+            rig.upload(&g, &dec.buf);
+            rig.stitch(&g, &c.poses[k]);
+            let _ = g.dev.poll(wgpu::PollType::wait_indefinitely());
+            let t = Instant::now();
+            let r = ai.plates(&pano, 0.2).unwrap();
+            tp.push(t.elapsed().as_secs_f64() * 1e3);
+            found += r.len();
+            h.push(k, r);
+            let t = Instant::now();
+            ai.faces(&pano, &ft, 0.5).unwrap();
+            tf.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        drop(dec);
+        let reg = h.regions(c.n, c.fps);
+        // per width bin: labelled, uncovered
+        let mut b = [[0usize; 2]; 4];
+        for (k, x) in lp.iter().filter(|p| p.0 < c.n) {
+            let i = bins.windows(2).position(|w| x.size.x * ppd < w[1]).unwrap();
+            let miss = !covered(&reg[*k], x);
+            b[i][0] += 1;
+            b[i][1] += miss as usize;
+            if i >= 2 {
+                big[0] += 1;
+                big[1] += miss as usize;
+            }
+            if miss {
+                let [y, p] = yaw_pitch(x.dir);
+                eprintln!(
+                    "  {name} frame {k}: plate at yaw {y:.1} pitch {p:.1}, {:.0} px wide, uncovered",
+                    x.size.x * ppd
+                );
+            }
+        }
+        let lf: Vec<usize> = lf.into_iter().filter(|&k| k < c.n).collect();
+        let fp: f32 = (lf.iter())
+            .flat_map(|&k| reg[k].iter().map(move |r| (k, r)))
+            .filter(|(k, r)| !lp.iter().any(|(j, x)| j == k && inside(r, x.dir)))
+            .map(|(_, r)| std::f32::consts::FRAC_PI_4 * r.size.x * r.size.y)
+            .fold(0.0, |a, x| a + x);
+        let ((p50, p95, _), (f50, f95, _)) = (pct(&mut tp), pct(&mut tf));
+        eprintln!(
+            "{name}: {} frames searched, {found} plates, {} tracks; {} labelled frames, {} plates; uncovered per width \
+             (px at {W}) <10 / 10-20 / 20-40 / 40+: {}; regions holding no labelled plate {:.2} deg² per labelled frame; \
+             ms per searched frame, median / p95: plates {p50:.1} / {p95:.1}, faces {f50:.1} / {f95:.1}",
+            tp.len(),
+            h.tracks(c.fps).len(),
+            lf.len(),
+            lp.len(),
+            b.map(|[n, m]| format!("{m} of {n}")).join(" / "),
+            fp / lf.len().max(1) as f32,
+        );
+    }
+    assert!(
+        big[1] * 10 <= big[0],
+        "{} of {} labelled plates 20 px wide or more uncovered",
+        big[1],
+        big[0]
+    );
 }
 
 /// Highlights and auto edit on the sample clips (`X5_HIGH`, default all three): every 10th frame the detector over
