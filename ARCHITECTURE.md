@@ -10,11 +10,13 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 - No Insta360 data in this repo unless the code needs it to run (the `.proto` files the app uses). Lens calibration
   comes from each file's trailer, never from the repo. Seam flow uses RAFT (open model), no Insta360 models.
 - The UI thread never paces playback. Media threads decode ahead of the audio clock.
-- Tests that need sample footage read the directory in `X5_SAMPLES` (`v635.insv`, `v606.insv`, `v627.insv`,
-  `v635.lrv`) and return early with a note when it is unset. `track`'s `tests/footage.rs` `subject` with `X5_REF` (a
-  reference track checked by eye) asserts the box on the subject itself on half the frames, without it just a box.
-  Track test results depend on the kernels burn's autotune picks (other kernels round VitTrack's confidence across
-  its thresholds differently): a cold cubecl slot (App, burn's cache) tunes them under whatever else runs on the GPU.
+- Tests that need sample footage read the directory in `X5_SAMPLES` (`v635.insv`, `v606.insv`, `v627.insv`, `v635.lrv`)
+  and return early with a note when it is unset. `track`'s `tests/footage.rs` `subject` with `X5_REF` (a reference track
+  checked by eye) asserts the box on the subject itself on half the frames, without it just a box. `track`'s
+  `tests/footage.rs` `plates` checks the plate pass against plates labelled by eye (`<clip>_plates.txt` in
+  `X5_FIXTURES`, never in git) and skips each clip without them. Track test results depend on the kernels burn's
+  autotune picks (other kernels round VitTrack's confidence across its thresholds differently): a cold cubecl slot (App,
+  burn's cache) tunes them under whatever else runs on the GPU.
 - Tests on numbered clips (`clip::tests::numbered`, made with the ffmpeg CLI: the B-frame, open-GOP and 10-bit tests of
   the app's `clip.rs`, movie's B-frame test) skip with a note when ffmpeg is missing or cannot make the clip (an encoder
   or filter it lacks, drawtext without fontconfig).
@@ -47,7 +49,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 | `fx` | Image effects on the shared device: colour adjustments (incl. brightness, brilliance), automatic colour and underwater correction, `.cube` LUTs and our own looks, defringe (purple / green / blue), clarity, overlays (watermark, stickers, text) |
 | `edit` | Editor model: timeline, clips with a look and colour adjustments each (`fx::Params`: edit depends on fx), trim / split / speed / freeze, reframing keyframes and camera-movement presets, undo (a drag that ends where it started leaves no undo step and keeps the redo list), project files |
 | `export` | Render jobs: decode → stitch → stabilise → effects → encode → mux, 360 and flat, queue; editor timelines (`Cut::Edit`: speed ramps, freeze frames, views, each clip's adjustments and look via `fx`, audio mixed with music, RNNoise-denoised after the time-stretch when `Edit::denoise` is set, and AAC-encoded, or copied for plain 1× cuts without denoise); photo frame grabs (JPEG with GPano). `export::locks(gate, burn)` hands it the app's GATE / BURN; `Job::flat` keeps a flat 2:1 picture from a 360 hook untagged |
-| `track` | AI with open models (burn on the shared device): subject tracker on the sphere with re-identification (LOMO colour and texture histograms with Fisher weights learnt per session, no model), detector, auto framing, face privacy blur regions, highlights → `edit::Timeline`. The tracker finds a lost subject again only within its reach (`Seen::prior`, `Seen::speed`: the speed, in its own heights a second, it needs to be a candidate since it was last seen for sure, its heading carried on for up to a second; beyond what it reaches setting off at a walk and speeding up by 3 heights/s² to a sprint's 3, it is someone else; within it, its similarity loses 0.1 × (speed / 1 height a second)²), and a person only with the pick's template's box on it (`vit::hit`: never on the detector's box alone); a person at least as like one `find` took and the tracker lost again before VitTrack was sure of them as like the subject (`vit::Tried`, the last 8; not added to the gallery, as the subject can be one) needs VitTrack 0.5, not 0.25 (`Tried::need`, also for whoever the tracker takes on its own after a gap). `Tracker::fps` is the clip's frame rate (30 until set) |
+| `track` | AI with open models (burn on the shared device): subject tracker on the sphere with re-identification (LOMO colour and texture histograms with Fisher weights learnt per session, no model), detector, auto framing, face and licence plate privacy blur regions (plates: a YOLOv9-t plate detector from open-image-models, cut before its NMS, on square crops around the vehicles YOLOX finds at score 0.1 or more: `Ai::plates`, `plate_crops`; regions through the same `Hide` and `Blur` as faces; licence questions in `models/plate-detector-licensing.md`), highlights → `edit::Timeline`. The tracker finds a lost subject again only within its reach (`Seen::prior`, `Seen::speed`: the speed, in its own heights a second, it needs to be a candidate since it was last seen for sure, its heading carried on for up to a second; beyond what it reaches setting off at a walk and speeding up by 3 heights/s² to a sprint's 3, it is someone else; within it, its similarity loses 0.1 × (speed / 1 height a second)²), and a person only with the pick's template's box on it (`vit::hit`: never on the detector's box alone); a person at least as like one `find` took and the tracker lost again before VitTrack was sure of them as like the subject (`vit::Tried`, the last 8; not added to the gallery, as the subject can be one) needs VitTrack 0.5, not 0.25 (`Tried::need`, also for whoever the tracker takes on its own after a gap). `Tracker::fps` is the clip's frame rate (30 until set) |
 | `ble` | Camera BLE: scan, wake, pairing, Wi-Fi credentials (btleplug). The X5's wake-up brings up its radios and session, never its screen. Feature `sim`: `Ble::sim`, a simulated adapter and camera on the real session code |
 | `live` | FLV and RTMP client, OBS frame protocol (Unix socket + DMA-BUF fds), PipeWire camera node |
 | `obs` | OBS source plugin (`cdylib`) that imports our frames |
@@ -152,10 +154,13 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   Work runs on the threads in PLAN.md §2; the UI thread only reads the newest state and draws.
 - AI (`ai.rs`): `ai::MODELS` loads one `track::Ai` per run and device on first use (warm-up: the tracker and the
   detector at every batch size, one network call at a time under BURN; re-identification runs no network), shared by
-  Deep Track, auto edit and every face pass. Deep Track sets `Tracker::fps` from the clip (`shotlab::Clip::meta.fps`);
-  its directions are in the frame of the track's stabilisation and are turned into any other frame with
-  `Track::turn` / `ai::rots`. The privacy blur also covers editor timelines (one face pass per clip) and Shot Lab
-  passes (before the effect).
+  Deep Track, auto edit and every privacy pass. Deep Track sets `Tracker::fps` from the clip
+  (`shotlab::Clip::meta.fps`); its directions are in the frame of the track's stabilisation and are turned into any
+  other frame with `Track::turn` / `ai::rots`. The privacy blur also covers editor timelines (one face pass per clip)
+  and Shot Lab passes (before the effect). The privacy pass (the export's `Keep::privacy`, the player's preview
+  `ai::privacy`) finds faces and/or licence plates every 3rd frame, each linked by a `Hide` of its own; with plates it
+  stitches 7680 wide and finds faces there too, else 3072. The player's Blur faces and Blur license plates previews
+  carry into the export (`Spec::faces`, `Spec::plates`).
 - Editor projects are edit's JSON plus a top-level `"x5desk"` object (overlays, denoise, stabilisation). A clip's
   look (one of fx's looks by name or a `.cube` path) and colour adjustments (per clip `"adjust"`: the `fx::Params`
   fields that differ from the defaults) live in edit's clips; a file from before per-clip adjustments holds the
@@ -257,12 +262,13 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
     `level=off`, `pace=off` (viewer only), `src=preview|webcam`;
   - live: `live`, `end` (Live screen scrolled to its end), `rtmp=<url>`, `res=`, `fps=`, `kbps=`, `obs`, `pwcam`,
     `grab=`, `min=`;
-  - export: `export=<preset>[:faces]`, `frame=`, `dest=`;
+  - export: `export=<preset>[:faces][:plates]`, `frame=`, `dest=`;
   - editor: `editor`, `project=<file>`, `clip=<file>` (repeatable), `undo=<n>`, `redo=<n>`, `at=<s>`, `sel=<k>`,
     `etab=clip|reframe|colour|audio|overlays`, `e360`, `epreset=<preset>`, `esave=<file>`,
     `tlexport=<preset>[:noraft][:qp=<n>]`, `eplay`;
   - AI and Shot Lab: `box=<x0>/<y0>/<x1>/<y1>`, `restab=off|free|horizon|direction[/<σ>]`, `ebox=<x0>/<y0>/<x1>/<y1>`,
-    `blur`, `autoedit[=<preset>[:faces]]`, `lab=<effect>`, `lrange=<a>/<b>`, `lpre`, `lexp=<preset>[:faces]` (`box=`
+    `blur`, `plates` (the player's plate blur preview), `autoedit[=<preset>[:faces][:plates]]`, `lab=<effect>`,
+    `lrange=<a>/<b>`, `lpre`, `lexp=<preset>[:faces][:plates]` (`box=`
     is 0..1 of the player's view at 16:9, as a flat 1080p export frames it, whatever the window's size or layout; the
     hook prints its subject, `x5desk: box: subject at yaw …, pitch …, <w>° × <h>°`, so runs can be compared; `ebox=`
     is 0..1 of the `epreset=` export preset's flat frame, whatever the window: a flat preset's own, as the viewer
