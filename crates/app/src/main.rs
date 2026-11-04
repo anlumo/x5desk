@@ -1,5 +1,6 @@
 //! x5desk: desktop app for the Insta360 X5. One eframe window on the shared Vulkan device (`video::Gpu`); a side
-//! panel switches screens. `x5desk [file]` opens a file.
+//! panel switches screens. `x5desk [file]` opens a file; on macOS so do Finder, the Dock and `open` (`finder.rs`), as
+//! a drop on the window would.
 //!
 //! Test hooks: `X5DESK_SHOT=<file.png>` (with `X5DESK_SHOT_AFTER=<s>`, default 1) saves a screenshot once that time has
 //! passed and the player has nothing pending, then exits. `X5DESK_TEST=<tokens>` (comma separated) sets up the first
@@ -70,6 +71,8 @@ mod dl;
 mod editor;
 mod export;
 mod feed;
+#[cfg(target_os = "macos")]
+mod finder;
 mod gyro;
 mod help;
 mod lab;
@@ -596,6 +599,9 @@ impl App {
         if let Some(f) = file {
             lib.open(&f);
         }
+        // the launch's files from Finder are queued already: the first frame takes them
+        #[cfg(target_os = "macos")]
+        finder::wake(&cc.egui_ctx);
         let shot = std::env::var_os("X5DESK_SHOT").map(|p| Shot {
             path: p.into(),
             after: Duration::from_secs_f64(
@@ -640,6 +646,9 @@ impl eframe::App for App {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
+        // what Finder, the Dock or `open` asked to open counts as dropped
+        #[cfg(target_os = "macos")]
+        let dropped = [dropped, finder::take()].concat();
         if let Some(p) = dropped.first() {
             match self.tab {
                 Tab::Editor => {
@@ -913,7 +922,13 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result {
+    // before AppKit starts: the launch's files come as it does
+    #[cfg(target_os = "macos")]
+    finder::watch();
     let file = std::env::args_os().nth(1).map(PathBuf::from);
+    // an old macOS launching the bundle passes its process serial number
+    #[cfg(target_os = "macos")]
+    let file = file.filter(|f| !f.as_os_str().as_encoded_bytes().starts_with(b"-psn_"));
     let test = std::env::var("X5DESK_TEST").ok().map(|s| Test::parse(&s));
     let g = Arc::new(video::Gpu::new().unwrap_or_else(|e| {
         eprintln!("x5desk: {e}");

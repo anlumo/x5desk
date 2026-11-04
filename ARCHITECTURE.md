@@ -229,8 +229,15 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   privacy grants follow the signature, which an ad hoc one (`-`) changes with every build. A Developer ID identity and
   Apple credentials in the environment sign it for anyone and notarize it. The disk image's window is laid out by
   Finder through AppleScript, which asks for Automation permission once; `CI=true` skips that, as where nobody can
-  answer (a locked screen). No icon and no file associations yet: winit 0.30 passes no Finder open-documents events
-  and the app reads a path from its arguments only; launched from Finder its stdout and stderr go nowhere.
+  answer (a locked screen). Launched from Finder its stdout and stderr go nowhere.
+- Opening files: Info.plist declares what the Library opens by extension (the system's MP4 and JPEG types also take
+  in `.m4v` and `.jpe`): `.insv`/`.lrv` and `.insp` as Insta360 Studio does (Editor, the default rank, so the user
+  picks which app opens them), `.mp4`, `.jpg` and `.jpeg` as Viewer, Alternate (offered in Open With, never their
+  default). Finder, the Dock and `open` send them as `kAEOpenDocuments` Apple events, which winit
+  0.30 leaves to AppKit, and AppKit has nobody to give them to. `finder.rs` replaces that one handler from
+  NSApplicationWillFinishLaunchingNotification, the only point that gets the launch's files too (AppKit installs its
+  own handlers just before, and dispatches the launch's event just after), queues the paths and wakes the UI, which
+  takes them each frame as it does dropped files, un-minimising the window.
 - Tests: `video`'s `tests/mac.rs` round-trips synthetic pictures through encode and decode (H.264, H.265, Main 10,
   RTMP's low-latency settings) with key requests, checked with `ffprobe`; `cbr` checks the rate within 10 % at 100 ms
   and 1 s and no filler, `renew` an invalidated session (`Encoder::invalidate`, a hidden hook), `hardware` every

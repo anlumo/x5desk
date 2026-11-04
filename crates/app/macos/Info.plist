@@ -7,11 +7,70 @@
   The usage strings are what macOS shows when it asks for each permission. Run from a terminal, the app has the
   terminal's grants instead; as a bundle without NSBluetoothAlwaysUsageDescription it would be killed at its first
   Bluetooth scan.
+
+  The documents are what the Library opens (finder.rs takes Finder's requests), by extension: Insta360's own formats
+  have no type identifier on macOS (Insta360 Studio declares them so too), and the system's types for MP4 and JPEG
+  take in more (public.mpeg-4 .m4v, public.jpeg .jpe) than the Library knows. Insta360's at the default rank, so the
+  user picks which app opens them (Get Info, Open with); MP4 and JPEG at Alternate: x5desk is offered for them, never
+  made their default.
 -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Insta360 360° video</string>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>insv</string>
+				<string>lrv</string>
+			</array>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Insta360 360° photo</string>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>insp</string>
+			</array>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>MPEG-4 video</string>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>mp4</string>
+			</array>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>JPEG photo</string>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>jpg</string>
+				<string>jpeg</string>
+			</array>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+		</dict>
+	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>x5desk finds your Insta360 camera over Bluetooth, wakes it, pairs with it and sets up its Wi-Fi.</string>
 	<key>NSLocalNetworkUsageDescription</key>
