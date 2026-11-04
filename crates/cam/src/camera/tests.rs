@@ -157,6 +157,43 @@ fn album_and_cache() {
     std::fs::remove_dir_all(&d).unwrap();
 }
 
+/// Files the camera lists under names that are no safe file names (out of the download folder on Windows, a device)
+/// stay out of the album, said in a note; so does one that appears later.
+#[test]
+fn unsafe_names() {
+    let bad = [
+        r"..\..\AppData\Roaming\x.lrv",
+        r"C:\Users\Public\x.lrv",
+        "CON.lrv",
+    ];
+    let f = card(&[&NAMES[..2], &bad[..]].concat());
+    let q = Arc::new(Mutex::new(dl::Queue::load(None)));
+    let (w, sim) = spawn(&f, 50_000_000, q, Cache::at(None));
+    w.tx.send(Cmd::Connect { clock: false }).unwrap();
+    let n = wait(&w, 5.0, |u| match u {
+        Up::Note(s, true) if s.starts_with("album:") => Some(s),
+        _ => None,
+    });
+    assert!(
+        n.contains("3 files left out") && n.contains("CON.lrv"),
+        "{n}"
+    );
+    let v = album(&w);
+    assert_eq!(v.len(), 1, "{v:?}");
+    assert_eq!(v[0].uris.len(), 2);
+    assert!(
+        v.iter()
+            .flat_map(|i| &i.uris)
+            .all(|u| album::safe(album::name(u)))
+    );
+    f.lock().unwrap().uris.push("/DCIM/Camera01/nul.lrv".into());
+    sim.lock().unwrap().clone().unwrap().note(
+        8201,
+        &pb::NotificationCaptureStopped::default().encode_to_vec(),
+    );
+    assert_eq!(album(&w).len(), 1);
+}
+
 /// A low battery warns (20 % or less, not charging): the battery-low notification gives an error note and the level
 /// the screens show; 21 % and a charging camera do not.
 #[test]

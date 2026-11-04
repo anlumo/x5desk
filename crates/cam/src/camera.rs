@@ -444,6 +444,8 @@ impl W {
             }
             self.tick();
         }
+        // the running download back in the queue, stopped (a card import's copy would go on writing its `.part`)
+        self.q.lock().unwrap().quit();
         self.close();
         // the end of the running download goes into the queue before it is saved; nothing new starts
         for _ in 0..200 {
@@ -784,7 +786,8 @@ impl W {
         vec![]
     }
 
-    /// Lists the card's or the camera's files (not while it records) and queues the thumbnails not sent yet.
+    /// Lists the card's or the camera's files (not while it records) and queues the thumbnails not sent yet. Camera
+    /// files whose names are no safe file names ([`album::safe`]) are left out, in a note.
     fn album(&mut self) {
         self.list(None)
     }
@@ -810,10 +813,12 @@ impl W {
             use pb::{CardLocation::StorClCamera as L, MediaType as M};
             let mut u = c.files(M::VideoAndPhoto, L).wait()?;
             u.extend(c.files(M::Dng, L).wait()?);
+            // a host joins the names to its download folder: one that is no safe file name stays out of the album
+            let bad: Vec<String> = u.extract_if(.., |u| !album::safe(album::name(u))).collect();
             let fi = c.file_infos(L).wait()?;
             // not part of every firmware
             let ed = c.favorites().wait().unwrap_or_default();
-            Ok::<_, Error>(Some(album::group(&u, &fi, &ed)))
+            Ok::<_, Error>(Some((album::group(&u, &fi, &ed), bad)))
         })();
         match r {
             Ok(None) => {
@@ -825,7 +830,17 @@ impl W {
                     false,
                 )
             }
-            Ok(Some(v)) => {
+            Ok(Some((v, bad))) => {
+                if !bad.is_empty() {
+                    let n = bad.len();
+                    let s = &bad[..n.min(3)];
+                    self.note(
+                        format!(
+                            "album: {n} files left out, their names are no safe file names: {s:?}"
+                        ),
+                        true,
+                    )
+                }
                 if self.info.busy {
                     self.info.busy = false;
                     self.info()

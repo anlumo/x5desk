@@ -115,14 +115,25 @@ impl Queue {
         Queue { v, file, saved: s }
     }
 
-    /// Writes the file unless it holds this already (every run's end saves).
+    /// Writes the file unless it holds this already (every run's end saves). An entry the format cannot hold as it
+    /// is (a line break in its URI or path, a tab in its URI, a path that is no UTF-8) is left out, and said: read
+    /// back it would be another download, or several.
     pub fn save(&mut self) {
         let Some(f) = &self.file else { return };
         let mut s = String::new();
         for d in &self.v {
+            let p = d.dst.to_str().filter(|p| !p.contains(['\n', '\r']));
+            let (Some(p), false) = (p, d.uri.contains(['\t', '\n', '\r'])) else {
+                eprintln!(
+                    "{}: not kept, its URI or path does not fit the file: {:?}",
+                    f.display(),
+                    d.dst
+                );
+                continue;
+            };
             let st = NAMES.iter().find(|n| n.0 == d.st).map_or("queued", |n| n.1);
             let e = d.err.replace(['\t', '\n', '\r'], " ");
-            s += &format!("{st}\t{}\t{e}\t{}\n", d.uri, d.dst.display());
+            s += &format!("{st}\t{}\t{e}\t{p}\n", d.uri);
         }
         if s == self.saved {
             return;
@@ -182,6 +193,24 @@ impl Queue {
         }
     }
 
+    /// At the worker's end: every running download, a card import too, goes back to the queue with what arrived, its
+    /// transfer told to stop, so nothing writes its `.part` once the worker is gone and the next run resumes it. One
+    /// whose cancel the transfer has yet to see is stopped (paused), as the cancel asked.
+    pub fn quit(&mut self) {
+        for d in self.v.iter_mut().filter(|d| d.st == St::Running) {
+            d.st = match d.prog.cancel.swap(true, Relaxed) {
+                true => St::Paused,
+                false => St::Queued,
+            }
+        }
+    }
+
+    /// Saves, then keeps whatever changes later in memory only (the file is another process's from here on).
+    pub fn close(&mut self) {
+        self.save();
+        self.file = None
+    }
+
     pub fn resume(&mut self, i: usize) {
         let d = &mut self.v[i];
         if matches!(d.st, St::Paused | St::Failed) {
@@ -225,6 +254,14 @@ pub fn end(g: &mut Queue, cur: &mut Cur) -> Option<PathBuf> {
                 // held (queued again) or cancelled since: that stays
                 Err(Error::Cancelled) if d.st == St::Running => d.st = St::Paused,
                 Err(Error::Cancelled) => {}
+                // stopped at the worker's end (a cancel it had yet to see): that stays, whatever ended it
+                Err(_) if d.st == St::Paused => {}
+                // the link went away after a cancel it had yet to see: stopped, as asked
+                Err(Error::Closed | Error::NoDevice | Error::Timeout)
+                    if d.st == St::Running && d.prog.cancel.load(Relaxed) =>
+                {
+                    d.st = St::Paused
+                }
                 // the link went away: on with the next session
                 Err(Error::Closed | Error::NoDevice | Error::Timeout) => d.st = St::Queued,
                 // the card went away: on once it is back
@@ -385,5 +422,139 @@ mod tests {
             .map(|d| (d.st, d.prog.cancel.load(Relaxed)))
             .collect();
         assert_eq!(v, [(St::Queued, true), (St::Running, false)]);
+    }
+
+    /// The worker's end stops all that runs, a card import too: queued again for the next run. A closed queue saves
+    /// once more, then keeps its changes in memory.
+    #[test]
+    fn quit() {
+        let d = std::env::var_os("X5_FIXTURES")
+            .map_or_else(std::env::temp_dir, PathBuf::from)
+            .join(format!("x5desk-q3-{}", std::process::id()));
+        let f = d.join("downloads");
+        let mut q = Queue::load(Some(f.clone()));
+        q.add("/DCIM/Camera01/a.insv", d.join("a"));
+        q.add("file:///run/media/u/X5/DCIM/Camera01/b.insv", d.join("b"));
+        q.add("/DCIM/Camera01/c.insv", d.join("c"));
+        q.add("/DCIM/Camera01/d.insv", d.join("d"));
+        (q.v[0].st, q.v[1].st, q.v[3].st) = (St::Running, St::Running, St::Running);
+        // d's cancel not seen yet
+        q.cancel(3);
+        q.quit();
+        let v: Vec<(St, bool)> = (q.v.iter())
+            .map(|d| (d.st, d.prog.cancel.load(Relaxed)))
+            .collect();
+        assert_eq!(
+            v,
+            [
+                (St::Queued, true),
+                (St::Queued, true),
+                (St::Queued, false),
+                (St::Paused, true)
+            ]
+        );
+        q.close();
+        q.cancel(2);
+        q.save();
+        let st: Vec<St> = Queue::load(Some(f)).v.iter().map(|d| d.st).collect();
+        assert_eq!(
+            st,
+            [St::Queued, St::Queued, St::Queued, St::Paused],
+            "saved at the close, not after"
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// An entry the file cannot hold as it is stays out of it (the others are written): a line break in its path or
+    /// URI, a tab in its URI, a path that is no UTF-8. Read back, the file has only what was there.
+    #[test]
+    fn unfit() {
+        let d = std::env::var_os("X5_FIXTURES")
+            .map_or_else(std::env::temp_dir, PathBuf::from)
+            .join(format!("x5desk-q4-{}", std::process::id()));
+        let f = d.join("downloads");
+        let mut q = Queue::load(Some(f.clone()));
+        q.add("/DCIM/Camera01/a.insv", d.join("a"));
+        q.add(
+            "/DCIM/Camera01/b.insv",
+            d.join("x\nqueued\t/DCIM/Camera01/c.insv\t\t/etc/y"),
+        );
+        q.add("/DCIM/Camera01/c\t.insv", d.join("c"));
+        q.add("/DCIM/Camera01/d.insv\r", d.join("d"));
+        q.add("/DCIM/Camera01/e.insv", d.join("e\tf"));
+        #[cfg(unix)]
+        q.add(
+            "/DCIM/Camera01/g.insv",
+            d.join(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"g\xff")),
+        );
+        q.save();
+        let v: Vec<(String, PathBuf)> = (Queue::load(Some(f)).v.into_iter())
+            .map(|x| (x.uri, x.dst))
+            .collect();
+        assert_eq!(
+            v,
+            [
+                ("/DCIM/Camera01/a.insv".into(), d.join("a")),
+                ("/DCIM/Camera01/e.insv".into(), d.join("e\tf"))
+            ]
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A card import running at the worker's end stops (the copy sees the flag) and is queued again with its `.part`,
+    /// which no longer grows; the link gone after a cancel it had yet to see leaves the download stopped.
+    #[test]
+    fn quit_running() {
+        let d = std::env::var_os("X5_FIXTURES")
+            .map_or_else(std::env::temp_dir, PathBuf::from)
+            .join(format!("x5desk-q5-{}", std::process::id()));
+        let src = d.join("card/DCIM/Camera01/VID_20260116_152935_00_603.insv");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        // sparse: no disk for the source; the copy stops long before its end
+        std::fs::File::create(&src)
+            .unwrap()
+            .set_len(1 << 30)
+            .unwrap();
+        let dst = d.join("out/a.insv");
+        let mut q = Queue::default();
+        q.add(&format!("file://{}", src.display()), dst.clone());
+        let q: Shared = Arc::new(Mutex::new(q));
+        let mut cur: Cur = None;
+        step(&q, None, &[], &mut cur);
+        assert_eq!(q.lock().unwrap().v[0].st, St::Running);
+        q.lock().unwrap().quit();
+        let t = Instant::now();
+        while cur.is_some() && t.elapsed() < Duration::from_secs(10) {
+            end(&mut q.lock().unwrap(), &mut cur);
+            thread::sleep(Duration::from_millis(5))
+        }
+        assert!(cur.is_none(), "the copy stopped");
+        assert_eq!(q.lock().unwrap().v[0].st, St::Queued);
+        let n = std::fs::metadata(part(&dst, ".part")).unwrap().len();
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(std::fs::metadata(part(&dst, ".part")).unwrap().len(), n);
+        assert!(n < 1 << 30 && !dst.exists());
+        // a camera download cancelled, then the link closed before the cancel was seen: stopped
+        let mut g = q.lock().unwrap();
+        g.add("/DCIM/Camera01/b.insv", d.join("out/b.insv"));
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(Err(Error::Closed)).unwrap();
+        g.v[1].st = St::Running;
+        g.cancel(1);
+        let mut cur: Cur = Some((d.join("out/b.insv"), rx.into(), crate::awake::hold()));
+        end(&mut g, &mut cur);
+        assert_eq!(g.v[1].st, St::Paused);
+        // the same at the worker's end: cancelled, then quit (paused), then the link closed: still stopped
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(Err(Error::Closed)).unwrap();
+        g.v[1].st = St::Running;
+        g.v[1].prog = Default::default();
+        g.cancel(1);
+        g.quit();
+        let mut cur: Cur = Some((d.join("out/b.insv"), rx.into(), crate::awake::hold()));
+        end(&mut g, &mut cur);
+        assert_eq!(g.v[1].st, St::Paused);
+        drop(g);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

@@ -1,6 +1,6 @@
 //! x5desk: desktop app for the Insta360 X5. One eframe window on the shared Vulkan device (`video::Gpu`); a side
 //! panel switches screens. `x5desk [file]` opens a file; on macOS so do Finder, the Dock and `open` (`finder.rs`), as
-//! a drop on the window would.
+//! a drop on the window would. `x5desk mcp …` is the MCP server instead (crate `mcp`), with no window.
 //!
 //! Test hooks: `X5DESK_SHOT=<file.png>` (with `X5DESK_SHOT_AFTER=<s>`, default 1) saves a screenshot once that time has
 //! passed and the player has nothing pending, then exits. `X5DESK_TEST=<tokens>` (comma separated) sets up the first
@@ -884,6 +884,10 @@ fn icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result {
+    // `x5desk mcp …`: the MCP server, before anything here runs or prints (its stdout is the protocol's)
+    if std::env::args_os().nth(1).is_some_and(|a| a == "mcp") {
+        std::process::exit(mcp::main(std::env::args_os().skip(2).collect()));
+    }
     // before AppKit starts: the launch's files come as it does
     #[cfg(target_os = "macos")]
     finder::watch();

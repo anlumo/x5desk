@@ -1,0 +1,1408 @@
+//! The MCP side of a host: one [`Conn`] per client, an rmcp `ServerHandler` over the shared host. The tools are a
+//! table ([`TOOLS`]: name, tier, description, input schema, annotations). `tools/list` lists those of the enabled
+//! tiers (a connection's own `--tiers` narrowing them: the hosting process's `stdio`); `tools/call` checks the tier
+//! again (a client's list can be stale), runs the tool and logs the call. A tool's
+//! failure is a tool result with `isError` (the model reads it), an unknown tool a protocol error. Results are JSON
+//! built field by field from the worker's state: the access point's password and the Wi-Fi client id are never in
+//! them, and the id goes only to a local address. Thumbnails are JPEG.
+
+use crate::{
+    config::{Tier, Tiers},
+    host::{Host, Shared, State},
+    job::{self, Job, Prog},
+    log::utc,
+    paths,
+};
+use cam::{
+    album::{self, Item, Kind, View},
+    camera::{self as cc, Cmd, Conn as Link, Info},
+    dl,
+};
+use link::Plug;
+use rmcp::{
+    ErrorData, RoleServer, ServerHandler,
+    handler::server::{common::schema_for_empty_input, tool::schema_for_input},
+    model::{
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+        JsonObject, ListToolsResult, PaginatedRequestParams, ProgressNotificationParam,
+        ServerCapabilities, ServerConfig, SubscriptionFilter, Tool, ToolAnnotations,
+    },
+    schemars::{self, JsonSchema},
+    service::{RequestContext, SubscriptionContext, SubscriptionSink},
+};
+use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::{Value, json};
+use std::{
+    collections::HashSet,
+    net::IpAddr,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
+/// One client's service over the host; its `subscriptions/listen` streams (2026-07-28) get the tier changes.
+pub(crate) struct Conn {
+    host: Arc<Host>,
+    client: String,
+    /// this client's own `--tiers` on top of the host's (the hosting process's `stdio`)
+    narrow: Option<Tiers>,
+    pub sinks: Arc<Mutex<Vec<SubscriptionSink>>>,
+}
+
+impl Conn {
+    pub fn new(host: Arc<Host>, client: &str, narrow: Option<Tiers>) -> Conn {
+        Conn {
+            host,
+            client: client.into(),
+            narrow,
+            sinks: Default::default(),
+        }
+    }
+
+    fn sh(&self) -> &Shared {
+        &self.host.sh
+    }
+
+    /// The tiers this client has: the host's, narrowed by its `--tiers`.
+    fn tiers(&self) -> Tiers {
+        let t = self.host.tiers();
+        self.narrow.map_or(t, |n| t.and(n))
+    }
+}
+
+/// Why a client's `--tiers` refuses tool `name` of `tier` (`narrow` leaves it out): enabling it would not help.
+pub(crate) fn left_out(name: &str, tier: Tier, narrow: Tiers) -> String {
+    format!(
+        "{name} is in the {} tier, which this client's --tiers leaves out (it allows {narrow})",
+        tier.name()
+    )
+}
+
+/// What the server says before any tool is enabled.
+const OFF: &str = "x5desk (Insta360 X5 camera control) has no tools enabled. The user enables them once, in a \
+                   terminal: `x5desk mcp enable --tiers read,local` (add `camera` to let agents connect to the \
+                   camera; `delete` only by name). Enabled tiers show up here without a restart.";
+
+/// A tool: name, tier, description, input schema, annotations.
+pub struct Def {
+    /// the tool's name (API: kept)
+    pub name: &'static str,
+    /// the tier that enables it
+    pub tier: Tier,
+    /// what `tools/list` says of it
+    pub desc: &'static str,
+    schema: fn() -> Arc<JsonObject>,
+    /// read only; else destructive, idempotent
+    ann: Option<(bool, bool)>,
+}
+
+fn input<T: JsonSchema + 'static>() -> Arc<JsonObject> {
+    schema_for_input::<T>().expect("tool arguments are an object")
+}
+
+impl Def {
+    /// The tool as `tools/list` lists it.
+    pub fn tool(&self) -> Tool {
+        let a = match self.ann {
+            None => ToolAnnotations::new().read_only(true).destructive(false),
+            Some((d, i)) => ToolAnnotations::new()
+                .read_only(false)
+                .destructive(d)
+                .idempotent(i),
+        };
+        Tool::new(self.name, self.desc, (self.schema)()).with_annotations(a.open_world(false))
+    }
+}
+
+/// `album_list` arguments.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListArgs {
+    /// first item to return (default 0)
+    offset: Option<usize>,
+    /// how many (default 100, at most 500)
+    limit: Option<usize>,
+    /// only videos or only photos
+    kind: Option<KindArg>,
+}
+
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum KindArg {
+    Video,
+    Photo,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct KeyArgs {
+    /// an item key from album_list
+    key: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PathArgs {
+    /// absolute path of the file or card
+    path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct JobArgs {
+    /// a job handle (`<host>-<n>`) as album_download returned it
+    job: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WaitArgs {
+    /// a job handle (`<host>-<n>`) as album_download returned it
+    job: String,
+    /// seconds to wait at most (default 30, at most 300)
+    wait_s: Option<f64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DownloadArgs {
+    /// item keys from album_list
+    keys: Vec<String>,
+    /// a folder inside the agent folder to put them in (relative, no `..`; made if missing)
+    subdir: Option<String>,
+    /// only each item's proxy (.lrv: small, low resolution) instead of all its files
+    proxy: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ConnectArgs {
+    /// the camera's address on this local network (private or link-local); none: USB
+    wifi_ip: Option<String>,
+}
+
+/// Every tool, in the order of the tiers.
+pub const TOOLS: &[Def] = &[
+    Def {
+        name: "status",
+        tier: Tier::Read,
+        desc: "Start here: the x5desk host, the enabled tiers, a camera summary, the jobs, the agent folder (where \
+               downloads go) and the read roots (what file_info may read).",
+        schema: schema_for_empty_input,
+        ann: None,
+    },
+    Def {
+        name: "camera_status",
+        tier: Tier::Read,
+        desc: "The X5's state: USB mode, connection, model, serial, firmware, battery, storage, whether it records, \
+               the album's source, mounted cards, recent notes.",
+        schema: schema_for_empty_input,
+        ann: None,
+    },
+    Def {
+        name: "album_list",
+        tier: Tier::Read,
+        desc: "Items of the album (the connected camera's files, or an opened card's), newest first: key, files, \
+               kind, size, date, length, dimensions, favourite, and the local copy in the agent folder if there is \
+               one. Needs camera_connect or card_open first.",
+        schema: input::<ListArgs>,
+        ann: None,
+    },
+    Def {
+        name: "album_thumbnail",
+        tier: Tier::Read,
+        desc: "An album item's thumbnail (JPEG, 320 x 160 equirectangular) by its key from album_list.",
+        schema: input::<KeyArgs>,
+        ann: None,
+    },
+    Def {
+        name: "card_list",
+        tier: Tier::Read,
+        desc: "Mounted X5 cards (the camera in U-disk mode, or its card in a reader) and which one the album shows.",
+        schema: schema_for_empty_input,
+        ann: None,
+    },
+    Def {
+        name: "card_open",
+        tier: Tier::Read,
+        desc: "Shows a mounted card (its root from card_list) in the album instead of the camera.",
+        schema: input::<PathArgs>,
+        ann: None,
+    },
+    Def {
+        name: "card_close",
+        tier: Tier::Read,
+        desc: "Shows the camera's files in the album again instead of a card.",
+        schema: schema_for_empty_input,
+        ann: None,
+    },
+    Def {
+        name: "file_info",
+        tier: Tier::Read,
+        desc: "Size, time and metadata (camera, serial, firmware, dimensions, length, GPS, tracks) of a local X5 \
+               file (insv, insp, lrv, mp4, jpg, dng) under the read roots (status lists them).",
+        schema: input::<PathArgs>,
+        ann: None,
+    },
+    Def {
+        name: "job_status",
+        tier: Tier::Read,
+        desc: "A job's state and progress per file. A file a later album_download started again (it had stopped, \
+               failed, or finished and gone) shows as it was then: the new transfer is that job's.",
+        schema: input::<JobArgs>,
+        ann: None,
+    },
+    Def {
+        name: "job_list",
+        tier: Tier::Read,
+        desc: "The jobs and their states: this host's and those kept from earlier hosts (every unfinished one and \
+               the newest 100), under their handles.",
+        schema: schema_for_empty_input,
+        ann: None,
+    },
+    Def {
+        name: "job_wait",
+        tier: Tier::Read,
+        desc: "Waits until a job is finished (or wait_s passed), with progress notifications; returns its state.",
+        schema: input::<WaitArgs>,
+        ann: None,
+    },
+    Def {
+        name: "album_download",
+        tier: Tier::Local,
+        desc: "Downloads album items (keys from album_list) into the agent folder or a subfolder of it, never over \
+               a file (names in use are numbered: name-2.insv; an item whose download stopped resumes under its \
+               names). Returns a job; follow it with job_wait. Needs the camera connected (camera_connect) or a card \
+               open (card_open). A download that waits or runs when the host ends goes on in the next host: from \
+               the camera once it is connected (camera_connect), from a card at once while it is mounted.",
+        schema: input::<DownloadArgs>,
+        ann: Some((false, false)),
+    },
+    Def {
+        name: "job_cancel",
+        tier: Tier::Local,
+        desc: "Stops a job's downloads, but not those another uncancelled job of the same items shares nor those a \
+               later album_download started again (that job's now). Their partial files stay, so downloading the \
+               items again resumes them, also in a later host.",
+        schema: input::<JobArgs>,
+        ann: Some((false, true)),
+    },
+    Def {
+        name: "camera_connect",
+        tier: Tier::Camera,
+        desc: "Connects to the X5 over USB (in its Android App USB mode), or over Wi-Fi at wifi_ip (the camera's \
+               address on this local network: private or link-local, nothing else; it gets the client id the camera \
+               authorized for x5desk, so give only the camera's). Never sets the camera's clock. The album then \
+               shows the camera's files. Fails while another app (the x5desk window, the phone app) holds the camera.",
+        schema: input::<ConnectArgs>,
+        ann: Some((false, true)),
+    },
+    Def {
+        name: "camera_release",
+        tier: Tier::Camera,
+        desc: "Ends the camera session so other apps can connect. Running downloads stop and resume on the next \
+               connect.",
+        schema: schema_for_empty_input,
+        ann: Some((false, true)),
+    },
+];
+
+fn args<T: DeserializeOwned>(a: JsonObject) -> Result<T, String> {
+    serde_json::from_value(Value::Object(a)).map_err(|e| format!("arguments: {e}"))
+}
+
+fn ok(v: Value) -> Result<CallToolResult, String> {
+    Ok(CallToolResult::structured(v))
+}
+
+/// Standard base64 with padding.
+pub fn b64(b: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::with_capacity(b.len().div_ceil(3) * 4);
+    for c in b.chunks(3) {
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
+        for (i, k) in [18, 12, 6, 0].into_iter().enumerate() {
+            s.push(if i <= c.len() {
+                A[(n >> k & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    s
+}
+
+fn kind(k: Kind) -> &'static str {
+    match k {
+        Kind::Video => "video",
+        Kind::Photo => "photo",
+        Kind::Other => "other",
+    }
+}
+
+fn plug(p: Option<Plug>) -> Value {
+    match p {
+        None => Value::Null,
+        Some(Plug::None) => "none".into(),
+        Some(Plug::Disk) => "U-disk mode".into(),
+        Some(Plug::Other) => "another USB mode (not Android App)".into(),
+        Some(Plug::App) => "app mode".into(),
+    }
+}
+
+fn link(c: Link) -> &'static str {
+    match c {
+        Link::Off => "off",
+        Link::Connecting => "connecting",
+        Link::On => "on",
+    }
+}
+
+/// The album's source: `camera`, or the card's mount point.
+fn source(i: &Info) -> Value {
+    i.src
+        .as_ref()
+        .map_or("camera".into(), |r| r.display().to_string().into())
+}
+
+/// The camera fields of `status`; never the access point's password.
+fn summary(i: &Info) -> Value {
+    let id = i.id.as_ref();
+    let b = i.battery.as_ref();
+    json!({
+        "usb": plug(i.plug),
+        "connection": link(i.conn),
+        "model": id.map(|x| x.model.clone()),
+        "serial": id.map(|x| x.serial.clone()),
+        "firmware": id.map(|x| x.firmware.clone()),
+        "battery_percent": b.map(|b| cc::level(b).0),
+        "charging": b.map(|b| cc::level(b).1),
+        "low_battery": b.map(cc::low),
+        "storage_free_bytes": i.storage.as_ref().map(|s| s.free_space),
+        "storage_total_bytes": i.storage.as_ref().map(|s| s.total_space),
+        "recording": i.busy,
+        "album_source": source(i),
+    })
+}
+
+fn cards(i: &Info) -> Value {
+    let v: Vec<Value> = (i.disk.iter())
+        .map(|v| {
+            json!({
+                "root": v.root.display().to_string(),
+                "name": v.name(),
+                "device": v.dev,
+                "camera": v.cam,
+                "open": i.src.as_ref() == Some(&v.root),
+            })
+        })
+        .collect();
+    v.into()
+}
+
+/// The camera's status without secrets: the access point's SSID only.
+fn camera(s: &State) -> Value {
+    let i = &s.info;
+    let mut v = summary(i);
+    let o = v.as_object_mut().unwrap();
+    o.insert(
+        "access_point_ssid".into(),
+        json!(i.wifi.as_ref().map(|w| w.0.clone())),
+    );
+    o.insert("clock_offset_s".into(), json!(i.skew));
+    o.insert("connect_attempts".into(), json!(i.tries));
+    o.insert(
+        "connecting_for_s".into(),
+        json!(i.since.map(|t| t.elapsed().as_secs())),
+    );
+    o.insert("cards".into(), cards(i));
+    let n: Vec<Value> = (s.notes.iter().rev().take(10).rev())
+        .map(|(_, t, e)| json!({ "text": t, "error": e }))
+        .collect();
+    o.insert("notes".into(), n.into());
+    v
+}
+
+/// A friendlier word for what a failed connect noted: a camera another process holds, another client's session, no
+/// camera.
+fn why(m: &str) -> String {
+    let l = m.to_ascii_lowercase();
+    if l.contains("another client holds the session") {
+        format!(
+            "another client holds the camera's session (the Insta360 app, or x5desk over Wi-Fi?): close \
+             it there, then try again ({m})"
+        )
+    } else if [
+        "exclusive access",
+        "busy",
+        "already claimed",
+        "in use",
+        // nusb on Windows: WinUSB opens a device for one process (ERROR_ACCESS_DENIED)
+        "failed to open device (error 5)",
+    ]
+    .iter()
+    .any(|s| l.contains(s))
+    {
+        format!(
+            "the camera is in use by another app (x5desk?): disconnect it there, then try again ({m})"
+        )
+    } else if l.contains("no camera in usb app mode") {
+        format!("no X5 in USB app mode: plug it in and choose Android App on its USB menu ({m})")
+    } else {
+        m.to_string()
+    }
+}
+
+/// Whether `ip` can be a camera's on this computer's network: IPv4 private or link-local, IPv6 unique-local
+/// (fc00::/7) or link-local (fe80::/10), an IPv4-mapped one as its IPv4. Not loopback, unspecified, multicast or
+/// public.
+fn lan(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(a) => a.is_private() || a.is_link_local(),
+        IpAddr::V6(a) => match a.to_ipv4_mapped() {
+            Some(a) => lan(a.into()),
+            None => a.is_unique_local() || a.is_unicast_link_local(),
+        },
+    }
+}
+
+/// How a file of an item fits at a number: its stopped download resumes, its finished one is kept, or the name is
+/// free.
+#[derive(Clone, Copy, PartialEq)]
+enum Fit {
+    Resume,
+    Done,
+    Free,
+}
+
+/// Where an item's files (album URIs `u`, queue URIs `qu`) go in `dir`: numbered alike (their recording key stays
+/// one), past names in use, being written, queued, or `taken` in this call. A stopped download of the same file
+/// resumes under its name, and with one that does, the files the queue finished at that number are kept (a job
+/// cancelled between them); a finished item again goes past them. Names that are no safe file names are refused.
+fn place(
+    q: &dl::Queue,
+    dir: &Path,
+    taken: &HashSet<PathBuf>,
+    u: &[&String],
+    qu: &[String],
+) -> Result<Vec<PathBuf>, String> {
+    if let Some(n) = u.iter().map(|u| album::name(u)).find(|n| !album::safe(n)) {
+        return Err(format!("{n:?} is no safe file name"));
+    }
+    let fit = |d: &PathBuf, u: &String| {
+        let same = |x: &&dl::Dl| x.dst == *d && x.uri == *u;
+        if taken.contains(d) {
+            None
+        } else if q.v.iter().filter(same).any(|x| x.st != dl::St::Done) {
+            Some(Fit::Resume)
+        } else if q.v.iter().filter(same).any(|x| x.st == dl::St::Done) && d.is_file() {
+            Some(Fit::Done)
+        } else if paths::free(d) && !q.v.iter().any(|x| x.dst == *d && x.st != dl::St::Done) {
+            Some(Fit::Free)
+        } else {
+            None
+        }
+    };
+    let dsts = (1..)
+        .map(|i| -> Vec<PathBuf> {
+            u.iter()
+                .map(|u| dir.join(paths::numbered(album::name(u), i)))
+                .collect()
+        })
+        .find(|d| {
+            let f: Option<Vec<Fit>> = d.iter().zip(qu).map(|(d, u)| fit(d, u)).collect();
+            f.is_some_and(|f| !f.contains(&Fit::Done) || f.contains(&Fit::Resume))
+        })
+        .unwrap();
+    match dsts.iter().find(|d| d.parent() != Some(dir)) {
+        Some(d) => Err(format!("{}: not in {}", d.display(), dir.display())),
+        None => Ok(dsts),
+    }
+}
+
+/// Whether a download for `d` waits or runs for a job: not one stopped, failed or finished, nor one whose cancel the
+/// link has yet to see.
+fn wanted(q: &dl::Queue, d: &Path) -> bool {
+    q.v.iter().any(|x| {
+        x.dst == d
+            && match x.st {
+                dl::St::Queued => true,
+                dl::St::Running => !x.prog.cancel.load(std::sync::atomic::Ordering::Relaxed),
+                _ => false,
+            }
+    })
+}
+
+/// The queue's URI of an album file: a card's is an import (`file://`).
+fn qury(src: &Option<PathBuf>, u: &str) -> String {
+    match src {
+        Some(r) => format!("file://{}", r.join(u.trim_start_matches('/')).display()),
+        None => u.to_string(),
+    }
+}
+
+fn job_dto(handle: String, j: &Job, p: &Prog, cam: bool) -> Value {
+    let files: Vec<Value> = (p.parts.iter())
+        .map(|x| {
+            json!({
+                "path": x.dst.display().to_string(),
+                "state": x.state,
+                "done_bytes": x.done,
+                "total_bytes": x.total,
+                "error": (!x.err.is_empty()).then(|| x.err.clone()),
+            })
+        })
+        .collect();
+    let waits = p.state == "queued" && !cam && j.files.iter().any(|f| dl::local(&f.uri).is_none());
+    json!({
+        "job": handle,
+        "kind": "download",
+        "state": p.state,
+        "finished": p.finished(),
+        "done_bytes": p.done,
+        "total_bytes": p.total,
+        "keys": j.keys,
+        "created": utc(j.at),
+        "files": files,
+        "note": waits.then_some("waits for the camera: call camera_connect"),
+    })
+}
+
+/// The local copies of an item's files, when all are there: finished downloads of the queue, else by name in the
+/// agent folder (not for a name that is no safe file name).
+fn local(it: &Item, q: &dl::Queue, agent: &Path) -> Option<Vec<String>> {
+    (it.uris.iter())
+        .map(|u| {
+            let n = Some(album::name(u)).filter(|n| album::safe(n))?;
+            let done = (q.v.iter())
+                .filter(|d| d.st == dl::St::Done && album::name(&d.uri) == n && d.dst.is_file())
+                .map(|d| d.dst.clone())
+                .next_back();
+            done.or_else(|| Some(agent.join(n)).filter(|p| p.is_file()))
+                .map(|p| p.display().to_string())
+        })
+        .collect()
+}
+
+fn item(it: &Item, have: Option<Vec<String>>) -> Value {
+    let files: Vec<&str> = it.uris.iter().map(|u| album::name(u)).collect();
+    json!({
+        "key": it.key,
+        "kind": kind(it.kind),
+        "files": files,
+        "uris": it.uris,
+        "size_bytes": it.size,
+        "date": (it.date > 0).then(|| album::date(it.date)),
+        "duration_ms": it.ms,
+        "width": it.dim[0],
+        "height": it.dim[1],
+        "favourite": it.fav,
+        "local": have,
+    })
+}
+
+/// What `file_info` reads: the file system's size and time, the trailer's metadata, the MP4's tracks.
+fn file_info(p: &Path) -> Result<Value, String> {
+    let m = std::fs::metadata(p).map_err(|e| format!("{}: {e}", paths::shown(p)))?;
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let mut v = json!({
+        "path": paths::shown(p),
+        "kind": ext,
+        "size_bytes": m.len(),
+        "modified": m.modified().ok().map(utc),
+    });
+    let o = v.as_object_mut().unwrap();
+    if let Ok(t) = media::insv::Trailer::open(p) {
+        let x = &t.meta;
+        let gps = t
+            .recs
+            .iter()
+            .any(|r| r.kind == media::insv::GPS && r.size > 0);
+        o.insert(
+            "trailer".into(),
+            json!({
+                "camera": x.camera,
+                "serial": x.serial,
+                "firmware": x.firmware,
+                "created": (x.created > 0).then(|| album::date(x.created)),
+                "utc_offset_s": x.tz,
+                "duration_ms": x.duration_ms,
+                "dimension": x.dimension,
+                "resolution": x.resolution,
+                "fps": x.fps,
+                "frames": x.frames,
+                "gps": gps,
+                "flowstate": x.flowstate,
+            }),
+        );
+    }
+    if matches!(ext.as_str(), "insv" | "lrv" | "mp4")
+        && let Ok(f) = media::mp4::Mp4::open(p)
+    {
+        let s = |b: [u8; 4]| String::from_utf8_lossy(&b).into_owned();
+        let tracks: Vec<Value> = (f.tracks.iter())
+            .map(|t| {
+                json!({
+                    "handler": s(t.handler),
+                    "codec": s(t.fourcc),
+                    "width": t.width,
+                    "height": t.height,
+                    "duration_s": t.secs(),
+                    "samples": t.samples.len(),
+                })
+            })
+            .collect();
+        o.insert(
+            "mp4".into(),
+            json!({
+                "brand": s(f.brand),
+                "duration_s": f.duration as f64 / f.timescale.max(1) as f64,
+                "tracks": tracks,
+            }),
+        );
+    }
+    Ok(v)
+}
+
+impl Conn {
+    /// The album of the source, listed: waits up to 10 s for a listing under way. Fails without a camera or card.
+    async fn album(&self) -> Result<(Vec<Item>, Option<PathBuf>), String> {
+        let sh = self.sh();
+        {
+            let s = sh.st.lock().unwrap();
+            if s.info.src.is_none() && s.info.conn == Link::Off {
+                return Err("no camera connected and no card open: call camera_connect (camera tier) or card_open \
+                            (card_list lists the cards) first"
+                    .into());
+            }
+        }
+        let r = sh
+            .until(10.0, |s| Some((s.album.clone()?, s.info.src.clone())))
+            .await;
+        r.ok_or_else(|| match sh.st.lock().unwrap().info.busy {
+            true => "the camera is recording: its files are listed once it stops".into(),
+            false => "the album was not listed within 10 s; see camera_status".into(),
+        })
+    }
+
+    fn status(&self, ctx: &RequestContext<RoleServer>) -> Result<CallToolResult, String> {
+        let sh = self.sh();
+        let roots: Vec<String> = sh.read_roots().iter().map(|r| paths::shown(r)).collect();
+        let (run, wait, fin) = {
+            let (j, q) = (sh.jobs.lock().unwrap(), sh.q.lock().unwrap());
+            (j.v.iter())
+                .map(|j| j.prog(&q))
+                .fold((0, 0, 0), |(r, w, f), p| match p.state {
+                    "running" => (r + 1, w, f),
+                    "queued" => (r, w + 1, f),
+                    _ => (r, w, f + 1),
+                })
+        };
+        let s = sh.st.lock().unwrap();
+        let t = self.tiers();
+        let next = match (s.info.conn, &s.info.src) {
+            (Link::On, _) | (_, Some(_)) => "album_list lists the album",
+            _ if t.has(Tier::Camera) => {
+                "camera_connect connects the camera (or card_open opens a card)"
+            }
+            _ => "card_open opens a card; connecting the camera needs the camera tier",
+        };
+        let tiers: Vec<&str> = t.iter().map(Tier::name).collect();
+        ok(json!({
+            "host": {
+                "kind": "headless",
+                "id": sh.id,
+                "version": env!("CARGO_PKG_VERSION"),
+                "simulated_camera": sh.sim,
+                "clients": sh.conns.load(std::sync::atomic::Ordering::Relaxed),
+            },
+            "protocol": ctx.protocol_version().map(|v| v.as_str().to_string()),
+            "client": self.client,
+            "tiers": tiers,
+            "camera": summary(&s.info),
+            "jobs": { "running": run, "queued": wait, "finished": fin },
+            "agent_folder": sh.agent.display().to_string(),
+            "read_roots": roots,
+            "next": next,
+        }))
+    }
+
+    async fn album_list(&self, a: ListArgs) -> Result<CallToolResult, String> {
+        let (items, src) = self.album().await?;
+        let (off, n) = (a.offset.unwrap_or(0), a.limit.unwrap_or(100).clamp(1, 500));
+        let w = View {
+            kind: a.kind.map(|k| match k {
+                KindArg::Video => Kind::Video,
+                KindArg::Photo => Kind::Photo,
+            }),
+            ..Default::default()
+        };
+        let mut idx = vec![];
+        w.apply(&items, &mut idx);
+        let sh = self.sh();
+        let q = sh.q.lock().unwrap();
+        let v: Vec<Value> = (idx.iter().skip(off).take(n))
+            .map(|&i| item(&items[i], local(&items[i], &q, &sh.agent)))
+            .collect();
+        drop(q);
+        let busy = sh.st.lock().unwrap().info.busy;
+        ok(json!({
+            "source": src.map_or("camera".into(), |r| r.display().to_string()),
+            "total": idx.len(),
+            "offset": off,
+            "more": off + v.len() < idx.len(),
+            "recording": busy,
+            "items": v,
+        }))
+    }
+
+    async fn album_thumbnail(&self, a: KeyArgs) -> Result<CallToolResult, String> {
+        let (items, _) = self.album().await?;
+        if !items.iter().any(|i| i.key == a.key) {
+            return Err(format!(
+                "no item {:?} in the album: album_list lists the keys",
+                a.key
+            ));
+        }
+        let sh = self.sh();
+        let have = sh.st.lock().unwrap().thumb(&a.key).cloned();
+        let t = match have {
+            Some(t) => Some(t),
+            None => {
+                sh.cmd(Cmd::Want(vec![a.key.clone()]));
+                sh.until(10.0, |s| s.thumb(&a.key).cloned()).await
+            }
+        };
+        let (w, h, px) = match t {
+            None => return Err(format!("{}: no thumbnail within 10 s", a.key)),
+            Some(None) => return Err(format!("{}: the item has no thumbnail", a.key)),
+            Some(Some(t)) => t,
+        };
+        let j = tokio::task::spawn_blocking(move || media::jpeg::encode(&px, w, h, 85, None))
+            .await
+            .map_err(|e| e.to_string())??;
+        Ok(CallToolResult::success(vec![
+            ContentBlock::image(b64(&j), "image/jpeg"),
+            ContentBlock::text(format!("{}: {w} x {h} JPEG, {} bytes", a.key, j.len())),
+        ]))
+    }
+
+    fn card_list(&self) -> Result<CallToolResult, String> {
+        let s = self.sh().st.lock().unwrap();
+        ok(json!({ "cards": cards(&s.info), "album_source": source(&s.info) }))
+    }
+
+    async fn card_open(&self, a: PathArgs) -> Result<CallToolResult, String> {
+        let sh = self.sh();
+        let want = std::fs::canonicalize(&a.path).unwrap_or_else(|_| a.path.clone().into());
+        let root = {
+            let s = sh.st.lock().unwrap();
+            let v = s
+                .info
+                .disk
+                .iter()
+                .find(|v| std::fs::canonicalize(&v.root).is_ok_and(|r| r == want));
+            v.map(|v| v.root.clone())
+        };
+        let root =
+            root.ok_or_else(|| format!("{}: not a mounted X5 card; card_list lists them", a.path))?;
+        sh.cmd(Cmd::Source(Some(root.clone())));
+        let n = sh.until(10.0, |s| {
+            (s.info.src.as_ref() == Some(&root)).then(|| s.album.as_ref().map(Vec::len))?
+        });
+        match n.await {
+            Some(n) => ok(json!({ "album_source": root.display().to_string(), "items": n })),
+            None => Err(format!(
+                "{}: the card was not listed within 10 s",
+                root.display()
+            )),
+        }
+    }
+
+    async fn card_close(&self) -> Result<CallToolResult, String> {
+        let sh = self.sh();
+        if sh.st.lock().unwrap().info.src.is_none() {
+            return ok(
+                json!({ "album_source": "camera", "note": "the album showed the camera already" }),
+            );
+        }
+        sh.cmd(Cmd::Source(None));
+        match sh.until(10.0, |s| s.info.src.is_none().then_some(())).await {
+            Some(()) => ok(json!({ "album_source": "camera" })),
+            None => Err("the album did not switch back within 10 s".into()),
+        }
+    }
+
+    async fn file_info(&self, a: PathArgs) -> Result<CallToolResult, String> {
+        let p = paths::readable(&a.path, &self.sh().read_roots())?;
+        let v = tokio::task::spawn_blocking(move || file_info(&p))
+            .await
+            .map_err(|e| e.to_string())??;
+        ok(v)
+    }
+
+    /// A job's state, its handle and whether the camera is connected.
+    fn job(&self, h: &str) -> Result<Value, String> {
+        let sh = self.sh();
+        let cam = sh.st.lock().unwrap().info.conn == Link::On;
+        let (jobs, q) = (sh.jobs.lock().unwrap(), sh.q.lock().unwrap());
+        let j = jobs.find(h)?;
+        Ok(job_dto(j.h.clone(), j, &j.prog(&q), cam))
+    }
+
+    fn job_list(&self) -> Result<CallToolResult, String> {
+        let sh = self.sh();
+        let cam = sh.st.lock().unwrap().info.conn == Link::On;
+        let (jobs, q) = (sh.jobs.lock().unwrap(), sh.q.lock().unwrap());
+        let v: Vec<Value> = (jobs.v.iter())
+            .map(|j| job_dto(j.h.clone(), j, &j.prog(&q), cam))
+            .collect();
+        ok(json!({ "jobs": v }))
+    }
+
+    async fn job_wait(
+        &self,
+        a: WaitArgs,
+        ctx: &RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, String> {
+        let sh = self.sh();
+        let wait = Duration::from_secs_f64(a.wait_s.unwrap_or(30.0).clamp(0.0, 300.0));
+        let (t0, tok) = (Instant::now(), ctx.meta.get_progress_token());
+        let (mut sent, mut last) = (t0, -1.0);
+        loop {
+            let p = {
+                let (jobs, q) = (sh.jobs.lock().unwrap(), sh.q.lock().unwrap());
+                jobs.find(&a.job)?.prog(&q)
+            };
+            if p.finished() || t0.elapsed() >= wait {
+                let mut v = self.job(&a.job)?;
+                v["waited_s"] = json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
+                return ok(v);
+            }
+            if let Some(t) = &tok
+                && sent.elapsed() >= Duration::from_secs(1)
+                && p.done as f64 > last
+            {
+                (sent, last) = (Instant::now(), p.done as f64);
+                // a total only once every file's size is known: a sum of those started would drop as the next begins
+                let all = p.total > 0 && p.parts.iter().all(|x| x.total > 0);
+                let mut n = ProgressNotificationParam::new(t.clone(), p.done as f64).with_message(
+                    match all {
+                        true => format!("{}: {} of {} bytes", p.state, p.done, p.total),
+                        false => format!("{}: {} bytes", p.state, p.done),
+                    },
+                );
+                if all {
+                    n = n.with_total(p.total as f64)
+                }
+                let _ = ctx.peer.notify_progress(n).await;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                _ = ctx.ct.cancelled() => return Err("cancelled".into()),
+                _ = sh.ct.cancelled() => return Err("the host is shutting down".into()),
+            }
+        }
+    }
+
+    async fn album_download(&self, a: DownloadArgs) -> Result<CallToolResult, String> {
+        if a.keys.is_empty() {
+            return Err("give the keys of the items to download (album_list lists them)".into());
+        }
+        let (items, src) = self.album().await?;
+        let mut picks = vec![];
+        let mut bad = vec![];
+        for k in &a.keys {
+            let Some(it) = items.iter().find(|i| i.key == *k) else {
+                bad.push(k.as_str());
+                continue;
+            };
+            let u: Vec<&String> = match a.proxy.unwrap_or(false) {
+                true => it
+                    .uris
+                    .iter()
+                    .filter(|u| u.to_ascii_lowercase().ends_with(".lrv"))
+                    .collect(),
+                false => it.uris.iter().collect(),
+            };
+            if u.is_empty() {
+                return Err(format!("{k} has no proxy (.lrv)"));
+            }
+            picks.push((k, u));
+        }
+        if !bad.is_empty() {
+            return Err(format!(
+                "no items {bad:?} in the album: album_list lists the keys"
+            ));
+        }
+        let sh = self.sh();
+        std::fs::create_dir_all(&sh.agent).map_err(|e| format!("{}: {e}", sh.agent.display()))?;
+        let dir = paths::sub(&sh.agent, a.subdir.as_deref().unwrap_or(""))?;
+        let dir = paths::make(&sh.agent, &dir)?;
+        let mut files = vec![];
+        let h = {
+            // the jobs before the queue, both held until the job is in: a cancel meanwhile sees it with its files
+            let mut jobs = sh.jobs.lock().unwrap();
+            let mut q = sh.q.lock().unwrap();
+            let mut taken = HashSet::new();
+            // every item placed before any is queued: a refused one queues nothing
+            let mut all = vec![];
+            for (k, u) in picks {
+                let qu: Vec<String> = u.iter().map(|u| qury(&src, u)).collect();
+                let d = place(&q, &dir, &taken, &u, &qu).map_err(|e| format!("{k}: {e}"))?;
+                taken.extend(d.iter().cloned());
+                all.push((d, qu));
+            }
+            for (d, qu) in all {
+                for (d, u) in d.into_iter().zip(qu) {
+                    // a file no download waits or runs for is this job's from here: the older jobs keep its state
+                    if !d.exists() && !wanted(&q, &d) {
+                        jobs.take(&d, &q);
+                        // a cancel the link has yet to see: queued again, it resumes once it stopped (as a hold)
+                        if let Some(x) =
+                            q.v.iter_mut()
+                                .find(|x| x.dst == d && x.st == dl::St::Running)
+                        {
+                            x.st = dl::St::Queued
+                        }
+                    }
+                    q.add(&u, d.clone());
+                    files.push(job::File::new(u, d));
+                }
+            }
+            let h = jobs.add(a.keys.clone(), files);
+            sh.save(&mut jobs, &mut q);
+            h
+        };
+        sh.log.line(&format!("{} queued job {h}", self.client));
+        ok(self.job(&h)?)
+    }
+
+    async fn job_cancel(&self, a: JobArgs) -> Result<CallToolResult, String> {
+        let sh = self.sh();
+        // its own downloads stopped, but none another job still wants (two calls for one item share them) nor one a
+        // later job started again
+        let cut: Vec<PathBuf> = {
+            let mut jobs = sh.jobs.lock().unwrap();
+            let i = jobs.at(&a.job)?;
+            let cut = jobs.cut(i);
+            let mut q = sh.q.lock().unwrap();
+            for d in &cut {
+                if let Some(i) = q.v.iter().position(|x| x.dst == *d) {
+                    q.cancel(i)
+                }
+            }
+            jobs.v[i].cancelled = true;
+            sh.save(&mut jobs, &mut q);
+            cut
+        };
+        // a running download ends once the link sees the flag
+        let end = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < end {
+            let run = (sh.q.lock().unwrap().v.iter())
+                .any(|x| x.st == dl::St::Running && cut.contains(&x.dst));
+            if !run {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await
+        }
+        ok(self.job(&a.job)?)
+    }
+
+    async fn camera_connect(&self, a: ConnectArgs) -> Result<CallToolResult, String> {
+        let sh = self.sh();
+        let ip = (a.wifi_ip.as_deref().map(str::trim))
+            .map(|s| {
+                s.parse::<IpAddr>()
+                    .map_err(|e| format!("wifi_ip {s:?}: {e}"))
+            })
+            .transpose()?;
+        // the client id goes to that address: only to one a camera can have here
+        if let Some(ip) = ip
+            && !lan(ip)
+        {
+            return Err(format!(
+                "wifi_ip {ip}: the camera's address is on the local network, a private (10.x, 172.16-31.x, \
+                 192.168.x, IPv6 fc00::/7) or link-local one (169.254.x, fe80::/10)"
+            ));
+        }
+        let (conn, seq) = {
+            let s = sh.st.lock().unwrap();
+            (s.info.conn, s.seq)
+        };
+        if ip.is_some() && sh.sim {
+            return Err("the simulated camera has no Wi-Fi: connect without wifi_ip".into());
+        }
+        if conn == Link::Off {
+            match ip {
+                Some(ip) => sh.cmd(Cmd::Wifi {
+                    ip,
+                    id: sh.wifi(),
+                    clock: false,
+                }),
+                None => sh.cmd(Cmd::Connect { clock: false }),
+            }
+        }
+        // the worker's notes say how it went: "connected to …", or why not
+        let fail = |t: &str| {
+            let w = [
+                "connect:",
+                "the X5 is in app mode",
+                "disconnect the camera first",
+                "connection cancelled",
+            ];
+            w.iter().any(|w| t.starts_with(w))
+        };
+        let r = sh.until(20.0, |s| {
+            let mut n = s.since(seq);
+            if s.info.conn == Link::On
+                && (conn == Link::On || n.any(|n| n.1.starts_with("connected")))
+            {
+                return Some(Ok(()));
+            }
+            s.since(seq).find(|n| fail(&n.1)).map(|n| Err(n.1.clone()))
+        });
+        match r.await {
+            Some(Ok(())) => {}
+            Some(Err(e)) => return Err(why(&e)),
+            None => {
+                return Err("still connecting after 20 s; camera_status shows how it goes".into());
+            }
+        }
+        // the camera's files in the album, not a card's
+        if sh.st.lock().unwrap().info.src.is_some() {
+            sh.cmd(Cmd::Source(None));
+            sh.until(5.0, |s| s.info.src.is_none().then_some(())).await;
+        }
+        let mut v = camera(&sh.st.lock().unwrap());
+        if conn == Link::On {
+            v["note"] = "connected already".into()
+        }
+        ok(v)
+    }
+
+    async fn camera_release(&self) -> Result<CallToolResult, String> {
+        let sh = self.sh();
+        if sh.st.lock().unwrap().info.conn != Link::Off {
+            sh.cmd(Cmd::Disconnect);
+            if sh
+                .until(10.0, |s| (s.info.conn == Link::Off).then_some(()))
+                .await
+                .is_none()
+            {
+                return Err("the camera did not disconnect within 10 s".into());
+            }
+        }
+        let v = camera(&sh.st.lock().unwrap());
+        ok(v)
+    }
+
+    async fn run(
+        &self,
+        name: &str,
+        a: JsonObject,
+        ctx: &RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, String> {
+        match name {
+            "status" => self.status(ctx),
+            "camera_status" => ok(camera(&self.sh().st.lock().unwrap())),
+            "album_list" => self.album_list(args(a)?).await,
+            "album_thumbnail" => self.album_thumbnail(args(a)?).await,
+            "card_list" => self.card_list(),
+            "card_open" => self.card_open(args(a)?).await,
+            "card_close" => self.card_close().await,
+            "file_info" => self.file_info(args(a)?).await,
+            "job_status" => ok(self.job(&args::<JobArgs>(a)?.job)?),
+            "job_list" => self.job_list(),
+            "job_wait" => self.job_wait(args(a)?, ctx).await,
+            "album_download" => self.album_download(args(a)?).await,
+            "job_cancel" => self.job_cancel(args(a)?).await,
+            "camera_connect" => self.camera_connect(args(a)?).await,
+            "camera_release" => self.camera_release().await,
+            _ => Err(format!("{name}: not implemented")),
+        }
+    }
+}
+
+impl ServerHandler for Conn {
+    fn get_info(&self) -> ServerConfig {
+        let (all, t) = (self.host.tiers(), self.tiers());
+        let ins = match (t.is_empty(), self.narrow) {
+            (true, Some(n)) if !all.is_empty() => format!(
+                "x5desk (Insta360 X5 camera control): this client's --tiers ({n}) leaves out every enabled tier \
+                 ({all}), so it has no tools."
+            ),
+            (true, _) => OFF.to_string(),
+            (false, _) => format!(
+                "x5desk controls an Insta360 X5 360° camera and its files. Enabled tiers: {t}. Start with status; \
+                 connect the camera (camera_connect) or open a card (card_open), list the album (album_list), and \
+                 download into the agent folder (album_download, then job_wait). The camera's clock is never set."
+            ),
+        };
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        )
+        .with_server_info(Implementation::new("x5desk", env!("CARGO_PKG_VERSION")))
+        .with_instructions(ins)
+    }
+
+    async fn list_tools(
+        &self,
+        _: Option<PaginatedRequestParams>,
+        _: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        let t = self.tiers();
+        Ok(ListToolsResult::with_all_items(
+            TOOLS
+                .iter()
+                .filter(|d| t.has(d.tier))
+                .map(Def::tool)
+                .collect(),
+        ))
+    }
+
+    async fn call_tool(
+        &self,
+        req: CallToolRequestParams,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let name = req.name.to_string();
+        let Some(d) = TOOLS.iter().find(|d| d.name == name) else {
+            return Err(ErrorData::invalid_params(
+                format!("unknown tool {name:?}"),
+                None,
+            ));
+        };
+        let a = req.arguments.unwrap_or_default();
+        let sum = serde_json::to_string(&a).unwrap_or_default();
+        let t0 = Instant::now();
+        let r = {
+            let _c = self.sh().call();
+            let t = self.tiers();
+            match (t.has(d.tier), self.narrow.filter(|n| !n.has(d.tier))) {
+                (true, _) => self.run(&name, a, &ctx).await,
+                (false, Some(n)) => Err(left_out(&name, d.tier, n)),
+                (false, None) => Err(format!(
+                    "{name} is in the {0} tier, which is not enabled (enabled: {t}). The user enables it with \
+                     `x5desk mcp enable --tiers <tiers>,{0}`",
+                    d.tier.name()
+                )),
+            }
+        };
+        let ms = t0.elapsed().as_secs_f64() * 1e3;
+        self.sh().log.call(
+            &self.client,
+            &name,
+            &sum,
+            r.as_ref().err().map(String::as_str),
+            ms,
+        );
+        Ok(match r {
+            Ok(r) => r,
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
+        }
+        .into())
+    }
+
+    fn accepted_subscription_filter(&self, _: &SubscriptionFilter) -> Option<SubscriptionFilter> {
+        Some(SubscriptionFilter::builder().tools_list_changed().build())
+    }
+
+    async fn listen(&self, ctx: SubscriptionContext) -> Result<(), ErrorData> {
+        let s = ctx.sink().clone();
+        let id = s.id().clone();
+        self.sinks.lock().unwrap().push(s);
+        ctx.cancelled().await;
+        self.sinks.lock().unwrap().retain(|x| *x.id() != id);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64() {
+        for (i, o) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+        ] {
+            assert_eq!(b64(i.as_bytes()), o);
+        }
+        assert_eq!(b64(&[0xff, 0xfe, 0xfd]), "//79");
+    }
+
+    #[test]
+    fn table() {
+        let mut n = HashSet::new();
+        for d in TOOLS {
+            assert!(n.insert(d.name), "{} twice", d.name);
+            let t = d.tool();
+            assert_eq!(
+                t.input_schema.get("type"),
+                Some(&json!("object")),
+                "{}",
+                d.name
+            );
+            let a = t.annotations.unwrap();
+            assert_eq!(a.read_only_hint, Some(d.tier == Tier::Read), "{}", d.name);
+        }
+        assert!(
+            TOOLS.iter().all(|d| d.tier != Tier::Delete),
+            "no delete tools in M1"
+        );
+        let f = |s: &str| why(s);
+        assert!(
+            f("connect: could not open interface for exclusive access (0xe00002c5)")
+                .contains("in use by another app")
+        );
+        assert!(f("connect: interface is busy (errno 16)").contains("in use by another app"));
+        assert!(
+            f("connect: camera busy: another client holds the session")
+                .contains("another client holds")
+        );
+        assert!(f("connect: no camera in USB app mode").contains("Android App"));
+        assert!(f("connect: failed to open device (error 5)").contains("in use by another app"));
+        assert_eq!(
+            f("connect: failed to open device (error 2)"),
+            "connect: failed to open device (error 2)"
+        );
+        assert_eq!(f("connect: timeout"), "connect: timeout");
+    }
+
+    #[test]
+    fn local_addresses() {
+        for a in [
+            "192.168.42.1",
+            "10.0.0.5",
+            "172.16.0.1",
+            "172.31.255.254",
+            "169.254.10.20",
+            "fd12:3456::1",
+            "fc00::1",
+            "fe80::1",
+            "::ffff:192.168.1.2",
+        ] {
+            assert!(lan(a.parse().unwrap()), "{a}");
+        }
+        for a in [
+            "8.8.8.8",
+            "203.0.113.9",
+            "172.32.0.1",
+            "127.0.0.1",
+            "0.0.0.0",
+            "255.255.255.255",
+            "224.0.0.251",
+            "::1",
+            "::",
+            "ff02::1",
+            "2001:db8::1",
+            "2606:4700::1111",
+            "::ffff:8.8.8.8",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(!lan(a.parse().unwrap()), "{a}");
+        }
+    }
+
+    /// A download waits or runs for a job until it stopped, failed or finished, or a cancel reached it.
+    #[test]
+    fn wants() {
+        let mut q = dl::Queue::default();
+        let d = std::env::temp_dir().join(format!("x5desk-mcp-wanted-{}", std::process::id()));
+        assert!(!wanted(&q, &d));
+        q.add("/DCIM/Camera01/a", d.clone());
+        assert!(wanted(&q, &d), "queued");
+        q.v[0].st = dl::St::Running;
+        assert!(wanted(&q, &d), "running");
+        q.cancel(0);
+        assert!(!wanted(&q, &d), "cancelled, the link not stopped yet");
+        for st in [dl::St::Paused, dl::St::Done, dl::St::Failed] {
+            q.v[0].st = st;
+            assert!(!wanted(&q, &d), "{st:?}");
+        }
+    }
+
+    /// An item's files at one number: free names, a stopped download resumed with its finished sibling kept, a
+    /// finished item numbered past, names in use or no safe file names.
+    #[test]
+    fn places() {
+        let d = std::env::temp_dir().join(format!("x5desk-mcp-place-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let us: Vec<String> = [
+            "/DCIM/Camera01/VID_1_00_603.insv",
+            "/DCIM/Camera01/LRV_1_01_603.lrv",
+        ]
+        .map(String::from)
+        .into();
+        let u: Vec<&String> = us.iter().collect();
+        let n = |p: &[PathBuf]| -> Vec<String> {
+            p.iter()
+                .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+                .collect()
+        };
+        let none = HashSet::new();
+        let mut q = dl::Queue::default();
+        let p = place(&q, &d, &none, &u, &us).unwrap();
+        assert_eq!(n(&p), ["VID_1_00_603.insv", "LRV_1_01_603.lrv"]);
+        assert!(p.iter().all(|p| p.parent() == Some(d.as_path())));
+        // a job cancelled between them: the video finished, the proxy stopped
+        for (u, p) in us.iter().zip(&p) {
+            q.add(u, p.clone())
+        }
+        std::fs::write(&p[0], b"v").unwrap();
+        q.v[0].st = dl::St::Done;
+        q.cancel(1);
+        assert_eq!(
+            place(&q, &d, &none, &u, &us).unwrap(),
+            p,
+            "resumed in place"
+        );
+        // taken in this call: past it
+        let taken: HashSet<PathBuf> = p.iter().cloned().collect();
+        assert_eq!(
+            n(&place(&q, &d, &taken, &u, &us).unwrap())[0],
+            "VID_1_00_603-2.insv"
+        );
+        // both finished: the item again goes past them
+        std::fs::write(&p[1], b"l").unwrap();
+        q.v[1].st = dl::St::Done;
+        assert_eq!(
+            n(&place(&q, &d, &none, &u, &us).unwrap()),
+            ["VID_1_00_603-2.insv", "LRV_1_01_603-2.lrv"]
+        );
+        // only the proxy finished (a proxy download): the whole item goes past it too
+        std::fs::remove_file(&p[0]).unwrap();
+        q.v.remove(0);
+        assert_eq!(
+            n(&place(&q, &d, &none, &u, &us).unwrap())[0],
+            "VID_1_00_603-2.insv"
+        );
+        for b in [
+            r"..\..\AppData\Roaming\x.bat",
+            r"C:\Users\Public\x.exe",
+            "CON.insv",
+            "a:b",
+        ] {
+            let bu = format!("/DCIM/Camera01/{b}");
+            let e = place(&q, &d, &none, &[&bu], std::slice::from_ref(&bu)).unwrap_err();
+            assert!(e.contains("no safe file name"), "{b}: {e}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

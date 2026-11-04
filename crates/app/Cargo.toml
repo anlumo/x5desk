@@ -36,6 +36,8 @@ signing-identity = "Apple Development: Andreas Monitzer (SEVVD2J45G)"
 proto.workspace = true
 # the camera and capture workers, album, downloads, cards, `/CONF`, folders, App Nap: shared with a headless host
 cam.workspace = true
+# `x5desk mcp`: the MCP server, dispatched first thing in `main`
+mcp.workspace = true
 # `sim`: the simulated camera that replays a recorded live preview (the `replay=` hook, the capture tests)
 link = { workspace = true, features = ["sim"] }
 prost.workspace = true
@@ -80,3 +82,5 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 cam = { workspace = true, features = ["sim"] }
 # Already in the tree through eframe: the UI test runs its event loop off the main thread.
 winit = { version = "0.30", default-features = false }
+# `tests/mcp.rs` reads the server's JSON-RPC lines (already in the tree)
+serde_json = "1"

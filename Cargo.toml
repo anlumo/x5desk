@@ -21,6 +21,7 @@ export = { path = "crates/export" }
 track = { path = "crates/track" }
 ble = { path = "crates/ble" }
 cam = { path = "crates/cam" }
+mcp = { path = "crates/mcp" }
 
 wgpu = "30"
 # the backend feature is per target in the crates that use it: vulkan on Linux, metal on macOS

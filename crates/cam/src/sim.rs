@@ -45,6 +45,8 @@ pub struct Card {
     pub zone: bool,
     /// the capture state CAPTURE_STATUS answers (no notification goes with a change)
     pub cap: i32,
+    /// the access point's SSID and password GET_OPTIONS reports; none: `X5 SIM001.OSC`, `88888888`
+    pub ap: Option<(String, String)>,
 }
 
 pub type Fake = Arc<Mutex<Card>>;
@@ -112,10 +114,17 @@ pub fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'st
                         total_space: 500_000_000_000,
                         ..Default::default()
                     }),
-                    wifi_info: Some(pb::options::WifiInfo {
-                        ssid: "X5 SIM001.OSC".into(),
-                        password: "88888888".into(),
-                        ..Default::default()
+                    wifi_info: Some(match &c.ap {
+                        Some((s, p)) => pb::options::WifiInfo {
+                            ssid: s.clone(),
+                            password: p.clone(),
+                            ..Default::default()
+                        },
+                        None => pb::options::WifiInfo {
+                            ssid: "X5 SIM001.OSC".into(),
+                            password: "88888888".into(),
+                            ..Default::default()
+                        },
                     }),
                     local_time: c
                         .clk

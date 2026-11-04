@@ -52,6 +52,40 @@ pub fn name(u: &str) -> &str {
     u.rsplit('/').next().unwrap_or(u)
 }
 
+/// Whether a file name the camera lists is safe to join to a folder, on every system alike: one plain component (not
+/// empty, `.` or `..`; no `/`, `\` or `:`, which on Windows lead elsewhere), no control characters, no trailing dot
+/// or space (Windows drops them) and no device name (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM` and `LPT`
+/// with a digit or ¹²³; also with an extension, any case). A listing leaves the others out.
+pub fn safe(name: &str) -> bool {
+    // the part Windows takes for a device: before the first dot, without trailing spaces
+    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ');
+    let is = |d: &str| stem.eq_ignore_ascii_case(d);
+    let numbered = |p: &str| {
+        stem.get(..3).is_some_and(|s| s.eq_ignore_ascii_case(p))
+            && stem.get(3..).is_some_and(|n| {
+                (n.len() == 1 && n.as_bytes()[0].is_ascii_digit()) || ["¹", "²", "³"].contains(&n)
+            })
+    };
+    let dev = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
+        .into_iter()
+        .any(is)
+        || numbered("COM")
+        || numbered("LPT");
+    let mut c = Path::new(name).components();
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name
+            .chars()
+            .any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
+        && !name.ends_with(['.', ' '])
+        && !dev
+        && matches!(
+            (c.next(), c.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        )
+}
+
 /// Directory and name: what a path keeps under another mount prefix.
 fn tail(u: &str) -> &str {
     u.rmatch_indices('/').nth(1).map_or(u, |(i, _)| &u[i + 1..])
@@ -512,6 +546,57 @@ mod tests {
         w.apply(&v, &mut o);
         assert_eq!(o.len(), 1);
         assert_eq!(date(20260116152936), "2026-01-16 15:29:36");
+    }
+
+    #[test]
+    fn safe_names() {
+        for n in [
+            "VID_20260116_152935_00_603.insv",
+            "LRV_20260116_152935_01_603.lrv",
+            ".hidden",
+            "a b.jpg",
+            "CONSOLE.insv",
+            "COM10.lrv",
+            "LPT.dng",
+            "NULL",
+            "x..y",
+        ] {
+            assert!(safe(n), "{n:?}");
+        }
+        for n in [
+            "",
+            ".",
+            "..",
+            "...",
+            "a/b",
+            r"a\b",
+            r"..\..\AppData\Roaming\x.bat",
+            r"C:\Users\Public\x.exe",
+            r"\x",
+            "C:x",
+            "a:b.insv",
+            "a\0b",
+            "a\nb",
+            "a\u{7f}b",
+            "a\u{85}b",
+            "x.",
+            "x.insv.",
+            "x ",
+            "CON",
+            "con.insv",
+            "Nul.txt",
+            "AUX .lrv",
+            "prn.tar.gz",
+            "COM1",
+            "com9.insv",
+            "LPT0",
+            "lpt5.dng",
+            "COM¹.jpg",
+            "CONIN$",
+            "conout$.x",
+        ] {
+            assert!(!safe(n), "{n:?}");
+        }
     }
 
     /// A 1280 × 640 picture of flat colours scales to 320 × 160 with the colours kept; a cached copy reads back

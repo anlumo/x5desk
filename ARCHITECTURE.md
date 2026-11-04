@@ -53,8 +53,9 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 | `ble` | Camera BLE: scan, wake, pairing, Wi-Fi credentials (btleplug). The X5's wake-up brings up its radios and session, never its screen. Feature `sim`: `Ble::sim`, a simulated adapter and camera on the real session code ; macOS: `Error::Off` / `Error::Denied` and `Event::Adapter` (Bluetooth off, not allowed, back) |
 | `live` | FLV and RTMP client, OBS frame protocol (Unix socket + DMA-BUF fds), PipeWire camera node (the last three Linux only: elsewhere `stub.rs` keeps their API and refuses to start) |
 | `obs` | OBS source plugin (`cdylib`) that imports our frames |
-| `cam` | The app's camera code without its UI, so the app and a headless host run the same session code: the camera worker (`camera`: session, clock, album and thumbnails, download queue, commands, mounted cards) and the capture worker (`capture`: mode, settings and shutter from `/CONF`), with `album`, `dl`, `disk`, `conf`, `work` (a recording's files), `dirs` (config, cache and video folders; on Windows the profile's), `awake`, `mono`. The workers guard what any host sends: no delete while the camera records or captures (`Info::busy`, and the capture status read before the delete), a setting only to a value `/CONF` allows now (`St::allowed`), no start of a recording or timelapse at 5 % battery or less unless charging (`camera::empty`), an explicit `Start` / `Stop` (the camera's capture state read first, nothing sent when it already is so); a connect sets the camera clock only when asked to (`Cmd::Connect { clock }`, the app's own always; its retries and its reconnects after a lost link, by the 2 s timer or the camera back on the bus, the same). Outside Linux and macOS: no card found (a card source given still lists, its URIs `/`-separated); not unix: the camera clock never set (no IANA zone known; said once), the favourite timestamp from the system's zone rules (Windows: `GetTimeZoneInformation`). Feature `sim`: a simulated X5 with a fake card for the tests above it. No egui, wgpu or video |
-| `app` | egui (eframe 0.37) UI, binary `x5desk` |
+| `cam` | The app's camera code without its UI, so the app and a headless host run the same session code: the camera worker (`camera`: session, clock, album and thumbnails, download queue, commands, mounted cards; at its end a running download, a card import too, goes back to the queue stopped, `dl::Queue::quit`, one whose cancel it had yet to see paused, and kept so whatever ends its transfer; the queue file leaves out an entry its lines cannot hold: a line break in a URI or path, a tab in a URI, a path that is no UTF-8) and the capture worker (`capture`: mode, settings and shutter from `/CONF`), with `album`, `dl`, `disk`, `conf`, `work` (a recording's files), `dirs` (config, cache and video folders; on Windows the profile's), `awake`, `mono`. The workers guard what any host sends: no delete while the camera records or captures (`Info::busy`, and the capture status read before the delete), a setting only to a value `/CONF` allows now (`St::allowed`), no start of a recording or timelapse at 5 % battery or less unless charging (`camera::empty`), an explicit `Start` / `Stop` (the camera's capture state read first, nothing sent when it already is so); a connect sets the camera clock only when asked to (`Cmd::Connect { clock }`, the app's own always; its retries and its reconnects after a lost link, by the 2 s timer or the camera back on the bus, the same). The camera's listing leaves out files whose names are no safe file names (`album::safe`: a separator, `:`, `..`, a control character, a trailing dot or space, a Windows device name), in a note, so no host joins them to a folder. Outside Linux and macOS: no card found (a card source given still lists, its URIs `/`-separated); not unix: the camera clock never set (no IANA zone known; said once), the favourite timestamp from the system's zone rules (Windows: `GetTimeZoneInformation`). Feature `sim`: a simulated X5 with a fake card for the tests above it. No egui, wgpu or video |
+| `mcp` | x5desk as an MCP server (rmcp 3.8, stdio framing; clients on 2025-11-25 and 2026-07-28). `host`: the headless host, cam's camera worker following USB but never connecting on its own or setting the camera clock, the download queue and the jobs (kept in `<config>/x5desk` for the next host, see Agents), cards watched, a pump thread turning the worker's reports into the state the tools wait on; the camera is released after 5 min without a call (not while a call runs, nor a download that runs or can start: a card import whose card went does not count) and by `Host::shutdown`; a stopped download keeps its `.part`, which downloading the item again resumes, in a later host too. One `Host` per process, one rmcp service per connection over it (`Host::serve` on any reader and writer, narrowed by that client's own `--tiers` if any). `server`: the tools, a table by tier (`read`, `local`, `camera`; `delete` from M2) that `tools/list` and `tools/call` both filter by the enabled tiers; results are JSON built field by field (never the access point's password or the Wi-Fi client id), thumbnails JPEG; a Wi-Fi connect goes only to a private or link-local address. `config`: the tiers in `<config>/x5desk/mcp` (0600), `--tiers` only narrowing, re-read every 2 s, a change sent as `tools/list_changed` (2026-07-28: on `subscriptions/listen`); its writers (`enable`, `disable`, a host keeping its Wi-Fi id) take turns under an `flock` on `mcp.lock` (0600), each through a temp name of its own. `job`: downloads followed by `<host id>-<n>` handles, of the host that made the job (kept with the queue as a JSON object a line, so they work in later hosts; an ended host's that is not kept says so); jobs of one item share a file's download while it waits or runs; one that stopped, failed, or finished and went is the job's alone that starts it again (the older jobs show it as it was then); a cancel stops only the job's own downloads that no other uncancelled job shares, and downloading an item again resumes its stopped files under their names, the finished ones kept. The jobs are locked before the queue. `paths`: writes only into `<videos>/x5desk/agent` (subfolders without `..`, `:` or control characters, names in use or being written numbered alike per item, camera names checked again), reads only of X5 files under the canonicalised read roots (the agent folder, the app's `dest=` and `<videos>/x5desk` looked up at each use, cards, `--allow-dir`s), a path outside them answered alike whether it exists or not; on Windows paths shown without `\\?\`. `scrub`: every line written to a client and to the log with each secret, raw and JSON-escaped, masked (none under 4 bytes); a client's line stays JSON, only its strings and keys masked (a result's text, JSON in a string, as JSON too), numbers as they are, one that does not parse masked as bytes. `log`: `<cache>/x5desk/mcp.log`, a line per call, 1 MB then `.1`. `sim`: `--sim`, cam's simulated X5 (an access-point password the host learns only from it, and a marker it knows from its start, both looked for by the scrub tests) and a fake card in temp dirs. The process side (Agents, below): `cli` (`x5desk mcp …`), `out` (the stdout guard), `endpoint` (the per-user socket or pipe, the election), `front` (stdio's lines to the host of this process or another's, the handshake replayed, re-election, `--tiers` for its own client only, the answers passed on after stdin's end) |
+| `app` | egui (eframe 0.37) UI, binary `x5desk` (`x5desk mcp …` hands over to `mcp::main` first thing in `main`) |
 
 ## Shared device contract (`video::Gpu`)
 
@@ -414,8 +415,113 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 
   Real-camera tests that change the camera's state and restore it: `X5_CAMERA_WRITE=<dir>`
   (`capture::tests::real_writes`), `X5_CAMERA_ILOG=<dir>` with `X5_ILOG_EXPO=<iso>,<shutter>`
-  (`capture::tests::real_ilog`). With the display off (DPMS), Wayland sends no frame callbacks and windows stall: run
-  tests under XWayland (`env -u WAYLAND_DISPLAY`).
+  (`capture::tests::real_ilog`). `x5desk mcp` takes `X5DESK_TEST` too (Agents, below). With the display off (DPMS),
+  Wayland sends no frame callbacks and windows stall: run tests under XWayland (`env -u WAYLAND_DISPLAY`).
 - OBS plugin (`crates/obs`, `libx5desk_obs.so`, installed as `x5desk-obs.so`): source `x5desk_source`, reads the
   app's socket (`$XDG_RUNTIME_DIR/x5desk/obs.sock`) with `live::obs::Client`; it announces the modifiers OBS imports and
   sends `done` only after OBS's GPU fence for that buffer.
+
+## Agents (`x5desk mcp`, crate `mcp`)
+
+- CLI, dispatched in the app's `main` before `finder::watch`, `Gpu::new` and anything that prints (`x5desk <file>` and
+  macOS's `-psn_` stay as they were; a file named `mcp` opens as `./mcp`):
+  - `x5desk mcp [--sim] [--tiers a,b] [--allow-dir DIR]…` serves MCP on stdio. `--tiers` only narrows the enabled
+    set (twice: both narrow); `--allow-dir` adds a read root (canonicalised; a missing one exits 1). `--sim`: cam's
+    simulated X5, a fake card, agent folder, log, queue and jobs in a temp dir that goes with the host.
+  - `x5desk mcp enable --tiers read,local[,camera][,delete]` writes `<config>/x5desk/mcp` (the set replaced; the dir
+    owner-only, the file 0600; under an `flock` on `mcp.lock`, so a host storing its Wi-Fi id meanwhile loses
+    neither) and prints what is enabled; `disable` turns every tier off. Hosts follow within 2 s.
+  - `x5desk mcp --print-config` prints `claude mcp add --transport stdio x5desk -- <exe> mcp` and Claude Desktop's
+    `mcpServers` entry for `current_exe()`; exit 1 from a disk image (`/Volumes/…`) or a translocated copy
+    (`/AppTranslocation/`), paths that are gone later.
+  - Wrong arguments: the usage on stderr, exit 2. A server exits 0 when its client goes (stdin's end; SIGTERM,
+    SIGINT and SIGHUP unless it started with them ignored, as under `nohup`, which stays so; Windows: Ctrl-C,
+    Ctrl-Break, its console closed, logoff, shutdown) and 1 when it could not start.
+- stdout is the protocol's. First thing when serving, `out::guard` keeps a copy of stdout for the protocol and points
+  stdout at stderr (unix: `F_DUPFD_CLOEXEC` of fd 1, then `dup2(2, 1)`, `/dev/null` without a stderr; Windows: a
+  duplicated handle, then `SetStdHandle(STD_OUTPUT_HANDLE, <stderr>)`, which std's `println!` follows as it looks the
+  handle up per write; the C runtime's fd 1 does not). stdin is read and stdout written on threads of their own, a
+  line at a time.
+- Hosts. One per user owns the camera; the first `x5desk mcp` binds the endpoint and hosts, later ones proxy to it. Each
+  process is a front (`front`) on its own stdio that passes whole JSON-RPC lines (16 MiB at most, as rmcp) to a host:
+  its own over a duplex (served as `stdio`) or another's over the endpoint (`endpoint <n>`; one rmcp service per
+  connection over the shared host). The front keeps the client's `initialize` and `notifications/initialized`
+  (2025-11-25 handshakes once) and replays them to every later host under an id of its own, the answer swallowed;
+  2026-07-28 clients send none. When the host goes, each request it had not answered gets -32603 "host ended; try
+  again", and the front elects again (bind and host, or connect to whoever did), the switch on stderr; a host that drops
+  a front before a word is tried again after 50 ms, doubling to 2 s. At stdin's end (a leading BOM of a line is cut off,
+  as rmcp does) a front sends nothing more, so its host sees the end too, and passes on the answers to the requests
+  still open until each has one, the link ends or 5 s pass (as rmcp's drain); then it ends without electing again. A
+  request the client cancelled (`notifications/cancelled`, passed on) is open no more: rmcp drops an answer not sent yet
+  (one that comes is passed on; with `--tiers` every tool list is narrowed). A host's stdin end (its client gone) ends
+  its process that way: the listener closed and its socket removed first (so a proxy's election finds no host), then
+  `Host::shutdown` (connections ended, the camera released, a running download back in the queue with its `.part`, the
+  queue and the jobs saved for the next host), exit 0; a signal ends it at once. An endpoint that fails (no home, a
+  socket file of another user's, a path too long) is said on stderr and the process hosts without one. `--tiers` narrows
+  only its own process's client, whichever host it has: the front answers calls of tools outside them itself (also a
+  call of a name it does not know or of none, -32602; under `--tiers` a line that is no JSON object never reaches the
+  host, a batch's requests answered -32600) and leaves those tools out of `tools/list`. A hosting process serves the
+  endpoint's connections with the tiers enabled and only its own `stdio` narrowed (`Host::serve`'s `narrow`: its
+  `status`, instructions and errors name the narrowed set, and a call left out names `--tiers`, not `enable`); through a
+  proxy `status` names the host's tiers. `--allow-dir` is the host's: a proxy's counts only once it hosts, and then for
+  every client of the host.
+- Kept queue and jobs. In `<config>/x5desk` (under `--sim` and `X5DESK_TEST` their temp dirs): `mcp-downloads`, cam's
+  queue file format (the app's own queue, `downloads`, stays apart), and `mcp-jobs`, a JSON object per job and line
+  (handle, keys, files with the state a later job took them over in, creation time, cancelled); lines that do not parse
+  (no UTF-8, no job, a time the system cannot hold) are left out and logged. A host holds `mcp-downloads.lock` (0600,
+  `flock` / `LockFileEx`) from its start until its worker is gone and both files are saved the last time; a worker a
+  camera call holds up (30 s at most) is waited for 5 s (`ENDING`), then the queue and the jobs are saved without it,
+  its queued downloads paused in memory so it starts none, and the lock let go. The next host, elected while the last
+  one still ends, waits for the lock up to 10 s (`HANDOVER`); one whose wait runs out (another endpoint's host, a hung
+  process) keeps its queue in memory and logs it, as one does whose files are there but cannot be read (a queue file
+  that is no UTF-8 is moved to `mcp-downloads.bad` instead). What it takes is checked, a forged or hand-edited file in
+  mind: only downloads and jobs into the agent folder (lexically, or its canonical path; no `..`, a safe name) from a
+  camera URI or a card's `DCIM` (no `..`); a download whose file is there without its `.part` loads as done (it finished
+  uncollected, or the file came meanwhile: never fetched over it). Every change is saved (the queue first, so a kept job
+  has its files in it), and the worker saves at the end of each run. At the worker's end every running download, a card
+  import too, goes back to the queue stopped (`dl::Queue::quit`; nothing writes its `.part` after), so the next host
+  resumes it: queued camera downloads once the camera is connected, a card import at once, a cancelled one when its item
+  is downloaded again (`place` finds its entry). It keeps every unfinished job, those with a stopped file whose `.part`
+  is there (their finished files stay in the queue, so the item resumes at its number) and the newest 100 (`job::KEEP`),
+  and of the queue what waits, what a kept job has and a stopped download whose `.part` is there; a finished file's size
+  is read for the jobs that show it, and its host id is one no kept handle uses.
+- Endpoint. Linux `$XDG_RUNTIME_DIR/x5desk/mcp.sock`, without it `<cache>/x5desk/mcp.sock`; macOS
+  `<config>/x5desk/mcp.sock`; the dir owner-only (`cam::dirs::private`); a path that does not fit `sun_path` (104
+  bytes on macOS, 108 on Linux, NUL included) moves to `/tmp/x5desk-<uid>/mcp.sock` in a dir of the user's alone
+  (`cam::dirs::mine`). The election runs under an `flock` on `<socket>.lock`: connect if a socket of this user's
+  answers, else remove the stale one and bind (socket 0600). A client checks the socket file's owner before
+  connecting and the peer's uid after; a host closes connections of other users (`peer_cred`). A host removes its
+  socket at its end under the lock, only while it is still its own (device and inode) and without waiting for the
+  lock. Windows (type-checked only): `\\.\pipe\x5desk-mcp-<user SID>`, the first instance made with
+  `first_pipe_instance` (of two starters one hosts, the other connects), `reject_remote_clients`, a DACL of the
+  current user alone (`D:P(A;;GA;;;<SID>)`), the next instance made before a connection is handed off; a client
+  checks that the server process (`GetNamedPipeServerProcessId`) runs as its user.
+- Tiers: `read`, `local`, `camera`, `delete` (M2), enabled once, no per-call approvals; nothing enabled: no tools
+  and instructions saying how. `--sim` and `X5DESK_TEST` take them from `X5DESK_MCP_TIERS` (a comma list), else
+  all but `delete`, and read no config file. An accepted risk of `camera`: a Wi-Fi connect (`camera_connect`) sends
+  the client id the camera authorized for the app (its `id=`, else the agents' own `id` in `<config>/x5desk/mcp`),
+  only to a private or link-local address (`lan()`), but a device on that network answering as a camera gets it.
+- Logs: `<cache>/x5desk/mcp.log` (0600, scrubbed, a line per call and per host event, 1 MB then `.1`); fronts say
+  what they host or proxy, and every switch, on stderr.
+- Test hooks: `X5DESK_MCP_ENDPOINT=<path or pipe name>` overrides the endpoint; without it `--sim` and `X5DESK_TEST`
+  use none (they never probe or bind the user's). `X5DESK_TEST` without `--sim` keeps the agent folder and log in
+  `$TMPDIR/x5desk-mcp-<pid>` and no thumbnail cache (`Opts::dir`), and its token `mcp-print` prints a line through
+  `println!` before serving (which the guard puts on stderr). The app's `tests/mcp.rs` runs the real binary (`--sim`,
+  endpoint, home, config, cache and temp dirs in a temp dir of its own): every stdout line JSON-RPC and the forced
+  print on stderr, stdin's end, SIGTERM and SIGHUP ending a host with exit 0 and its socket and temp dir gone (one
+  started with SIGHUP and SIGINT ignored surviving them, answering and ending at stdin's end), a client that writes
+  its requests and closes stdin at once answered (by its own host and through a proxy), three processes sharing one
+  host (a client of the second on 2025-11-25, of the third on 2026-07-28) and, its process killed, the other two
+  electing one of them, the 2025-11-25 handshake replayed, a host started with `--tiers read` narrowing only its own
+  client, and the command line (usage, `enable` / `disable`, `--print-config`); a socket path that would not fit
+  `sun_path` (a long `$TMPDIR`) moves to `/tmp/x5mcp-<test>-<pid>/`, a Windows pipe is named after its test. The
+  crate's `tests/tools.rs` runs the tools over a duplex on cam's simulated X5 (a connection narrowed by its own
+  `--tiers` too; jobs sharing a download, and taking over one that stopped, failed or finished and went; a host ending
+  mid-download while the next one waits for the queue, which resumes the `.part` once connected, and a third host
+  finding the jobs as they ended; a host whose worker a camera call holds up handing them on after `ENDING`); `front`'s
+  unit tests play hosts (the handshake replayed, an open request answered, `--tiers` in a proxy against a BOM,
+  batches, unknown names, the answers after stdin's end, a request the client cancelled not waited for); `endpoint`'s
+  the election on a temp socket (in `/tmp` for a long `$TMPDIR`). Opt-in on a real X5 in Android App mode over USB:
+  `X5_CAMERA=<scratch dir>` (`tests/camera.rs`: a host with its agent folder and log there connects without the clock,
+  lists the album, downloads its smallest item and checks its size; a second host of the process is refused the
+  camera, "in use by another app"; the camera is released).
