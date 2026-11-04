@@ -1,11 +1,12 @@
 //! Mount detection against a fake mount table and sysfs, and a fake macOS mount table; a fake card (a DCIM tree in
-//! the fixtures directory, with the samples of `X5_SAMPLES` as its recordings when set); the import copy's resume
-//! rules, and imports through the download queue.
+//! the fixtures directory, with the samples of `X5_SAMPLES` symlinked in as its recordings when set, on unix); the
+//! import copy's resume rules, and imports through the download queue.
 
 use super::*;
 use crate::dl::{self, St};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::{
-    os::unix::fs::symlink,
     sync::{Arc, Mutex},
     time::{Duration, Instant, UNIX_EPOCH},
 };
@@ -21,6 +22,7 @@ fn dir(n: &str) -> PathBuf {
 
 /// The camera's disk by its USB product string (wherever it is mounted, a space in the path), a card under a
 /// removable-media place; not: a USB stick elsewhere, a volume without DCIM, a non-device source, a second mount.
+#[cfg(unix)] // symlinks
 #[test]
 fn mounts() {
     let d = dir("mounts");
@@ -178,16 +180,20 @@ fn card() {
     for p in ["DCIM/Camera01", "DCIM/Camera02", "DCIM/.trash"] {
         fs::create_dir_all(r.join(p)).unwrap();
     }
-    let s = std::env::var_os("X5_SAMPLES").map(PathBuf::from);
+    // the samples are linked in, so only where there are symlinks
+    let s = std::env::var_os("X5_SAMPLES")
+        .filter(|_| cfg!(unix))
+        .map(PathBuf::from);
     for (n, f) in [
         ("VID_20260117_141148_00_635.insv", "v635.insv"),
         ("LRV_20260117_141148_01_635.lrv", "v635.lrv"),
         ("VID_20260116_152935_00_606.insv", "v606.insv"),
         ("LRV_20260503_190639_01_708.lrv", "v635.lrv"),
     ] {
-        match &s {
-            Some(s) => symlink(s.join(f), c.join(n)).unwrap(),
-            None => fs::write(c.join(n), b"no trailer").unwrap(),
+        match s.as_ref().map(|s| s.join(f)) {
+            #[cfg(unix)]
+            Some(f) => symlink(f, c.join(n)).unwrap(),
+            _ => fs::write(c.join(n), b"no trailer").unwrap(),
         }
     }
     for n in [
@@ -263,7 +269,7 @@ fn card() {
     );
     assert!(list(&d).is_err(), "no DCIM");
     let Some(s) = s else {
-        eprintln!("X5_SAMPLES not set: no trailer metadata or thumbnails checked");
+        eprintln!("X5_SAMPLES not set (or not unix): no trailer metadata or thumbnails checked");
         return fs::remove_dir_all(&d).unwrap();
     };
     println!(

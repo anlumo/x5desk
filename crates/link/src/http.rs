@@ -7,7 +7,6 @@ use crate::{Done, Error, Result};
 use std::{
     fs::{self, File, OpenOptions},
     io,
-    os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -134,6 +133,13 @@ impl Xfer {
                 Relaxed,
             );
             (x.etag, x.total, x.todo) = (e, t, r);
+            // lowest first (`fill` pops from the end): in order, no range starts past what is written
+            x.todo.sort_unstable_by_key(|r| std::cmp::Reverse(r.0));
+        }
+        // Ranges are written out of order: without holes a write past the file's valid data length first zero-fills
+        // the gap, on the link's I/O thread, so there one connection writes in order.
+        if !holes(&f) {
+            x.n = 1
         }
         x.dst = Dst::File(f, p.into());
         Ok(x)
@@ -255,7 +261,7 @@ impl Xfer {
                 }
                 v[a..b].copy_from_slice(&d[..n])
             }
-            Dst::File(f, _) => f.write_all_at(&d[..n], k.pos)?,
+            Dst::File(f, _) => write_at(f, &d[..n], k.pos)?,
         }
         k.pos += n as u64;
         prog.done.fetch_add(n as u64, Relaxed);
@@ -324,6 +330,98 @@ impl Xfer {
             let _ = fs::remove_file(ext(p, ".part.todo"));
         }
     }
+}
+
+/// `b` at `pos`, whole.
+#[cfg(unix)]
+fn write_at(f: &File, b: &[u8], pos: u64) -> io::Result<()> {
+    std::os::unix::fs::FileExt::write_all_at(f, b, pos)
+}
+
+/// Whether `f` keeps ranges never written as holes, so ranges can be written in any order without the file system
+/// first zero-filling up to each write: not on FAT or exFAT, and on Windows only once marked sparse
+/// (FSCTL_SET_SPARSE, which NTFS and ReFS take). Unknown: yes, a FUSE mount too (exfat-fuse among them).
+#[cfg(target_os = "linux")]
+fn holes(f: &File) -> bool {
+    use std::os::fd::AsRawFd;
+    // SAFETY: fstatfs only writes the struct it is given.
+    let s = unsafe {
+        let mut s: libc::statfs = std::mem::zeroed();
+        (libc::fstatfs(f.as_raw_fd(), &mut s) == 0).then_some(s)
+    };
+    // MSDOS_SUPER_MAGIC, EXFAT_SUPER_MAGIC
+    !s.is_some_and(|s| matches!(s.f_type, 0x4d44 | 0x2011_bab0))
+}
+
+/// See the Linux [`holes`]; the file system by its name.
+#[cfg(target_os = "macos")]
+fn holes(f: &File) -> bool {
+    use std::os::fd::AsRawFd;
+    // SAFETY: fstatfs only writes the struct it is given.
+    let s = unsafe {
+        let mut s: libc::statfs = std::mem::zeroed();
+        (libc::fstatfs(f.as_raw_fd(), &mut s) == 0).then_some(s)
+    };
+    !s.is_some_and(|s| {
+        let n = s.f_fstypename.map(|c| c as u8);
+        let n = std::ffi::CStr::from_bytes_until_nul(&n).map_or(&[][..], |n| n.to_bytes());
+        matches!(n, b"msdos" | b"exfat")
+    })
+}
+
+/// See the Linux [`holes`].
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn holes(_: &File) -> bool {
+    true
+}
+
+/// See the Linux [`holes`]: marks `f` sparse, so ranges never written take no space and are never zero-filled.
+#[cfg(windows)]
+fn holes(f: &File) -> bool {
+    use std::{ffi::c_void, os::windows::io::AsRawHandle, ptr::null_mut};
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn DeviceIoControl(
+            h: *mut c_void,
+            code: u32,
+            i: *mut c_void,
+            ni: u32,
+            o: *mut c_void,
+            no: u32,
+            ret: *mut u32,
+            ov: *mut c_void,
+        ) -> i32;
+    }
+    const FSCTL_SET_SPARSE: u32 = 0x0009_00c4;
+    let mut ret = 0;
+    // SAFETY: an open handle with write access, no buffers, and no OVERLAPPED: std opens files for synchronous I/O.
+    unsafe {
+        DeviceIoControl(
+            f.as_raw_handle(),
+            FSCTL_SET_SPARSE,
+            null_mut(),
+            0,
+            null_mut(),
+            0,
+            &mut ret,
+            null_mut(),
+        ) != 0
+    }
+}
+
+/// `b` at `pos`, whole: `seek_write` may write less (and moves the cursor, which nothing here reads).
+#[cfg(windows)]
+fn write_at(f: &File, mut b: &[u8], mut pos: u64) -> io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !b.is_empty() {
+        match f.seek_write(b, pos) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => (b, pos) = (&b[n..], pos + n as u64),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -402,6 +500,52 @@ mod tests {
             qs.extend(opened);
         }
         true
+    }
+
+    /// A download keeps its connections where the file system holds holes (the temp dir's) and runs one on FAT or
+    /// exFAT (a dir on one in `X5_NOHOLES`, when set).
+    #[test]
+    fn holes_fs() {
+        let n = |d: &Path| {
+            let p = d.join(format!("x5link-h{}", std::process::id()));
+            let n = Xfer::new("/f".into(), Some(&p), 4, Arc::new(Prog::default()))
+                .unwrap()
+                .n;
+            fs::remove_file(ext(&p, ".part")).unwrap();
+            n
+        };
+        assert_eq!(n(&std::env::temp_dir()), 4);
+        let Some(d) = std::env::var_os("X5_NOHOLES") else {
+            return eprintln!("X5_NOHOLES not set: no FAT or exFAT dir checked");
+        };
+        assert_eq!(n(Path::new(&d)), 1);
+    }
+
+    /// A resume opens its missing ranges lowest first, so one connection never starts past what is written.
+    #[test]
+    fn resume_in_order() {
+        let dir = std::env::temp_dir().join(format!("x5link-r{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("f.bin");
+        fs::write(ext(&p, ".part"), b"0123456789").unwrap();
+        fs::write(
+            ext(&p, ".part.todo"),
+            "e\n400\n10 100\n200 300\n300 400\n100 200\n",
+        )
+        .unwrap();
+        let mut x = Xfer::new("/f".into(), Some(&p), 1, Arc::new(Prog::default())).unwrap();
+        let mut at = vec![];
+        while let Some(r) = x.todo.last().copied() {
+            x.fill(&mut 0, "h", &mut |_, _| Ok(false)).unwrap();
+            at.push(x.cs.pop().map(|k| (k.pos, k.end)));
+            assert_eq!(at.last(), Some(&Some(r)));
+        }
+        assert_eq!(
+            at,
+            [10, 100, 200, 300].map(|a| Some((a, a + 100 - a % 100)))
+        );
+        drop(x);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

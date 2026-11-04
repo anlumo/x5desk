@@ -516,8 +516,9 @@ impl Camera {
         Pending(rx)
     }
 
-    /// Downloads `uri` to `dst` over `conns` connections; resumes from `<dst>.part` / `<dst>.part.todo` if they
-    /// are there. Data goes to `<dst>.part`, renamed to `dst` when complete.
+    /// Downloads `uri` to `dst` over `conns` connections (one, in order, where `<dst>.part` can't hold holes: FAT,
+    /// exFAT); resumes from `<dst>.part` / `<dst>.part.todo` if they are there. Data goes to `<dst>.part`, renamed to
+    /// `dst` when complete.
     pub fn download(&self, uri: &str, dst: &Path, conns: usize) -> Download {
         let (tx, rx) = mpsc::sync_channel(1);
         let prog = Arc::new(Prog::default());

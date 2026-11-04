@@ -399,7 +399,8 @@ impl Exp {
         self.items.iter().all(|i| i.over())
     }
 
-    /// A free output path: `<dest>/<source stem>_<pre><tag>.<ext>`, numbered when taken (on disk or by a queued job).
+    /// A free output path: `<dest>/<source stem>_<pre><tag>.<ext>`, numbered when taken (on disk, by a partial file, or
+    /// by a queued job).
     fn path(&self, s: &Spec, x: &Set, grab: bool, pre: &str) -> PathBuf {
         let stem = s.files[0]
             .file_stem()
@@ -420,7 +421,7 @@ impl Exp {
                 1 => self.dest.join(format!("{stem}_{pre}{tag}.{ext}")),
                 _ => self.dest.join(format!("{stem}_{pre}{tag}-{i}.{ext}")),
             })
-            .find(|p| !p.exists() && self.items.iter().all(|i| &i.path != p))
+            .find(|p| free(p) && self.items.iter().all(|i| &i.path != p))
             .unwrap()
     }
 
@@ -539,7 +540,7 @@ impl Exp {
                 1 => self.dest.join(format!("{}_{tag}.mp4", e.name)),
                 _ => self.dest.join(format!("{}_{tag}-{i}.mp4", e.name)),
             })
-            .find(|p| !p.exists() && self.items.iter().all(|i| &i.path != p))
+            .find(|p| free(p) && self.items.iter().all(|i| &i.path != p))
             .unwrap();
         let what = match x.preset {
             Some(i) => PRESETS[i].1.to_string(),
@@ -1028,6 +1029,14 @@ pub(crate) fn scoped<T>(
 struct Keep {
     raft: Option<stitch::Raft>,
     fx: Option<fx::Ctx>,
+}
+
+/// Neither the file nor a partial one (`<path>.part`, which a job writes until it is complete, in this process or in
+/// another) is there.
+fn free(p: &Path) -> bool {
+    let mut part = p.as_os_str().to_owned();
+    part.push(".part");
+    !p.exists() && !Path::new(&part).exists()
 }
 
 fn worker(g: Arc<Gpu>, cx: Ctx, ctx: egui::Context, rx: mpsc::Receiver<Task>) {

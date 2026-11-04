@@ -59,15 +59,10 @@
 //! effects the `box=` run, is there; the run ends with the queue).
 
 mod ai;
-mod album;
-mod awake;
 mod bt;
 mod camera;
 mod capture;
 mod clip;
-mod conf;
-mod disk;
-mod dl;
 mod editor;
 mod export;
 mod feed;
@@ -86,10 +81,14 @@ mod replay;
 mod settings;
 mod webcam;
 
+// the camera code without its UI (`cam`): the screens use these as modules of the app's own
+use cam::dirs::mine;
+pub use cam::dirs::{private, videos, xdg};
+use cam::{album, awake, conf, disk, dl};
 use eframe::{egui, egui_wgpu};
 use std::{
     cell::RefCell,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard,
         atomic::{AtomicBool, Ordering::Relaxed},
@@ -260,56 +259,6 @@ impl Test {
         }
         t
     }
-}
-
-/// `$<var>` if absolute, else `~/<home>` (XDG base directories). On macOS `~/.config` and `~/.cache` are
-/// `~/Library/Application Support` and `~/Library/Caches`; the XDG variables still override them.
-pub fn xdg(var: &str, home: &str) -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    let home = match home {
-        ".config" => "Library/Application Support",
-        ".cache" => "Library/Caches",
-        h => h,
-    };
-    std::env::var_os(var)
-        .map(PathBuf::from)
-        .filter(|d| d.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(home)))
-}
-
-/// The user's video folder: `~/Videos`, on macOS `~/Movies`.
-pub fn videos() -> Option<PathBuf> {
-    let d = if cfg!(target_os = "macos") {
-        "Movies"
-    } else {
-        "Videos"
-    };
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(d))
-}
-
-/// `d`, made owner-only if missing, if it is a dir of this user's that no other can write to: in a shared tmp another
-/// user may have made it first, or put a symlink there.
-fn mine(d: PathBuf) -> Option<PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-    let _ = std::fs::DirBuilder::new().mode(0o700).create(&d);
-    let m = d.symlink_metadata().ok()?;
-    // SAFETY: geteuid has no preconditions.
-    let me = unsafe { libc::geteuid() };
-    (m.is_dir() && m.uid() == me && m.mode() & 0o022 == 0).then_some(d)
-}
-
-/// Makes the app's config dir `d` before a save there: created if missing, owner-only also when it exists already
-/// (it holds the stream key, the client id, the recent files). Its parents keep their modes.
-pub fn private(d: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    if let Some(p) = d.parent() {
-        std::fs::create_dir_all(p)?
-    }
-    match std::fs::DirBuilder::new().mode(0o700).create(d) {
-        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
-        _ => {}
-    }
-    std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))
 }
 
 /// wgpu-core's `Surface::configure` waits for the queue to go idle and fails (`GpuWaitTimeout`) when another thread
@@ -1040,34 +989,6 @@ mod tests {
             (ble("ble=sim"), ble("ble=sta"), ble("ble=x")),
             (Some(false), Some(true), None)
         );
-    }
-
-    /// The hook's cubecl dir: made owner-only; refused when another user owns it (here root), when it is a symlink (to
-    /// a dir of ours too) or when others can write to it.
-    #[test]
-    fn cubecl_dir() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-        struct Rm(std::path::PathBuf);
-        impl Drop for Rm {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let run = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, Into::into);
-        let b = Rm(run.join(format!("x5desk-mine-{}", std::process::id())));
-        std::fs::create_dir(&b.0).unwrap();
-        let mode = |d: &std::path::Path| std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
-        let d = b.0.join("x5desk-cubecl");
-        assert_eq!(super::mine(d.clone()), Some(d.clone()));
-        assert_eq!(mode(&d), 0o700);
-        assert_eq!(super::mine("/".into()), None);
-        let l = b.0.join("link");
-        symlink(&d, &l).unwrap();
-        assert_eq!(super::mine(l), None);
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert_eq!(super::mine(d.clone()), None);
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(super::mine(d.clone()), Some(d));
     }
 
     /// The error wgpu 30 reports for `Surface::configure` when another thread submitted during its idle wait, and

@@ -2,7 +2,7 @@
 //! files and proxy, a photo and its raw; PROTOCOL.md §9.2 fileKey), their metadata and favourite flags, and
 //! thumbnails: the trailer's NV12 picture scaled down and cached on disk.
 
-use crate::library::key;
+use crate::work::key;
 use link::pb;
 use std::{
     collections::HashMap,
@@ -280,8 +280,11 @@ pub const CAP: u64 = 1_000_000_000;
 
 impl Cache {
     /// `<cache dir>/x5desk/thumbs`.
+    #[allow(clippy::new_without_default)] // the user's cache dir, from the environment: no default
     pub fn new() -> Cache {
-        Cache::at(crate::xdg("XDG_CACHE_HOME", ".cache").map(|d| d.join("x5desk").join("thumbs")))
+        Cache::at(
+            crate::dirs::xdg("XDG_CACHE_HOME", ".cache").map(|d| d.join("x5desk").join("thumbs")),
+        )
     }
 
     pub fn at(dir: Option<PathBuf>) -> Cache {
@@ -316,7 +319,12 @@ impl Cache {
     /// `None` unless the file is a whole entry of a size [`thumb`] makes: a short or damaged one (a crash between
     /// write and rename) is fetched again and rewritten.
     pub fn get(p: &Path) -> Option<(u32, u32, Vec<u8>)> {
-        let mut f = std::fs::File::open(p).ok()?;
+        let mut o = std::fs::File::options();
+        o.read(true);
+        // the touch below needs FILE_WRITE_ATTRIBUTES on the handle there (GENERIC_READ alone fails it)
+        #[cfg(windows)]
+        std::os::windows::fs::OpenOptionsExt::access_mode(&mut o, 0x8000_0000 | 0x100);
+        let mut f = o.open(p).ok()?;
         let mut b = vec![];
         f.read_to_end(&mut b).ok()?;
         let u = |o: usize| Some(u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?));
@@ -325,6 +333,7 @@ impl Cache {
         if !ok || b.len() != 8 + (w * h * 4) as usize {
             return None;
         }
+        // a hit counts as a use: `trim` drops the least recently used first
         let _ = f.set_modified(SystemTime::now());
         Some((w, h, b.split_off(8)))
     }

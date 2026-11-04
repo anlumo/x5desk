@@ -1,9 +1,10 @@
 //! Downloads: a persistent queue of camera files, run one at a time over four tunnel connections (one connection
-//! is camera-limited to ~18 MB/s, four reach 29–42 MB/s, PLAN.md §1). Data goes to `<dst>.part` with link's sidecar,
-//! so a cancelled or interrupted file resumes where it stopped, also after a restart. Imports from a mounted card
-//! (`file://` sources) run in the same queue as local copies ([`disk::copy`], also resumable), with or without a
-//! camera; one whose card is gone waits for it, one whose card is there without its file fails. The queue is a text
-//! file in the config dir: state, URI, failure reason and destination per line.
+//! is camera-limited to ~18 MB/s, four reach 29–42 MB/s, PLAN.md §1; onto FAT or exFAT one, in order, see link).
+//! Data goes to `<dst>.part` with link's sidecar, so a cancelled or interrupted file resumes where it stopped, also
+//! after a restart. Imports from a mounted card (`file://` sources) run in the same queue as local copies
+//! ([`disk::copy`], also resumable), with or without a camera; one whose card is gone waits for it, one whose card is
+//! there without its file fails. The queue is a text file in the config dir: state, URI, failure reason and
+//! destination per line.
 
 use crate::disk;
 use link::{Camera, Download, Error, Pending, Prog};
@@ -129,7 +130,7 @@ impl Queue {
         let t = f.with_extension("new");
         let r = f
             .parent()
-            .map_or(Ok(()), crate::private)
+            .map_or(Ok(()), crate::dirs::private)
             .and_then(|_| std::fs::write(&t, &s))
             .and_then(|_| std::fs::rename(&t, f));
         match r {

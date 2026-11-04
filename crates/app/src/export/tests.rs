@@ -73,6 +73,19 @@ fn projection() {
     }
 }
 
+/// A name is free only when neither the file nor its `.part` is there: a job in another process (an agent's) may be
+/// writing that name.
+#[test]
+fn free_names() {
+    let d = crate::clip::tests::Tmp::new("free");
+    let p = |n: &str| d.0.join(n);
+    std::fs::write(p("a.mp4"), b"").unwrap();
+    std::fs::write(p("b.mp4.part"), b"").unwrap();
+    assert!(!free(&p("a.mp4")));
+    assert!(!free(&p("b.mp4")));
+    assert!(free(&p("c.mp4")));
+}
+
 /// Presets apply their output settings and keep the rest; the hook's tokens; H.264 stops at 4096 px.
 #[test]
 fn presets() {

@@ -3,8 +3,8 @@
 //! the values of the settings it depends on (`depend_on` joined by `|`, else `default`). And how a setting reaches
 //! the camera: `SET_PHOTOGRAPHY_OPTIONS` with the mode's function mode, or `SET_OPTIONS`. The app maps the JSON's
 //! strings to protobuf values through an asset of its own (`proto.json`); here they come from the enum names in
-//! `proto/`, plus the few the names do not give. The writes in `capture::CHECKED` ran on an X5 and read back; the
-//! others go out the same way.
+//! `proto/`, plus the few the names do not give. The writes in the app's `capture::CHECKED` ran on an X5 and read
+//! back; the others go out the same way. The capture worker sends only values a mode's lists allow (`Key::allowed`).
 
 use link::{Mode as Sub, pb};
 use pb::PhotographyOptionType as T;

@@ -373,6 +373,7 @@ dependencies = [
  "ash",
  "ble",
  "bytemuck",
+ "cam",
  "cpal",
  "edit",
  "eframe",
@@ -386,9 +387,7 @@ dependencies = [
  "media",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
- "objc2-core-foundation",
  "objc2-foundation 0.3.2",
- "objc2-io-kit",
  "pollster 1.0.1",
  "prost",
  "proto",
@@ -1716,6 +1715,20 @@ dependencies = [
  "rustix 0.38.44",
  "wayland-backend",
  "wayland-client",
+]
+
+[[package]]
+name = "cam"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "link",
+ "media",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "objc2-io-kit",
+ "prost",
 ]
 
 [[package]]
@@ -5064,6 +5077,7 @@ name = "link"
 version = "0.1.0"
 dependencies = [
  "futures-core",
+ "libc",
  "nusb",
  "prost",
  "proto",

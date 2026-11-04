@@ -13,7 +13,8 @@
 //! instead of reaching the device's handler or hanging the other threads. A host that reconfigures a surface on the
 //! device hands the job's threads its locks around their GPU work (`locks`).
 
-pub mod jpeg;
+// the photo encoder lives in media, beside the decoder
+pub use media::jpeg;
 
 use media::{
     aacenc,

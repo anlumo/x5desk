@@ -71,11 +71,8 @@ pub trait Source {
 /// A source shared with the output thread.
 pub type Src = Arc<Mutex<dyn Source + Send>>;
 
-pub fn mono() -> u64 {
-    let mut t: libc::timespec = unsafe { std::mem::zeroed() };
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) };
-    t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
-}
+/// CLOCK_MONOTONIC in ns (`cam`'s, the capture worker's camera clock offset goes by it too).
+pub use cam::mono;
 
 /// A file's AAC track handed out packet by packet as the audio clock passes them.
 pub struct Tap {

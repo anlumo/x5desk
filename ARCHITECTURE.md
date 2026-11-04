@@ -18,6 +18,8 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 - Tests on numbered clips (`clip::tests::numbered`, made with the ffmpeg CLI: the B-frame, open-GOP and 10-bit tests of
   the app's `clip.rs`, movie's B-frame test) skip with a note when ffmpeg is missing or cannot make the clip (an encoder
   or filter it lacks, drawtext without fontconfig).
+- `link`'s `holes_fs` checks that a download on FAT or exFAT runs one connection in a dir on one named by
+  `X5_NOHOLES` (on macOS a mounted `hdiutil create -fs ExFAT` image will do), without it only the temp dir's four.
 - Tests that make paths in `$XDG_RUNTIME_DIR` name them `<name>-<pid>` and remove them through a drop guard, also
   when they fail. The test hook's burn cache is the exception: `x5desk-cubecl/<n>`, shared by every hook run on
   purpose, one process to a slot (`flock`), kept.
@@ -39,18 +41,19 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 | Crate | Content |
 |---|---|
 | `video` | `Gpu` (one Vulkan device via wgpu-hal with decode and encode queues; macOS: the Metal device), H.265 / H.264 parsers, Vulkan Video (macOS: VideoToolbox, `mac/`) decode and encode, NV12 / P010 pictures for wgpu (`Ring::planes`) |
-| `media` | MP4 demux and mux (`sv3d` / `st3d`), `.insv` / `.insp` trailer (calibration, gyro, exposure), AAC decode (symphonia) and AAC-LC encode (`aacenc`), editor mixer with ducking and limiter (`mix`), music import (`music`), resampler, RNNoise denoise, audio output and master clock (cpal; `audio::Player::open_on` plays on a picked device, `audio::device(id)` resolves the settings' device id by exact match: it lists the devices, so resolve when the choice changes, never per open; macOS: the app's settings look a gone or missing picked device up again on the opening thread), `audio::Conv` to a stream's format (`Conv::on`: macOS the device's own rate and up to 2 channels, else the source's; the clock counts source frames), MJPEG decode, UVC capture of the X5's Webcam Mode |
+| `media` | MP4 demux and mux (`sv3d` / `st3d`), `.insv` / `.insp` trailer (calibration, gyro, exposure), AAC decode (symphonia) and AAC-LC encode (`aacenc`), editor mixer with ducking and limiter (`mix`), music import (`music`), resampler, RNNoise denoise, audio output and master clock (cpal; `audio::Player::open_on` plays on a picked device, `audio::device(id)` resolves the settings' device id by exact match: it lists the devices, so resolve when the choice changes, never per open; macOS: the app's settings look a gone or missing picked device up again on the opening thread), `audio::Conv` to a stream's format (`Conv::on`: macOS the device's own rate and up to 2 channels, else the source's; the clock counts source frames), MJPEG decode, baseline JPEG encode (`jpeg`), UVC capture of the X5's Webcam Mode |
 | `proto` | Protobuf messages for the camera (prost, compiled with protox from `proto/`) |
-| `link` | Camera link: UCD framing, session, requests, notifications, HTTP tunnel with several connections, downloads; USB (nusb), Wi-Fi (TCP); BLE lives in `ble`. Connections start as `link::Opening` (dropping it cancels the sync); `Error::Silent` after 30 s without a sync answer; `Camera::set_time` sends the app's two SET_OPTIONS at once and returns both pending answers; `scan` / `watch` report `Plug::Disk` for an Insta360 product string under vendor 070a (the X5 in U-disk mode, or the first seconds of app mode); feature `sim`: a simulated camera (a handler status 0 leaves the request unanswered) |
+| `link` | Camera link: UCD framing, session, requests, notifications, HTTP tunnel with several connections, downloads (each connection writes its range at its offset of `<dst>.part`; on FAT and exFAT, which hold no holes and zero-fill up to an out-of-order write, one connection writes in order; Windows marks the file sparse first); USB (nusb), Wi-Fi (TCP); BLE lives in `ble`. Connections start as `link::Opening` (dropping it cancels the sync); `Error::Silent` after 30 s without a sync answer; `Camera::set_time` sends the app's two SET_OPTIONS at once and returns both pending answers; `scan` / `watch` report `Plug::Disk` for an Insta360 product string under vendor 070a (the X5 in U-disk mode, or the first seconds of app mode); feature `sim`: a simulated camera (a handler status 0 leaves the request unanswered) |
 | `stitch` | Dual fisheye → equirect / perspective on the shared device from NV12 / P010 textures: template seam, RAFT flow, colour matching, stabilisation rotation; burn's attachment per device (`attach`) and its cache dir (`cache`: a slot of the process's own, else memory only) |
 | `stab` | Stabilisation maths: trailer gyro / accelerometer → per-frame orientation, smoothing (FlowState-like), horizon and direction lock, rolling-shutter terms |
 | `fx` | Image effects on the shared device: colour adjustments (incl. brightness, brilliance), automatic colour and underwater correction, `.cube` LUTs and our own looks, defringe (purple / green / blue), clarity, overlays (watermark, stickers, text) |
 | `edit` | Editor model: timeline, clips with a look and colour adjustments each (`fx::Params`: edit depends on fx), trim / split / speed / freeze, reframing keyframes and camera-movement presets, undo (a drag that ends where it started leaves no undo step and keeps the redo list), project files |
-| `export` | Render jobs: decode → stitch → stabilise → effects → encode → mux, 360 and flat, queue; editor timelines (`Cut::Edit`: speed ramps, freeze frames, views, each clip's adjustments and look via `fx`, audio mixed with music, RNNoise-denoised after the time-stretch when `Edit::denoise` is set, and AAC-encoded, or copied for plain 1× cuts without denoise); photo frame grabs (JPEG with GPano). `export::locks(gate, burn)` hands it the app's GATE / BURN; `Job::flat` keeps a flat 2:1 picture from a 360 hook untagged |
+| `export` | Render jobs: decode → stitch → stabilise → effects → encode → mux, 360 and flat, queue; editor timelines (`Cut::Edit`: speed ramps, freeze frames, views, each clip's adjustments and look via `fx`, audio mixed with music, RNNoise-denoised after the time-stretch when `Edit::denoise` is set, and AAC-encoded, or copied for plain 1× cuts without denoise); photo frame grabs (JPEG with GPano; the encoder is `media::jpeg`, also reachable as `export::jpeg`). `export::locks(gate, burn)` hands it the app's GATE / BURN; `Job::flat` keeps a flat 2:1 picture from a 360 hook untagged |
 | `track` | AI with open models (burn on the shared device; macOS: the face detector through Core ML, `coreml.rs`): subject tracker on the sphere with re-identification (LOMO colour and texture histograms with Fisher weights learnt per session, no model), detector, auto framing, face privacy blur regions, highlights → `edit::Timeline`. The tracker finds a lost subject again only within its reach (`Seen::prior`, `Seen::speed`: the speed, in its own heights a second, it needs to be a candidate since it was last seen for sure, its heading carried on for up to a second; beyond what it reaches setting off at a walk and speeding up by 3 heights/s² to a sprint's 3, it is someone else; within it, its similarity loses 0.1 × (speed / 1 height a second)²), and a person only with the pick's template's box on it (`vit::hit`: never on the detector's box alone); a person at least as like one `find` took and the tracker lost again before VitTrack was sure of them as like the subject (`vit::Tried`, the last 8; not added to the gallery, as the subject can be one) needs VitTrack 0.5, not 0.25 (`Tried::need`, also for whoever the tracker takes on its own after a gap). `Tracker::fps` is the clip's frame rate (30 until set) |
 | `ble` | Camera BLE: scan, wake, pairing, Wi-Fi credentials (btleplug). The X5's wake-up brings up its radios and session, never its screen. Feature `sim`: `Ble::sim`, a simulated adapter and camera on the real session code ; macOS: `Error::Off` / `Error::Denied` and `Event::Adapter` (Bluetooth off, not allowed, back) |
 | `live` | FLV and RTMP client, OBS frame protocol (Unix socket + DMA-BUF fds), PipeWire camera node (the last three Linux only: elsewhere `stub.rs` keeps their API and refuses to start) |
 | `obs` | OBS source plugin (`cdylib`) that imports our frames |
+| `cam` | The app's camera code without its UI, so the app and a headless host run the same session code: the camera worker (`camera`: session, clock, album and thumbnails, download queue, commands, mounted cards) and the capture worker (`capture`: mode, settings and shutter from `/CONF`), with `album`, `dl`, `disk`, `conf`, `work` (a recording's files), `dirs` (config, cache and video folders; on Windows the profile's), `awake`, `mono`. The workers guard what any host sends: no delete while the camera records or captures (`Info::busy`, and the capture status read before the delete), a setting only to a value `/CONF` allows now (`St::allowed`), no start of a recording or timelapse at 5 % battery or less unless charging (`camera::empty`), an explicit `Start` / `Stop` (the camera's capture state read first, nothing sent when it already is so); a connect sets the camera clock only when asked to (`Cmd::Connect { clock }`, the app's own always; its retries and its reconnects after a lost link, by the 2 s timer or the camera back on the bus, the same). Outside Linux and macOS: no card found (a card source given still lists, its URIs `/`-separated); not unix: the camera clock never set (no IANA zone known; said once), the favourite timestamp from the system's zone rules (Windows: `GetTimeZoneInformation`). Feature `sim`: a simulated X5 with a fake card for the tests above it. No egui, wgpu or video |
 | `app` | egui (eframe 0.37) UI, binary `x5desk` |
 
 ## Shared device contract (`video::Gpu`)
@@ -262,28 +265,31 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   export preset, audio output of the player and the editor's preview, thumbnail cache, GPU info, client id) and Help (keys, a guide per screen, About with
   licences). A camera battery at 20 % or less and not charging shows as a warning on every screen (`camera::low`).
 - One module per screen: `library.rs` / `player.rs`; `editor.rs` (`deck.rs`, `sound.rs`, `thumbs.rs`, `doc.rs`);
-  `lab.rs` (Shot Lab on crate shotlab); `camera.rs` (its worker connects in the app's order, PROTOCOL.md §5.1:
-  identity, options, capture status, then the clock's two SET_OPTIONS (§5.3) on every USB and Wi-Fi connect, not
+  `lab.rs` (Shot Lab on crate shotlab); `camera.rs` (its worker, `cam::camera`, connects in the app's order, PROTOCOL.md
+  §5.1: identity, options, capture status, then the clock's two SET_OPTIONS (§5.3) on every USB and Wi-Fi connect, not
   waited for: polled in its tick; once both were answered, a refusal too, the options are read again, so the Clock row
   shows the clock as the camera has it (set, even when only the zone was refused); not when an answer never came or
   came garbled (timeout: GET_OPTIONS would hold the worker; link lost; undecodable reply); then the connect note and a
   low-battery note come; a refusal or timeout adds an error note and the session stays; then the Capture screen's tap
   and the listing; Sync time takes the same path; at quit only the running download's end is collected (`dl::end`),
-  nothing new starts; `album.rs`,
-  `dl.rs`; `disk.rs`: a mounted card found through the mount table and the sysfs product string, listed with one
+  nothing new starts; `cam`'s `album`,
+  `dl`; `disk`: a mounted card found through the mount table and the sysfs product string, listed with one
   trailer per item (its first file; empty files left out), imported as `file://` download entries; the bar takes
   U-disk mode from a mounted disk of the camera's own, else from the scan's `Plug::Disk` (`070a:4027`, also the first
   seconds of app mode); `bt.rs`: Bluetooth and station-mode Wi-Fi: join, a read of the camera's existing station
   connection over BLE, a typed camera address; the scan row says when Bluetooth is off or not allowed, macOS: System
-  Settings > Privacy & Security > Bluetooth); `capture.rs` (worker on the camera session through `camera::Tap`; its
-  reports carry the session (`Tap::sid`) they belong to, and the screen drops those of an earlier one; `conf.rs`: the
-  `/CONF` model and its wire values; `feed.rs`: live preview decode thread, pictures handed over under one lock and
+  Settings > Privacy & Security > Bluetooth); `capture.rs` (worker `cam::capture` on the camera session through
+  `camera::Tap`; its reports carry the session (`Tap::sid`) they belong to, and the screen drops those of an earlier
+  one; the shutter sends a photo, or the start or stop its button shows; `cam::conf`: the `/CONF` model and its wire
+  values; `feed.rs`: live preview decode thread, pictures handed over under one lock and
   taken as they fall due, paced on the camera clock from the slowest of the last 32 deliveries, IMU levelling;
   `webcam.rs`: Webcam Mode via `media::uvc` + MJPEG; `replay.rs`: link's simulated camera streaming a recorded
   preview, every loop from its first IDR (leading packets stamped 0 are sent again a frame apart)); `live.rs`
   (sources `live::Pick {Player, Preview, Webcam}`; `live::Source::tick(at)` takes the tick's scheduled
-  `CLOCK_MONOTONIC` time); `export.rs` with the `photo.rs` and `movie.rs` viewers (`movie.rs`: plain videos such as
-  our exports or B-frame MP4s, NV12 or P010 to RGBA through BT.709 limited range); `ai.rs`; `settings.rs`; `help.rs`.
+  `CLOCK_MONOTONIC` time); `export.rs` (an output name is numbered past one on disk, one whose `.part` a job in any
+  process is writing, and one a queued job will write) with the `photo.rs` and `movie.rs` viewers (`movie.rs`: plain
+  videos such as our exports or B-frame MP4s, NV12 or P010 to RGBA through BT.709 limited range); `ai.rs`;
+  `settings.rs`; `help.rs`.
   Work runs on the threads in PLAN.md §2; the UI thread only reads the newest state and draws.
 - AI (`ai.rs`): `ai::MODELS` loads one `track::Ai` per run and device on first use (warm-up: the tracker and the
   detector at every batch size, one network call at a time under BURN; re-identification runs no network), shared by
@@ -336,7 +342,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   Recent and Downloaded lists on a thread every 2 s and greys out the ones not there (on a card that is not mounted),
   keeping them out of the editor's media, until they are back. The download queue file is written only when its
   text changes.
-- Config: every save to `<config>/x5desk` makes that dir owner-only (`main.rs` `private`), also when it exists
+- Config: every save to `<config>/x5desk` makes that dir owner-only (`cam::dirs::private`), also when it exists
   already; the `live` file (stream key) is 0600. A stream key in the RTMP URL (key field empty: the last path
   segment after the app, trailing '/' ignored as `live::rtmp::Rtmp::start` does, whitespace around the URL trimmed by
   the app first: `live::dest`, `live::mask`) is drawn masked and handed to `live::rtmp` as the key, never inside the
@@ -350,7 +356,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 - burn's cache: burn keeps its device measurements and autotune results (burn feature `persistence`) in a slot of
   `<cache>/x5desk/cubecl` (`stitch::cache(Option<&Path>)`, called in `main` before `stitch::attach`). Test-hook runs
   share `$XDG_RUNTIME_DIR/x5desk-cubecl` (the temp dir without it), so they start warm too, if it is a dir of this
-  user's, not a symlink, that no other user can write to (`main.rs` `mine`, made 0700 when missing); any other burn
+  user's, not a symlink, that no other user can write to (`cam::dirs::mine`, made 0700 when missing); any other burn
   user (tests) gets cubecl's own root from `stitch::attach` (`target/environment` of the outermost Cargo workspace
   above the working dir, else the user cache dir). A slot is the first `<n>` (made 0700) whose `lock` the process can
   `flock`, never through a symlink another user planted (the lock made with `O_EXCL`, else taken only if `lstat` shows
