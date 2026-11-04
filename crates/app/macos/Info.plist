@@ -8,6 +8,8 @@
   terminal's grants instead; as a bundle without NSBluetoothAlwaysUsageDescription it would be killed at its first
   Bluetooth scan.
 
+  CFBundleIconName is the icon in Assets.car (../icon/icon.swift); cargo-packager sets CFBundleIconFile, the icns.
+
   The documents are what the Library opens (finder.rs takes Finder's requests), by extension: Insta360's own formats
   have no type identifier on macOS (Insta360 Studio declares them so too), and the system's types for MP4 and JPEG
   take in more (public.mpeg-4 .m4v, public.jpeg .jpe) than the Library knows. Insta360's at the default rank, so the
@@ -18,6 +20,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

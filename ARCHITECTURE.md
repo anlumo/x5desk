@@ -230,6 +230,13 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   Apple credentials in the environment sign it for anyone and notarize it. The disk image's window is laid out by
   Finder through AppleScript, which asks for Automation permission once; `CI=true` skips that, as where nobody can
   answer (a locked screen). Launched from Finder its stdout and stderr go nowhere.
+- Icon: `crates/app/icon/icon.swift` (CoreGraphics, run by hand; needs Xcode's actool) renders it and writes what is
+  checked in beside it: `Assets.car`, the asset catalog Info.plist's `CFBundleIconName` names (macOS 27 shows an icon
+  that only comes as an icns small on a grey plate at 16 and 32 px on a 1x screen), `AppIcon.icns` for what reads no
+  catalog (the dmg's volume), and `x5desk.png`, the window icon (X11, Windows; winit 0.30 takes none on Wayland, where
+  the compositor would go by the app id's desktop file, which the repo has none of) and a bare binary's Dock icon.
+  eframe puts egui's logo in the Dock unless given one; inside a bundle (`NSBundle` has an identifier) the app gives it
+  the empty default instead, so the catalog's icon stays, rendered as Finder shows it.
 - Opening files: Info.plist declares what the Library opens by extension (the system's MP4 and JPEG types also take
   in `.m4v` and `.jpe`): `.insv`/`.lrv` and `.insp` as Insta360 Studio does (Editor, the default rank, so the user
   picks which app opens them), `.mp4`, `.jpg` and `.jpeg` as Viewer, Alternate (offered in Open With, never their

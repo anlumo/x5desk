@@ -20,6 +20,9 @@ identifier = "io.github.anlumo.x5desk"
 description = "Desktop app for the Insta360 X5: player, camera control, live output, export"
 category = "Video"
 binaries = [{ path = "x5desk", main = true }]
+# rendered by icon/icon.swift: the catalog (Info.plist's CFBundleIconName), and an icns for what reads none
+icons = ["icon/AppIcon.icns"]
+resources = ["icon/Assets.car"]
 before-packaging-command = "cargo build --release --locked -p app"
 formats = ["app", "dmg"]
 
@@ -64,10 +67,10 @@ ash.workspace = true
 
 # macOS, already in the tree through wgpu, cubecl and eframe (winit has the versions before): App Nap held off while
 # long work runs (`awake.rs`), the USB device a mounted disk sits on from the IOKit registry (`disk.rs`), the files
-# Finder asks the app to open (`finder.rs`)
+# Finder asks the app to open (`finder.rs`), whether it runs from a bundle (main.rs `icon`)
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSAppleEventManager", "NSNotification", "NSProcessInfo", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSAppleEventManager", "NSBundle", "NSNotification", "NSProcessInfo", "NSString", "NSURL"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFString"] }
 objc2-io-kit = { version = "0.3", default-features = false, features = ["std", "libc"] }

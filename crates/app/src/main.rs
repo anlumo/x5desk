@@ -921,6 +921,19 @@ impl eframe::App for App {
     }
 }
 
+/// The window's icon (`icon/`), which on macOS is the Dock's: eframe would put egui's logo there without one. A bundle
+/// keeps its own (Assets.car, as Finder shows it): eframe leaves the Dock alone given the empty default.
+fn icon() -> egui::IconData {
+    #[cfg(target_os = "macos")]
+    if objc2_foundation::NSBundle::mainBundle()
+        .bundleIdentifier()
+        .is_some()
+    {
+        return egui::IconData::default();
+    }
+    eframe::icon_data::from_png_bytes(include_bytes!("../icon/x5desk.png")).expect("x5desk.png")
+}
+
 fn main() -> eframe::Result {
     // before AppKit starts: the launch's files come as it does
     #[cfg(target_os = "macos")]
@@ -974,6 +987,7 @@ fn main() -> eframe::Result {
             .with_inner_size([1600.0, 900.0])
             .with_title("x5desk")
             .with_app_id("x5desk")
+            .with_icon(icon())
             .with_drag_and_drop(true),
         // video pixels as decoded
         dithering: false,
