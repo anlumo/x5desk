@@ -1,9 +1,9 @@
 //! What agents may do: the tiers the user enabled, in `<config>/x5desk/mcp` (0600 on unix, its dir owner-only through
 //! `cam::dirs::private`). One line `tiers = read,local,camera`; other keys and lines are kept and ignored, a missing
-//! or unreadable file enables nothing. Command-line flags only narrow the set ([`Tiers::and`]), and `delete` is only
-//! ever enabled by naming it (there is no "all"). A host re-reads the file at most every 2 s ([`Watch`]). Writers
-//! ([`set`]: `enable`, `disable`; [`get_or_set`]: a host's Wi-Fi id, looked up or made) take turns under a lock on
-//! `<config>/x5desk/mcp.lock`.
+//! or unreadable file enables nothing. Command-line flags only narrow the set ([`Tiers::and`]), and `delete` and
+//! `untested` are only ever enabled by naming them (there is no "all"). A host re-reads the file at most every 2 s
+//! ([`Watch`]). Writers ([`set`]: `enable`, `disable`; [`get_or_set`]: a host's Wi-Fi id, looked up or made) take
+//! turns under a lock on `<config>/x5desk/mcp.lock`.
 
 use std::{
     fmt,
@@ -16,19 +16,28 @@ use std::{
 /// A group of tools enabled as one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
-    /// state, listings, thumbnails, file metadata, jobs
+    /// state, listings, thumbnails, file metadata, jobs, the capture state
     Read,
     /// writes into the agent folder: downloads (later stills and exports)
     Local,
-    /// the camera session: connect and release (later capture and settings)
+    /// the camera session (connect and release) and capture: mode, settings, photos, recordings, highlight marks
     Camera,
-    /// deleting files on the camera (M2)
+    /// deleting files on the camera
     Delete,
+    /// no tools of its own: the camera tier's modes, settings and shutters x5desk has not run on an X5 (`cam::conf`'s
+    /// lists), and favourites (refused by the X5 so far)
+    Untested,
 }
 
 impl Tier {
     /// Every tier, in the order they build on each other.
-    pub const ALL: [Tier; 4] = [Tier::Read, Tier::Local, Tier::Camera, Tier::Delete];
+    pub const ALL: [Tier; 5] = [
+        Tier::Read,
+        Tier::Local,
+        Tier::Camera,
+        Tier::Delete,
+        Tier::Untested,
+    ];
 
     /// The tier's name in the config file and on the command line.
     pub fn name(self) -> &'static str {
@@ -37,6 +46,7 @@ impl Tier {
             Tier::Local => "local",
             Tier::Camera => "camera",
             Tier::Delete => "delete",
+            Tier::Untested => "untested",
         }
     }
 
@@ -53,8 +63,14 @@ impl Tiers {
     /// Nothing enabled.
     pub const NONE: Tiers = Tiers(0);
 
-    /// What `--sim` enables without `X5DESK_MCP_TIERS`: all but `delete`.
+    /// What `--sim` enables without `X5DESK_MCP_TIERS`: all but `delete` and `untested`.
     pub const SIM: Tiers = Tiers(0b0111);
+
+    /// Every tier.
+    pub const EVERY: Tiers = Tiers(0b11111);
+
+    /// `read,local`: the most the environment gives a host on a real camera that reads no config (`Opts::dir`).
+    pub const FILES: Tiers = Tiers(0b0011);
 
     /// Whether `t` is in the set.
     pub fn has(self, t: Tier) -> bool {
@@ -81,8 +97,8 @@ impl Tiers {
         Tier::ALL.into_iter().filter(move |t| self.has(*t))
     }
 
-    /// A comma list of tier names (spaces around them allowed, empty parts ignored). There is no "all": `delete` is
-    /// only enabled by its name.
+    /// A comma list of tier names (spaces around them allowed, empty parts ignored). There is no "all": `delete` and
+    /// `untested` are only enabled by their names.
     pub fn parse(s: &str) -> Result<Tiers, String> {
         let mut t = Tiers::NONE;
         for p in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
@@ -93,7 +109,7 @@ impl Tiers {
                 Some(x) => t = t.with(x),
                 None => {
                     return Err(format!(
-                        "unknown tier {p:?}: name them, from read, local, camera, delete"
+                        "unknown tier {p:?}: name them, from read, local, camera, delete, untested"
                     ));
                 }
             }

@@ -3,12 +3,12 @@
 //! it reports; the shutter (photo, recording, timelapse, the self-timer the app counts down itself), highlight marks;
 //! the status from the notifications. The capture worker (`cam::capture`) runs the requests on the camera worker's
 //! session (`camera::Tap`). On an X5 (fw v1.13.21, `tests::real_writes` / `real_ilog`) these ran, each read back:
-//! switches to the modes in [`SWITCHED`], the settings in [`CHECKED`], the photo and the normal video shutter,
-//! highlight marks. The screen marks the rest ⚠.
+//! switches to the modes in [`conf::SWITCHED`], the settings in [`conf::CHECKED`], the photo and the normal video
+//! shutter, highlight marks. The screen marks the rest ⚠.
 
 use crate::{
     camera::{self, Taps},
-    conf::{self, Shot, Slot},
+    conf::{self, CHECKED, SWITCHED, Shot, show},
     feed::Feed,
     player::Look,
     webcam::{self, Webcam},
@@ -23,21 +23,6 @@ use std::{
 };
 use stitch::Ctx;
 use video::Gpu;
-
-/// The `/CONF` settings (mode, key) whose writes ran on an X5 and read back.
-const CHECKED: [(&str, &str); 8] = [
-    ("PHOTO_SINGLE", "white_balance"),
-    ("VIDEO_NORMAL", "record_resolution"),
-    ("VIDEO_NORMAL", "p3_switch"),
-    ("VIDEO_NORMAL", "exposure_program"),
-    ("VIDEO_NORMAL", "exposure_iso"),
-    ("VIDEO_NORMAL", "exposure_shutter_speed"),
-    ("VIDEO_NORMAL", "white_balance"),
-    ("VIDEO_NORMAL", "i_log_switch"),
-];
-
-/// The modes the app's switch to ran on an X5 and read back.
-const SWITCHED: [&str; 2] = ["PHOTO_SINGLE", "VIDEO_NORMAL"];
 
 const UNV: &str = "⚠ Not run on an X5 yet: the app's message, unit-tested";
 
@@ -754,7 +739,8 @@ impl Capture {
                 b = b.on_hover_text(UNV);
             }
             if b.clicked() {
-                let timer = if conf::photo(m) {
+                // the mode's own self-timer: its values read (another mode's stay after a failed read)
+                let timer = if conf::photo(m) && s.vals.as_deref() == Some(m) {
                     s.po.photography_self_timer
                 } else {
                     0
@@ -794,37 +780,6 @@ fn press(shot: Shot, run: bool) -> Option<Cmd> {
         Shot::Rec(_) | Shot::Lapse(_) if run => Some(Cmd::Stop),
         Shot::Rec(_) | Shot::Lapse(_) => Some(Cmd::Start),
         Shot::None => None,
-    }
-}
-
-/// A `/CONF` value as the UI shows it.
-fn show(s: Slot, v: &str) -> String {
-    let p: Vec<&str> = v.split('_').collect();
-    match (s, v) {
-        (Slot::Iso | Slot::Shutter | Slot::Wb | Slot::IsoTop, "0") => "Auto".into(),
-        (Slot::Timer | Slot::Accel, "0") => "Off".into(),
-        (Slot::Wb, v) => format!("{v} K"),
-        (Slot::Timer, v) => format!("{v} s"),
-        (Slot::Accel, v) => format!("{v}×"),
-        (Slot::Shutter, v) => format!("{v} s"),
-        (Slot::Ev, v) if !v.starts_with('-') && v != "0" => format!("+{v}"),
-        (Slot::Res, _) if p.len() >= 3 => format!(
-            "{} × {}, {} fps{}",
-            p[0],
-            p[1],
-            p[2],
-            if p.len() > 3 { " +" } else { "" }
-        ),
-        (Slot::PhotoRes, _) if p.len() == 2 => format!("{} × {}", p[0], p[1]),
-        (Slot::Dur, v) => v.parse::<u32>().map_or(v.into(), |x| match x {
-            0 => "Unlimited".into(),
-            x if x % 3600 == 0 => format!("{} h", x / 3600),
-            x => format!("{} min", x / 60),
-        }),
-        (Slot::Burst, v) => v
-            .split_once('/')
-            .map_or(v.into(), |(n, t)| format!("{n} in {t} s")),
-        _ => v.replace('_', " ").to_lowercase(),
     }
 }
 

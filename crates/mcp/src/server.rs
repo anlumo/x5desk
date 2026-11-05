@@ -1,5 +1,6 @@
 //! The MCP side of a host: one [`Conn`] per client, an rmcp `ServerHandler` over the shared host. The tools are a
-//! table ([`TOOLS`]: name, tier, description, input schema, annotations). `tools/list` lists those of the enabled
+//! table ([`TOOLS`]: name, tier, description, input schema, annotations); the capture tools and the camera's file
+//! writes are in [`capture`]. `tools/list` lists those of the enabled
 //! tiers (a connection's own `--tiers` narrowing them: the hosting process's `stdio`); `tools/call` checks the tier
 //! again (a client's list can be stale), runs the tool and logs the call. A tool's
 //! failure is a tool result with `isError` (the model reads it), an unknown tool a protocol error. Results are JSON
@@ -8,7 +9,7 @@
 
 use crate::{
     config::{Tier, Tiers},
-    host::{Host, Shared, State},
+    host::{Host, Shared, State, capturing},
     job::{self, Job, Prog},
     log::utc,
     paths,
@@ -40,6 +41,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod capture;
+
+use capture::{DeleteArgs, FavArgs, ModeArgs, PhotoArgs, RecordArgs, SetArgs};
+
 /// One client's service over the host; its `subscriptions/listen` streams (2026-07-28) get the tier changes.
 pub(crate) struct Conn {
     host: Arc<Host>,
@@ -63,11 +68,18 @@ impl Conn {
         &self.host.sh
     }
 
-    /// The tiers this client has: the host's, narrowed by its `--tiers`.
+    /// The tiers this client has: the host's, narrowed by its `--tiers` (the hosting process's own), and in a call by
+    /// the `--tiers` its front sent along ([`crate::front::NARROW`]).
     fn tiers(&self) -> Tiers {
         let t = self.host.tiers();
-        self.narrow.map_or(t, |n| t.and(n))
+        let t = self.narrow.map_or(t, |n| t.and(n));
+        CALL.try_with(|c| t.and(*c)).unwrap_or(t)
     }
+}
+
+tokio::task_local! {
+    /// The narrowing a tool call carries from a proxying front's `--tiers`.
+    static CALL: Tiers;
 }
 
 /// Why a client's `--tiers` refuses tool `name` of `tier` (`narrow` leaves it out): enabling it would not help.
@@ -81,7 +93,8 @@ pub(crate) fn left_out(name: &str, tier: Tier, narrow: Tiers) -> String {
 /// What the server says before any tool is enabled.
 const OFF: &str = "x5desk (Insta360 X5 camera control) has no tools enabled. The user enables them once, in a \
                    terminal: `x5desk mcp enable --tiers read,local` (add `camera` to let agents connect to the \
-                   camera; `delete` only by name). Enabled tiers show up here without a restart.";
+                   camera and capture; `delete` and `untested` only by name). Enabled tiers show up here without a \
+                   restart.";
 
 /// A tool: name, tier, description, input schema, annotations.
 pub struct Def {
@@ -216,6 +229,16 @@ pub const TOOLS: &[Def] = &[
         ann: None,
     },
     Def {
+        name: "capture_status",
+        tier: Tier::Read,
+        desc: "The camera's capture state: its mode (and the modes it has: name, label, photo/record/timelapse/live, \
+               whether x5desk ran it on an X5), the mode's settings with their values and the values allowed now, \
+               whether it captures and since when, whether this host started it, battery, storage, remaining photos \
+               and video time, temperature, recent capture notes. Needs the camera connected (camera_connect).",
+        schema: schema_for_empty_input,
+        ann: None,
+    },
+    Def {
         name: "card_list",
         tier: Tier::Read,
         desc: "Mounted X5 cards (the camera in U-disk mode, or its card in a reader) and which one the album shows.",
@@ -304,6 +327,68 @@ pub const TOOLS: &[Def] = &[
                connect.",
         schema: schema_for_empty_input,
         ann: Some((false, true)),
+    },
+    Def {
+        name: "capture_mode",
+        tier: Tier::Camera,
+        desc: "Switches the camera to a photo or video mode (a name or label from capture_status), not while it \
+               captures. Modes x5desk has not run on an X5 need the user's `untested` tier; live modes are not for \
+               agents.",
+        schema: input::<ModeArgs>,
+        ann: Some((false, true)),
+    },
+    Def {
+        name: "capture_set",
+        tier: Tier::Camera,
+        desc: "Sets one setting of the current mode to one of the values capture_status lists as allowed now, not \
+               while the camera captures; answers once the camera reports it. Settings x5desk has not written on an \
+               X5 need the user's `untested` tier.",
+        schema: input::<SetArgs>,
+        ann: Some((false, true)),
+    },
+    Def {
+        name: "capture_photo",
+        tier: Tier::Camera,
+        desc: "Takes a photo in the current photo mode (counting its self-timer down first unless self_timer is \
+               false; a cancel before the shutter takes none). Answers the file, its album key (album_download \
+               downloads it) and whether the album lists it. Not idempotent: each call takes one.",
+        schema: input::<PhotoArgs>,
+        ann: Some((false, false)),
+    },
+    Def {
+        name: "capture_record",
+        tier: Tier::Camera,
+        desc: "Starts or stops a recording or timelapse of the current video mode, or waits for the camera to stop \
+               capturing. start with seconds (1-600): the host stops it then, and up to 45 s the call waits and \
+               answers the clip. stop answers the clip's album key. A recording this host started stops when the \
+               host ends (status names the host).",
+        schema: input::<RecordArgs>,
+        ann: Some((false, false)),
+    },
+    Def {
+        name: "capture_mark",
+        tier: Tier::Camera,
+        desc: "Marks a highlight in the running recording (modes with highlight marks), at the time it has run.",
+        schema: schema_for_empty_input,
+        ann: Some((false, false)),
+    },
+    Def {
+        name: "camera_favourite",
+        tier: Tier::Camera,
+        desc: "Sets or clears the favourite flag of album items on the camera. Needs the user's `untested` tier: the \
+               X5 (firmware v1.13.21) refused it in every form tried.",
+        schema: input::<FavArgs>,
+        ann: Some((false, true)),
+    },
+    Def {
+        name: "camera_delete",
+        tier: Tier::Delete,
+        desc: "Deletes album items (keys from album_list) from the camera, not while it captures nor while one is \
+               being downloaded; cannot be undone. Answers what is gone (per item: deleted, partly, not), and which \
+               deleted items were never downloaded here (local: verified, by_name, none); downloaded_only keeps \
+               those not verified. Needs the camera connected (camera tier).",
+        schema: input::<DeleteArgs>,
+        ann: Some((true, false)),
     },
 ];
 
@@ -407,6 +492,7 @@ fn camera(s: &State) -> Value {
     let i = &s.info;
     let mut v = summary(i);
     let o = v.as_object_mut().unwrap();
+    o.insert("recording".into(), capturing(s).into());
     o.insert(
         "access_point_ssid".into(),
         json!(i.wifi.as_ref().map(|w| w.0.clone())),
@@ -543,7 +629,7 @@ fn qury(src: &Option<PathBuf>, u: &str) -> String {
     }
 }
 
-fn job_dto(handle: String, j: &Job, p: &Prog, cam: bool) -> Value {
+fn job_dto(handle: String, j: &Job, p: &Prog, cam: bool, rec: bool) -> Value {
     let files: Vec<Value> = (p.parts.iter())
         .map(|x| {
             json!({
@@ -566,7 +652,11 @@ fn job_dto(handle: String, j: &Job, p: &Prog, cam: bool) -> Value {
         "keys": j.keys,
         "created": utc(j.at),
         "files": files,
-        "note": waits.then_some("waits for the camera: call camera_connect"),
+        "note": match (waits, rec && p.state == "queued") {
+            (true, _) => Some("waits for the camera: call camera_connect"),
+            (_, true) => Some("held while the camera records"),
+            _ => None,
+        },
     })
 }
 
@@ -714,6 +804,8 @@ impl Conn {
             _ => "card_open opens a card; connecting the camera needs the camera tier",
         };
         let tiers: Vec<&str> = t.iter().map(Tier::name).collect();
+        let mut cam = summary(&s.info);
+        cam["recording"] = capturing(&s).into();
         ok(json!({
             "host": {
                 "kind": "headless",
@@ -725,7 +817,7 @@ impl Conn {
             "protocol": ctx.protocol_version().map(|v| v.as_str().to_string()),
             "client": self.client,
             "tiers": tiers,
-            "camera": summary(&s.info),
+            "camera": cam,
             "jobs": { "running": run, "queued": wait, "finished": fin },
             "agent_folder": sh.agent.display().to_string(),
             "read_roots": roots,
@@ -800,6 +892,9 @@ impl Conn {
 
     async fn card_open(&self, a: PathArgs) -> Result<CallToolResult, String> {
         let sh = self.sh();
+        if sh.st.lock().unwrap().deleting.is_some() {
+            return Err("a delete runs on the camera: the album shows its outcome first".into());
+        }
         let want = std::fs::canonicalize(&a.path).unwrap_or_else(|_| a.path.clone().into());
         let root = {
             let s = sh.st.lock().unwrap();
@@ -827,6 +922,9 @@ impl Conn {
 
     async fn card_close(&self) -> Result<CallToolResult, String> {
         let sh = self.sh();
+        if sh.st.lock().unwrap().deleting.is_some() {
+            return Err("a delete runs on the camera: the album shows its outcome first".into());
+        }
         if sh.st.lock().unwrap().info.src.is_none() {
             return ok(
                 json!({ "album_source": "camera", "note": "the album showed the camera already" }),
@@ -850,18 +948,24 @@ impl Conn {
     /// A job's state, its handle and whether the camera is connected.
     fn job(&self, h: &str) -> Result<Value, String> {
         let sh = self.sh();
-        let cam = sh.st.lock().unwrap().info.conn == Link::On;
+        let (cam, rec) = {
+            let s = sh.st.lock().unwrap();
+            (s.info.conn == Link::On, s.info.busy)
+        };
         let (jobs, q) = (sh.jobs.lock().unwrap(), sh.q.lock().unwrap());
         let j = jobs.find(h)?;
-        Ok(job_dto(j.h.clone(), j, &j.prog(&q), cam))
+        Ok(job_dto(j.h.clone(), j, &j.prog(&q), cam, rec))
     }
 
     fn job_list(&self) -> Result<CallToolResult, String> {
         let sh = self.sh();
-        let cam = sh.st.lock().unwrap().info.conn == Link::On;
+        let (cam, rec) = {
+            let s = sh.st.lock().unwrap();
+            (s.info.conn == Link::On, s.info.busy)
+        };
         let (jobs, q) = (sh.jobs.lock().unwrap(), sh.q.lock().unwrap());
         let v: Vec<Value> = (jobs.v.iter())
-            .map(|j| job_dto(j.h.clone(), j, &j.prog(&q), cam))
+            .map(|j| job_dto(j.h.clone(), j, &j.prog(&q), cam, rec))
             .collect();
         ok(json!({ "jobs": v }))
     }
@@ -1017,6 +1121,7 @@ impl Conn {
 
     async fn camera_connect(&self, a: ConnectArgs) -> Result<CallToolResult, String> {
         let sh = self.sh();
+        let _a = sh.act.lock().await;
         let ip = (a.wifi_ip.as_deref().map(str::trim))
             .map(|s| {
                 s.parse::<IpAddr>()
@@ -1089,6 +1194,16 @@ impl Conn {
 
     async fn camera_release(&self) -> Result<CallToolResult, String> {
         let sh = self.sh();
+        let _a = sh.act.lock().await;
+        self.free()?;
+        // also a start not shown recording yet: the camera may begin without a session to stop it
+        if sh.st.lock().unwrap().rec.is_some() {
+            return Err(
+                "a recording this host started (or its start) is on the camera: capture_record stop stops it first \
+                 (or the host's end does)"
+                    .into(),
+            );
+        }
         if sh.st.lock().unwrap().info.conn != Link::Off {
             sh.cmd(Cmd::Disconnect);
             if sh
@@ -1125,6 +1240,14 @@ impl Conn {
             "job_cancel" => self.job_cancel(args(a)?).await,
             "camera_connect" => self.camera_connect(args(a)?).await,
             "camera_release" => self.camera_release().await,
+            "capture_status" => self.capture_status().await,
+            "capture_mode" => self.capture_mode(args(a)?).await,
+            "capture_set" => self.capture_set(args(a)?).await,
+            "capture_photo" => self.capture_photo(args(a)?, ctx).await,
+            "capture_record" => self.capture_record(args(a)?, ctx).await,
+            "capture_mark" => self.capture_mark().await,
+            "camera_favourite" => self.camera_favourite(args(a)?).await,
+            "camera_delete" => self.camera_delete(args(a)?).await,
             _ => Err(format!("{name}: not implemented")),
         }
     }
@@ -1142,7 +1265,9 @@ impl ServerHandler for Conn {
             (false, _) => format!(
                 "x5desk controls an Insta360 X5 360° camera and its files. Enabled tiers: {t}. Start with status; \
                  connect the camera (camera_connect) or open a card (card_open), list the album (album_list), and \
-                 download into the agent folder (album_download, then job_wait). The camera's clock is never set."
+                 download into the agent folder (album_download, then job_wait). With the camera tier: \
+                 capture_status, then capture_mode, capture_set, capture_photo, capture_record. The camera's clock \
+                 is never set."
             ),
         };
         ServerConfig::new(
@@ -1185,19 +1310,26 @@ impl ServerHandler for Conn {
         let a = req.arguments.unwrap_or_default();
         let sum = serde_json::to_string(&a).unwrap_or_default();
         let t0 = Instant::now();
-        let r = {
+        // a proxying front's --tiers (it refuses the tools those leave out itself; the rest it sends along)
+        let call = (ctx.meta.get(crate::front::NARROW))
+            .and_then(Value::as_str)
+            .map_or(Ok(Tiers::EVERY), Tiers::parse)
+            .unwrap_or(Tiers::NONE);
+        let r = CALL.scope(call, async {
             let _c = self.sh().call();
             let t = self.tiers();
-            match (t.has(d.tier), self.narrow.filter(|n| !n.has(d.tier))) {
+            let narrow = self.narrow.map_or(call, |n| n.and(call));
+            match (t.has(d.tier), Some(narrow).filter(|n| !n.has(d.tier))) {
                 (true, _) => self.run(&name, a, &ctx).await,
                 (false, Some(n)) => Err(left_out(&name, d.tier, n)),
-                (false, None) => Err(format!(
+                (false, _) => Err(format!(
                     "{name} is in the {0} tier, which is not enabled (enabled: {t}). The user enables it with \
                      `x5desk mcp enable --tiers <tiers>,{0}`",
                     d.tier.name()
                 )),
             }
-        };
+        });
+        let r = r.await;
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         self.sh().log.call(
             &self.client,
@@ -1261,10 +1393,21 @@ mod tests {
             let a = t.annotations.unwrap();
             assert_eq!(a.read_only_hint, Some(d.tier == Tier::Read), "{}", d.name);
         }
+        let del: Vec<&str> = (TOOLS.iter())
+            .filter(|d| d.tier == Tier::Delete)
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(del, ["camera_delete"]);
         assert!(
-            TOOLS.iter().all(|d| d.tier != Tier::Delete),
-            "no delete tools in M1"
+            TOOLS.iter().all(|d| d.tier != Tier::Untested),
+            "untested has no tools"
         );
+        let d = TOOLS
+            .iter()
+            .find(|d| d.name == "camera_delete")
+            .unwrap()
+            .tool();
+        assert_eq!(d.annotations.unwrap().destructive_hint, Some(true));
         let f = |s: &str| why(s);
         assert!(
             f("connect: could not open interface for exclusive access (0xe00002c5)")

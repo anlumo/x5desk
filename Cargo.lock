@@ -5305,6 +5305,7 @@ dependencies = [
  "libc",
  "link",
  "media",
+ "prost",
  "rmcp",
  "serde",
  "serde_json",

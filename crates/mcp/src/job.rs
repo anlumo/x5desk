@@ -75,6 +75,9 @@ pub struct File {
     /// from then on, and this job's cancel leaves it
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub was: Option<Part>,
+    /// the bytes the camera sent for it, once its download finished (a local copy checked against it later)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 impl File {
@@ -84,6 +87,7 @@ impl File {
             uri,
             dst,
             was: None,
+            size: None,
         }
     }
 

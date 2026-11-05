@@ -122,6 +122,12 @@ fn name_date(n: &str) -> u64 {
     d(8).map_or(0, |a| a * 1_000_000 + d(6).unwrap_or(0))
 }
 
+/// The key of the item a camera URI belongs to: its directory and its recording key (`work::key`).
+pub fn key_of(u: &str) -> String {
+    let d = u.rsplit_once('/').map_or("", |d| d.0);
+    format!("{d}/{}", key(name(u)))
+}
+
 /// Items of the listed `uris` in listing order, with the metadata of `infos` and the favourite flags of `ed`
 /// (matched by directory and name, the edit list's paths need not carry the listing's prefix; else by name alone).
 pub fn group(
@@ -132,8 +138,7 @@ pub fn group(
     let mut v: Vec<Item> = vec![];
     let mut at = HashMap::new();
     for u in uris {
-        let d = u.rsplit_once('/').map_or("", |d| d.0);
-        let k = format!("{d}/{}", key(name(u)));
+        let k = key_of(u);
         let i = *at.entry(k.clone()).or_insert_with(|| {
             v.push(Item {
                 key: k,

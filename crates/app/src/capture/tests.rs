@@ -8,7 +8,7 @@ use super::*;
 use crate::{
     album::{Cache, Item},
     camera::{Cmd as Cc, Up, Worker},
-    conf::Write,
+    conf::{Slot, Write},
     dl,
     feed::mono,
     replay::{self, Replay},

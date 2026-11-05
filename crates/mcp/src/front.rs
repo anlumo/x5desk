@@ -98,6 +98,25 @@ fn msg(v: &Value) -> Msg {
     }
 }
 
+/// Tool call `v` with `--tiers` `t` in its `_meta` ([`NARROW`]), which the host narrows that call by.
+fn narrowed(mut v: Value, t: Tiers) -> Value {
+    if let Some(p) = v.get_mut("params").and_then(Value::as_object_mut) {
+        // a `_meta` that is no object (null) would carry nothing: made one
+        let m = p.entry("_meta").or_insert_with(|| json!({}));
+        if !m.is_object() {
+            *m = json!({})
+        }
+        if let Some(m) = m.as_object_mut() {
+            m.insert(NARROW.into(), json!(t.to_string()));
+        }
+    }
+    v
+}
+
+/// The `_meta` key of a tool call that narrows it by a client's `--tiers` (only ever narrows: a client gains nothing
+/// by sending it).
+pub const NARROW: &str = "x5desk/tiers";
+
 fn line(v: &Value) -> Vec<u8> {
     let mut b = serde_json::to_vec(v).unwrap_or_default();
     b.push(b'\n');
@@ -309,6 +328,11 @@ impl<A: Attach> Front<A> {
                         r["jsonrpc"] = json!("2.0");
                         r["id"] = id;
                         return out.send(line(&r)).map_err(|_| End::Client);
+                    }
+                    // a call carries this client's --tiers to whichever host: the tiers without tools of their own
+                    // (`untested`) narrow it there
+                    if let (Some(t), "tools/call") = (self.narrow, method.as_str()) {
+                        l = line(&narrowed(v.clone(), t));
                     }
                     if method == "initialize" {
                         (self.init, self.inited) = (Some(v.clone()), None)
@@ -771,6 +795,20 @@ mod tests {
             5,
             "nothing before it reached the host"
         );
+        // a call it lets through carries its --tiers, which the host narrows the call by (`untested`)
+        itx.send(call(7, json!("status"))).unwrap();
+        let r = next(&mut h1).await;
+        assert_eq!(
+            (&r["id"], &r["params"]["_meta"][NARROW]),
+            (&json!(7), &json!("read")),
+            "{r}"
+        );
+        // a `_meta` of null carries it all the same
+        let v = json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": {"name": "status", "_meta": null}});
+        itx.send(line(&v)).unwrap();
+        let r = next(&mut h1).await;
+        assert_eq!(r["params"]["_meta"][NARROW], "read", "{r}");
         itx.send(
             [
                 BOM,

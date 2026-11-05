@@ -3,11 +3,11 @@
 //!   the front (`front`) electing a host on the endpoint (`endpoint`). `--tiers` only narrows, and only this
 //!   process's client (`front`); `--allow-dir` adds read roots of the host (each must exist). `--sim`: the simulated
 //!   camera in temp dirs, no endpoint unless `X5DESK_MCP_ENDPOINT` names one, the tiers from `X5DESK_MCP_TIERS` (else
-//!   all but `delete`). `X5DESK_TEST` likewise uses no endpoint, and without `--sim` keeps the agent folder and log in
-//!   a temp dir (`Opts::dir`); its token `mcp-print` prints a line through `println!` before serving, which the guard
-//!   sends to stderr.
-//! - `x5desk mcp enable --tiers read,local[,camera][,delete]` writes `<config>/x5desk/mcp` (the set replaced) and
-//!   prints what is enabled; `x5desk mcp disable` turns every tier off.
+//!   all but `delete` and `untested`). `X5DESK_TEST` likewise uses no endpoint, and without `--sim` keeps the agent
+//!   folder and log in a temp dir (`Opts::dir`: a real camera, so `X5DESK_MCP_TIERS` gives at most `read,local`); its
+//!   token `mcp-print` prints a line through `println!` before serving, which the guard sends to stderr.
+//! - `x5desk mcp enable --tiers read,local[,camera][,delete][,untested]` writes `<config>/x5desk/mcp` (the set
+//!   replaced) and prints what is enabled; `x5desk mcp disable` turns every tier off.
 //! - `x5desk mcp --print-config` prints the Claude Code command and Claude Desktop's `mcpServers` entry for this
 //!   executable; refused from a disk image (`/Volumes/`) or a translocated copy (`/AppTranslocation/`), gone later.
 //!
@@ -36,7 +36,8 @@ usage: x5desk mcp [--sim] [--tiers <tiers>] [--allow-dir <dir>]...  serve MCP on
        x5desk mcp enable --tiers <tiers>  enable tiers for agents (replaces the enabled set)
        x5desk mcp disable                 turn every tier off
        x5desk mcp --print-config          how to add x5desk to Claude Code and Claude Desktop
-<tiers>: a comma list of read, local, camera, delete (delete only by its name); when serving, --tiers only narrows
+<tiers>: a comma list of read, local, camera, delete, untested (delete and untested only by their names); when
+         serving, --tiers only narrows. untested: modes and settings x5desk has not run on an X5
 ";
 
 /// What the command line asks for.

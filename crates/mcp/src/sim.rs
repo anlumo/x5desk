@@ -111,6 +111,7 @@ impl Sim {
         {
             let mut c = fake.lock().unwrap();
             c.ap = Some(("X5 SIM001.OSC".into(), AP.into()));
+            sim::capture(&mut c);
             for u in c.uris.clone() {
                 let n = cam::album::name(&u);
                 let k = match n.rsplit_once('.').map(|e| e.1) {
@@ -148,8 +149,12 @@ impl Sim {
                 *c.opens.entry(u.into()).or_default() += 1;
                 c.data.get(u).cloned()
             };
+            // the session's control kept: capture's notifications go through it
             Camera::sim(sim::handler(f.clone()), files, rate)
-                .map(|(c, ev, _)| (c, ev))
+                .map(|(c, ev, s)| {
+                    f.lock().unwrap().link = Some(s);
+                    (c, ev)
+                })
                 .into()
         })
     }

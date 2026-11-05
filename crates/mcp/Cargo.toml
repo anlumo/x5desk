@@ -34,5 +34,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+# the tests decode what reached the simulated camera
+prost.workspace = true
 rmcp = { version = "3.8", default-features = false, features = ["server", "client", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util"] }

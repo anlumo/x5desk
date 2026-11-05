@@ -18,6 +18,8 @@ fn notes() {
         st: St::default(),
         up: tx,
         wake: Box::new(|| {}),
+        bad: false,
+        retry: None,
     };
     let cap = |s: C, t| {
         Note::CaptureStatus(pb::CaptureStatus {
@@ -54,6 +56,19 @@ fn notes() {
     assert!(!running(C::SingleShooting as i32) && running(C::TimelapseCapture as i32));
 }
 
+/// A reload after the session closed (a release racing a notification's reload) notes nothing.
+#[test]
+fn closed_quietly() {
+    let f = fake();
+    let (w, c, _sim) = rig(&f);
+    let st = run(&w, &f, Cmd::Note(Note::Temp(Default::default())), &[]).0;
+    assert!(st.vals.is_some());
+    c.close().wait().unwrap();
+    let st = run(&w, &f, Cmd::Note(Note::SubMode(Default::default())), &[]).0;
+    // the reload ran (its values dropped first) and failed
+    assert!(st.vals.is_none() && st.note.is_none(), "{:?}", st.note);
+}
+
 /// A `/CONF` of three modes: ISO depends on the exposure program (Auto only in FULL_AUTO), EV does not.
 const CONF: &str = r#"{"Sphere06C": {
     "photo_sub_mode": ["PHOTO_SINGLE"],
@@ -77,6 +92,9 @@ struct Fake {
     state: pb::CameraCaptureState,
     battery: pb::BatteryInfo,
     log: Vec<(u16, Vec<u8>)>,
+    /// requests answered with status 500, or with bytes that do not decode
+    refuse: Vec<u16>,
+    junk: Vec<u16>,
 }
 
 type Shared = Arc<Mutex<Fake>>;
@@ -91,6 +109,8 @@ fn fake() -> Shared {
             ..Default::default()
         },
         log: vec![],
+        refuse: vec![],
+        junk: vec![],
     }))
 }
 
@@ -105,6 +125,12 @@ fn rig(f: &Shared) -> (Worker, Camera, Sim) {
         let mut f = f2.lock().unwrap();
         f.log.push((code, b.to_vec()));
         use pb::CameraCaptureState as C;
+        if f.refuse.contains(&code) {
+            return (500, vec![]);
+        }
+        if f.junk.contains(&code) {
+            return (200, vec![0xff; 3]);
+        }
         match code {
             code::GET_OPTIONS => ok(pb::GetOptionsResp {
                 option_types: vec![],
@@ -143,6 +169,13 @@ fn rig(f: &Shared) -> (Worker, Camera, Sim) {
                 f.state = C::TimelapseCapture;
                 (200, vec![])
             }
+            code::TAKE_PICTURE => ok(pb::TakePictureResponse {
+                image: Some(pb::Photo {
+                    uri: "/DCIM/Camera01/IMG_20261104_120000_00_002.insp".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
             code::STOP_CAPTURE | code::STOP_TIMELAPSE => {
                 f.state = C::NotCapture;
                 ok(pb::StopCaptureResp {
@@ -349,4 +382,103 @@ fn battery_start() {
     assert!(s.is_empty());
     drop(w);
     c.close().wait().unwrap();
+}
+
+/// An asked command's outcome comes in the report after it under its number, kept across sessions: a write sent, a
+/// value refused, a mode, lens or sub-mode other than the one checked refused, a shutter refused or its photo or clip
+/// named, a start; a mode or setting change while the camera captures sends nothing; a start sends nothing when the
+/// capture state cannot be read, and one the camera refuses did not begin; an answer that does not decode a failure.
+/// No session: nothing sent. The mode's values loaded name their mode.
+#[test]
+fn asked() {
+    let f = fake();
+    let (w, c, _sim) = rig(&f);
+    let seen = |m: &str| {
+        Some(Seen {
+            mode: m.into(),
+            both: true,
+            known: true,
+        })
+    };
+    let ask = |n, c: Cmd, s: Option<Seen>| {
+        let (st, l) = run(
+            &w,
+            &f,
+            Cmd::Ask {
+                n,
+                c: Box::new(c),
+                seen: s,
+            },
+            &[WRITES.as_slice(), &SHUTTER, &[code::SET_OPTIONS]].concat(),
+        );
+        let (k, o) = st.out.clone().expect("an outcome");
+        assert_eq!(k, n);
+        println!("{n}: {o:?} {:?}", l.iter().map(|x| x.0).collect::<Vec<_>>());
+        (st, o, l.len())
+    };
+    let no = |o: &Out, w: &str| matches!(o, Out::No(t) if t.contains(w));
+    let (st, ..) = ask(0, Cmd::Mark, seen("PHOTO_SINGLE"));
+    assert_eq!(st.vals.as_deref(), Some("VIDEO_NORMAL"));
+    let set = || Cmd::Set("exposure_bias".into(), "0.3".into());
+    assert_eq!(ask(1, set(), seen("VIDEO_NORMAL")).1, Out::Sent(None));
+    let (_, o, n) = ask(2, Cmd::Set("exposure_bias".into(), "9".into()), None);
+    assert!(no(&o, "not allowed") && n == 0, "{o:?}");
+    let (_, o, n) = ask(3, set(), seen("PHOTO_SINGLE"));
+    assert!(no(&o, "in VIDEO_NORMAL now") && n == 0, "{o:?}");
+    let lens = Seen {
+        both: false,
+        ..seen("VIDEO_NORMAL").unwrap()
+    };
+    let (_, o, n) = ask(4, set(), Some(lens));
+    assert!(no(&o, "lens or sub-mode") && n == 0, "{o:?}");
+    let (_, o, n) = ask(5, Cmd::Shoot, None);
+    assert!(no(&o, "nothing taken") && n == 0, "{o:?}");
+    let (_, o, n) = ask(6, Cmd::Mode("VIDEO_NOSUCH".into()), None);
+    assert!(matches!(&o, Out::No(_)) && n == 0, "{o:?}");
+    // a start: its capture state unreadable, or refused by the camera: nothing began
+    f.lock().unwrap().refuse = vec![code::CAPTURE_STATUS];
+    let (_, o, n) = ask(7, Cmd::Start, None);
+    assert!(no(&o, "nothing sent") && n == 0, "{o:?}");
+    f.lock().unwrap().refuse = vec![code::START_CAPTURE];
+    let (st, o, _) = ask(8, Cmd::Start, None);
+    assert!(no(&o, "refused the start") && !running(st.cap), "{o:?}");
+    f.lock().unwrap().refuse.clear();
+    assert_eq!(ask(9, Cmd::Start, None).1, Out::Sent(None));
+    // capturing: no mode or setting change goes out, the camera's state read first
+    for (k, c) in [(10, Cmd::Mode("VIDEO_TIMELAPSE".into())), (11, set())] {
+        let (st, o, n) = ask(k, c, None);
+        assert!(no(&o, "captures") && n == 0, "{o:?}");
+        assert!(running(st.cap));
+    }
+    let (_, o, _) = ask(12, Cmd::Stop, None);
+    assert!(
+        matches!(&o, Out::Sent(Some(u)) if u.ends_with("_00_001.insv")),
+        "{o:?}"
+    );
+    // kept across a session
+    w.tx.send(Cmd::Cam(1, Some(c.clone()))).unwrap();
+    assert_eq!(next(&w).out.map(|x| x.0), Some(12));
+    // a photo mode: its photo named; an answer that does not decode a failure
+    f.lock().unwrap().video = None;
+    w.tx.send(Cmd::Cam(1, Some(c.clone()))).unwrap();
+    next(&w);
+    let (_, o, _) = ask(13, Cmd::Shoot, seen("PHOTO_SINGLE"));
+    let u = "/DCIM/Camera01/IMG_20261104_120000_00_002.insp";
+    assert_eq!(o, Out::Sent(Some(u.into())));
+    f.lock().unwrap().junk = vec![code::TAKE_PICTURE];
+    assert!(matches!(ask(14, Cmd::Shoot, None).1, Out::Failed(_)));
+    drop(w);
+    c.close().wait().unwrap();
+    // no session
+    let w = Worker::spawn(|| {});
+    let c = Cmd::Ask {
+        n: 15,
+        c: Box::new(Cmd::Start),
+        seen: None,
+    };
+    w.tx.send(c).unwrap();
+    assert_eq!(
+        next(&w).out,
+        Some((15, Out::No("no camera session".into())))
+    );
 }

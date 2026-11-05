@@ -171,10 +171,11 @@ fn unb64(s: &str) -> Vec<u8> {
     o
 }
 
-const READ: [&str; 11] = [
+const READ: [&str; 12] = [
     "album_list",
     "album_thumbnail",
     "camera_status",
+    "capture_status",
     "card_close",
     "card_list",
     "card_open",
@@ -183,6 +184,18 @@ const READ: [&str; 11] = [
     "job_status",
     "job_wait",
     "status",
+];
+
+/// The camera tier's tools.
+const CAMERA: [&str; 8] = [
+    "camera_connect",
+    "camera_release",
+    "capture_mode",
+    "capture_set",
+    "capture_photo",
+    "capture_record",
+    "capture_mark",
+    "camera_favourite",
 ];
 
 async fn until(secs: f64, mut f: impl FnMut() -> bool) -> bool {
@@ -275,7 +288,7 @@ async fn tiers() {
     );
     assert!(until(3.0, || old.h.changed.load(Relaxed) == 1).await);
     let mut want = all.clone();
-    want.extend(["camera_connect", "camera_release"]);
+    want.extend(CAMERA);
     want.sort();
     assert_eq!(names(&old).await, want);
     assert_eq!(names(&new).await, want);
