@@ -59,7 +59,6 @@ eframe.workspace = true
 # egui 0.37 keeps the symbol fonts (★ ☆ ✔ in the camera screen) behind this feature
 egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
 wgpu.workspace = true
-pollster.workspace = true
 rfd.workspace = true
 libc.workspace = true
 # the editor's preview mix plays on its own output stream (already in the tree through media)
@@ -68,6 +67,10 @@ cpal.workspace = true
 ble = { workspace = true, features = ["sim"] }
 # the Settings screen names the video queues' codec operations
 ash.workspace = true
+# the agents' engine (`export::agent`): its plans' settings as JSON (`tests/mcp.rs` reads the server's lines with it);
+# a headless host's logger, which hears cubecl report a lost device (both already in the tree)
+serde_json = "1"
+log = "0.4"
 
 # macOS, already in the tree through wgpu, cubecl and eframe (winit has the versions before): the files Finder asks
 # the app to open (`finder.rs`), whether it runs from a bundle (main.rs `icon`); App Nap and the IOKit registry are
@@ -82,5 +85,5 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 cam = { workspace = true, features = ["sim"] }
 # Already in the tree through eframe: the UI test runs its event loop off the main thread.
 winit = { version = "0.30", default-features = false }
-# `tests/mcp.rs` reads the server's JSON-RPC lines (already in the tree)
-serde_json = "1"
+# `synth`: the synthetic X5 recording the MCP server's GPU tools render in the process tests (`tests/mcp.rs`)
+export = { workspace = true, features = ["synth"] }

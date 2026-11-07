@@ -16,9 +16,9 @@ use std::{
 /// A group of tools enabled as one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
-    /// state, listings, thumbnails, file metadata, jobs, the capture state
+    /// state, listings, thumbnails, file metadata, jobs, the capture state, what renders accept
     Read,
-    /// writes into the agent folder: downloads (later stills and exports)
+    /// writes into the agent folder: downloads, stills and exports
     Local,
     /// the camera session (connect and release) and capture: mode, settings, photos, recordings, highlight marks
     Camera,

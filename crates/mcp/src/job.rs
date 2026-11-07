@@ -1,13 +1,15 @@
-//! Jobs: what one call started and a client follows with `job_status` / `job_wait` / `job_cancel`. M1 has one kind,
-//! a download: an item's files in the host's download queue. Jobs of one item share a file's download while it waits
-//! or runs; one that stopped, failed, or finished and went is the job's alone that starts it again, and the older
-//! jobs show it as it was then ([`File::was`]). A handle is `<host id>-<n>`, of the host that made the job; the host
-//! id (the pid in base 36 and a random part) differs between hosts. The jobs are kept beside the queue, a JSON object
-//! a line ([`Jobs::load`], [`Jobs::save`]), so a later host follows an earlier one's under their handles; it keeps
-//! every unfinished job and the newest [`KEEP`] ([`Jobs::prune`]).
+//! Jobs: what one call started and a client follows with `job_status` / `job_wait` / `job_cancel`. Two kinds: a
+//! download (an item's files in the host's download queue) and a render (a still or an export, [`crate::renders`],
+//! kept in a file of its own). Jobs of one item share a file's download while it waits or runs; one that stopped,
+//! failed, or finished and went is the job's alone that starts it again, and the older jobs show it as it was then
+//! ([`File::was`]). A handle is `<host id>-<n>`, of the host that made the job, numbered over both kinds
+//! ([`Jobs::handle`]); the host id (the pid in base 36 and a random part) differs between hosts. The jobs are kept
+//! beside the queue, a JSON object a line ([`Jobs::load`], [`Jobs::save`]), so a later host follows an earlier one's
+//! under their handles; it keeps every unfinished job and the newest [`KEEP`] ([`Jobs::prune`]).
 
+use crate::renders::Renders;
 use cam::dl::{self, St};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use std::{
     hash::{BuildHasher, Hasher},
     io,
@@ -56,13 +58,6 @@ pub fn host_id() -> String {
     )
 }
 
-/// `<p>.part`, where a download of `p` is written.
-pub fn part_of(p: &Path) -> PathBuf {
-    let mut s = p.as_os_str().to_owned();
-    s.push(".part");
-    s.into()
-}
-
 /// One file of a job: the queue's URI and where it goes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct File {
@@ -98,7 +93,7 @@ impl File {
 }
 
 /// [`SystemTime`] as milliseconds since 1970.
-mod ms {
+pub(crate) mod ms {
     use super::*;
 
     pub fn serialize<S: Serializer>(t: &SystemTime, s: S) -> Result<S::Ok, S::Error> {
@@ -261,13 +256,77 @@ impl Job {
     }
 }
 
+/// The objects of `file`, one JSON object a line (none when it is missing), how many of its lines did not parse (no
+/// UTF-8, no object of its kind: left out), and its text as read. Fails when the file is there but cannot be read: it
+/// is not taken over.
+pub(crate) fn lines<T: DeserializeOwned>(file: &Path) -> io::Result<(Vec<T>, usize, String)> {
+    let b = match std::fs::read(file) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => vec![],
+        Err(e) => return Err(e),
+    };
+    let (mut v, mut bad) = (vec![], 0);
+    for l in b.split(|&c| c == b'\n') {
+        match std::str::from_utf8(l) {
+            Ok(l) if l.trim().is_empty() || l.starts_with('#') => {}
+            Ok(l) => match serde_json::from_str::<T>(l) {
+                Ok(j) => v.push(j),
+                Err(_) => bad += 1,
+            },
+            Err(_) => bad += 1,
+        }
+    }
+    Ok((v, bad, String::from_utf8(b).unwrap_or_default()))
+}
+
+/// Writes `v` to `file` under `head` unless it holds that already (`saved`, the text as read or last written), through
+/// `<file>.new` renamed into place. One that does not serialize (a path that is no UTF-8) is left out and said by its
+/// handle (`h`), after `what`.
+pub(crate) fn write<T: Serialize>(
+    file: &Path,
+    head: &str,
+    v: &[T],
+    h: impl Fn(&T) -> &str,
+    saved: &mut String,
+    what: &str,
+) -> io::Result<()> {
+    let (mut s, mut out) = (format!("{head}\n"), vec![]);
+    for j in v {
+        match serde_json::to_string(j) {
+            Ok(l) => {
+                s += &l;
+                s.push('\n')
+            }
+            Err(_) => out.push(h(j)),
+        }
+    }
+    if s != *saved {
+        let t = file.with_extension("new");
+        std::fs::write(&t, &s).and_then(|_| std::fs::rename(&t, file))?;
+        *saved = s;
+    }
+    match out.is_empty() {
+        true => Ok(()),
+        false => Err(io::Error::other(format!("{what}: {}", out.join(", ")))),
+    }
+}
+
+/// Which kind of job a handle names, and where it is: in [`Jobs::v`] or in [`Renders::v`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Which {
+    Dl(usize),
+    Render(usize),
+}
+
 /// The host's jobs, with those kept from earlier hosts.
 pub struct Jobs {
     /// the host id, the prefix of its handles
     pub host: String,
-    /// every job, oldest first
+    /// every download job, oldest first
     pub v: Vec<Job>,
-    /// this host's jobs so far
+    /// the render jobs, in `mcp-renders` beside these, their handles from the same numbering
+    pub r: Renders,
+    /// this host's jobs so far, of both kinds
     n: u64,
     /// where they are kept
     file: Option<PathBuf>,
@@ -281,6 +340,7 @@ impl Jobs {
         Jobs {
             host,
             v: vec![],
+            r: Renders::default(),
             n: 0,
             file: None,
             saved: String::new(),
@@ -288,73 +348,45 @@ impl Jobs {
     }
 
     /// The jobs kept in `file` (none when it is missing), for host `host`, and how many of its lines did not parse
-    /// (no UTF-8, no job: left out). Fails when the file is there but cannot be read: it is not taken over.
+    /// (no UTF-8, no job: left out). Fails when the file is there but cannot be read: it is not taken over. No render
+    /// jobs: [`Renders::load`] reads their file.
     pub fn load(host: String, file: PathBuf) -> io::Result<(Jobs, usize)> {
-        let b = match std::fs::read(&file) {
-            Ok(b) => b,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => vec![],
-            Err(e) => return Err(e),
-        };
-        let (mut v, mut bad) = (vec![], 0);
-        for l in b.split(|&c| c == b'\n') {
-            match std::str::from_utf8(l) {
-                Ok(l) if l.trim().is_empty() || l.starts_with('#') => {}
-                Ok(l) => match serde_json::from_str::<Job>(l) {
-                    Ok(j) => v.push(j),
-                    Err(_) => bad += 1,
-                },
-                Err(_) => bad += 1,
-            }
-        }
+        let (v, bad, saved) = lines(&file)?;
         let j = Jobs {
             host,
             v,
+            r: Renders::default(),
             n: 0,
             file: Some(file),
-            saved: String::from_utf8(b).unwrap_or_default(),
+            saved,
         };
         Ok((j, bad))
     }
 
     /// Writes the file unless it holds this already, through `<file>.new` renamed into place. A job that does not
-    /// serialize (a path that is no UTF-8) is left out and said.
+    /// serialize (a path that is no UTF-8) is left out and said. The render jobs are saved apart ([`Renders::save`]).
     pub fn save(&mut self) -> io::Result<()> {
         let Some(f) = &self.file else { return Ok(()) };
-        let (mut s, mut out) = (format!("{HEAD}\n"), vec![]);
-        for j in &self.v {
-            match serde_json::to_string(j) {
-                Ok(l) => {
-                    s += &l;
-                    s.push('\n')
-                }
-                Err(_) => out.push(j.h.as_str()),
-            }
-        }
-        if s != self.saved {
-            let t = f.with_extension("new");
-            std::fs::write(&t, &s).and_then(|_| std::fs::rename(&t, f))?;
-            self.saved = s;
-        }
-        match out.is_empty() {
-            true => Ok(()),
-            false => Err(io::Error::other(format!(
-                "jobs not kept: {}",
-                out.join(", ")
-            ))),
-        }
+        write(f, HEAD, &self.v, |j| &j.h, &mut self.saved, "jobs not kept")
     }
 
-    /// Saves, then keeps whatever changes later in memory only (the file is another host's from here on).
+    /// Saves both files, then keeps whatever changes later in memory only (the files are another host's from here
+    /// on). The first error, once both are closed.
     pub fn close(&mut self) -> io::Result<()> {
         let r = self.save();
         self.file = None;
-        r
+        r.and(self.r.close())
+    }
+
+    /// The next handle of this host, for a job of either kind.
+    pub fn handle(&mut self) -> String {
+        self.n += 1;
+        format!("{}-{}", self.host, self.n)
     }
 
     /// A new job for album `keys`; returns its handle.
     pub fn add(&mut self, keys: Vec<String>, files: Vec<File>) -> String {
-        self.n += 1;
-        let h = format!("{}-{}", self.host, self.n);
+        let h = self.handle();
         self.v.push(Job {
             h: h.clone(),
             keys,
@@ -365,28 +397,33 @@ impl Jobs {
         h
     }
 
-    /// Where the job a handle names is in [`Jobs::v`]. One of another host's that is not kept is told apart.
-    pub fn at(&self, h: &str) -> Result<usize, String> {
+    /// Which job a handle names, a download or a render. One that ended and is not kept (another host's, or one of
+    /// this host's pruned) is told apart.
+    pub fn which(&self, h: &str) -> Result<Which, String> {
         let h = h.trim();
         if let Some(i) = self.v.iter().position(|j| j.h == h) {
-            return Ok(i);
+            return Ok(Which::Dl(i));
         }
-        match parse(h)? == self.host {
-            true => Err(format!("unknown job {h}")),
-            false => Err(format!(
+        if let Some(i) = self.r.v.iter().position(|r| r.h == h) {
+            return Ok(Which::Render(i));
+        }
+        match parse(h)? {
+            (id, n) if id == self.host && n > self.n => Err(format!("unknown job {h}")),
+            (id, _) if id == self.host => Err(format!(
+                "unknown job {h} (it has ended, and is not among those kept: job_list lists them)"
+            )),
+            _ => Err(format!(
                 "unknown job {h} (its host has ended, and the job is not among those kept: job_list lists them)"
             )),
         }
     }
 
-    /// The job a handle names ([`Jobs::at`]).
+    /// The download job a handle names ([`Jobs::which`]).
     pub fn find(&self, h: &str) -> Result<&Job, String> {
-        self.at(h).map(|i| &self.v[i])
-    }
-
-    /// [`Jobs::find`] to change.
-    pub fn find_mut(&mut self, h: &str) -> Result<&mut Job, String> {
-        self.at(h).map(|i| &mut self.v[i])
+        match self.which(h)? {
+            Which::Dl(i) => Ok(&self.v[i]),
+            Which::Render(_) => Err(format!("{} is a render job, no download", h.trim())),
+        }
     }
 
     /// A new job starts the file at `dst` again (no download waits or runs for it): every job that had it keeps its
@@ -427,7 +464,7 @@ impl Jobs {
                 (q.v.iter()).any(|d| {
                     d.dst == f.dst
                         && matches!(d.st, St::Paused | St::Failed)
-                        && part_of(&d.dst).exists()
+                        && media::part::of(&d.dst).exists()
                 })
             })
         };
@@ -441,17 +478,17 @@ impl Jobs {
             St::Queued | St::Running => true,
             _ if has(&d.dst) => true,
             St::Done => false,
-            St::Paused | St::Failed => part_of(&d.dst).exists(),
+            St::Paused | St::Failed => media::part::of(&d.dst).exists(),
         });
     }
 }
 
 /// The host id in handle `h` (`<host id>-<n>`).
-fn parse(h: &str) -> Result<&str, String> {
+fn parse(h: &str) -> Result<(&str, u64), String> {
     let bad = || format!("{h:?} is not a job handle (<host>-<n>)");
     let (id, n) = h.rsplit_once('-').ok_or_else(bad)?;
     match n.parse::<u64>() {
-        Ok(_) if !id.is_empty() => Ok(id),
+        Ok(n) if !id.is_empty() => Ok((id, n)),
         _ => Err(bad()),
     }
 }
@@ -485,11 +522,19 @@ mod tests {
         assert_eq!(j.add(vec![], vec![]), "1x3k.9fz2-2");
         assert_eq!(j.find("1x3k.9fz2-1").unwrap().h, h1);
         assert_eq!(j.find(" 1x3k.9fz2-1 ").unwrap().h, h1);
-        assert_eq!(j.at("1x3k.9fz2-2"), Ok(1));
+        assert_eq!(j.which("1x3k.9fz2-2"), Ok(Which::Dl(1)));
         assert_eq!(
             j.find("1x3k.9fz2-3").unwrap_err(),
             "unknown job 1x3k.9fz2-3"
         );
+        // one of this host's that is no more
+        let k = j.v.remove(0);
+        assert!(
+            j.find(&h1)
+                .unwrap_err()
+                .contains("it has ended, and is not among those kept")
+        );
+        j.v.insert(0, k);
         assert!(
             j.find("1x3k.0000-1")
                 .unwrap_err()
@@ -498,13 +543,46 @@ mod tests {
         for h in ["", "1", "1x3k.9fz2", "1x3k.9fz2-x", "1x3k.9fz2-", "-1"] {
             assert!(j.find(h).unwrap_err().contains("not a job handle"), "{h}");
         }
-        assert!(j.find_mut(&h1).is_ok());
         // an earlier host's job among them is found under its handle
         j.v.push(Job {
             h: "zz.0000-7".into(),
             ..j.v[0].clone()
         });
-        assert_eq!(j.at("zz.0000-7"), Ok(2));
+        assert_eq!(j.which("zz.0000-7"), Ok(Which::Dl(2)));
+    }
+
+    /// Downloads and renders share the host's numbering: a handle names one job of either kind, the unknown-job
+    /// wording the same for both.
+    #[test]
+    fn shared() {
+        use crate::renders::tests::rjob;
+        let mut j = Jobs::new("1x3k.9fz2".into());
+        assert_eq!(j.add(vec![], vec![]), "1x3k.9fz2-1");
+        let h = j.handle();
+        assert_eq!(h, "1x3k.9fz2-2");
+        j.r.add(h.clone(), rjob("/a/b.mp4"));
+        assert_eq!(j.add(vec![], vec![]), "1x3k.9fz2-3");
+        let h4 = j.handle();
+        j.r.add(h4, rjob("/a/c.jpg"));
+        assert_eq!(j.r.v[0].h, h);
+        assert_eq!(j.which(" 1x3k.9fz2-2 "), Ok(Which::Render(0)));
+        assert_eq!(j.which("1x3k.9fz2-3"), Ok(Which::Dl(1)));
+        assert_eq!(j.which("1x3k.9fz2-4"), Ok(Which::Render(1)));
+        assert_eq!(
+            j.which("1x3k.9fz2-5").unwrap_err(),
+            "unknown job 1x3k.9fz2-5"
+        );
+        assert!(
+            j.which("zz.0000-2")
+                .unwrap_err()
+                .contains("its host has ended")
+        );
+        assert!(j.which("x").unwrap_err().contains("not a job handle"));
+        assert!(j.find("1x3k.9fz2-2").unwrap_err().contains("a render job"));
+        assert_eq!(j.find("1x3k.9fz2-3").unwrap().h, "1x3k.9fz2-3");
+        // an earlier host's render among them is found under its handle
+        j.r.add("zz.0000-9".into(), rjob("/a/d.mp4"));
+        assert_eq!(j.which("zz.0000-9"), Ok(Which::Render(2)));
     }
 
     #[test]
@@ -564,7 +642,11 @@ mod tests {
         let mut j = Jobs::new("h".into());
         q.add(u, p.clone());
         let (a, b) = (j.add(vec![], f()), j.add(vec![], f()));
-        let (a, b) = (j.at(&a).unwrap(), j.at(&b).unwrap());
+        let at = |j: &Jobs, h: &str| match j.which(h) {
+            Ok(Which::Dl(i)) => i,
+            w => panic!("{h}: {w:?}"),
+        };
+        let (a, b) = (at(&j, &a), at(&j, &b));
         assert!(j.cut(b).is_empty(), "a still wants it");
         j.v[b].cancelled = true;
         assert_eq!(j.cut(a), std::slice::from_ref(&p));
@@ -574,7 +656,7 @@ mod tests {
         j.take(&p, &q);
         q.add(u, p.clone());
         let c = j.add(vec![], f());
-        let c = j.at(&c).unwrap();
+        let c = at(&j, &c);
         q.v[0].st = St::Running;
         for n in [a, b] {
             let x = j.v[n].prog(&q);
@@ -588,7 +670,7 @@ mod tests {
         j.take(&p, &q);
         q.add(u, p.clone());
         let e = j.add(vec![], f());
-        let e = j.at(&e).unwrap();
+        let e = at(&j, &e);
         q.v[0].prog.done.store(5, Relaxed);
         let x = j.v[c].prog(&q);
         assert_eq!(
@@ -739,7 +821,7 @@ mod tests {
         }
         (q.v[1].st, q.v[2].st) = (St::Done, St::Paused);
         std::fs::write(d.join("vid"), b"x").unwrap();
-        std::fs::write(part_of(&d.join("lrv")), b"x").unwrap();
+        std::fs::write(media::part::of(&d.join("lrv")), b"x").unwrap();
         for i in 0..KEEP + 20 {
             j.add(vec![], vec![x(&format!("f{i}"))]);
         }
@@ -758,7 +840,7 @@ mod tests {
             q.add(&format!("/DCIM/Camera01/{n}"), d.join(n));
             q.v.last_mut().unwrap().st = st;
             if part {
-                std::fs::write(part_of(&d.join(n)), b"x").unwrap();
+                std::fs::write(media::part::of(&d.join(n)), b"x").unwrap();
             }
         }
         j.prune(&mut q);

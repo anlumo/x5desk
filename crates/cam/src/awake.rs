@@ -1,7 +1,9 @@
 //! App Nap (macOS): once every window is hidden or covered and no sound plays, the system coalesces the process's
 //! timers and lowers its threads' priority. Long work holds a [`Hold`] while it runs (exports and frame grabs, Shot
 //! Lab and AI passes, live outputs, downloads and card imports): the first begins an NSProcessInfo activity (user
-//! initiated, idle system sleep allowed), the last to go ends it. Elsewhere a hold does nothing.
+//! initiated, idle system sleep allowed), the last to go ends it. An agent's renders hold a [`Keep`] instead, often
+//! with no user at the keyboard: an activity of its own that also keeps idle system sleep off (the display may
+//! sleep), so no hold's activity can weaken it. Elsewhere both do nothing (no sleep lock on Linux yet).
 
 /// App Nap stays off while one lives.
 #[must_use = "App Nap is off only while the hold lives"]
@@ -9,14 +11,31 @@ pub struct Hold(());
 
 pub fn hold() -> Hold {
     #[cfg(target_os = "macos")]
-    mac::take();
+    mac::HOLD.take();
     Hold(())
 }
 
 impl Drop for Hold {
     fn drop(&mut self) {
         #[cfg(target_os = "macos")]
-        mac::give()
+        mac::HOLD.give()
+    }
+}
+
+/// App Nap and idle system sleep stay off while one lives.
+#[must_use = "idle sleep is off only while the keep lives"]
+pub struct Keep(());
+
+pub fn keep() -> Keep {
+    #[cfg(target_os = "macos")]
+    mac::KEEP.take();
+    Keep(())
+}
+
+impl Drop for Keep {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        mac::KEEP.give()
     }
 }
 
@@ -35,34 +54,51 @@ mod mac {
     // SAFETY: the token is only handed back to NSProcessInfo, which is thread-safe, and released
     unsafe impl Send for Token {}
 
-    /// The holds, and the activity while there are any.
-    static ON: Mutex<(usize, Option<Token>)> = Mutex::new((0, None));
-
-    pub fn on() -> MutexGuard<'static, (usize, Option<Token>)> {
-        ON.lock().unwrap_or_else(|e| e.into_inner())
+    /// One kind of activity: its holders, and the activity while there are any.
+    pub struct Act {
+        on: Mutex<(usize, Option<Token>)>,
+        why: &'static str,
+        opts: NSActivityOptions,
     }
 
-    pub fn take() {
-        let mut g = on();
-        g.0 += 1;
-        if g.1.is_none() {
-            let r = NSString::from_str("x5desk: an export, analysis, live output or download runs");
-            let o = NSActivityOptions::UserInitiatedAllowingIdleSystemSleep;
-            // a thread of ours has no pool for what the calls autorelease
-            g.1 = Some(Token(autoreleasepool(|_| {
-                NSProcessInfo::processInfo().beginActivityWithOptions_reason(o, &r)
-            })));
+    pub static HOLD: Act = Act {
+        on: Mutex::new((0, None)),
+        why: "x5desk: an export, analysis, live output or download runs",
+        opts: NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+    };
+
+    pub static KEEP: Act = Act {
+        on: Mutex::new((0, None)),
+        why: "x5desk: an agent's render runs",
+        opts: NSActivityOptions::UserInitiated,
+    };
+
+    impl Act {
+        pub fn on(&self) -> MutexGuard<'_, (usize, Option<Token>)> {
+            self.on.lock().unwrap_or_else(|e| e.into_inner())
         }
-    }
 
-    pub fn give() {
-        let mut g = on();
-        g.0 -= 1;
-        if g.0 == 0
-            && let Some(t) = g.1.take()
-        {
-            // SAFETY: the activity beginActivity returned
-            autoreleasepool(|_| unsafe { NSProcessInfo::processInfo().endActivity(&t.0) });
+        pub fn take(&self) {
+            let mut g = self.on();
+            g.0 += 1;
+            if g.1.is_none() {
+                let r = NSString::from_str(self.why);
+                // a thread of ours has no pool for what the calls autorelease
+                g.1 = Some(Token(autoreleasepool(|_| {
+                    NSProcessInfo::processInfo().beginActivityWithOptions_reason(self.opts, &r)
+                })));
+            }
+        }
+
+        pub fn give(&self) {
+            let mut g = self.on();
+            g.0 -= 1;
+            if g.0 == 0
+                && let Some(t) = g.1.take()
+            {
+                // SAFETY: the activity beginActivity returned
+                autoreleasepool(|_| unsafe { NSProcessInfo::processInfo().endActivity(&t.0) });
+            }
         }
     }
 }
@@ -80,7 +116,7 @@ mod tests {
         let a = hold();
         #[cfg(target_os = "macos")]
         let t = {
-            let g = mac::on();
+            let g = mac::HOLD.on();
             assert!(g.0 >= 1);
             Retained::as_ptr(&g.1.as_ref().expect("an activity").0)
         };
@@ -88,10 +124,43 @@ mod tests {
         drop(a);
         #[cfg(target_os = "macos")]
         {
-            let g = mac::on();
+            let g = mac::HOLD.on();
             let u = Retained::as_ptr(&g.1.as_ref().expect("still the activity").0);
             assert_eq!(u, t, "a second activity");
         }
         drop(b);
+    }
+
+    /// Keeps have an activity and a count of their own, apart from the holds' (only this test keeps).
+    #[test]
+    fn keeps() {
+        let h = hold();
+        let k = keep();
+        #[cfg(target_os = "macos")]
+        {
+            let (g, n) = (mac::HOLD.on(), mac::KEEP.on());
+            assert_eq!(n.0, 1);
+            let (a, b) = (
+                &g.1.as_ref().expect("a hold's").0,
+                &n.1.as_ref().expect("a keep's").0,
+            );
+            assert_ne!(
+                Retained::as_ptr(a),
+                Retained::as_ptr(b),
+                "one activity for both"
+            );
+        }
+        let l = keep();
+        drop(h);
+        drop(k);
+        #[cfg(target_os = "macos")]
+        assert!(mac::KEEP.on().1.is_some(), "a hold's end ended the keep");
+        drop(l);
+        #[cfg(target_os = "macos")]
+        {
+            let n = mac::KEEP.on();
+            assert_eq!(n.0, 0);
+            assert!(n.1.is_none(), "the keep outlived its holders");
+        }
     }
 }

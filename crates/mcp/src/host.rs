@@ -5,18 +5,21 @@
 //! and records the outcome of every command a tool asked it for by number. Tools send the workers commands and wait
 //! with timeouts; camera-writing tools take turns ([`Shared::act`]). The camera is released after [`IDLE`] without a
 //! tool call (not while a call runs, a download runs or can start, or the camera captures), and on
-//! [`Host::shutdown`] (stdin's end, a signal: the process side calls it), which first stops a recording this host
-//! started ([`Rec`], within [`STOPPING`]: on the session directly, not behind the capture worker's queue).
+//! [`Host::shutdown`] (stdin's end, a signal: the process side calls it), which first cancels this host's renders
+//! (settled by identity within [`RENDERS`]; [`Host::closing`] cancels them earlier, at the hosting client's end) and
+//! stops a recording this host started ([`Rec`], within [`STOPPING`]: on the session directly, not behind the capture
+//! worker's queue). A poller follows the renders while any runs ([`poll`]).
 //!
-//! The queue and the jobs are kept in the config dir (`mcp-downloads`, cam's queue file, and `mcp-jobs`, see [`job`]),
-//! the app's own queue apart, under a lock (`mcp-downloads.lock`) a host holds from its start until its worker is gone
-//! and both are saved the last time (a worker a camera call holds up past [`ENDING`] is left behind); a host that
-//! starts while the one before it ends waits up to [`HANDOVER`] for it. What it takes is checked: downloads into the
-//! agent folder, from a camera or a card. So a later host goes on with what an earlier one left: the downloads that
-//! waited or ran (`camera_release` and the shutdown leave them so) run once the camera is connected (a card import at
-//! once), the jobs keep their handles, and a cancelled download, its `.part` kept, resumes under its name when its item
-//! is downloaded again. A host whose lock stays another's (another endpoint's host) keeps its queue in memory, and says
-//! so in the log.
+//! The queue and the jobs are kept in the config dir (`mcp-downloads`, cam's queue file, `mcp-jobs`, see [`job`], and
+//! `mcp-renders`, see [`crate::renders`]), the app's own queue apart, under a lock (`mcp-downloads.lock`) a host holds
+//! from its start until its worker is gone and they are saved the last time (a worker a camera call holds up past
+//! [`ENDING`] is left behind); a host that starts while the one before it ends waits up to [`HANDOVER`] for it. What it
+//! takes is checked: downloads into the agent folder, from a camera or a card; renders into it. So a later host goes
+//! on with what an earlier one left: the downloads that waited or ran (`camera_release` and the shutdown leave them so)
+//! run once the camera is connected (a card import at once), the jobs keep their handles, and a cancelled download, its
+//! `.part` kept, resumes under its name when its item is downloaded again. Renders never carry over: one left
+//! unfinished is settled by its `.part`'s identity. A host whose lock stays another's (another endpoint's host) keeps
+//! its queue in memory, and says so in the log.
 //!
 //! The enabled tiers are re-read every 2 s; a change tells every client (`notifications/tools/list_changed`, on
 //! 2026-07-28 to its `subscriptions/listen` streams). Each connection is one rmcp service over the shared host
@@ -27,8 +30,13 @@ use crate::{
     job::{self, Jobs},
     log::Log,
     paths,
+    render::{Backend, CONCEALED, GpuSt, Kind, Lane, Phase, Plan, Render, Req, Run, RunSt},
+    renders::{ENDED, End, Renders, Snap, frames},
     scrub::{self, Secrets},
-    server::Conn,
+    server::{
+        Conn,
+        render::{blocking, caught, gpu_st, keep_preview, preview},
+    },
     sim::{self, Sim},
 };
 use cam::{
@@ -41,7 +49,7 @@ use cam::{
 use link::{Plug, pb};
 use rmcp::ServiceExt;
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs::File,
     io,
     path::{Component, Path, PathBuf},
@@ -51,7 +59,7 @@ use std::{
         mpsc::{RecvTimeoutError, Sender},
     },
     thread::JoinHandle,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -75,6 +83,41 @@ pub const ENDING: Duration = Duration::from_secs(5);
 
 /// How long a host's end tries to stop a recording it started (its start's outcome first) before the session closes.
 pub const STOPPING: Duration = Duration::from_secs(5);
+
+/// How long a host's end waits for its renders, from its sweep, before it settles what is left by identity (a writer
+/// still in the driver then writes into an orphan inode and publishes nothing): the whole end stays within
+/// [`HANDOVER`].
+#[cfg(not(test))]
+pub const RENDERS: Duration = Duration::from_secs(8);
+#[cfg(test)]
+pub const RENDERS: Duration = Duration::from_secs(1);
+
+/// How often the poller reads the runs.
+const POLL: Duration = Duration::from_millis(200);
+
+/// A run that does not move this long is stuck (making frames; setting up or compiling the first RAFT flow; never
+/// while it finishes its file): cancelled whatever the GPU's state. One not ended [`GRACE`] after a cancel of the
+/// watchdog's (or of a lost device's) is settled failed, its lane wedged when it was stuck.
+#[cfg(not(test))]
+const QUIET: [Duration; 2] = [Duration::from_secs(120), Duration::from_secs(180)];
+#[cfg(test)]
+const QUIET: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(1)];
+#[cfg(not(test))]
+const GRACE: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const GRACE: Duration = Duration::from_secs(1);
+
+/// With no unfinished render this long, the GPU's idle memory is freed (once per idle spell).
+#[cfg(not(test))]
+const TRIM: Duration = Duration::from_secs(300);
+#[cfg(test)]
+const TRIM: Duration = Duration::from_secs(1);
+
+/// A suspect GPU (an uncaptured error, cubecl's loss line) is probed at most this often.
+const PROBE: Duration = Duration::from_secs(30);
+
+/// What an export failed at a picture that could not be decoded ([`CONCEALED`]) adds: the way out.
+const FROZEN: &str = "; pass allow_frozen: true to export it with repeated frames";
 
 /// Outcomes of asked capture commands kept.
 const OUTS: usize = 32;
@@ -104,6 +147,10 @@ pub struct Opts {
     /// cache, nothing of the user's config read, a Wi-Fi client id of its own, the tiers as under `--sim` (tests on
     /// a camera, `X5DESK_TEST`)
     pub dir: Option<PathBuf>,
+    /// the GPU tools' backend; none: catalog, render_still and export are not listed
+    pub backend: Backend,
+    /// the executable the backend's GPU self-test runs as `<exe> mcp gpu-check`; none: in process
+    pub gpu_child: Option<PathBuf>,
 }
 
 impl Default for Opts {
@@ -115,6 +162,8 @@ impl Default for Opts {
             tiers: None,
             idle: IDLE,
             dir: None,
+            backend: Backend::default(),
+            gpu_child: None,
         }
     }
 }
@@ -178,6 +227,9 @@ pub struct Rec {
     pub at: Instant,
     /// the host stops it then (`capture_record`'s `seconds`)
     pub until: Option<Instant>,
+    /// a stop came before the camera showed it capturing: the host stops it as soon as it does (as at `until`; no
+    /// timed recording for that, so renders go on)
+    pub due: bool,
     /// a stop of this host's asked for it: its number (its outcome ends it)
     pub stop: Option<u64>,
     /// when its start's outcome came (it went out, or may have)
@@ -241,6 +293,81 @@ pub(crate) struct Shared {
     pub tap: Taps,
     /// the capture thread ends
     cstop: AtomicBool,
+    /// the GPU tools' backend ([`Opts::backend`])
+    pub render: Option<Arc<dyn Render>>,
+    /// the GPU self-test's executable ([`Opts::gpu_child`])
+    pub gpu_child: Option<PathBuf>,
+    /// this host's unfinished render jobs by handle ([`Live`]); locked after `jobs` and `q`, never across an await or
+    /// a backend call
+    pub runs: Mutex<HashMap<String, Live>>,
+    /// a task starts the GPU and submits the parked jobs (one per host at a time), set and cleared under `runs`
+    pub starting: AtomicBool,
+    /// set by the host's end: a GPU start under way is halted
+    pub halt: Arc<AtomicBool>,
+    /// this host's unfinished render jobs, raised under `st`: a timed recording and renders exclude each other (a
+    /// crash mid-render would lose the recording's stop, this host's timer)
+    pub rendering: AtomicUsize,
+    /// a timed `capture_record` start is under way, set under `st`
+    pub timed: AtomicBool,
+    /// a run its cancel did not end was settled (its thread may still be in a driver call, which may crash this
+    /// host), set under `st` before `rendering` is lowered for it: timed recordings are refused until the host ends
+    pub wedged: AtomicBool,
+    /// the newest previews of done stills, by handle
+    pub previews: Mutex<VecDeque<(String, Preview)>>,
+    /// the poller runs ([`poll`]), from this host's first render job until it ends
+    polling: AtomicBool,
+    /// when the end's sweep ran first ([`Shared::sweep`]): the renders' deadline counts from it
+    ending: OnceLock<Instant>,
+    /// idle system sleep kept off while a render job of this host is unfinished (the poller takes and drops it)
+    pub keep: Mutex<Option<cam::awake::Keep>>,
+    /// when this host's start task found the GPU up
+    pub gpu_at: OnceLock<SystemTime>,
+}
+
+/// A render job of this host while it is unfinished ([`Shared::runs`]): where it publishes and the identity of its
+/// reserved `.part` (every outcome is settled by it), its volume and estimate (the free-space check counts what it
+/// still needs), whether a cancel came, and the watchdog's cancel or a lost device's.
+pub(crate) struct Live {
+    pub st: LiveSt,
+    pub dst: PathBuf,
+    pub id: media::part::Id,
+    pub vol: u64,
+    pub bytes: u64,
+    pub cancel: bool,
+    pub stuck: Option<Stuck>,
+}
+
+/// Why a run was cancelled for it (it made no frame, or the device was lost), and when: not ended [`GRACE`] later it
+/// is settled failed, its lane wedged when `lane` (a decode stuck in a driver call keeps the lane's thread).
+#[derive(Clone, Debug)]
+pub(crate) struct Stuck {
+    pub at: Instant,
+    pub why: String,
+    pub lane: bool,
+}
+
+/// Where a render job is: parked until the GPU is up, being submitted, or on its lane.
+pub(crate) enum LiveSt {
+    Parked(Box<Parked>),
+    Submitting,
+    Run(Arc<dyn Run>),
+}
+
+/// A job parked while the GPU starts: its reserved `.part` and what the backend checked.
+pub(crate) struct Parked {
+    pub part: media::part::Part,
+    pub req: Req,
+    pub plan: Plan,
+}
+
+/// A done still's preview: the JPEG, its size and quality, and the still's size.
+#[derive(Clone, Debug)]
+pub(crate) struct Preview {
+    pub jpg: Arc<[u8]>,
+    pub w: u32,
+    pub h: u32,
+    pub q: u8,
+    pub src: [u32; 2],
 }
 
 /// A tool call in progress: the camera is not idle meanwhile.
@@ -310,6 +437,241 @@ impl Shared {
         q.save();
         if let Err(e) = jobs.save() {
             self.log.line(&format!("the jobs file: {e}"))
+        }
+    }
+
+    /// Ends render job `h` of this host: its [`Live`] taken out of `runs` (`rendering` lowered with it), its `.part`
+    /// settled by identity ([`media::part::settle`]), and its record's end written, `end` as the file says it (a
+    /// publish that landed after all is done, a done file gone failed; the time since it was made when `end` has
+    /// none), the finished records pruned ([`Renders::end`]); saved. False when it had ended already.
+    pub fn end_render(&self, h: &str, end: End) -> bool {
+        let mut jobs = self.jobs.lock().unwrap();
+        let Some(l) = self.runs.lock().unwrap().remove(h) else {
+            return false;
+        };
+        self.settle_render(&mut jobs, h, l, end);
+        true
+    }
+
+    /// [`Shared::end_render`] of `l`, job `h`'s, taken out of `runs` already; the caller holds `jobs`.
+    pub(crate) fn settle_render(&self, jobs: &mut Jobs, h: &str, l: Live, end: End) {
+        use media::part::Settled;
+        self.rendering.fetch_sub(1, Relaxed);
+        // a parked job's file closed before its name goes
+        drop(l.st);
+        let r = jobs.r.v.iter().find(|r| r.h == h);
+        // a run settled before it ended (stuck, the host's end) made the frames its last reading says
+        let had = r.and_then(|r| r.live.as_ref()).map_or(0, |s| frames(&s.st));
+        let secs = match end.secs > 0.0 {
+            true => end.secs,
+            false => r.map_or(0.0, |r| {
+                SystemTime::now()
+                    .duration_since(r.at)
+                    .map_or(0.0, |d| d.as_secs_f64())
+            }),
+        };
+        let done = end.state == "done";
+        let end = match media::part::settle(&media::part::of(&l.dst), &l.dst, &l.id) {
+            Settled::Done(bytes) if done => End { bytes, secs, ..end },
+            Settled::Done(b) => End::done(r.map_or(0, |r| r.frames), secs, b, 0),
+            Settled::Gone if done => End::failed(&format!(
+                "{}: removed before it was settled",
+                paths::shown(&l.dst)
+            )),
+            Settled::Gone => End {
+                secs,
+                frames: end.frames.max(had),
+                ..end
+            },
+        };
+        let kind = r.map_or("render", |r| r.kind.name());
+        let name = l.dst.file_name().unwrap_or_default().to_string_lossy();
+        self.log.line(&match (end.state.as_str(), kind) {
+            ("done", "still") => format!("still {h} done in {:.1} s → {name}", end.secs),
+            ("done", _) => format!(
+                "{kind} {h} done: {} frames in {:.1} s ({:.1} frames/s) → {name}",
+                end.frames,
+                end.secs,
+                end.frames as f64 / end.secs.max(1e-3)
+            ),
+            ("failed", _) => format!("{kind} {h} failed: {}", end.err),
+            _ if end.err.is_empty() => format!("{kind} {h} cancelled"),
+            _ => format!("{kind} {h} cancelled: {}", end.err),
+        });
+        jobs.r.end(h, end);
+        if let Err(e) = jobs.r.save() {
+            self.log.line(&format!("the renders file: {e}"))
+        }
+    }
+
+    /// The end's sweep (also [`Host::closing`] at the hosting client's end, before the front's drain): no render job
+    /// is reserved any more (`closing`, set under `jobs`, which every reservation checks under it, `runs` filled under
+    /// it too), every unfinished one of this host cancelled: a parked one settled at once, a run told to stop (no lock
+    /// held), a GPU start under way halted. Never waits; a second sweep finds nothing more to do.
+    pub(crate) fn sweep(&self) {
+        let v: Vec<Arc<dyn Run>> = {
+            let mut jobs = self.jobs.lock().unwrap();
+            jobs.r.closing = true;
+            let _ = self.ending.set(Instant::now());
+            let mut runs = self.runs.lock().unwrap();
+            let parked: Vec<String> = (runs.iter())
+                .filter(|(_, l)| matches!(l.st, LiveSt::Parked(_)))
+                .map(|(h, _)| h.clone())
+                .collect();
+            let v = (runs.values_mut())
+                .filter_map(|l| {
+                    l.cancel = true;
+                    match &l.st {
+                        LiveSt::Run(r) => Some(r.clone()),
+                        _ => None,
+                    }
+                })
+                .collect();
+            let parked: Vec<(String, Live)> = (parked.into_iter())
+                .filter_map(|h| runs.remove_entry(&h))
+                .collect();
+            drop(runs);
+            for (h, l) in parked {
+                self.settle_render(&mut jobs, &h, l, End::cancelled(ENDED))
+            }
+            v
+        };
+        for r in v {
+            let _ = caught(|| r.cancel());
+        }
+        self.halt.store(true, Relaxed)
+    }
+
+    /// One look at this host's runs (the poller's every [`POLL`], the end's every 50 ms): their states read with no
+    /// lock held (the only caller of [`Run::state`]), each written into its record ([`Snap`]); those that ended
+    /// returned with their end. With `watch` the watchdog too: a run that does not move for [`QUIET`] is cancelled
+    /// whatever the GPU's state (a decode wedged on its own queue passes a probe), and one still not ended [`GRACE`]
+    /// after such a cancel is returned to be settled failed.
+    fn look(&self, watch: bool) -> Look {
+        let runs: Vec<(String, Arc<dyn Run>)> = (self.runs.lock().unwrap().iter())
+            .filter_map(|(h, l)| match &l.st {
+                LiveSt::Run(r) => Some((h.clone(), r.clone())),
+                _ => None,
+            })
+            .collect();
+        let seen: Vec<(String, Arc<dyn Run>, RunSt)> = (runs.into_iter())
+            .map(|(h, r)| {
+                let st = caught(|| r.state()).unwrap_or_else(RunSt::Failed);
+                (h, r, st)
+            })
+            .collect();
+        let (now, mut k, mut stop) = (Instant::now(), Look::default(), vec![]);
+        {
+            let mut jobs = self.jobs.lock().unwrap();
+            let closing = jobs.r.closing;
+            let mut live = self.runs.lock().unwrap();
+            for (h, run, st) in seen {
+                // ended meanwhile
+                let (Some(l), Some(r)) = (live.get_mut(&h), jobs.r.v.iter_mut().find(|r| r.h == h))
+                else {
+                    continue;
+                };
+                // the frames it made, which a failed or cancelled reading does not say
+                let had = r.live.as_ref().map_or(0, |p| frames(&p.st));
+                let s = Snap::after(r.live.as_ref(), st, now, r.at);
+                let end = match &s.st {
+                    RunSt::Done {
+                        frames,
+                        secs,
+                        bytes,
+                        concealed,
+                    } => Some(End::done(*frames, *secs, *bytes, *concealed)),
+                    RunSt::Failed(e) => {
+                        // a device loss says so: the probe tells a lost GPU from a failed job
+                        k.probe |= e.to_ascii_lowercase().contains("lost");
+                        let e = match r.kind == Kind::Export && e.contains(CONCEALED) {
+                            true => format!("{e}{FROZEN}"),
+                            false => e.clone(),
+                        };
+                        Some(End::failed(&e))
+                    }
+                    RunSt::Cancelled => Some(match (&l.stuck, r.cancelled) {
+                        (Some(x), false) => End::failed(&x.why),
+                        (None, false) if closing => End::cancelled(ENDED),
+                        _ => End::cancelled(""),
+                    }),
+                    _ => None,
+                }
+                .map(|e| match e.state == "done" {
+                    true => e,
+                    false => End { frames: had, ..e },
+                });
+                // the faststart rewrite makes no frames, and reads its stop per chunk
+                let quiet = match &s.st {
+                    RunSt::Running { phase, .. } => match phase {
+                        Phase::Frames => Some(("frames", QUIET[0])),
+                        Phase::Setup => Some(("setup", QUIET[1])),
+                        Phase::Compiling => Some(("compiling", QUIET[1])),
+                        Phase::Finishing => None,
+                    },
+                    _ => None,
+                };
+                match (end, &l.stuck) {
+                    (Some(end), _) => {
+                        let still = r.kind == Kind::Still && end.state == "done";
+                        k.ended.push(Ended {
+                            h: h.clone(),
+                            end,
+                            preview: still.then(|| (l.dst.clone(), l.id)),
+                        })
+                    }
+                    (None, Some(x)) if watch && now.duration_since(x.at) >= GRACE => {
+                        k.stuck.push((h.clone(), r.lane, x.clone()))
+                    }
+                    (None, None)
+                        if let Some((p, q)) = quiet
+                            && watch
+                            && now.duration_since(s.moved) >= q =>
+                    {
+                        let why = format!("stuck in {p}: nothing for {} s", q.as_secs());
+                        self.log
+                            .line(&format!("{} {h} {why}: cancelled", r.kind.name()));
+                        l.stuck = Some(Stuck {
+                            at: now,
+                            why,
+                            lane: true,
+                        });
+                        k.probe = true;
+                        stop.push(run.clone())
+                    }
+                    _ => {}
+                }
+                r.live = Some(s)
+            }
+        }
+        for r in stop {
+            let _ = caught(|| r.cancel());
+        }
+        k
+    }
+
+    /// The GPU device was lost (`why`): every run of this host cancelled, each settled failed once it ends, or
+    /// [`GRACE`] after.
+    fn lost(&self, why: &str) {
+        self.log.line(&format!(
+            "the GPU device was lost ({why}): this host's renders stop"
+        ));
+        let now = Instant::now();
+        let v: Vec<Arc<dyn Run>> = (self.runs.lock().unwrap().values_mut())
+            .filter_map(|l| {
+                l.stuck.get_or_insert_with(|| Stuck {
+                    at: now,
+                    why: format!("the GPU device was lost ({why})"),
+                    lane: false,
+                });
+                match &l.st {
+                    LiveSt::Run(r) => Some(r.clone()),
+                    _ => None,
+                }
+            })
+            .collect();
+        for r in v {
+            let _ = caught(|| r.cancel());
         }
     }
 
@@ -478,14 +840,16 @@ impl Shared {
                             s.ended = Some((r.n, Ok(u.clone())));
                             s.rec = None
                         }
-                        // a start the camera has not shown capturing yet: stopped once it does (its stop due now)
+                        // a start the camera has not shown capturing yet: stopped once it does (its stop due now; one
+                        // with seconds is timed until then)
                         Out::No(t)
                             if t.contains("nothing to stop")
                                 && !r.seen
                                 && r.sent_at.is_none_or(|t| t.elapsed() < LATE) =>
                         {
                             let r = s.rec.as_mut().unwrap();
-                            (r.stop, r.until) = (None, Some(Instant::now()))
+                            (r.stop, r.due) = (None, true);
+                            r.until = r.until.map(|u| u.min(Instant::now()))
                         }
                         Out::No(t) if t.contains("nothing to stop") => {
                             s.ended = Some((r.n, Err("it had ended".into())));
@@ -644,8 +1008,9 @@ fn cap_pump(sh: Arc<Shared>, w: capture::Worker) {
     sh.tap.lock().unwrap().notes = None;
 }
 
-/// The stops of recordings this host started with `seconds` (`capture_record`): once one is due and its start went
-/// out, its stop, again every 5 s while it fails (the link lost meanwhile: once it is back), until the host ends.
+/// The stops of recordings this host started with `seconds` (`capture_record`), or stopped before they began
+/// ([`Rec::due`]): once one is due and its start went out, its stop, again every 5 s while it fails (the link lost
+/// meanwhile, or the camera not capturing yet: once it is), until the host ends.
 async fn timer(h: std::sync::Weak<Host>) {
     let mut t = tokio::time::interval(Duration::from_millis(250));
     let mut next = None;
@@ -658,7 +1023,7 @@ async fn timer(h: std::sync::Weak<Host>) {
         let due = {
             let s = h.sh.st.lock().unwrap();
             (s.rec.as_ref())
-                .filter(|r| r.sent && r.until.is_some_and(|u| u <= Instant::now()))
+                .filter(|r| r.sent && (r.due || r.until.is_some_and(|u| u <= Instant::now())))
                 .map(|r| r.n)
         };
         let Some(n) = due else {
@@ -769,6 +1134,182 @@ fn busy(q: &dl::Queue) -> bool {
     })
 }
 
+/// What a look at the runs found ([`Shared::look`]).
+#[derive(Default)]
+struct Look {
+    /// the runs that ended, to be settled
+    ended: Vec<Ended>,
+    /// those a cancel for them did not end within [`GRACE`]: handle, lane, why
+    stuck: Vec<(String, Lane, Stuck)>,
+    /// a job failed as a lost device fails one, or the watchdog cancelled one: the GPU is probed
+    probe: bool,
+}
+
+/// A run that ended: its handle, its end, and for a done still its file and identity (its preview made first).
+struct Ended {
+    h: String,
+    end: End,
+    preview: Option<(PathBuf, media::part::Id)>,
+}
+
+/// The poller's own state between its looks.
+#[derive(Default)]
+struct Poller {
+    /// since when no render job of this host is unfinished, and whether the GPU was trimmed since
+    idle: Option<Instant>,
+    trimmed: bool,
+    /// a probe under way, and when the last one began
+    probe: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    probed: Option<Instant>,
+    /// the device's loss was handled
+    lost: bool,
+}
+
+/// Starts this host's poller unless it runs (with the host's first render job; it runs until the host ends).
+pub(crate) fn poll(sh: &Arc<Shared>) {
+    if !sh.polling.swap(true, Relaxed) {
+        tokio::spawn(poller(sh.clone()));
+    }
+}
+
+/// The poller, one task per host from its first render job until `sh.ct`: every [`POLL`] the runs' states into their
+/// records, each one that ended settled by identity (a done still once its preview is kept, so a waiting call never
+/// reads it done without an image); the watchdog; idle system sleep kept off while a render job of this host is
+/// unfinished; a suspect GPU probed (at most every [`PROBE`]) and a lost one's runs stopped; after [`TRIM`] with no
+/// unfinished job the GPU's idle memory freed, once per idle spell.
+async fn poller(sh: Arc<Shared>) {
+    let Some(r) = sh.render.clone() else { return };
+    let mut t = tokio::time::interval(POLL);
+    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut p = Poller::default();
+    loop {
+        tokio::select! {
+            _ = t.tick() => {}
+            _ = sh.ct.cancelled() => break,
+        }
+        tick(&sh, &r, &mut p).await
+    }
+}
+
+/// One round of the poller.
+async fn tick(sh: &Arc<Shared>, r: &Arc<dyn Render>, p: &mut Poller) {
+    let k = sh.look(true);
+    for e in k.ended {
+        if let Some((dst, id)) = e.preview {
+            match blocking(move || preview(&dst, &id)).await.and_then(|x| x) {
+                Ok(v) => keep_preview(sh, &e.h, v),
+                Err(w) => sh.log.line(&format!("still {}: no preview: {w}", e.h)),
+            }
+        }
+        sh.end_render(&e.h, e.end);
+    }
+    for (h, lane, x) in k.stuck {
+        let n = lane.name();
+        let why = match x.lane {
+            true => format!(
+                "{}; the GPU's {n} lane is off until this MCP server restarts",
+                x.why
+            ),
+            false => x.why.clone(),
+        };
+        // its thread may be in a driver call still: no timed recording relies on this host's timer from now on (D23)
+        {
+            let _s = sh.st.lock().unwrap();
+            sh.wedged.store(true, Relaxed)
+        }
+        // a decode stuck in a driver call keeps its lane's thread: its queued jobs fail, new ones are refused
+        if sh.end_render(&h, End::failed(&why)) && x.lane {
+            let w = format!(
+                "the GPU's {n} lane is stuck ({}): this MCP server must restart to use it",
+                x.why
+            );
+            sh.log.line(&w);
+            let r = r.clone();
+            tokio::spawn(blocking(move || r.wedge(lane, &w)));
+        }
+    }
+    let st = gpu_st(&**r);
+    let suspect = matches!(&st, GpuSt::Ready(i) if i.suspect);
+    if (k.probe || suspect && p.probed.is_none_or(|t| t.elapsed() >= PROBE))
+        && p.probe.is_none()
+        && !p.lost
+    {
+        let r = r.clone();
+        p.probe = Some(tokio::spawn(async move {
+            blocking(move || r.probe()).await.and_then(|x| x)
+        }));
+        p.probed = Some(Instant::now())
+    }
+    if let Some(t) = p.probe.take_if(|t| t.is_finished()) {
+        match t.await.map_err(|e| e.to_string()).and_then(|x| x) {
+            Ok(()) => sh.log.line("the GPU's probe passed"),
+            Err(w) if !p.lost => {
+                p.lost = true;
+                sh.lost(&w)
+            }
+            Err(_) => {}
+        }
+    }
+    if let GpuSt::Dead(w) = &st
+        && !p.lost
+    {
+        p.lost = true;
+        sh.lost(w)
+    }
+    let busy = !sh.runs.lock().unwrap().is_empty();
+    {
+        let mut g = sh.keep.lock().unwrap();
+        if busy != g.is_some() {
+            *g = busy.then(cam::awake::keep)
+        }
+    }
+    if busy {
+        (p.idle, p.trimmed) = (None, false)
+    } else if !p.trimmed
+        && p.idle.get_or_insert_with(Instant::now).elapsed() >= TRIM
+        && matches!(st, GpuSt::Ready(_))
+    {
+        p.trimmed = true;
+        sh.log.line(&format!(
+            "no render for {} s: the GPU's idle decoders and RAFT models freed",
+            TRIM.as_secs()
+        ));
+        let r = r.clone();
+        tokio::spawn(blocking(move || r.trim()));
+    }
+}
+
+/// The end's wait for this host's renders, which its sweep cancelled: every 50 ms each one that ended settled, until
+/// none is left or [`RENDERS`] after the sweep; then the rest settled as they are, by identity (a writer still in the
+/// driver writes into an orphan inode and publishes nothing; a publish that landed meanwhile reads done).
+fn wind(sh: &Shared) {
+    let end = *sh.ending.get_or_init(Instant::now) + RENDERS;
+    loop {
+        for e in sh.look(false).ended {
+            sh.end_render(&e.h, e.end);
+        }
+        if sh.runs.lock().unwrap().is_empty() || Instant::now() >= end {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50))
+    }
+    let left: Vec<String> = sh.runs.lock().unwrap().keys().cloned().collect();
+    for h in left {
+        let was = {
+            let j = sh.jobs.lock().unwrap();
+            (j.r.v.iter().position(|r| r.h == h))
+                .map(|i| (j.r.v[i].kind.name(), j.r.prog(i).phase.unwrap_or("?")))
+        };
+        if let Some((k, p)) = was {
+            sh.log.line(&format!(
+                "{k} {h} still in {p} at the host's end, {} s after its cancel",
+                RENDERS.as_secs()
+            ))
+        }
+        sh.end_render(&h, End::cancelled(ENDED));
+    }
+}
+
 /// The pump: the worker's reports into the state until the host stops, then the session closed and the worker gone
 /// (its drop quits it cleanly; a running download keeps its `.part`).
 fn pump(sh: Arc<Shared>, w: Worker) {
@@ -786,6 +1327,8 @@ fn pump(sh: Arc<Shared>, w: Worker) {
         }
         sh.idle_check()
     }
+    // the renders cancelled first: they wind down while the recording stops and the worker ends
+    sh.sweep();
     stop_own(&sh);
     let _ = w.tx.send(Cmd::Disconnect);
     // the capture worker ends on its own thread: its calls fail once the session closed
@@ -800,6 +1343,9 @@ fn pump(sh: Arc<Shared>, w: Worker) {
             let _ = tx.send(());
         });
     let stuck = r.is_ok() && rx.recv_timeout(ENDING) == Err(RecvTimeoutError::Timeout);
+    // every render settled before the records are saved the last time
+    wind(&sh);
+    drop(sh.keep.lock().unwrap().take());
     {
         let mut j = sh.jobs.lock().unwrap();
         let mut q = sh.q.lock().unwrap();
@@ -811,7 +1357,7 @@ fn pump(sh: Arc<Shared>, w: Worker) {
             q.quit()
         }
         if let Err(e) = j.close() {
-            sh.log.line(&format!("the jobs file: {e}"))
+            sh.log.line(&format!("the jobs files: {e}"))
         }
         q.close();
         // a worker that comes back starts nothing more
@@ -853,10 +1399,11 @@ async fn lock_wait(p: &Path, wait: Duration) -> io::Result<Option<File>> {
 /// The queue and the jobs kept in `dir`, for the agent folder `agent`, with their lock (waited for up to
 /// [`HANDOVER`]) and what to log. Kept downloads and jobs a host of that folder cannot have made are left out (a file
 /// edited by hand, or forged): a file outside the folder, one whose name is no safe file name, a source that is
-/// neither a camera URI nor a card's `DCIM`. A download whose file is there without its `.part` is done (it finished
-/// uncollected). Then what earlier hosts left is pruned ([`Jobs::prune`]) and a finished file's size read for the jobs
-/// that show it. In memory without a dir, while the lock stays another's, or when a file
-/// is there but cannot be read (it is not taken over); a queue file that is no UTF-8 is moved to
+/// neither a camera URI nor a card's `DCIM`; a render not from absolute sources to an `.mp4` or `.jpg`. A download
+/// whose file is there without its `.part` is done (it finished uncollected); a render left unfinished is settled by
+/// identity ([`Renders::settle`]). Then what earlier hosts left is pruned ([`Jobs::prune`], [`Renders::prune`]) and
+/// a finished file's size read for the jobs that show it. In memory without a dir, while the lock stays another's, or
+/// when a file is there but cannot be read (it is not taken over); a queue file that is no UTF-8 is moved to
 /// `mcp-downloads.bad`.
 async fn kept(dir: Option<&Path>, agent: &Path) -> (dl::Queue, Jobs, Option<File>, Vec<String>) {
     let mem = |said: Vec<String>| (dl::Queue::load(None), Jobs::new(String::new()), None, said);
@@ -877,7 +1424,11 @@ async fn kept(dir: Option<&Path>, agent: &Path) -> (dl::Queue, Jobs, Option<File
             )]);
         }
     };
-    let (qf, jf) = (d.join("mcp-downloads"), d.join("mcp-jobs"));
+    let (qf, jf, rf) = (
+        d.join("mcp-downloads"),
+        d.join("mcp-jobs"),
+        d.join("mcp-renders"),
+    );
     let lost = |f: &Path, e: &dyn std::fmt::Display| {
         vec![format!(
             "{}: {e}; the download queue stays in memory",
@@ -904,10 +1455,14 @@ async fn kept(dir: Option<&Path>, agent: &Path) -> (dl::Queue, Jobs, Option<File
         Ok(j) => j,
         Err(e) => return mem(lost(&jf, &e)),
     };
-    if bad > 0 {
+    let (mut rs, rbad) = match Renders::load(rf.clone()) {
+        Ok(r) => r,
+        Err(e) => return mem(lost(&rf, &e)),
+    };
+    for (f, n) in [(&jf, bad), (&rf, rbad)].into_iter().filter(|x| x.1 > 0) {
         said.push(format!(
-            "{}: {bad} lines that do not parse left out",
-            jf.display()
+            "{}: {n} lines that do not parse left out",
+            f.display()
         ))
     }
     let mut q = dl::Queue::load(Some(qf));
@@ -944,14 +1499,33 @@ async fn kept(dir: Option<&Path>, agent: &Path) -> (dl::Queue, Jobs, Option<File
             nj - jobs.v.len()
         ))
     }
+    let nr = rs.v.len();
+    rs.v.retain(|r| {
+        r.src.iter().all(|s| s.is_absolute())
+            && inside(&r.dst)
+            && matches!(
+                r.dst.extension().and_then(|e| e.to_str()),
+                Some("mp4" | "jpg")
+            )
+    });
+    if rs.v.len() < nr {
+        said.push(format!(
+            "left out, not from absolute sources into {}: {} render jobs",
+            agent.display(),
+            nr - rs.v.len()
+        ))
+    }
+    // before the pruning: a record that goes still had its `.part` to remove
+    said.extend(rs.settle());
     // a download that finished but was not collected (its host's worker held up at its end), or a file there
     // meanwhile: done, never fetched over it
     for x in q.v.iter_mut().filter(|x| x.st != dl::St::Done) {
-        if x.dst.is_file() && !job::part_of(&x.dst).exists() {
+        if x.dst.is_file() && !media::part::of(&x.dst).exists() {
             x.st = dl::St::Done
         }
     }
     jobs.prune(&mut q);
+    rs.prune();
     for x in q.v.iter().filter(|x| x.st == dl::St::Done) {
         if let Ok(m) = std::fs::metadata(&x.dst) {
             x.prog.total.store(m.len(), Relaxed);
@@ -962,19 +1536,24 @@ async fn kept(dir: Option<&Path>, agent: &Path) -> (dl::Queue, Jobs, Option<File
     if let Err(e) = jobs.save() {
         said.push(format!("the jobs file: {e}"))
     }
-    if !jobs.v.is_empty() || !q.v.is_empty() {
+    if let Err(e) = rs.save() {
+        said.push(format!("the renders file: {e}"))
+    }
+    if !jobs.v.is_empty() || !q.v.is_empty() || !rs.v.is_empty() {
         said.push(format!(
-            "kept from earlier hosts: {} jobs, {} downloads",
+            "kept from earlier hosts: {} jobs, {} downloads, {} render jobs",
             jobs.v.len(),
-            q.v.len()
+            q.v.len(),
+            rs.v.len()
         ))
     }
+    jobs.r = rs;
     (q, jobs, Some(l), said)
 }
 
 /// The `id=` of the app's `<config>/x5desk/settings` (the client id the camera remembers once its user allowed this
-/// computer), and its thumbnail cache limit.
-fn app_settings() -> (Option<String>, Option<u64>) {
+/// computer), its thumbnail cache limit, and its default export preset (`preset=`, agents' exports start from it).
+pub(crate) fn app_settings() -> (Option<String>, Option<u64>, Option<String>) {
     let f = cam::dirs::xdg("XDG_CONFIG_HOME", ".config").map(|d| d.join("x5desk").join("settings"));
     let t = f
         .and_then(|f| std::fs::read_to_string(f).ok())
@@ -983,6 +1562,7 @@ fn app_settings() -> (Option<String>, Option<u64>) {
     (
         v("id=").filter(|s| !s.is_empty()).map(String::from),
         v("cache=").and_then(|s| s.parse().ok()),
+        v("preset=").filter(|s| !s.is_empty()).map(String::from),
     )
 }
 
@@ -1007,7 +1587,7 @@ fn uuid() -> String {
 /// The Wi-Fi client id: the app's (the camera already knows it if its user allowed x5desk), else one of the agents'
 /// own, kept as `id` in `<config>/x5desk/mcp` (looked up or made under the file's lock, so hosts agree on one).
 fn wifi_id() -> String {
-    if let (Some(id), _) = app_settings() {
+    if let (Some(id), ..) = app_settings() {
         return id;
     }
     let Some(f) = config::file() else {
@@ -1110,9 +1690,13 @@ impl Host {
             (None, None) => config::file().and_then(|f| f.parent().map(Path::to_path_buf)),
         };
         let (q, mut jobs, held, said) = kept(state.as_deref(), &agent).await;
-        // a handle names one job: an id none of the kept jobs has
+        // a handle names one job: an id none of the kept jobs has, of either kind
         let mut id = job::host_id();
-        while (jobs.v.iter()).any(|j| j.h.rsplit_once('-').is_some_and(|(h, _)| h == id)) {
+        let used = |id: &str| {
+            let of = |h: &String| h.rsplit_once('-').is_some_and(|(h, _)| h == id);
+            jobs.v.iter().any(|j| of(&j.h)) || jobs.r.v.iter().any(|r| of(&r.h))
+        };
+        while used(&id) {
             id = job::host_id()
         }
         jobs.host = id.clone();
@@ -1185,6 +1769,19 @@ impl Host {
             act: tokio::sync::Mutex::new(()),
             tap,
             cstop: AtomicBool::new(false),
+            render: o.backend.render.clone(),
+            gpu_child: o.gpu_child.clone(),
+            runs: Mutex::default(),
+            starting: AtomicBool::new(false),
+            halt: Arc::default(),
+            rendering: AtomicUsize::new(0),
+            timed: AtomicBool::new(false),
+            wedged: AtomicBool::new(false),
+            previews: Mutex::default(),
+            polling: AtomicBool::new(false),
+            ending: OnceLock::new(),
+            keep: Mutex::default(),
+            gpu_at: OnceLock::new(),
         });
         let s4 = sh.clone();
         std::thread::Builder::new()
@@ -1262,6 +1859,13 @@ impl Host {
     /// Whether it is shutting down.
     pub fn is_closed(&self) -> bool {
         self.sh.ct.is_cancelled()
+    }
+
+    /// The hosting client went (its stdin's end): this host's renders are cancelled and no new one is taken, before
+    /// the front's drain, so a call waiting for a render answers at once ("the host is shutting down"). Everything
+    /// else serves on until [`Host::shutdown`], whose end then finds nothing more to cancel.
+    pub fn closing(&self) {
+        self.sh.sweep()
     }
 
     /// Serves one client on `r` / `w` (a stdio pair, a socket's halves, a duplex) with an rmcp service of its own
@@ -1478,6 +2082,83 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
+    /// What a later host takes of the render jobs: those into the agent folder from absolute sources, to an `.mp4`
+    /// or `.jpg`; one left unfinished settled by its `.part`'s identity (its own removed, another's at the name left),
+    /// a finished one as it ended; the file saved so. An unreadable renders file is not taken over.
+    #[tokio::test]
+    async fn renders() {
+        use crate::renders::{End, GONE, tests::rjob};
+        let d = std::env::temp_dir().join(format!("x5desk-mcp-renders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let agent = d.join("agent");
+        std::fs::create_dir_all(&agent).unwrap();
+        let rf = d.join("mcp-renders");
+        let at = |n: &str| agent.join(n).display().to_string();
+        let (mut r, _) = Renders::load(rf.clone()).unwrap();
+        let a = agent.join("VID_20260117_141148_00_635_pano57.mp4");
+        let id = media::part::create(&a).unwrap().id;
+        let mut x = rjob(&at("VID_20260117_141148_00_635_pano57.mp4"));
+        x.part = Some(id);
+        r.add("old-1".into(), x);
+        // the name another's now
+        std::fs::write(media::part::of(&agent.join("b.mp4")), b"theirs").unwrap();
+        let mut x = rjob(&at("b.mp4"));
+        x.part = Some(id);
+        r.add("old-2".into(), x);
+        // left out: outside the folder, a relative source, no render's extension
+        r.add("old-3".into(), rjob(&d.join("x.mp4").display().to_string()));
+        let mut x = rjob(&at("c.mp4"));
+        x.src = vec!["rel/VID_20260117_141148_00_635.insv".into()];
+        r.add("old-4".into(), x);
+        r.add("old-5".into(), rjob(&at("d.insv")));
+        let mut x = rjob(&at("e.jpg"));
+        x.end = Some(End::done(1, 3.0, 9, 0));
+        r.add("old-6".into(), x);
+        r.save().unwrap();
+        let (_, j, l, said) = kept(Some(&d), &agent).await;
+        let st: Vec<(&str, &str, &str)> = (j.r.v.iter())
+            .map(|r| (r.h.as_str(), r.end.as_ref().unwrap()))
+            .map(|(h, e)| (h, e.state.as_str(), e.err.as_str()))
+            .collect();
+        assert_eq!(
+            st,
+            [
+                ("old-1", "cancelled", GONE),
+                ("old-2", "cancelled", GONE),
+                ("old-6", "done", "")
+            ]
+        );
+        assert!(!media::part::of(&a).exists() && media::part::of(&agent.join("b.mp4")).exists());
+        let has = |t: &str| said.iter().any(|s| s.contains(t));
+        assert!(
+            has("not from absolute sources") && has(": 3 render jobs"),
+            "{said:?}"
+        );
+        assert!(has("left unfinished: 0 done, 2 cancelled"), "{said:?}");
+        assert!(
+            has("kept from earlier hosts: 0 jobs, 0 downloads, 3 render jobs"),
+            "{said:?}"
+        );
+        assert_eq!((l.is_some(), j.r.file()), (true, Some(rf.as_path())));
+        let (k, bad) = Renders::load(rf.clone()).unwrap();
+        assert_eq!((k.v.len(), bad), (3, 0));
+        assert!(k.v.iter().all(|r| r.end.is_some()), "saved settled");
+        drop(l);
+        // an unreadable renders file: not taken over, the jobs in memory
+        #[cfg(unix)]
+        if unsafe { libc::geteuid() } != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&rf, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let (_, j, l, said) = kept(Some(&d), &agent).await;
+            assert!(
+                l.is_none() && j.r.file().is_none() && said[0].contains("stays in memory"),
+                "{said:?}"
+            );
+            std::fs::set_permissions(&rf, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
     /// A lock another holds is waited for up to the wait, and taken once let go; owner-only, its dir too.
     #[tokio::test]
     async fn handover() {
@@ -1546,6 +2227,7 @@ mod tests {
             mode: "VIDEO_NORMAL".into(),
             at: Instant::now(),
             until: None,
+            due: false,
             stop: None,
             sent_at: Some(Instant::now()),
         };

@@ -1,7 +1,7 @@
-//! The VideoToolbox decoder on hand-made H.264 (Baseline, 64 × 64, I_PCM pictures of one luma value each, so every
-//! picture decodes exactly): a picture VideoToolbox fails on shows the one before it, never what its slot held; the
-//! decoder's gate; the scaling list parser on garbage. And an open-GOP H.265 stream from the ffmpeg CLI (a test tool)
-//! with a broken picture.
+//! The VideoToolbox decoder on hand-made H.264 (`video::check`'s streams in Constrained Baseline, 64 × 64, I_PCM
+//! pictures of one luma value each, so every picture decodes exactly): a picture VideoToolbox fails on shows the one
+//! before it, never what its slot held; the decoder's gate; the scaling list parser on garbage. And an open-GOP H.265
+//! stream from the ffmpeg CLI (a test tool) with a broken picture.
 #![cfg(target_os = "macos")]
 
 use std::{
@@ -9,14 +9,14 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use video::{Codec, Decoder, Error, Gpu, h264, h265};
+use video::{Codec, Decoder, Error, Gpu, check, check::broken, h264, h265};
 
 /// GPU tests run one at a time: each opens its own device.
 static GPU: Mutex<()> = Mutex::new(());
 
 const S: u32 = 64;
 
-/// RBSP bits in, a NAL unit (emulation prevention bytes in) out.
+/// RBSP bits in, a NAL unit (emulation prevention bytes in) or one cut short out: the scaling list tests' sets.
 #[derive(Default)]
 struct W {
     b: Vec<u8>,
@@ -76,55 +76,17 @@ impl W {
 
 /// SPS and PPS: Constrained Baseline, level 3, 64 × 64, POC type 2, one reference frame; CAVLC.
 fn sets() -> Vec<Vec<u8>> {
-    let mut s = W::default();
-    s.u(8, 0x67).u(8, 66).u(8, 0xc0).u(8, 30).ue(0);
-    s.ue(0).ue(2).ue(1).u(1, 0);
-    s.ue(S / 16 - 1)
-        .ue(S / 16 - 1)
-        .u(1, 1)
-        .u(1, 1)
-        .u(1, 0)
-        .u(1, 0);
-    let mut p = W::default();
-    p.u(8, 0x68).ue(0).ue(0).u(1, 0).u(1, 0).ue(0);
-    p.ue(0).ue(0).u(1, 0).u(2, 0);
-    p.se(0).se(0).se(0).u(1, 0).u(1, 0).u(1, 0);
-    vec![s.nal(), p.nal()]
-}
-
-/// IDR slice header `id`, every macroblock I_PCM after it.
-fn idr(id: u32) -> W {
-    let mut w = W::default();
-    w.u(8, 0x65).ue(0).ue(7).ue(0).u(4, 0).ue(id);
-    w.u(1, 0).u(1, 0).se(0);
-    w
+    check::sets(S, false)
 }
 
 /// An IDR whose luma is `y` all over (chroma 128).
 fn flat(id: u32, y: u8) -> Vec<u8> {
-    let mut w = idr(id);
-    for _ in 0..(S / 16) * (S / 16) {
-        w.ue(25).align();
-        (0..256).for_each(|_| _ = w.u(8, y as u32));
-        (0..128).for_each(|_| _ = w.u(8, 128));
-    }
-    w.nal()
-}
-
-/// An IDR VideoToolbox fails on (kVTVideoDecoderBadDataErr here): the header and one macroblock cut short.
-fn broken(id: u32) -> Vec<u8> {
-    let mut w = idr(id);
-    w.ue(25).align();
-    (0..100).for_each(|_| _ = w.u(8, 9));
-    w.cut()
+    check::flat(S, id, y)
 }
 
 /// A reference P picture, frame_num `n`, every macroblock skipped: the picture before it again.
 fn skip(n: u32) -> Vec<u8> {
-    let mut w = W::default();
-    w.u(8, 0x41).ue(0).ue(5).ue(0).u(4, n);
-    w.u(1, 0).u(1, 0).u(1, 0).se(0);
-    w.ue((S / 16) * (S / 16)).nal()
+    check::skip(S, n)
 }
 
 /// The mean luma of frame `f`.

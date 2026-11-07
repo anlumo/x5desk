@@ -2,7 +2,8 @@
 //! ([`insv`]), AAC decode and the audio master clock ([`audio`]), MJPEG decode ([`mjpeg`]), baseline JPEG encode
 //! ([`jpeg`]) and UVC capture of the X5's Webcam Mode ([`uvc`], 64-bit Linux). Audio for the editor and export:
 //! AAC-LC encoder ([`aacenc`]), music import ([`music`]), resampler ([`resample`]), time-stretch ([`stretch`]), mixer
-//! ([`mix`]), speech denoise ([`denoise`]).
+//! ([`mix`]), speech denoise ([`denoise`]). Output files written beside their name and published without replacing
+//! anything ([`part`]); an RGBA area downscaler ([`scale`]).
 
 pub mod aacenc;
 pub mod audio;
@@ -15,7 +16,9 @@ pub mod mjpeg;
 pub mod mp4;
 pub mod music;
 pub mod mux;
+pub mod part;
 pub mod resample;
+pub mod scale;
 pub mod stretch;
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 pub mod uvc;

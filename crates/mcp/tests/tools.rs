@@ -2,7 +2,13 @@
 //! fake mounted card, temp dirs). Every byte the server writes passes a tap on its way to the client, so the scrub
 //! checks see what a client would.
 
-use mcp::{Host, Opts, Tiers, config::Source, sim};
+use mcp::{
+    Host, Opts, Tiers,
+    config::Source,
+    render::{Backend, Catalog, GpuInfo, GpuSt, Kind, Lane, Plan, Render, Req, Run, Start},
+    renders::{End, GONE, RJob, Renders},
+    sim,
+};
 use rmcp::{
     ClientHandler, RoleClient, ServiceExt,
     model::{
@@ -20,7 +26,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering::Relaxed},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -198,6 +204,46 @@ const CAMERA: [&str; 8] = [
     "camera_favourite",
 ];
 
+/// The GPU tools, listed only with a backend: catalog in the read tier, the others in the local tier.
+const GPU_READ: [&str; 1] = ["catalog"];
+const GPU_LOCAL: [&str; 2] = ["export", "render_still"];
+
+/// A backend with no GPU that refuses everything (the lists need one; `tests/render.rs` has the working fake).
+struct NoGpu;
+
+impl Render for NoGpu {
+    fn catalog(&self) -> Catalog {
+        Catalog::default()
+    }
+    fn check(&self, _: &Req) -> Result<Plan, String> {
+        Err("no GPU".into())
+    }
+    fn start(&self, _: &Start) -> Result<GpuInfo, String> {
+        Err("no GPU".into())
+    }
+    fn gpu(&self) -> GpuSt {
+        GpuSt::Off
+    }
+    fn selftest(&self) -> Result<GpuInfo, (u8, String)> {
+        Err((1, "no GPU".into()))
+    }
+    fn probe(&self) -> Result<(), String> {
+        Err("no GPU".into())
+    }
+    fn submit(
+        &self,
+        _: Req,
+        _: &Plan,
+        _: &Path,
+        _: media::part::Part,
+        _: Lane,
+    ) -> Result<Arc<dyn Run>, String> {
+        Err("no GPU".into())
+    }
+    fn wedge(&self, _: Lane, _: &str) {}
+    fn trim(&self) {}
+}
+
 async fn until(secs: f64, mut f: impl FnMut() -> bool) -> bool {
     let end = Instant::now() + Duration::from_secs_f64(secs);
     while Instant::now() < end {
@@ -209,8 +255,8 @@ async fn until(secs: f64, mut f: impl FnMut() -> bool) -> bool {
     f()
 }
 
-/// `tools/list` per tier set, calls outside them refused naming the tier, nothing enabled says how to enable, and a
-/// changed tiers file reaches clients of both protocol generations.
+/// `tools/list` per tier set (the GPU tools only with a backend), calls outside them refused naming the tier, nothing
+/// enabled says how to enable, and a changed tiers file reaches clients of both protocol generations.
 #[tokio::test(flavor = "multi_thread")]
 async fn tiers() {
     let h = host(Tiers::parse("read").unwrap(), 8_000_000, 1000).await;
@@ -296,6 +342,27 @@ async fn tiers() {
     drop(sub);
     let _ = std::fs::remove_dir_all(&d);
     h2.shutdown().await;
+
+    // with a backend the GPU tools join their tiers' lists
+    for (t, mut want) in [("read", READ.to_vec()), ("read,local", all.clone())] {
+        let h = Host::new(Opts {
+            sim: Some(Default::default()),
+            tiers: Some(Source::Fixed(Tiers::parse(t).unwrap())),
+            backend: Backend {
+                render: Some(Arc::new(NoGpu)),
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        want.extend(GPU_READ);
+        if t != "read" {
+            want.extend(GPU_LOCAL)
+        }
+        want.sort();
+        assert_eq!(names(&connect(&h, false).await).await, want, "{t}");
+        h.shutdown().await;
+    }
 }
 
 /// A connection's own `--tiers` narrow only it: its tools, `status`, instructions and errors name its set (a call
@@ -417,6 +484,15 @@ async fn camera() {
         (Some(card.as_str()), Some(2))
     );
     let k = key(&l["items"], sim::CARD[0]);
+    let it = (l["items"].as_array().unwrap().iter())
+        .find(|i| i["key"] == k)
+        .unwrap();
+    let at = sim.card.join("DCIM").join("Camera01").join(sim::CARD[0]);
+    assert_eq!(
+        it["path"],
+        at.display().to_string(),
+        "a card's item: its file's path"
+    );
     // a card's files are imported like the camera's
     let j = ok(
         &c,
@@ -500,6 +576,10 @@ async fn camera() {
     assert_eq!(l["total"], 5, "{l}");
     let items = &l["items"];
     assert_eq!(items[0]["date"], "2026-05-03 19:06:39", "newest first");
+    assert!(
+        items[0]["path"].is_null(),
+        "a camera's item has no local path"
+    );
     assert_eq!(
         ok(&c, "album_list", json!({ "kind": "video" })).await["total"],
         3
@@ -1043,7 +1123,7 @@ async fn across_hosts() {
         .iter()
         .map(|j| j["job"].clone())
         .collect();
-    assert_eq!(listed, [p["job"].clone(), j["job"].clone()]);
+    assert_eq!(listed, [j["job"].clone(), p["job"].clone()], "newest first");
     assert_eq!(
         ok(&c, "status", json!({})).await["jobs"],
         json!({ "running": 0, "queued": 1, "finished": 1 })
@@ -1087,14 +1167,164 @@ async fn across_hosts() {
     assert_eq!(
         st,
         [
-            (p["job"].clone(), json!("cancelled")),
+            (q["job"].clone(), json!("done")),
             (j["job"].clone(), json!("done")),
-            (q["job"].clone(), json!("done"))
+            (p["job"].clone(), json!("cancelled"))
         ]
     );
     let log = std::fs::read_to_string(&h.sim().unwrap().log).unwrap();
     assert!(log.contains("kept from earlier hosts: 3 jobs"), "{log}");
     h.shutdown().await;
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// Render jobs an earlier host left: the next host settles an unfinished one by its `.part`'s identity (cancelled,
+/// the `.part` gone) and shows them in the job tools beside the downloads, newest first, by kind and limit; job_wait
+/// and job_cancel answer a finished one at once, as it ended.
+#[tokio::test(flavor = "multi_thread")]
+async fn renders_kept() {
+    let d = std::env::temp_dir().join(format!("x5desk-mcp-rkept-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let agent = d.join("agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    let (mut r, _) = Renders::load(d.join("mcp-renders")).unwrap();
+    let t0 = SystemTime::now() - Duration::from_secs(60);
+    let job = |kind: Kind, dst: PathBuf, at: SystemTime| RJob {
+        h: String::new(),
+        kind,
+        at,
+        src: vec!["/v/VID_20260117_141148_00_635.insv".into()],
+        dst,
+        part: None,
+        lane: match kind {
+            Kind::Export => Lane::Export,
+            Kind::Still => Lane::Still,
+        },
+        settings: json!({ "preset": "pano57" }),
+        frames: if kind == Kind::Still { 1 } else { 175 },
+        bytes: 92_000_000,
+        cancelled: false,
+        end: None,
+        live: None,
+    };
+    // an export its host left running, its `.part` there; a still that finished
+    let x = agent.join("VID_20260117_141148_00_635_pano57.mp4");
+    let mut e = job(Kind::Export, x.clone(), t0);
+    e.part = Some(media::part::create(&x).unwrap().id);
+    r.add("zz.0001-1".into(), e);
+    let mut s = job(
+        Kind::Still,
+        agent.join("VID_20260117_141148_00_635_3.00s_360_7680.jpg"),
+        t0 + Duration::from_secs(1),
+    );
+    s.end = Some(End::done(1, 3.4, 5_000, 0));
+    r.add("zz.0001-2".into(), s);
+    r.save().unwrap();
+    let h = Host::new(Opts {
+        sim: Some(sim::Opts {
+            dir: Some(d.clone()),
+            ..Default::default()
+        }),
+        tiers: Some(Source::Fixed(Tiers::SIM)),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let c = connect(&h, false).await;
+    let v = ok(&c, "job_status", json!({ "job": "zz.0001-1" })).await;
+    assert_eq!(
+        (
+            &v["kind"],
+            &v["state"],
+            &v["finished"],
+            &v["note"],
+            &v["frames_total"]
+        ),
+        (
+            &json!("export"),
+            &json!("cancelled"),
+            &json!(true),
+            &json!(GONE),
+            &json!(175)
+        ),
+        "{v}"
+    );
+    assert_eq!(v["path"], x.display().to_string());
+    assert!(!media::part::of(&x).exists() && !x.exists());
+    let v = ok(&c, "job_status", json!({ "job": " zz.0001-2 " })).await;
+    assert_eq!(
+        (
+            &v["kind"],
+            &v["state"],
+            &v["bytes"],
+            &v["concealed"],
+            &v["settings"]["preset"]
+        ),
+        (
+            &json!("still"),
+            &json!("done"),
+            &json!(5_000),
+            &json!(false),
+            &json!("pano57")
+        ),
+        "{v}"
+    );
+    let list = |a: Value| {
+        let c = &c;
+        async move {
+            let v = ok(c, "job_list", a).await;
+            let h: Vec<String> = (v["jobs"].as_array().unwrap().iter())
+                .map(|j| j["job"].as_str().unwrap().to_string())
+                .collect();
+            (h, v["total"].as_u64().unwrap(), v)
+        }
+    };
+    let (l, n, v) = list(json!({})).await;
+    assert_eq!(
+        (l, n),
+        (vec!["zz.0001-2".to_string(), "zz.0001-1".into()], 2)
+    );
+    assert!(v["jobs"][0].get("settings").is_none(), "a short row: {v}");
+    assert_eq!(v["jobs"][1]["state"], "cancelled");
+    assert_eq!(list(json!({ "kind": "still" })).await.0, ["zz.0001-2"]);
+    assert_eq!(list(json!({ "kind": "export" })).await.0, ["zz.0001-1"]);
+    assert_eq!(list(json!({ "kind": "download" })).await.1, 0);
+    assert_eq!(list(json!({ "limit": 1 })).await.0, ["zz.0001-2"]);
+    assert!(
+        err(&c, "job_list", json!({ "kind": "photo" }))
+            .await
+            .contains("arguments")
+    );
+    let t = Instant::now();
+    let w = ok(&c, "job_wait", json!({ "job": "zz.0001-1", "wait_s": 30 })).await;
+    assert!(
+        w["state"] == "cancelled" && t.elapsed() < Duration::from_secs(2),
+        "{w}"
+    );
+    let x = ok(&c, "job_cancel", json!({ "job": "zz.0001-2" })).await;
+    assert_eq!(
+        (&x["state"], &x["cancel_requested"]),
+        (&json!("done"), &json!(false)),
+        "{x}"
+    );
+    assert_eq!(
+        ok(&c, "status", json!({})).await["jobs"],
+        json!({ "running": 0, "queued": 0, "finished": 2 })
+    );
+    assert!(
+        err(&c, "job_status", json!({ "job": "zz.0001-3" }))
+            .await
+            .contains("its host has ended")
+    );
+    h.shutdown().await;
+    // the next host has them as they ended
+    let (k, _) = Renders::load(d.join("mcp-renders")).unwrap();
+    assert_eq!(
+        (k.v.iter())
+            .map(|r| r.end.as_ref().unwrap().state.as_str())
+            .collect::<Vec<_>>(),
+        ["cancelled", "done"]
+    );
     std::fs::remove_dir_all(&d).unwrap();
 }
 

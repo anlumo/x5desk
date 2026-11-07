@@ -282,6 +282,7 @@ unsafe extern "C" {
     pub fn VTDecompressionSessionWaitForAsynchronousFrames(s: CFTypeRef) -> OSStatus;
     pub fn VTDecompressionSessionCanAcceptFormatDescription(s: CFTypeRef, desc: CFTypeRef) -> u8;
     pub fn VTDecompressionSessionInvalidate(s: CFTypeRef);
+    pub fn VTIsHardwareDecodeSupported(codec: u32) -> u8;
 
     pub fn VTCompressionSessionCreate(
         alloc: CFTypeRef,

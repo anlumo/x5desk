@@ -5,11 +5,15 @@
 //!   camera in temp dirs, no endpoint unless `X5DESK_MCP_ENDPOINT` names one, the tiers from `X5DESK_MCP_TIERS` (else
 //!   all but `delete` and `untested`). `X5DESK_TEST` likewise uses no endpoint, and without `--sim` keeps the agent
 //!   folder and log in a temp dir (`Opts::dir`: a real camera, so `X5DESK_MCP_TIERS` gives at most `read,local`); its
-//!   token `mcp-print` prints a line through `println!` before serving, which the guard sends to stderr.
+//!   token `mcp-print` prints a line through `println!` before serving, which the guard sends to stderr; with
+//!   `--sim`, its token `mcp-sim-dir` keeps the simulated camera's dirs in `$TMPDIR/x5desk-mcp-<pid>` (process tests
+//!   read the agent folder after the end).
 //! - `x5desk mcp enable --tiers read,local[,camera][,delete][,untested]` writes `<config>/x5desk/mcp` (the set
 //!   replaced) and prints what is enabled; `x5desk mcp disable` turns every tier off.
 //! - `x5desk mcp --print-config` prints the Claude Code command and Claude Desktop's `mcpServers` entry for this
 //!   executable; refused from a disk image (`/Volumes/`) or a translocated copy (`/AppTranslocation/`), gone later.
+//! - `x5desk mcp gpu-check` (not in the usage): the GPU self-test child a host's backend runs before it opens the
+//!   device itself ([`gpu_check`]'s one line on stdout). It ends at stdin's EOF (its parent gone) and after 25 s.
 //!
 //! Wrong arguments: the usage on stderr, exit 2. A server that could not start exits 1, one whose client went (stdin's
 //! end, once the open requests are answered; SIGTERM, SIGINT and SIGHUP unless started with them ignored (`nohup`);
@@ -19,12 +23,15 @@ use crate::{
     Opts, Tiers, config,
     front::{Elect, Front, Lines},
     out,
+    render::{Backend, GpuInfo, NO_GPU, panicked},
+    sim,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     ffi::OsString,
     fs::File,
     io::{Read, Write},
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -52,6 +59,7 @@ enum Cmd {
     Disable,
     Print,
     Help,
+    GpuCheck,
 }
 
 /// The value of flag `f` at `a[i]` (`f=v`, or `f v`) and how many arguments it took; none: not that flag.
@@ -85,6 +93,7 @@ fn parse(a: &[OsString]) -> Result<Cmd, String> {
         (Some("disable"), 1) => return Ok(Cmd::Disable),
         (Some("--print-config"), 1) => return Ok(Cmd::Print),
         (Some("-h" | "--help" | "help"), 1) => return Ok(Cmd::Help),
+        (Some("gpu-check"), 1) => return Ok(Cmd::GpuCheck),
         _ => {}
     }
     let (mut sim, mut t, mut allow, mut i) = (false, None::<Tiers>, vec![], 0);
@@ -114,8 +123,9 @@ fn parse(a: &[OsString]) -> Result<Cmd, String> {
     })
 }
 
-/// Runs `x5desk mcp` with the arguments after `mcp`; returns the exit code.
-pub fn main(args: Vec<OsString>) -> i32 {
+/// Runs `x5desk mcp` with the arguments after `mcp`; returns the exit code. `b`: the GPU tools' backend (the app's
+/// engine; none: no GPU tools).
+pub fn main(args: Vec<OsString>, b: Backend) -> i32 {
     match parse(&args) {
         Ok(Cmd::Help) => {
             print!("{USAGE}");
@@ -145,7 +155,8 @@ pub fn main(args: Vec<OsString>) -> i32 {
             }
         },
         Ok(Cmd::Print) => print_config(),
-        Ok(Cmd::Serve { sim, tiers, allow }) => serve(sim, tiers, allow),
+        Ok(Cmd::GpuCheck) => gpu_cmd(&b),
+        Ok(Cmd::Serve { sim, tiers, allow }) => serve(sim, tiers, allow, b),
         Err(e) => {
             eprint!("x5desk mcp: {e}\n{USAGE}");
             2
@@ -216,6 +227,111 @@ fn print_config() -> i32 {
     0
 }
 
+/// The self-test's outcome: the device's info, or the step that failed (None: before any) and why.
+fn selftest(b: &Backend) -> Result<GpuInfo, (Option<u8>, String)> {
+    let r = b.render.as_ref().ok_or((None, NO_GPU.to_string()))?;
+    match catch_unwind(AssertUnwindSafe(|| r.selftest())) {
+        Ok(r) => r.map_err(|(s, w)| (Some(s), w)),
+        Err(p) => Err((None, format!("the self-test panicked: {}", panicked(&*p)))),
+    }
+}
+
+fn line(r: &Result<GpuInfo, (Option<u8>, String)>) -> String {
+    match r {
+        Ok(i) => json!({ "v": 1, "ok": true, "info": i }),
+        Err((step, why)) => json!({ "v": 1, "ok": false, "step": step, "why": why }),
+    }
+    .to_string()
+}
+
+/// What `x5desk mcp gpu-check` prints: `{"v":1,"ok":true,"info":GpuInfo}` or `{"v":1,"ok":false,"step":…,"why":…}`
+/// on one line. A panic in the self-test is a failure without a step.
+pub fn gpu_check(b: &Backend) -> String {
+    line(&selftest(b))
+}
+
+/// [`gpu_check`]'s line read back, as the parent gets it from the child's stdout.
+pub fn gpu_checked(l: &str) -> Result<GpuInfo, (Option<u8>, String)> {
+    let bad = |e: String| (None, format!("the GPU check's answer: {e}"));
+    let v: Value = serde_json::from_str(l.trim()).map_err(|e| bad(e.to_string()))?;
+    if v["v"] != 1 {
+        return Err(bad(format!("version {}", v["v"])));
+    }
+    match v["ok"].as_bool() {
+        Some(true) => serde_json::from_value(v["info"].clone()).map_err(|e| bad(e.to_string())),
+        Some(false) => Err((
+            v["step"].as_u64().map(|s| s as u8),
+            v["why"].as_str().unwrap_or("no reason given").to_string(),
+        )),
+        None => Err(bad("no ok".into())),
+    }
+}
+
+/// Ends the process now: no atexit, no driver teardown (an ICD's destructors may hang or crash).
+fn quit(code: i32) -> ! {
+    #[cfg(unix)]
+    // SAFETY: _exit(2) only ends the process; what had to be written was flushed, stderr is unbuffered.
+    unsafe {
+        libc::_exit(code)
+    }
+    #[cfg(not(unix))]
+    std::process::exit(code)
+}
+
+/// `x5desk mcp gpu-check`: stdout guarded (a driver's prints go to stderr), the self-test, its line, gone. It also
+/// ends at stdin's EOF (the parent gone: a SIGKILLed host takes it along) and after 25 s (a driver that hangs).
+fn gpu_cmd(b: &Backend) -> i32 {
+    let mut out = match out::guard() {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("x5desk mcp gpu-check: {e}");
+            return 1;
+        }
+    };
+    fn gone(why: &str) -> ! {
+        eprintln!("x5desk mcp gpu-check: {why}");
+        quit(1)
+    }
+    let _ = std::thread::Builder::new()
+        .name("x5-gpu-stdin".into())
+        .spawn(move || {
+            let (mut i, mut b) = (std::io::stdin(), [0; 256]);
+            loop {
+                match i.read(&mut b) {
+                    Ok(0) => gone("stdin closed: the parent is gone"),
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => gone(&format!("stdin: {e}")),
+                }
+            }
+        });
+    let _ = std::thread::Builder::new()
+        .name("x5-gpu-limit".into())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_secs(25));
+            gone("no answer within 25 s")
+        });
+    let r = selftest(b);
+    if let Err(e) = writeln!(out, "{}", line(&r)).and_then(|_| out.flush()) {
+        gone(&format!("stdout: {e}"))
+    }
+    quit(if r.is_ok() { 0 } else { 1 })
+}
+
+/// The `gpu-check` child's executable: this one (Linux by /proc/self/exe, which still names it once the file is
+/// replaced or gone).
+fn exe() -> Option<PathBuf> {
+    match cfg!(target_os = "linux") {
+        true => Some("/proc/self/exe".into()),
+        false => std::env::current_exe().ok(),
+    }
+}
+
+/// Whether the comma list `X5DESK_TEST` has token `t`.
+fn token(test: Option<&str>, t: &str) -> bool {
+    test.is_some_and(|x| x.split(',').any(|w| w.trim() == t))
+}
+
 /// stdin's lines, read on a thread of their own (a blocking read nobody can cancel; it goes with the process).
 fn reader() -> mpsc::UnboundedReceiver<Vec<u8>> {
     let (tx, rx) = mpsc::unbounded_channel();
@@ -275,6 +391,16 @@ fn ignored(s: libc::c_int) -> bool {
     }
 }
 
+/// SIGCHLD back to its default when started with it ignored: Linux then reaps our children itself, and waiting for
+/// the `gpu-check` child fails (ECHILD). Before any thread of ours runs.
+#[cfg(unix)]
+fn reap_own() {
+    if ignored(libc::SIGCHLD) {
+        // SAFETY: SIG_DFL is a valid disposition; no handler of ours is replaced
+        unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) };
+    }
+}
+
 /// Cancels `stop` at SIGTERM, SIGINT or SIGHUP (its terminal closed); SIGINT and SIGHUP not when started with them
 /// ignored (`nohup`, a background job of a shell without job control), which tokio's handler would undo. Windows:
 /// Ctrl-C, Ctrl-Break, its console closed, the user logging off, the system shutting down (tokio holds the console
@@ -324,7 +450,9 @@ fn signals(stop: CancellationToken) {
     });
 }
 
-fn serve(sim: bool, narrow: Option<Tiers>, allow: Vec<PathBuf>) -> i32 {
+fn serve(sim: bool, narrow: Option<Tiers>, allow: Vec<PathBuf>, backend: Backend) -> i32 {
+    #[cfg(unix)]
+    reap_own();
     // stdout is the protocol's from here on: whatever else prints goes to stderr
     let out = match out::guard() {
         Ok(f) => f,
@@ -334,10 +462,7 @@ fn serve(sim: bool, narrow: Option<Tiers>, allow: Vec<PathBuf>) -> i32 {
         }
     };
     let test = std::env::var("X5DESK_TEST").ok();
-    if test
-        .as_deref()
-        .is_some_and(|t| t.split(',').any(|w| w.trim() == "mcp-print"))
-    {
+    if token(test.as_deref(), "mcp-print") {
         println!("x5desk mcp: X5DESK_TEST=mcp-print: a line printed on stdout");
     }
     // an --allow-dir is checked now, also by a process that only proxies (it may host later)
@@ -347,11 +472,19 @@ fn serve(sim: bool, narrow: Option<Tiers>, allow: Vec<PathBuf>) -> i32 {
             return 1;
         }
     }
-    let dir = (test.is_some() && !sim)
-        .then(|| std::env::temp_dir().join(format!("x5desk-mcp-{}", std::process::id())));
+    let mine = std::env::temp_dir().join(format!("x5desk-mcp-{}", std::process::id()));
+    let dir = (test.is_some() && !sim).then(|| mine.clone());
     if let Some(d) = &dir {
         eprintln!(
             "x5desk mcp: X5DESK_TEST: the agent folder and the log in {}",
+            d.display()
+        );
+    }
+    // the simulated camera's dirs kept, so a process test reads them after the end
+    let keep = (sim && token(test.as_deref(), "mcp-sim-dir")).then_some(mine);
+    if let Some(d) = &keep {
+        eprintln!(
+            "x5desk mcp: X5DESK_TEST=mcp-sim-dir: the simulated camera's dirs in {}",
             d.display()
         );
     }
@@ -374,10 +507,15 @@ fn serve(sim: bool, narrow: Option<Tiers>, allow: Vec<PathBuf>) -> i32 {
         }
     };
     let o = Opts {
-        sim: sim.then(Default::default),
+        sim: sim.then(|| sim::Opts {
+            dir: keep,
+            ..Default::default()
+        }),
         narrow,
         allow,
         dir,
+        backend,
+        gpu_child: exe(),
         ..Default::default()
     };
     let code = rt.block_on(run(o, ep, out));
@@ -457,6 +595,7 @@ mod tests {
         assert_eq!(p("disable"), Ok(Cmd::Disable));
         assert_eq!(p("--print-config"), Ok(Cmd::Print));
         assert_eq!(p("--help"), Ok(Cmd::Help));
+        assert_eq!(p("gpu-check"), Ok(Cmd::GpuCheck));
         for bad in [
             "--bogus",
             "file.insv",
@@ -469,10 +608,99 @@ mod tests {
             "disable now",
             "--print-config --sim",
             "--simx",
+            "gpu-check --sim",
+            "--sim gpu-check",
         ] {
             assert!(p(bad).is_err(), "{bad}");
         }
         assert!(p("--tiers all").unwrap_err().contains("unknown tier"));
+    }
+
+    /// The self-test child's line: one JSON line of version 1, read back as it was, whether it passed, failed at a
+    /// step, panicked or had no backend.
+    #[test]
+    fn gpu_line() {
+        use crate::render::{Backend, tests::Fake};
+        use std::sync::Arc;
+        let b = |f| Backend {
+            render: Some(Arc::new(f)),
+        };
+        let l = gpu_check(&b(Fake::Ok));
+        assert!(!l.contains('\n'), "{l}");
+        let v: Value = serde_json::from_str(&l).unwrap();
+        assert_eq!((&v["v"], &v["ok"]), (&json!(1), &json!(true)), "{l}");
+        assert_eq!(v["info"]["adapter"], "Fake GPU");
+        assert_eq!(
+            gpu_checked(&format!("{l}\n")),
+            Ok(crate::render::tests::info())
+        );
+        let l = gpu_check(&b(Fake::Fails));
+        let v: Value = serde_json::from_str(&l).unwrap();
+        assert_eq!(
+            (&v["v"], &v["ok"], &v["step"]),
+            (&json!(1), &json!(false), &json!(3)),
+            "{l}"
+        );
+        let e = gpu_checked(&l).unwrap_err();
+        assert_eq!(e.0, Some(3));
+        assert!(e.1.contains("cannot decode"), "{e:?}");
+        let e = gpu_checked(&gpu_check(&b(Fake::Panics))).unwrap_err();
+        assert_eq!(e.0, None);
+        assert!(e.1.contains("panicked: the driver went away"), "{e:?}");
+        assert_eq!(
+            gpu_checked(&gpu_check(&Backend::default())),
+            Err((None, NO_GPU.to_string()))
+        );
+        for bad in [
+            "",
+            "x5desk: oops",
+            r#"{"v":2,"ok":true}"#,
+            r#"{"v":1}"#,
+            r#"{"v":1,"ok":true}"#,
+        ] {
+            let e = gpu_checked(bad).unwrap_err();
+            assert!(
+                e.0.is_none() && e.1.starts_with("the GPU check's answer"),
+                "{bad}: {e:?}"
+            );
+        }
+    }
+
+    /// A server started with SIGCHLD ignored (Linux then reaps its children itself) waits for its `gpu-check` child: in
+    /// a child process of this test, whose disposition it changes.
+    #[cfg(unix)]
+    #[test]
+    fn reaps() {
+        if std::env::var_os("X5_MCP_REAP").is_some() {
+            // SAFETY: SIG_IGN is a valid disposition, in a process that runs this test alone
+            unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
+            reap_own();
+            let mut c = std::process::Command::new("/bin/sh")
+                .args(["-c", "exit 3"])
+                .spawn()
+                .unwrap();
+            assert_eq!(c.wait().unwrap().code(), Some(3));
+            return;
+        }
+        let o = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "cli::tests::reaps",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("X5_MCP_REAP", "1")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&o.stdout) + String::from_utf8_lossy(&o.stderr);
+        assert!(o.status.success() && said.contains("1 passed"), "{said}");
+    }
+
+    #[test]
+    fn tokens() {
+        assert!(token(Some("mcp-print, mcp-sim-dir"), "mcp-sim-dir"));
+        assert!(!token(Some("mcp-sim-dirs"), "mcp-sim-dir"));
+        assert!(!token(None, "mcp-print"));
     }
 
     #[test]

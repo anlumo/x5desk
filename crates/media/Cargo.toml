@@ -10,3 +10,9 @@ cpal.workspace = true
 zune-jpeg.workspace = true
 bytemuck.workspace = true
 libc.workspace = true
+# `part::Id`, kept in mcp's job records
+serde = { version = "1", features = ["derive"] }
+
+# `part`: file identity, the no-replace rename, free space and the file system's name (the version mcp uses)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

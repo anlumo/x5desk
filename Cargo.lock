@@ -384,12 +384,12 @@ dependencies = [
  "libc",
  "link",
  "live",
+ "log",
  "mcp",
  "media",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
- "pollster 1.0.1",
  "prost",
  "proto",
  "rfd",
@@ -3642,6 +3642,7 @@ name = "export"
 version = "0.1.0"
 dependencies = [
  "edit",
+ "export",
  "fx",
  "glam",
  "media",
@@ -5321,7 +5322,9 @@ dependencies = [
  "bytemuck",
  "cpal",
  "libc",
+ "serde",
  "symphonia",
+ "windows-sys 0.61.2",
  "zune-jpeg",
 ]
 

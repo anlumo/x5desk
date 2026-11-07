@@ -47,12 +47,20 @@ pub struct Mux {
 impl Mux {
     pub fn create(path: impl AsRef<Path>) -> io::Result<Mux> {
         // read access for the faststart shift
-        let mut f = File::options()
+        let f = File::options()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
             .open(path)?;
+        Mux::new(f)
+    }
+
+    /// Writes into `f`, a file made elsewhere (a reserved `.part`, [`crate::part::create`]): opened read + write (the
+    /// faststart shift reads), emptied first.
+    pub fn new(mut f: File) -> io::Result<Mux> {
+        f.set_len(0)?;
+        f.seek(SeekFrom::Start(0))?;
         let mut h = vec![];
         bx(&mut h, b"ftyp", |b| {
             b.extend_from_slice(b"isom\0\0\x02\0isomiso2mp41")
@@ -174,7 +182,13 @@ impl Mux {
         self.tracks[t].end = pts;
     }
 
-    pub fn finish(mut self, faststart: bool) -> io::Result<()> {
+    pub fn finish(self, faststart: bool) -> io::Result<()> {
+        self.finish_with(faststart, &|| false)
+    }
+
+    /// [`Mux::finish`], asking `quit` before each 4 MiB chunk of the faststart shift: true ends it there with
+    /// `ErrorKind::Interrupted`, the file left unreadable.
+    pub fn finish_with(mut self, faststart: bool, quit: &dyn Fn() -> bool) -> io::Result<()> {
         let data = self.pos - self.mdat - 16;
         if 8 + data <= u32::MAX as u64 {
             self.at(self.mdat + 8, &(8 + data as u32).to_be_bytes())?;
@@ -197,6 +211,9 @@ impl Mux {
         let mut buf = vec![0; 1 << 22];
         let mut end = self.pos;
         while end > self.mdat {
+            if quit() {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
             let a = end.saturating_sub(buf.len() as u64).max(self.mdat);
             let b = &mut buf[..(end - a) as usize];
             self.f.seek(SeekFrom::Start(a))?;
@@ -1120,6 +1137,50 @@ mod tests {
         decodes_clean(&dst);
         let back = Mp4::open(&dst).unwrap();
         assert_eq!(back.tracks[0].codec, m.tracks[0].codec);
+    }
+
+    /// A file handed in (a reserved `.part`) is emptied and written from its start; `quit` ends the faststart shift
+    /// between its 4 MiB chunks; left alone, the file reads back whole through `Mp4::from_file`.
+    #[test]
+    fn handed_file_quit() {
+        let dst = fixtures().join("handed.mp4");
+        let run = |quit: &dyn Fn() -> bool| {
+            let mut f = (File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true))
+            .open(&dst)
+            .unwrap();
+            f.write_all(&[0xee; 3 << 20]).unwrap();
+            let mut x = Mux::new(f.try_clone().unwrap()).unwrap();
+            let aac = Codec::Aac {
+                asc: vec![0x11, 0x90],
+                rate: 48000,
+                ch: 2,
+            };
+            x.track(aac, 48000, 0, 0, false).unwrap();
+            let s = vec![0x5a; 1 << 20];
+            for i in 0..9 {
+                x.write(0, &s, 1024 * i, 1024 * i, 1024, true).unwrap();
+            }
+            (x.finish_with(true, quit), f)
+        };
+        let n = std::cell::Cell::new(0);
+        let (r, _) = run(&|| {
+            n.set(n.get() + 1);
+            n.get() > 1
+        });
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(n.get(), 2, "asked once per chunk");
+        let (r, f) = run(&|| false);
+        r.unwrap();
+        let m = Mp4::from_file(f).unwrap();
+        let s = &m.tracks[0].samples;
+        assert!(s.len() == 9 && s.iter().all(|s| s.size == 1 << 20));
+        let mut b = vec![];
+        m.read(&s[8], &mut b).unwrap();
+        assert!(b.iter().all(|&x| x == 0x5a));
     }
 
     /// Empty samples (frames the encoder dropped) are not written: the one before lasts longer, a track that starts

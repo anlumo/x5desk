@@ -1,6 +1,8 @@
 //! x5desk: desktop app for the Insta360 X5. One eframe window on the shared Vulkan device (`video::Gpu`); a side
 //! panel switches screens. `x5desk [file]` opens a file; on macOS so do Finder, the Dock and `open` (`finder.rs`), as
-//! a drop on the window would. `x5desk mcp …` is the MCP server instead (crate `mcp`), with no window.
+//! a drop on the window would. `x5desk mcp …` is the MCP server instead (crate `mcp`), with no window; its GPU tools
+//! run on this app's engine (`export::agent`; `X5DESK_TEST=mcp-noattach` keeps burn off its device). One GPU setup for
+//! both (`gpu.rs`).
 //!
 //! Test hooks: `X5DESK_SHOT=<file.png>` (with `X5DESK_SHOT_AFTER=<s>`, default 1) saves a screenshot once that time has
 //! passed and the player has nothing pending, then exits. `X5DESK_TEST=<tokens>` (comma separated) sets up the first
@@ -68,6 +70,7 @@ mod export;
 mod feed;
 #[cfg(target_os = "macos")]
 mod finder;
+mod gpu;
 mod gyro;
 mod help;
 mod lab;
@@ -886,7 +889,16 @@ fn icon() -> egui::IconData {
 fn main() -> eframe::Result {
     // `x5desk mcp …`: the MCP server, before anything here runs or prints (its stdout is the protocol's)
     if std::env::args_os().nth(1).is_some_and(|a| a == "mcp") {
-        std::process::exit(mcp::main(std::env::args_os().skip(2).collect()));
+        let r: Arc<dyn mcp::render::Render> = export::agent::Agent::headless();
+        let b = mcp::render::Backend { render: Some(r) };
+        let code = mcp::main(std::env::args_os().skip(2).collect(), b);
+        // a lane still in the driver: no atexit, no driver teardown (the stdout writer is done by now)
+        if export::agent::busy() {
+            eprintln!("x5desk mcp: ending with a GPU thread in the driver: without its teardown");
+            // SAFETY: _exit(2) only ends the process; stderr is unbuffered, the log written line by line
+            unsafe { libc::_exit(code) }
+        }
+        std::process::exit(code)
     }
     // before AppKit starts: the launch's files come as it does
     #[cfg(target_os = "macos")]
@@ -896,10 +908,6 @@ fn main() -> eframe::Result {
     #[cfg(target_os = "macos")]
     let file = file.filter(|f| !f.as_os_str().as_encoded_bytes().starts_with(b"-psn_"));
     let test = std::env::var("X5DESK_TEST").ok().map(|s| Test::parse(&s));
-    let g = Arc::new(video::Gpu::new().unwrap_or_else(|e| {
-        eprintln!("x5desk: {e}");
-        std::process::exit(1)
-    }));
     // burn's device measurements and autotune results; the test hook's runs share a dir of their own (warm too)
     let cc = match test {
         Some(_) => mine(
@@ -909,14 +917,15 @@ fn main() -> eframe::Result {
         ),
         None => xdg("XDG_CACHE_HOME", ".cache").map(|d| d.join("x5desk/cubecl")),
     };
-    stitch::cache(cc.as_deref());
-    // cubecl's handler panics on the surface race: attach first, so ours replaces it for good (RAFT and the
+    // cubecl's handler panics on the surface race: burn attaches first, so ours replaces it for good (RAFT and the
     // trackers reuse the attachment)
-    if let Err(e) = stitch::attach(&g.instance, &g.adapter, &g.device, &g.queue) {
+    let (g, a) = gpu::open(cc.as_deref(), gpu::Policy::Panic, true).unwrap_or_else(|e| {
+        eprintln!("x5desk: {e}");
+        std::process::exit(1)
+    });
+    if let Err(e) = a {
         eprintln!("x5desk: {e}");
     }
-    errors(&g.device);
-    ::export::locks(&GATE, &BURN);
     let setup = egui_wgpu::WgpuSetupExisting {
         instance: g.instance.clone(),
         adapter: g.adapter.clone(),

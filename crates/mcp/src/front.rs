@@ -4,9 +4,9 @@
 //! that never saw `initialize` refuses them) and replays them to every later host, under an id of its own whose answer
 //! the client never sees; 2026-07-28 clients send none. When the host goes, each request it had not answered gets an
 //! error (-32603, [`ENDED`]) and the front elects again: it binds the endpoint and hosts, or connects to whoever did;
-//! the switch goes to stderr. At stdin's end the front sends nothing more and passes on what the host still answers,
-//! until every open request (not one the client cancelled: rmcp drops an answer not sent yet) has its answer, the
-//! link ends or
+//! the switch goes to stderr. At stdin's end the front sends nothing more (a host of this process stops its renders
+//! then, so a call waiting for one answers at once) and passes on what the host still answers, until every open
+//! request (not one the client cancelled: rmcp drops an answer not sent yet) has its answer, the link ends or
 //! [`DRAIN`] passes. A host also serves the endpoint's
 //! connections, and ends with its own client: after stdin's end (or at a signal) it stops accepting, then releases the
 //! camera, downloads keeping their `.part`. `--tiers` narrows this process's client only: here, whichever host it
@@ -139,6 +139,8 @@ pub(crate) trait Attach {
     async fn attach(&mut self) -> Result<Link, String>;
     /// The front ends: a host of this process stops.
     async fn end(&mut self);
+    /// The client's stdin ended: a host of this process stops its renders before the drain ([`Host::closing`]).
+    fn closing(&self) {}
 }
 
 /// How a pump ended.
@@ -225,6 +227,8 @@ impl<A: Attach> Front<A> {
                     l = stdin.recv(), if tx.is_some() => match (l, &tx) {
                         (Some(l), Some(t)) => if let Err(e) = self.up(l, t, out) { break e },
                         _ => {
+                            // a host of this process stops its renders before it sees the end
+                            self.at.closing();
                             tx = None;
                             if self.open.is_empty() {
                                 break End::Client;
@@ -521,6 +525,12 @@ impl Attach for Elect {
         Ok(self.local())
     }
 
+    fn closing(&self) {
+        if let Some(h) = &self.hosting {
+            h.host.closing()
+        }
+    }
+
     /// Stops accepting (the socket goes first, so a proxy's election finds it stale), then shuts the host down.
     async fn end(&mut self) {
         if let Some(h) = self.hosting.take() {
@@ -576,14 +586,17 @@ mod tests {
         assert_eq!(msg(&json!({"id": null, "error": {}})), Msg::Other);
     }
 
-    /// Hosts the test plays: each attach hands out the next link.
-    struct Fake(VecDeque<Link>);
+    /// Hosts the test plays: each attach hands out the next link; stdin's ends counted.
+    struct Fake(VecDeque<Link>, Arc<std::sync::atomic::AtomicUsize>);
 
     impl Attach for Fake {
         async fn attach(&mut self) -> Result<Link, String> {
             self.0.pop_front().ok_or_else(|| "no host".to_string())
         }
         async fn end(&mut self) {}
+        fn closing(&self) {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// A host's end of a link: its lines in, its writer.
@@ -623,7 +636,7 @@ mod tests {
     async fn replay() {
         let ((l1, mut h1), (l2, mut h2)) = (link(), link());
         let narrow = Tiers::parse("read").ok();
-        let mut f = Front::new(Fake(VecDeque::from([l1, l2])), narrow);
+        let mut f = Front::new(Fake(VecDeque::from([l1, l2]), Arc::default()), narrow);
         let (itx, mut irx) = mpsc::unbounded_channel();
         let (otx, orx) = std::sync::mpsc::channel::<Vec<u8>>();
         let stop = CancellationToken::new();
@@ -729,7 +742,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn narrowed() {
         let (l1, mut h1) = link();
-        let mut f = Front::new(Fake(VecDeque::from([l1])), Tiers::parse("read").ok());
+        let mut f = Front::new(
+            Fake(VecDeque::from([l1]), Arc::default()),
+            Tiers::parse("read").ok(),
+        );
         let (itx, mut irx) = mpsc::unbounded_channel();
         let (otx, orx) = std::sync::mpsc::channel::<Vec<u8>>();
         let stop = CancellationToken::new();
@@ -835,7 +851,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn drain() {
         let (l1, mut h1) = link();
-        let mut f = Front::new(Fake(VecDeque::from([l1])), None);
+        let ends = Arc::<std::sync::atomic::AtomicUsize>::default();
+        let mut f = Front::new(Fake(VecDeque::from([l1]), ends.clone()), None);
         let (itx, mut irx) = mpsc::unbounded_channel();
         let (otx, orx) = std::sync::mpsc::channel::<Vec<u8>>();
         let stop = CancellationToken::new();
@@ -853,6 +870,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(end.unwrap(), None, "the host sees stdin's end");
+        assert_eq!(
+            ends.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a host of this process told before the drain"
+        );
         say(&mut h1, json!({"jsonrpc": "2.0", "id": 1, "result": {}})).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!t.is_finished(), "a request still open");
@@ -875,7 +897,7 @@ mod tests {
         assert_eq!(ids, [json!(1), json!(2)]);
 
         let ((l1, mut h1), (l2, _h2)) = (link(), link());
-        let mut f = Front::new(Fake(VecDeque::from([l1, l2])), None);
+        let mut f = Front::new(Fake(VecDeque::from([l1, l2]), Arc::default()), None);
         let (itx, mut irx) = mpsc::unbounded_channel();
         let (otx, orx) = std::sync::mpsc::channel::<Vec<u8>>();
         let stop = CancellationToken::new();
@@ -902,7 +924,7 @@ mod tests {
     async fn cancelled() {
         let (l1, mut h1) = link();
         let mut f = Front::new(
-            Fake(VecDeque::from([l1])),
+            Fake(VecDeque::from([l1]), Arc::default()),
             Some(Tiers::parse("read").unwrap()),
         );
         let (itx, mut irx) = mpsc::unbounded_channel();

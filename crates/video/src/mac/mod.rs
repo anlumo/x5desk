@@ -2,4 +2,4 @@
 pub mod decode;
 pub mod encode;
 pub mod gpu;
-mod sys;
+pub(crate) mod sys;

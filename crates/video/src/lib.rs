@@ -2,9 +2,11 @@
 //! encode from NV12 / P010 pictures that wgpu fills: Vulkan Video on Linux, VideoToolbox on macOS (`mac`), with the
 //! same API. A decoded frame's planes come from `Ring::planes` on both.
 mod bits;
-// the Vulkan encoder writes its parameter sets; the parser tests write test streams
-#[cfg(any(target_os = "linux", test))]
+// the Vulkan encoder writes its parameter sets; `check` and the parser tests write test streams
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 mod bitw;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod check;
 #[cfg(target_os = "linux")]
 pub mod decode;
 #[cfg(target_os = "linux")]

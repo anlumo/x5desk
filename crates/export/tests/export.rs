@@ -1,24 +1,32 @@
 //! Export jobs on the X5's footage (`X5_SAMPLES`; skipped when unset), checked with the `ffprobe` / `ffmpeg` CLIs and
-//! `exiv2` / `djpeg` (test tools only). Outputs go to `X5_EXPORT_OUT` (default: Cargo's test tmp directory, on disk).
-//! GPU timings are noisy: other work shares the GPU.
+//! `exiv2` / `djpeg` (test tools only), and on the synthetic recording (`export::synth`) without them. Outputs go to
+//! `X5_EXPORT_OUT` (default: Cargo's test tmp directory, on disk). GPU timings are noisy: other work shares the GPU.
 
-use export::{Cut, Edit, Enc, Fx, Hook, Job, Out, Progress, Queue, Seg, State};
+use export::{Cut, Dest, Edit, Enc, Fx, Hook, Job, Out, Progress, Queue, Seg, State};
+use media::part;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    sync::{
+        Arc, Mutex, MutexGuard, OnceLock, RwLock,
+        atomic::{AtomicBool, Ordering::Relaxed},
+    },
     time::{Duration, Instant},
 };
 use stitch::{Ctx, Mode, View};
 use video::{Codec, Gpu, Rate};
 
-/// One device per test binary; the lock runs the GPU tests one at a time.
+/// One device per test binary; the lock runs the GPU tests one at a time. The jobs take a host's locks, as the app's
+/// do (here nobody else takes them).
 fn gpu() -> (MutexGuard<'static, ()>, Arc<Gpu>, Ctx) {
     static G: OnceLock<(Mutex<()>, Arc<Gpu>, Ctx)> = OnceLock::new();
+    static GATE: RwLock<()> = RwLock::new(());
+    static BURN: Mutex<()> = Mutex::new(());
     let (m, g, cx) = G.get_or_init(|| {
         let g = Arc::new(Gpu::new().expect("GPU"));
         let cx = Ctx::new(&g.device, &g.queue);
+        export::locks(&GATE, &BURN);
         (Mutex::new(()), g, cx)
     });
     (
@@ -41,7 +49,12 @@ fn out(name: &str) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")));
     std::fs::create_dir_all(&d).unwrap();
-    d.join(name)
+    let p = d.join(name);
+    // a job never replaces a file, nor writes beside a `.part`: an earlier run's go
+    for p in [&p, &part::of(&p)] {
+        let _ = std::fs::remove_file(p);
+    }
+    p
 }
 
 /// A tool's stdout; panics with its stderr when it fails.
@@ -1876,4 +1889,734 @@ fn flat_flag() {
         assert_eq!(s.contains("Stereo 3D"), !flat);
         assert!(s.contains("width=2048") && s.contains("height=1024"));
     }
+}
+
+/// The synthetic recording (`export::synth`): 300 frames of 256² per lens (10 s), made once per test binary.
+fn synth() -> PathBuf {
+    static P: OnceLock<PathBuf> = OnceLock::new();
+    P.get_or_init(|| {
+        let p = out("synth300.insv");
+        export::synth::insv(&p, 300, 256).unwrap();
+        p
+    })
+    .clone()
+}
+
+/// A flat 640 × 360 H.264 job of `src` over `t` (s): template seam, the default view.
+fn flat_job(src: &Path, t: [f64; 2], path: &Path) -> Job {
+    Job {
+        cut: Cut::Segs(vec![Seg {
+            files: vec![src.to_path_buf()],
+            t,
+        }]),
+        path: path.to_path_buf(),
+        out: Out::Flat {
+            w: 640,
+            h: 360,
+            view: None,
+        },
+        enc: Enc::Video {
+            codec: Codec::H264,
+            deep: false,
+            rate: Rate::Cbr(4_000_000),
+            gop: 30,
+        },
+        raft: false,
+        colour: None,
+        stab: None,
+        flat: false,
+        fx: None,
+    }
+}
+
+/// A hook that takes `ms` per frame: a job that lasts.
+fn slow(ms: u64) -> Option<Hook> {
+    Some(Box::new(move |_: Fx<'_>| {
+        std::thread::sleep(Duration::from_millis(ms))
+    }))
+}
+
+/// `job` through `run_into` on this thread.
+fn run(
+    g: &Gpu,
+    cx: &Ctx,
+    job: Job,
+    d: Dest,
+    stop: &AtomicBool,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<Progress, String> {
+    export::run_into(g, cx, &mut None, job, d, stop, progress)
+}
+
+/// The samples of `p`'s one video track.
+fn samples(p: &Path) -> usize {
+    let m = media::mp4::Mp4::open(p).unwrap();
+    let v: Vec<_> = (m.tracks.iter())
+        .filter(|t| {
+            matches!(
+                t.codec,
+                media::mp4::Codec::Avc { .. } | media::mp4::Codec::Hevc { .. }
+            )
+        })
+        .collect();
+    assert_eq!(v.len(), 1, "{}", p.display());
+    v[0].samples.len()
+}
+
+/// Nothing at `p` or its `.part`, not even a link.
+fn gone(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_err() && std::fs::symlink_metadata(part::of(p)).is_err()
+}
+
+/// `id`'s state once it has ended.
+fn wait(q: &Queue, id: u64, secs: u64) -> State {
+    let t = Instant::now();
+    loop {
+        match q.state(id) {
+            Some(State::Queued | State::Running(_)) => {}
+            Some(s) => return s,
+            None => panic!("job {id} forgotten"),
+        }
+        assert!(t.elapsed().as_secs() < secs, "job {id}: {:?}", q.state(id));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// `id` running with at least `n` frames done.
+fn running(q: &Queue, id: u64, n: u64) {
+    let t = Instant::now();
+    loop {
+        match q.state(id) {
+            Some(State::Running(p)) if p.done >= n => return,
+            Some(State::Queued | State::Running(_)) => {}
+            s => panic!("job {id}: {s:?}"),
+        }
+        assert!(t.elapsed().as_secs() < 300, "job {id}: {:?}", q.state(id));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// `source` reads what a job reads first, without the GPU: the synthetic recording's rate, length and tracks, no IMU;
+/// with stabilisation it fails as the job would; the same MP4 without its trailer is refused. v635 with its IMU.
+#[test]
+fn source_head() {
+    let src = synth();
+    let s = export::source(std::slice::from_ref(&src), false).unwrap();
+    eprintln!(
+        "synthetic: {:?} {} frames {:.3} s, {:?}, IMU {}, AAC {}",
+        s.fps, s.frames, s.dur, s.tracks, s.imu, s.aac
+    );
+    assert_eq!((s.fps, s.frames), ([30000, 1001], 300));
+    assert!((s.dur - 300.0 * 1001.0 / 30000.0).abs() < 1e-9);
+    let t = export::Track {
+        codec: Codec::H264,
+        deep: false,
+        size: [256, 256],
+    };
+    assert_eq!(s.tracks, [t; 2]);
+    assert!(!s.imu && !s.aac);
+    assert_eq!((s.meta.stream, s.meta.camera.as_str()), (3, "Insta360 X5"));
+    let e = export::source(std::slice::from_ref(&src), true).unwrap_err();
+    assert!(
+        e.contains("no IMU or exposure data to stabilise with"),
+        "{e}"
+    );
+    let plain = out("synth_plain.mp4");
+    let start = media::insv::Trailer::open(&src).unwrap().start as usize;
+    std::fs::write(&plain, &std::fs::read(&src).unwrap()[..start]).unwrap();
+    let e = export::source(&[plain], false).unwrap_err();
+    assert!(e.contains("no Insta360 trailer"), "{e}");
+    let Some(v) = sample("v635.insv") else {
+        return;
+    };
+    let s = export::source(&[v], true).unwrap();
+    eprintln!(
+        "v635: {:?} {} frames {:.3} s, {:?}, IMU {}, AAC {}",
+        s.fps, s.frames, s.dur, s.tracks, s.imu, s.aac
+    );
+    assert!(s.imu && s.tracks[0].codec == Codec::H265);
+}
+
+/// A job writes into the `.part` it is handed and publishes that very file, a video and a still; the strict checks
+/// (frame count, the JPEG's decode) pass. The file is known by a second handle on it: its identity at the end (on
+/// macOS FAT and exFAT the writes change it).
+#[test]
+fn part_into() {
+    let src = synth();
+    let (_l, g, cx) = gpu();
+    let stop = AtomicBool::new(false);
+    let strict = |p| Dest {
+        part: Some(p),
+        strict: true,
+        frozen_ok: false,
+    };
+    let path = out("part_into.mp4");
+    let p = part::create(&path).unwrap();
+    let f = p.f.try_clone().unwrap();
+    let job = flat_job(&src, [0.0, 2.0], &path);
+    let r = run(&g, &cx, job, strict(p), &stop, &mut |_| {}).unwrap();
+    assert_eq!((r.done, r.total, r.concealed), (60, 60, 0));
+    assert!(part::is(&path, &part::id_of(&f).unwrap()) && !part::of(&path).exists());
+    assert_eq!(samples(&path), 60);
+    let jpg = out("part_into.jpg");
+    let p = part::create(&jpg).unwrap();
+    let f = p.f.try_clone().unwrap();
+    let job = Job {
+        out: Out::Pano(512),
+        enc: Enc::Jpeg(90),
+        ..flat_job(&src, [1.0, 1.0], &jpg)
+    };
+    run(&g, &cx, job, strict(p), &stop, &mut |_| {}).unwrap();
+    assert!(part::is(&jpg, &part::id_of(&f).unwrap()) && !part::of(&jpg).exists());
+    assert_eq!(
+        media::mjpeg::size(&std::fs::read(&jpg).unwrap()),
+        Some((512, 256))
+    );
+}
+
+/// A file that appears at the job's path while it runs fails the job and stays as it was; the `.part` goes.
+#[test]
+fn no_replace() {
+    let src = synth();
+    let (_l, g, cx) = gpu();
+    let stop = AtomicBool::new(false);
+    let path = out("no_replace.mp4");
+    let job = flat_job(&src, [0.0, 1.0], &path);
+    let e = run(&g, &cx, job, Dest::default(), &stop, &mut |p| {
+        if p.done == 5 {
+            std::fs::write(&path, b"theirs").unwrap();
+        }
+    })
+    .unwrap_err();
+    assert!(
+        e.contains("appeared while it was rendered; nothing replaced"),
+        "{e}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"theirs");
+    assert!(!part::of(&path).exists());
+}
+
+/// A link at `<path>.part`, dangling or to a file, fails the job at its start without writing through it, in
+/// `run_into` and on a queue's thread; the link and its target stay as they were.
+#[test]
+fn link_part() {
+    let src = synth();
+    let (_l, g, cx) = gpu();
+    let q = Queue::new(g.clone(), cx.clone());
+    let stop = AtomicBool::new(false);
+    let (path, target) = (out("link_part.mp4"), out("link_target"));
+    let pp = part::of(&path);
+    for (queued, content) in [(false, None), (false, Some(&b"keep"[..])), (true, None)] {
+        let _ = std::fs::remove_file(&target);
+        if let Some(c) = content {
+            std::fs::write(&target, c).unwrap();
+        }
+        std::os::unix::fs::symlink(&target, &pp).unwrap();
+        let job = flat_job(&src, [0.0, 0.5], &path);
+        let e = match queued {
+            false => run(&g, &cx, job, Dest::default(), &stop, &mut |_| {}).unwrap_err(),
+            true => match wait(&q, q.push(job), 60) {
+                State::Failed(e) => e,
+                s => panic!("{s:?}"),
+            },
+        };
+        assert!(e.contains("being written by another export"), "{e}");
+        assert!(std::fs::symlink_metadata(&pp).unwrap().is_symlink());
+        assert_eq!(std::fs::read(&target).ok().as_deref(), content);
+        assert!(!path.exists());
+        std::fs::remove_file(&pp).unwrap();
+    }
+}
+
+/// A stop in the last frame's progress ends the job cancelled with nothing left: a video (its encoder still
+/// draining) and a still (written by then).
+#[test]
+fn stop_at_end() {
+    let src = synth();
+    let (_l, g, cx) = gpu();
+    for (name, enc) in [
+        ("stop_at_end.mp4", None),
+        ("stop_at_end.jpg", Some(Enc::Jpeg(90))),
+    ] {
+        let path = out(name);
+        let mut job = flat_job(&src, [0.0, 1.0], &path);
+        if let Some(e) = enc {
+            job.enc = e;
+        }
+        let stop = AtomicBool::new(false);
+        let d = Dest {
+            strict: true,
+            ..Default::default()
+        };
+        let r = run(&g, &cx, job, d, &stop, &mut |p| {
+            if p.done == p.total {
+                stop.store(true, Relaxed)
+            }
+        });
+        assert_eq!(r, Err("cancelled".to_string()), "{name}");
+        assert!(gone(&path), "{name}");
+    }
+}
+
+/// A stop while the muxer moves the `moov` in front of 60 MB of noise frames ends the job cancelled, at the next
+/// 4 MiB chunk, with nothing left.
+#[test]
+fn cancel_in_finish() {
+    use std::os::unix::fs::FileExt;
+    let src = synth();
+    let (_l, g, cx) = gpu();
+    let (w, h) = (1920u32, 960u32);
+    let size = wgpu::Extent3d {
+        width: w + 128,
+        height: h + 64,
+        depth_or_array_layers: 1,
+    };
+    // noise the hook copies over each frame from an offset of its own: nothing the encoder can shrink
+    let noise = g.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let mut s = 1u32;
+    let px: Vec<u8> = (0..size.width * size.height * 4)
+        .map(|_| {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            (s >> 24) as u8
+        })
+        .collect();
+    g.queue.write_texture(
+        noise.as_image_copy(),
+        &px,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(size.width * 4),
+            rows_per_image: None,
+        },
+        size,
+    );
+    let hook: Hook = Box::new(move |fx: Fx<'_>| {
+        let k = fx.k as u32;
+        let from = wgpu::TexelCopyTextureInfo {
+            texture: &noise,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: k * 13 % 128,
+                y: k * 7 % 64,
+                z: 0,
+            },
+            aspect: wgpu::TextureAspect::All,
+        };
+        fx.enc
+            .copy_texture_to_texture(from, fx.tex.as_image_copy(), fx.tex.size());
+    });
+    let path = out("cancel_in_finish.mp4");
+    let pp = part::of(&path);
+    let job = Job {
+        out: Out::Flat { w, h, view: None },
+        enc: Enc::Video {
+            codec: Codec::H265,
+            deep: false,
+            rate: Rate::Cbr(60_000_000),
+            gop: 30,
+        },
+        fx: Some(hook),
+        ..flat_job(&src, [0.0, 8.0], &path)
+    };
+    let (stop, done) = (AtomicBool::new(false), AtomicBool::new(false));
+    let (r, at, end) = std::thread::scope(|sc| {
+        let w = sc.spawn(|| {
+            // the mdat's size, the first thing the finish writes
+            let mut b = [0u8; 4];
+            let mut f = None;
+            while !done.load(Relaxed) {
+                f = f.or_else(|| std::fs::File::open(&pp).ok());
+                if let Some(f) = &f
+                    && f.read_exact_at(&mut b, 36).is_ok()
+                    && b != [0; 4]
+                {
+                    stop.store(true, Relaxed);
+                    return Some((Instant::now(), f.metadata().unwrap().len()));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            None
+        });
+        let r = run(&g, &cx, job, Dest::default(), &stop, &mut |_| {});
+        let end = Instant::now();
+        done.store(true, Relaxed);
+        (r, w.join().unwrap(), end)
+    });
+    let (t, len) = at.expect("the finish never began");
+    eprintln!(
+        "stopped in the finish of {:.1} MB: cancelled {:.1} ms later",
+        len as f64 / 1e6,
+        (end - t).as_secs_f64() * 1e3
+    );
+    assert_eq!(r, Err("cancelled".to_string()));
+    assert!(gone(&path));
+    assert!(len > 40_000_000, "{len} bytes: too few chunks to stop in");
+}
+
+/// A queued job's cancel is final at once: `Cancelled`, its handed `.part` removed, never started; the job before it
+/// runs on. `forget` drops a finished entry at once, a running one once it ends.
+#[test]
+fn queued_cancel() {
+    let src = synth();
+    let (_l, g, cx) = gpu();
+    let q = Queue::new(g.clone(), cx.clone());
+    let (pa, pb) = (out("queued_a.mp4"), out("queued_b.mp4"));
+    let ia = q.push(Job {
+        fx: slow(10),
+        ..flat_job(&src, [0.0, 5.0], &pa)
+    });
+    let d = Dest {
+        part: Some(part::create(&pb).unwrap()),
+        strict: true,
+        frozen_ok: false,
+    };
+    let ib = q.push_into(flat_job(&src, [0.0, 1.0], &pb), d).unwrap();
+    running(&q, ia, 1);
+    assert!(q.busy() && q.alive());
+    assert_eq!(q.state(ib), Some(State::Queued));
+    q.cancel(ib);
+    assert_eq!(q.state(ib), Some(State::Cancelled));
+    assert!(gone(&pb));
+    q.forget(ib);
+    assert_eq!(q.state(ib), None);
+    q.forget(ia);
+    assert!(matches!(q.state(ia), Some(State::Running(_))));
+    let t = Instant::now();
+    while q.state(ia).is_some() {
+        assert!(t.elapsed().as_secs() < 300);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(samples(&pa), 150);
+    assert!(gone(&pb) && q.jobs().is_empty());
+}
+
+/// Panics fail their job alone, leaving neither the file nor its `.part`, and the lane runs the next job: a hook that
+/// panics at frame 5 and one that panics as it drops (both caught in the job). The second through `run_into` itself
+/// too, as the app's export screen runs it: an error, nothing left.
+#[test]
+fn lane_panic() {
+    struct Bomb;
+    impl Drop for Bomb {
+        fn drop(&mut self) {
+            panic!("a hook that panics as it drops")
+        }
+    }
+    let src = synth();
+    let (_l, g, cx) = gpu();
+    let late = || -> Hook {
+        let bomb = Bomb;
+        Box::new(move |_: Fx<'_>| {
+            let _ = &bomb;
+        })
+    };
+    let path = out("panic_direct.mp4");
+    let job = Job {
+        fx: Some(late()),
+        ..flat_job(&src, [0.0, 0.5], &path)
+    };
+    let stop = AtomicBool::new(false);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run(&g, &cx, job, Dest::default(), &stop, &mut |_| {})
+    }));
+    assert_eq!(
+        r.ok(),
+        Some(Err("panic: a hook that panics as it drops".into()))
+    );
+    assert!(gone(&path), "output left");
+    let q = Queue::new(g.clone(), cx.clone());
+    let boom: Hook = Box::new(|fx: Fx<'_>| {
+        if fx.k == 5 {
+            panic!("fx hook at frame 5")
+        }
+    });
+    let jobs = [
+        (
+            "panic_hook.mp4",
+            Some(boom),
+            Some("panic: fx hook at frame 5"),
+        ),
+        (
+            "panic_drop.mp4",
+            Some(late()),
+            Some("panic: a hook that panics as it drops"),
+        ),
+        ("panic_after.mp4", None, None),
+    ];
+    let mut ids = vec![];
+    for (name, fx, want) in jobs {
+        let path = out(name);
+        let d = Dest {
+            part: Some(part::create(&path).unwrap()),
+            ..Default::default()
+        };
+        let job = Job {
+            fx,
+            ..flat_job(&src, [0.0, 0.5], &path)
+        };
+        ids.push((q.push_into(job, d).unwrap(), name, path, want));
+    }
+    for (id, name, path, want) in ids {
+        let s = wait(&q, id, 120);
+        eprintln!("{name}: {s:?}");
+        match (s, want) {
+            (State::Failed(e), Some(w)) => assert_eq!(e, w, "{name}"),
+            (State::Done(p), None) => assert_eq!(samples(&path), p.total as usize),
+            (s, w) => panic!("{name}: {s:?}, expected {w:?}"),
+        }
+        assert!(want.is_none() || gone(&path), "{name}: output left");
+    }
+    assert!(q.alive());
+}
+
+/// Two queues on one device run at once, as the MCP server's still and export lanes: a RAFT 360 export of the
+/// synthetic recording in one; in the other, the whole recording flat, then a flat RAFT one (two models taking turns
+/// at BURN). Overlapping, each file complete (strict). With `X5_SAMPLES`: v635 flat with RAFT and the horizon lock in
+/// one (after a `trim`), three 360 stills in the other.
+#[test]
+fn two_lanes() {
+    let src = synth();
+    let (_l, g, cx) = gpu();
+    let a = Queue::with(g.clone(), cx.clone(), "lane-a").unwrap();
+    let b = Queue::with(g.clone(), cx.clone(), "lane-b").unwrap();
+    let strict = || Dest {
+        strict: true,
+        ..Default::default()
+    };
+    let (pa, pb, pc) = (out("lanes_a.mp4"), out("lanes_b.mp4"), out("lanes_c.mp4"));
+    let ja = Job {
+        out: Out::Pano(1024),
+        enc: Enc::Video {
+            codec: Codec::H265,
+            deep: false,
+            rate: Rate::Cbr(8_000_000),
+            gop: 30,
+        },
+        raft: true,
+        colour: Some(0.1),
+        ..flat_job(&src, [0.0, 4.0], &pa)
+    };
+    let t = Instant::now();
+    // the other lane once this one has its model and kernels
+    let ia = a.push_into(ja, strict()).unwrap();
+    running(&a, ia, 1);
+    let jb = Job {
+        fx: slow(5),
+        ..flat_job(&src, [0.0, f64::INFINITY], &pb)
+    };
+    let jc = Job {
+        raft: true,
+        ..flat_job(&src, [0.0, 1.0], &pc)
+    };
+    let (ib, ic) = (
+        b.push_into(jb, strict()).unwrap(),
+        b.push_into(jc, strict()).unwrap(),
+    );
+    let live = |s: &Option<State>| matches!(s, Some(State::Queued | State::Running(_)));
+    let on = |s: &Option<State>| matches!(s, Some(State::Running(p)) if p.done > 0);
+    let mut both = [0; 2];
+    loop {
+        let s = [a.state(ia), b.state(ib), b.state(ic)];
+        for k in 0..2 {
+            both[k] += (on(&s[0]) && on(&s[k + 1])) as u32;
+        }
+        if !s.iter().any(live) {
+            break;
+        }
+        assert!(t.elapsed().as_secs() < 600, "{s:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let s = [a.state(ia), b.state(ib), b.state(ic)];
+    eprintln!(
+        "synthetic in {:.1} s: {s:?}; the 360 one running with the flat ones at {both:?} looks",
+        t.elapsed().as_secs_f64()
+    );
+    for (s, p, n) in [(&s[0], &pa, 120), (&s[1], &pb, 300), (&s[2], &pc, 30)] {
+        assert!(matches!(s, Some(State::Done(x)) if x.done == n), "{s:?}");
+        assert_eq!(samples(p), n as usize);
+    }
+    assert!(both[0] > 0 && both[1] > 0, "the lanes never ran at once");
+    assert!(a.lost().is_none() && b.lost().is_none());
+    let Some(v) = sample("v635.insv") else {
+        return;
+    };
+    a.trim();
+    let pv = out("lanes_v635.mp4");
+    let ja = Job {
+        out: Out::Flat {
+            w: 1280,
+            h: 720,
+            view: None,
+        },
+        raft: true,
+        colour: Some(0.1),
+        stab: Some((stab::Lock::Horizon, 0.5)),
+        ..flat_job(&v, [0.0, 3.0], &pv)
+    };
+    let ia = a.push_into(ja, strict()).unwrap();
+    running(&a, ia, 10);
+    let stills: Vec<_> = [0.5, 1.0, 1.5]
+        .into_iter()
+        .map(|s| {
+            let p = out(&format!("lanes_v635_{s}.jpg"));
+            let job = Job {
+                out: Out::Pano(3840),
+                enc: Enc::Jpeg(90),
+                ..flat_job(&v, [s, s], &p)
+            };
+            (b.push_into(job, strict()).unwrap(), p)
+        })
+        .collect();
+    for (id, p) in &stills {
+        let s = wait(&b, *id, 300);
+        eprintln!("{}: {s:?}, the export {:?}", p.display(), a.state(ia));
+        assert!(matches!(s, State::Done(_)), "{s:?}");
+    }
+    let s = wait(&a, ia, 600);
+    eprintln!("{}: {s:?}", pv.display());
+    let State::Done(x) = s else { panic!("{s:?}") };
+    assert_eq!(samples(&pv), x.total as usize);
+}
+
+/// `detach` returns at once while a job runs: the queued job is cancelled (its `.part` gone at once), the running one
+/// finishes and publishes, and the thread ends after it.
+#[test]
+fn detach() {
+    let src = synth();
+    let (_l, g, cx) = gpu();
+    let n = Arc::strong_count(&g);
+    let q = Queue::with(g.clone(), cx.clone(), "detached").unwrap();
+    let (pa, pb) = (out("detach_a.mp4"), out("detach_b.mp4"));
+    let ia = q.push(Job {
+        fx: slow(5),
+        ..flat_job(&src, [0.0, f64::INFINITY], &pa)
+    });
+    let d = Dest {
+        part: Some(part::create(&pb).unwrap()),
+        ..Default::default()
+    };
+    q.push_into(flat_job(&src, [0.0, 1.0], &pb), d).unwrap();
+    running(&q, ia, 5);
+    let t = Instant::now();
+    q.detach();
+    let dt = t.elapsed();
+    assert!(dt < Duration::from_millis(100), "{dt:?}");
+    assert!(gone(&pb));
+    // the thread's device handle goes when it ends
+    let t = Instant::now();
+    while Arc::strong_count(&g) > n {
+        assert!(t.elapsed().as_secs() < 300, "the thread runs on");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    eprintln!(
+        "detached in {:.2} ms; the job ended {:.1} s later",
+        dt.as_secs_f64() * 1e3,
+        t.elapsed().as_secs_f64()
+    );
+    assert_eq!(samples(&pa), 300);
+    assert!(gone(&pb));
+}
+
+/// The synthetic recording with frame 45 of both lenses broken (90 frames), made once: VideoToolbox conceals it and
+/// the P pictures after it, up to the IDR at 60.
+#[cfg(target_os = "macos")]
+fn damaged() -> PathBuf {
+    static P: OnceLock<PathBuf> = OnceLock::new();
+    P.get_or_init(|| {
+        let p = out("synth_damaged.insv");
+        export::synth::damaged(&p, 90, 256, 45).unwrap();
+        p
+    })
+    .clone()
+}
+
+/// Strict, a concealed picture fails the job at its frame, nothing left (macOS: Linux fails the decode itself).
+#[cfg(target_os = "macos")]
+#[test]
+fn strict_concealed() {
+    let src = damaged();
+    let (_l, g, cx) = gpu();
+    let stop = AtomicBool::new(false);
+    for (name, enc, at) in [
+        ("strict_concealed.mp4", None, 45),
+        ("strict_concealed.jpg", Some(Enc::Jpeg(90)), 0),
+    ] {
+        let path = out(name);
+        let mut job = flat_job(&src, [0.0, 3.0], &path);
+        if let Some(e) = enc {
+            // frame 50: decoded from the IDR at 30, through the broken one
+            (job.enc, job.cut) = (
+                e,
+                Cut::Segs(vec![Seg {
+                    files: vec![src.clone()],
+                    t: [50.0 * 1001.0 / 30000.0; 2],
+                }]),
+            );
+        }
+        let d = Dest {
+            strict: true,
+            ..Default::default()
+        };
+        let e = run(&g, &cx, job, d, &stop, &mut |_| {}).unwrap_err();
+        eprintln!("{name}: {e}");
+        assert!(
+            e.starts_with(&format!("frame {at}: ")) && e.contains("could not be decoded"),
+            "{e}"
+        );
+        assert!(gone(&path), "{name}");
+    }
+}
+
+/// With `frozen_ok` the damaged recording exports whole and its concealed pictures are counted, as the app's export
+/// screen (not strict) has it; a still through them too.
+#[cfg(target_os = "macos")]
+#[test]
+fn frozen_ok() {
+    let src = damaged();
+    let (_l, g, cx) = gpu();
+    let stop = AtomicBool::new(false);
+    let frozen = || Dest {
+        strict: true,
+        frozen_ok: true,
+        part: None,
+    };
+    for (name, d) in [
+        ("frozen_ok.mp4", frozen()),
+        ("frozen_gui.mp4", Dest::default()),
+    ] {
+        let path = out(name);
+        let p = run(
+            &g,
+            &cx,
+            flat_job(&src, [0.0, 3.0], &path),
+            d,
+            &stop,
+            &mut |_| {},
+        )
+        .unwrap();
+        eprintln!("{name}: {p:?}");
+        assert_eq!(p.done, 90);
+        assert!((2..=30).contains(&p.concealed), "{p:?}");
+        assert_eq!(samples(&path), 90);
+    }
+    let path = out("frozen_ok.jpg");
+    let job = Job {
+        enc: Enc::Jpeg(90),
+        cut: Cut::Segs(vec![Seg {
+            files: vec![src.clone()],
+            t: [50.0 * 1001.0 / 30000.0; 2],
+        }]),
+        ..flat_job(&src, [0.0, 0.0], &path)
+    };
+    let p = run(&g, &cx, job, frozen(), &stop, &mut |_| {}).unwrap();
+    eprintln!("frozen_ok.jpg: {p:?}");
+    assert!(p.concealed > 0 && path.exists());
 }

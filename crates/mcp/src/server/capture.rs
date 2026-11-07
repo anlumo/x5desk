@@ -399,9 +399,9 @@ impl Conn {
             "capture_state": state.ok(),
             "capturing_for_s": st.since.filter(|_| cap).map(|t| t.elapsed().as_secs()),
             "started_by_this_host": s.rec.is_some(),
-            "stops_in_s": s.rec.as_ref().and_then(|r| r.until).map(|t| {
-                t.saturating_duration_since(Instant::now()).as_secs()
-            }),
+            "stops_in_s": (s.rec.as_ref())
+                .and_then(|r| r.due.then(Instant::now).or(r.until))
+                .map(|t| t.saturating_duration_since(Instant::now()).as_secs()),
             "battery_percent": b.map(|b| cc::level(b).0),
             "charging": b.map(|b| cc::level(b).1),
             "storage_free_bytes": i.storage.as_ref().map(|s| s.free_space),
@@ -692,8 +692,8 @@ impl Conn {
         Ok(r)
     }
 
-    /// The stop of recording `n` this host started with `seconds`, now due (the host's timer, `host::timer`, again
-    /// while it fails).
+    /// The stop of recording `n` this host started with `seconds`, or stopped before it began, now due (the host's
+    /// timer, `host::timer`, again while it fails).
     pub(crate) async fn timed_stop(&self, n: u64) -> Result<(), String> {
         let sh = self.sh();
         let _a = sh.act.lock().await;
@@ -800,6 +800,10 @@ impl Conn {
         if sh.st.lock().unwrap().rec.is_some() {
             return Err(REC.into());
         }
+        // a timed one and this host's renders exclude each other: its stop is this host's timer
+        let _t = seconds
+            .map(|_| super::render::timed_start(sh))
+            .transpose()?;
         let st = self.cap(Need::Vals).await?;
         let m = st.mode.clone().unwrap_or_default();
         if !matches!(conf::shot(&m), Shot::Rec(_) | Shot::Lapse(_)) {
@@ -837,6 +841,7 @@ impl Conn {
                 mode: m.clone(),
                 at,
                 until: seconds.map(|x| at + Duration::from_secs_f64(x)),
+                due: false,
                 stop: None,
                 sent_at: None,
             })

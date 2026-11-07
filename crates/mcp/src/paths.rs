@@ -153,18 +153,33 @@ pub fn sub(agent: &Path, s: &str) -> Result<PathBuf, String> {
 }
 
 /// Makes `d` (from [`sub`]) and checks that, canonicalised, it is still inside the agent folder: no link leads out.
-/// Returns `d` as given.
+/// The part of `d` that exists is checked first, so nothing is made where a link leads. Returns `d` as given.
 pub fn make(agent: &Path, d: &Path) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
-    let (a, c) = (std::fs::canonicalize(agent), std::fs::canonicalize(d));
-    match (a, c) {
-        (Ok(a), Ok(c)) if c.starts_with(&a) => Ok(d.to_path_buf()),
-        (Ok(_), Ok(c)) => Err(format!(
+    let io = |e: std::io::Error| format!("{}: {e}", d.display());
+    let out = |c: &Path| {
+        format!(
             "{}: leads out of the agent folder (to {})",
             d.display(),
             c.display()
-        )),
-        (Err(e), _) | (_, Err(e)) => Err(format!("{}: {e}", d.display())),
+        )
+    };
+    std::fs::create_dir_all(agent).map_err(io)?;
+    let a = std::fs::canonicalize(agent).map_err(io)?;
+    // the deepest folder of `d` there now, a link followed
+    let mut e = d;
+    while !e.exists()
+        && let Some(p) = e.parent()
+    {
+        e = p
+    }
+    let c = std::fs::canonicalize(e).map_err(io)?;
+    if !c.starts_with(&a) {
+        return Err(out(&c.join(d.strip_prefix(e).unwrap_or(d))));
+    }
+    std::fs::create_dir_all(d).map_err(io)?;
+    match std::fs::canonicalize(d).map_err(io)? {
+        c if c.starts_with(&a) => Ok(d.to_path_buf()),
+        c => Err(out(&c)),
     }
 }
 
@@ -179,12 +194,8 @@ pub fn numbered(name: &str, i: u32) -> String {
     }
 }
 
-/// Nothing is at `p`, and nothing is being written there (`<p>.part`).
-pub fn free(p: &Path) -> bool {
-    let mut part = p.as_os_str().to_owned();
-    part.push(".part");
-    !p.exists() && !Path::new(&part).exists()
-}
+/// Nothing is at `p`, not even a dangling link, and nothing is being written there (`<p>.part`).
+pub use media::part::free;
 
 #[cfg(test)]
 mod tests {
@@ -303,10 +314,11 @@ mod tests {
         {
             std::fs::create_dir_all(t.0.join("elsewhere")).unwrap();
             std::os::unix::fs::symlink(t.0.join("elsewhere"), a.join("out")).unwrap();
+            let e = make(&a, &sub(&a, "out/x/y").unwrap()).unwrap_err();
+            assert!(e.contains("leads out") && e.ends_with("y)"), "{e}");
             assert!(
-                make(&a, &sub(&a, "out/x").unwrap())
-                    .unwrap_err()
-                    .contains("leads out")
+                !t.0.join("elsewhere/x").exists(),
+                "made where the link leads"
             );
         }
         assert_eq!(numbered("VID_1_00_603.insv", 1), "VID_1_00_603.insv");
@@ -320,6 +332,12 @@ mod tests {
         std::fs::remove_file(a.join("f.insv.part")).unwrap();
         std::fs::write(&f, b"").unwrap();
         assert!(!free(&f));
+        #[cfg(unix)]
+        {
+            let g = a.join("g.insv");
+            std::os::unix::fs::symlink(t.0.join("nowhere"), &g).unwrap();
+            assert!(!free(&g), "a dangling link");
+        }
     }
 
     /// The app's download folders: its `dest=` and the default beside it, read again each time.

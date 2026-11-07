@@ -76,4 +76,10 @@ impl Gpu {
     pub(crate) fn flush(&self) {
         unsafe { sys::CVMetalTextureCacheFlush(self.cache.0, 0) };
     }
+
+    /// What an idle host gives back: the texture cache's old pictures (`flush`; VideoToolbox keeps no decoder memory
+    /// of ours parked, as Linux's bin).
+    pub fn trim(&self) {
+        self.flush()
+    }
 }

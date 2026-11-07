@@ -14,7 +14,11 @@
 use crate::{clip, gyro, photo, player::Look};
 use eframe::egui;
 use glam::{Mat3, Quat, Vec2, Vec3};
-use media::mp4::{self, Mp4};
+// `free`: neither the file nor its `.part` (a job's, in this process or another) is there, not even a dangling link
+use media::{
+    mp4::{self, Mp4},
+    part::free,
+};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -27,6 +31,9 @@ use std::{
 };
 use stitch::{Ctx, Mode, Preview, View};
 use video::{Codec, Gpu, Rate};
+
+// the agents' render engine (`x5desk mcp`): this screen's tables and jobs on lanes of its own
+pub mod agent;
 
 const CANCELLED: &str = "cancelled";
 /// Face detection: YuNet score (privacy takes the faces it is less sure of too), every few frames (`Hide` bridges
@@ -169,6 +176,8 @@ const FPS: [(Option<(u32, u32)>, &str); 6] = [
 /// H.264 and H.265 encode up to these sizes (RADV).
 const H264_MAX: u32 = 4096;
 const H265_MAX: u32 = 8192;
+/// The exports' AAC, bit/s.
+const ABR: u32 = 192_000;
 
 /// Export settings.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -208,6 +217,11 @@ impl Set {
 
     fn size(&self) -> [u32; 2] {
         [self.w, if self.pano { self.w / 2 } else { self.h }]
+    }
+
+    /// The output frame rate: these settings', else the source's `src`.
+    fn rate(&self, src: edit::Rate) -> edit::Rate {
+        self.fps.map_or(src, |(num, den)| edit::Rate { num, den })
     }
 
     /// Why these cannot export `s` (a grab: one frame), if they cannot.
@@ -254,6 +268,22 @@ impl Default for Set {
         s.apply(0);
         s
     }
+}
+
+/// `<stem>_<pre><tag>`, an output's name before its number and extension: a grab (`grab`: the frame's time, s) by its
+/// time and kind (`360_<w>`, `flat_<w>x<h>`), else by the preset's key while unchanged, else by its kind.
+pub(crate) fn stem_tag(stem: &str, x: &Set, grab: Option<f64>, pre: &str) -> String {
+    let [w, h] = x.size();
+    let kind = match x.pano {
+        true => format!("360_{w}"),
+        false => format!("flat_{w}x{h}"),
+    };
+    let tag = match (grab, x.preset) {
+        (Some(t), _) => format!("{t:.2}s_{kind}"),
+        (None, Some(i)) => PRESETS[i].0.to_string(),
+        _ => kind,
+    };
+    format!("{stem}_{pre}{tag}")
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -306,6 +336,9 @@ struct Task {
     ed: Option<Box<Tl>>,
     /// a Shot Lab effect on the frames
     lab: Option<Lab>,
+    /// where a video job writes and how strictly (`run_into`; an agent's reserved `.part`, M4); None: a `.part` of its
+    /// own, as the screen's jobs
+    dest: Mutex<Option<::export::Dest>>,
 }
 
 /// Makes an effect hook for frames of this size and format (`export::Fx`), on the export thread.
@@ -405,21 +438,16 @@ impl Exp {
         let stem = s.files[0]
             .file_stem()
             .map_or("x5".into(), |n| n.to_string_lossy());
-        let [w, h] = x.size();
-        let kind = match x.pano {
-            true => format!("360_{w}"),
-            false => format!("flat_{w}x{h}"),
-        };
-        let tag = match (grab && !s.photo, x.preset) {
-            (true, _) => format!("{:.2}s_{kind}", s.t),
-            (false, Some(i)) if !s.photo => PRESETS[i].0.to_string(),
-            _ => kind,
+        // a photo by its kind alone: no time, no video preset
+        let n = match s.photo {
+            true => stem_tag(&stem, &Set { preset: None, ..*x }, None, pre),
+            false => stem_tag(&stem, x, grab.then_some(s.t), pre),
         };
         let ext = if grab || s.photo { "jpg" } else { "mp4" };
         (1..)
             .map(|i| match i {
-                1 => self.dest.join(format!("{stem}_{pre}{tag}.{ext}")),
-                _ => self.dest.join(format!("{stem}_{pre}{tag}-{i}.{ext}")),
+                1 => self.dest.join(format!("{n}.{ext}")),
+                _ => self.dest.join(format!("{n}-{i}.{ext}")),
             })
             .find(|p| free(p) && self.items.iter().all(|i| &i.path != p))
             .unwrap()
@@ -499,6 +527,7 @@ impl Exp {
                 grab,
                 ed: None,
                 lab,
+                dest: Mutex::new(None),
             })
             .map_err(|_| "the export thread is gone".to_string())
     }
@@ -530,15 +559,11 @@ impl Exp {
         }
         std::fs::create_dir_all(&self.dest).map_err(|e| format!("{}: {e}", self.dest.display()))?;
         let [w, h] = x.size();
-        let tag = match (x.preset, x.pano) {
-            (Some(i), _) => PRESETS[i].0.to_string(),
-            (None, true) => format!("360_{w}"),
-            (None, false) => format!("flat_{w}x{h}"),
-        };
+        let n = stem_tag(&e.name, &x, None, "");
         let path = (1..)
             .map(|i| match i {
-                1 => self.dest.join(format!("{}_{tag}.mp4", e.name)),
-                _ => self.dest.join(format!("{}_{tag}-{i}.mp4", e.name)),
+                1 => self.dest.join(format!("{n}.mp4")),
+                _ => self.dest.join(format!("{n}-{i}.mp4")),
             })
             .find(|p| free(p) && self.items.iter().all(|i| &i.path != p))
             .unwrap();
@@ -567,6 +592,7 @@ impl Exp {
                 grab: false,
                 ed: Some(Box::new(e)),
                 lab: None,
+                dest: Mutex::new(None),
             })
             .map_err(|_| "the export thread is gone".to_string())
     }
@@ -1000,28 +1026,7 @@ impl Drop for Exp {
 
 /// Runs `f` with this thread's wgpu errors and panics captured (they fail the job instead of reaching the device's
 /// handler, which panics), as crate export does on its threads.
-pub(crate) fn scoped<T>(
-    dev: &wgpu::Device,
-    f: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
-    use wgpu::ErrorFilter as E;
-    let s = [E::Validation, E::OutOfMemory, E::Internal].map(|f| dev.push_error_scope(f));
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|x| {
-        let m = (x.downcast_ref::<String>().cloned())
-            .or_else(|| x.downcast_ref::<&str>().map(|s| s.to_string()));
-        Err(format!("panic: {}", m.unwrap_or_default()))
-    });
-    let mut e = None;
-    for g in s.into_iter().rev() {
-        if let Some(x) = pollster::block_on(g.pop()) {
-            e.get_or_insert(x);
-        }
-    }
-    match e {
-        Some(e) => Err(format!("wgpu: {e}")),
-        None => r,
-    }
-}
+pub(crate) use ::export::scoped;
 
 /// What the export thread keeps between jobs: the RAFT model, the effects' pipelines (the face detector is the app's
 /// `ai::MODELS`).
@@ -1029,14 +1034,6 @@ pub(crate) fn scoped<T>(
 struct Keep {
     raft: Option<stitch::Raft>,
     fx: Option<fx::Ctx>,
-}
-
-/// Neither the file nor a partial one (`<path>.part`, which a job writes until it is complete, in this process or in
-/// another) is there.
-fn free(p: &Path) -> bool {
-    let mut part = p.as_os_str().to_owned();
-    part.push(".part");
-    !p.exists() && !Path::new(&part).exists()
 }
 
 fn worker(g: Arc<Gpu>, cx: Ctx, ctx: egui::Context, rx: mpsc::Receiver<Task>) {
@@ -1065,6 +1062,90 @@ fn worker(g: Arc<Gpu>, cx: Ctx, ctx: egui::Context, rx: mpsc::Receiver<Task>) {
 /// Face regions per frame.
 type Regs = Vec<Vec<track::Region>>;
 
+/// The source span (s) a job of `r` plays at `fps`: a grab is one frame from `r[0]`, ending at the clip's end (`dur`)
+/// at the latest; every span at least a frame, from 0 on.
+pub(crate) fn span(r: [f64; 2], grab: bool, fps: edit::Rate, dur: f64) -> [f64; 2] {
+    let [a, b] = match grab {
+        true => [r[0], (r[0] + fps.t(1)).min(dur)],
+        false => r,
+    };
+    [a.min(b - fps.t(1)).max(0.0), b]
+}
+
+/// One clip of `files` (`dur` s, the source's rate `src`) at 1× over `ab` (from `span`) with `x`: the Export screen's
+/// job and the agents'. `grab`: its first frame as a JPEG; `at`: the flat view per output time; `fx`: the caller's
+/// hooks (face blur, Shot Lab); `flat`: Lab's 2:1 non-sphere. Also returns the timeline's frames (`Progress::total`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn clip_job(
+    files: &[PathBuf],
+    dur: f64,
+    src: edit::Rate,
+    x: &Set,
+    [a, b]: [f64; 2],
+    grab: bool,
+    at: impl FnMut(f64) -> View + Send + 'static,
+    path: PathBuf,
+    fx: Option<export::Hook>,
+    flat: bool,
+) -> (export::Job, u64) {
+    let fps = x.rate(src);
+    let mut tl = edit::Timeline::new(fps);
+    tl.files.push(edit::File {
+        path: files[0].to_string_lossy().into(),
+        dur,
+    });
+    let id = x.look.map_or("", |l| l.name());
+    tl.clips.push(edit::Clip {
+        look: id.into(),
+        amt: x.amt,
+        adj: x.adj,
+        ..edit::Clip::new(0, a, b)
+    });
+    tl.fix();
+    let n = tl.len();
+    let e = export::Edit {
+        tl,
+        files: vec![files.to_vec()],
+        looks: x
+            .look
+            .map(|l| (id.to_string(), l.cube()))
+            .into_iter()
+            .collect(),
+        over: vec![],
+        abr: ABR,
+        denoise: None,
+    };
+    let job = export::Job {
+        cut: export::Cut::Edit(Box::new(e)),
+        path,
+        out: match x.pano {
+            true => export::Out::Pano(x.w),
+            false => export::Out::Flat {
+                w: x.w,
+                h: x.h,
+                view: Some(Box::new(at)),
+            },
+        },
+        enc: match grab {
+            true => export::Enc::Jpeg(x.jq),
+            false => export::Enc::Video {
+                codec: x.codec,
+                deep: x.deep && x.codec == Codec::H265,
+                rate: x
+                    .qp
+                    .map_or(Rate::Cbr((x.mbps as f64 * 1e6) as u64), Rate::Qp),
+                gop: ((fps.num + fps.den / 2) / fps.den).max(1),
+            },
+        },
+        raft: x.raft,
+        colour: x.colour.then_some(0.1),
+        stab: x.stab.map(|l| (l, x.smooth)),
+        fx,
+        flat,
+    };
+    (job, n)
+}
+
 impl Keep {
     fn video(
         &mut self,
@@ -1076,41 +1157,12 @@ impl Keep {
         let (s, x) = (&t.spec, &t.set);
         let stab = x.stab.map(|l| (l, x.smooth));
         let (src, _) = probe(&s.files[0])?;
-        let fps = x.fps.map_or(src, |(num, den)| edit::Rate { num, den });
         // a grab: one output frame from the frame shown
-        let [a, b] = match t.grab {
-            true => [s.t, (s.t + fps.t(1)).min(s.dur)],
-            false => t.range,
-        };
-        let a = a.min(b - fps.t(1)).max(0.0);
+        let r = if t.grab { [s.t; 2] } else { t.range };
+        let [a, b] = span(r, t.grab, x.rate(src), s.dur);
         let faces = match x.faces {
             true => Some(self.faces(g, cx, t, &s.files, stab, [a, b], src, &mut [0; 5], ctx)?),
             false => None,
-        };
-        let mut tl = edit::Timeline::new(fps);
-        tl.files.push(edit::File {
-            path: s.files[0].to_string_lossy().into(),
-            dur: s.dur,
-        });
-        let id = x.look.map_or("", |l| l.name());
-        tl.clips.push(edit::Clip {
-            look: id.into(),
-            amt: x.amt,
-            adj: x.adj,
-            ..edit::Clip::new(0, a, b)
-        });
-        tl.fix();
-        let e = export::Edit {
-            tl,
-            files: vec![s.files.clone()],
-            looks: x
-                .look
-                .map(|l| (id.to_string(), l.cube()))
-                .into_iter()
-                .collect(),
-            over: vec![],
-            abr: 192_000,
-            denoise: None,
         };
         let v = s.view;
         // a followed subject: its directions turned into the frame this export stitches in
@@ -1152,56 +1204,40 @@ impl Keep {
             let mk = l.hook.lock().unwrap_or_else(|e| e.into_inner()).take();
             fxs.push((mk.ok_or("the effect ran already")?)(g, w, h, fmt)?);
         }
-        let job = export::Job {
-            cut: export::Cut::Edit(Box::new(e)),
-            path: t.it.path.clone(),
-            out: match x.pano {
-                true => export::Out::Pano(x.w),
-                false => export::Out::Flat {
-                    w: x.w,
-                    h: x.h,
-                    view: Some(Box::new(at)),
-                },
-            },
-            enc: match t.grab {
-                true => export::Enc::Jpeg(x.jq),
-                false => export::Enc::Video {
-                    codec: x.codec,
-                    deep: x.deep && x.codec == Codec::H265,
-                    rate: x
-                        .qp
-                        .map_or(Rate::Cbr((x.mbps as f64 * 1e6) as u64), Rate::Qp),
-                    gop: ((fps.num + fps.den / 2) / fps.den).max(1),
-                },
-            },
-            raft: x.raft,
-            colour: x.colour.then_some(0.1),
-            stab,
-            fx: match fxs.len() {
-                0 => None,
-                1 => fxs.pop(),
-                _ => Some(Box::new(move |f: export::Fx| {
-                    let export::Fx { enc, tex, k, t } = f;
-                    for h in &mut fxs {
-                        h(export::Fx {
-                            enc: &mut *enc,
-                            tex,
-                            k,
-                            t,
-                        });
-                    }
-                })),
-            },
-            flat,
+        let fx: Option<export::Hook> = match fxs.len() {
+            0 => None,
+            1 => fxs.pop(),
+            _ => Some(Box::new(move |f: export::Fx| {
+                let export::Fx { enc, tex, k, t } = f;
+                for h in &mut fxs {
+                    h(export::Fx {
+                        enc: &mut *enc,
+                        tex,
+                        k,
+                        t,
+                    });
+                }
+            })),
         };
+        let path = t.it.path.clone();
+        let (job, _) = clip_job(&s.files, s.dur, src, x, [a, b], t.grab, at, path, fx, flat);
+        let d = t.dest.lock().unwrap_or_else(|e| e.into_inner()).take();
         let (it, mut last) = (&t.it, Instant::now());
-        export::run(g, cx, &mut self.raft, job, &it.stop, &mut |p| {
-            it.set(St::Run(p));
-            if last.elapsed().as_millis() >= 100 {
-                last = Instant::now();
-                ctx.request_repaint();
-            }
-        })
+        export::run_into(
+            g,
+            cx,
+            &mut self.raft,
+            job,
+            d.unwrap_or_default(),
+            &it.stop,
+            &mut |p| {
+                it.set(St::Run(p));
+                if last.elapsed().as_millis() >= 100 {
+                    last = Instant::now();
+                    ctx.request_repaint();
+                }
+            },
+        )
     }
 
     /// An editor timeline: its cuts, speeds, freeze frames, views (flat output), looks and soundtrack through
@@ -1239,7 +1275,7 @@ impl Keep {
                 files: e.files.clone(),
                 looks: e.looks.clone(),
                 over: e.over.clone(),
-                abr: 192_000,
+                abr: ABR,
                 denoise: e.denoise,
             })),
             path: t.it.path.clone(),

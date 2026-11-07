@@ -3,10 +3,10 @@
 //! thumbnails, the download queue, the camera commands, mounted cards) and the capture worker (`capture`: mode,
 //! settings and shutter on that session, from the camera's `/CONF`). Under them: the album's grouping and thumbnail
 //! cache (`album`), the download queue (`dl`), mounted cards (`disk`), `/CONF` (`conf`), a recording's files
-//! (`work`), the config, cache and video folders (`dirs`), App Nap (`awake`). The commands that change the camera
-//! check what they may do in the workers (no delete while recording, `/CONF`'s allowed values, the 5 % battery rule,
-//! an explicit start or stop), so every host gets the same guards. Linux and macOS; Windows type-checks (no cards
-//! found, the camera clock left alone).
+//! (`work`), the config, cache and video folders (`dirs`), App Nap and idle sleep (`awake`). The commands that change
+//! the camera check what they may do in the workers (no delete while recording, `/CONF`'s allowed values, the 5 %
+//! battery rule, an explicit start or stop), so every host gets the same guards. Linux and macOS; Windows type-checks
+//! (no cards found, the camera clock left alone).
 
 pub mod album;
 pub mod awake;

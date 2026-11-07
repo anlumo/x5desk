@@ -362,6 +362,11 @@ impl Decoder {
         }
     }
 
+    /// Frames that showed the frame before them (`failed`), as both backends answer.
+    pub fn failed(&self) -> u64 {
+        self.failed
+    }
+
     /// Decoding restarts at the next access unit, a random access point (a seek), as in a new decoder: the session is
     /// made anew and the DPB emptied. An H.265 CRA there is handled as a BLA (HandleCraAsBlaFlag): its RASL pictures,
     /// which reference pictures before it, are `Error::Skip`. So are the pictures shown before an H.264 non-IDR I

@@ -1,6 +1,6 @@
 //! The MCP side of a host: one [`Conn`] per client, an rmcp `ServerHandler` over the shared host. The tools are a
 //! table ([`TOOLS`]: name, tier, description, input schema, annotations); the capture tools and the camera's file
-//! writes are in [`capture`]. `tools/list` lists those of the enabled
+//! writes are in [`capture`], the GPU tools and the render jobs in [`render`]. `tools/list` lists those of the enabled
 //! tiers (a connection's own `--tiers` narrowing them: the hosting process's `stdio`); `tools/call` checks the tier
 //! again (a client's list can be stale), runs the tool and logs the call. A tool's
 //! failure is a tool result with `isError` (the model reads it), an unknown tool a protocol error. Results are JSON
@@ -10,9 +10,10 @@
 use crate::{
     config::{Tier, Tiers},
     host::{Host, Shared, State, capturing},
-    job::{self, Job, Prog},
+    job::{self, Job, Prog, Which},
     log::utc,
     paths,
+    render::{GpuSt, NO_GPU, panicked},
 };
 use cam::{
     album::{self, Item, Kind, View},
@@ -36,12 +37,14 @@ use serde_json::{Value, json};
 use std::{
     collections::HashSet,
     net::IpAddr,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 mod capture;
+pub(crate) mod render;
 
 use capture::{DeleteArgs, FavArgs, ModeArgs, PhotoArgs, RecordArgs, SetArgs};
 
@@ -96,6 +99,10 @@ const OFF: &str = "x5desk (Insta360 X5 camera control) has no tools enabled. The
                    camera and capture; `delete` and `untested` only by name). Enabled tiers show up here without a \
                    restart.";
 
+/// What the instructions add with a GPU backend.
+const RENDERS: &str = " Stills and exports of X5 recordings: catalog, then render_still or export, then job_wait; \
+                       photos: later.";
+
 /// A tool: name, tier, description, input schema, annotations.
 pub struct Def {
     /// the tool's name (API: kept)
@@ -107,6 +114,8 @@ pub struct Def {
     schema: fn() -> Arc<JsonObject>,
     /// read only; else destructive, idempotent
     ann: Option<(bool, bool)>,
+    /// needs the GPU backend: listed only with one ([`crate::render::Backend`])
+    pub gpu: bool,
 }
 
 fn input<T: JsonSchema + 'static>() -> Arc<JsonObject> {
@@ -163,17 +172,35 @@ struct PathArgs {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct JobArgs {
-    /// a job handle (`<host>-<n>`) as album_download returned it
+    /// a job handle (`<host>-<n>`) as album_download, render_still or export returned it
     job: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct WaitArgs {
-    /// a job handle (`<host>-<n>`) as album_download returned it
+    /// a job handle (`<host>-<n>`) as album_download, render_still or export returned it
     job: String,
     /// seconds to wait at most (default 30, at most 300)
     wait_s: Option<f64>,
+}
+
+/// `job_list` arguments.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct JobListArgs {
+    /// only downloads, exports or stills
+    kind: Option<JobKind>,
+    /// how many, newest first (default 50, at most 500)
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema, Clone, Copy, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum JobKind {
+    Download,
+    Export,
+    Still,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -203,6 +230,7 @@ pub const TOOLS: &[Def] = &[
                downloads go) and the read roots (what file_info may read).",
         schema: schema_for_empty_input,
         ann: None,
+        gpu: false,
     },
     Def {
         name: "camera_status",
@@ -211,6 +239,7 @@ pub const TOOLS: &[Def] = &[
                the album's source, mounted cards, recent notes.",
         schema: schema_for_empty_input,
         ann: None,
+        gpu: false,
     },
     Def {
         name: "album_list",
@@ -220,6 +249,7 @@ pub const TOOLS: &[Def] = &[
                one. Needs camera_connect or card_open first.",
         schema: input::<ListArgs>,
         ann: None,
+        gpu: false,
     },
     Def {
         name: "album_thumbnail",
@@ -227,6 +257,7 @@ pub const TOOLS: &[Def] = &[
         desc: "An album item's thumbnail (JPEG, 320 x 160 equirectangular) by its key from album_list.",
         schema: input::<KeyArgs>,
         ann: None,
+        gpu: false,
     },
     Def {
         name: "capture_status",
@@ -237,6 +268,7 @@ pub const TOOLS: &[Def] = &[
                and video time, temperature, recent capture notes. Needs the camera connected (camera_connect).",
         schema: schema_for_empty_input,
         ann: None,
+        gpu: false,
     },
     Def {
         name: "card_list",
@@ -244,6 +276,7 @@ pub const TOOLS: &[Def] = &[
         desc: "Mounted X5 cards (the camera in U-disk mode, or its card in a reader) and which one the album shows.",
         schema: schema_for_empty_input,
         ann: None,
+        gpu: false,
     },
     Def {
         name: "card_open",
@@ -251,6 +284,7 @@ pub const TOOLS: &[Def] = &[
         desc: "Shows a mounted card (its root from card_list) in the album instead of the camera.",
         schema: input::<PathArgs>,
         ann: None,
+        gpu: false,
     },
     Def {
         name: "card_close",
@@ -258,6 +292,7 @@ pub const TOOLS: &[Def] = &[
         desc: "Shows the camera's files in the album again instead of a card.",
         schema: schema_for_empty_input,
         ann: None,
+        gpu: false,
     },
     Def {
         name: "file_info",
@@ -266,29 +301,46 @@ pub const TOOLS: &[Def] = &[
                file (insv, insp, lrv, mp4, jpg, dng) under the read roots (status lists them).",
         schema: input::<PathArgs>,
         ann: None,
+        gpu: false,
     },
     Def {
         name: "job_status",
         tier: Tier::Read,
-        desc: "A job's state and progress per file. A file a later album_download started again (it had stopped, \
-               failed, or finished and gone) shows as it was then: the new transfer is that job's.",
+        desc: "A job's state and progress: per file for downloads (a file a later album_download started again, as \
+               it had stopped, failed, or finished and gone, shows as it was then: the new transfer is that job's), \
+               in frames for renders (render_still, export), with their settings.",
         schema: input::<JobArgs>,
         ann: None,
+        gpu: false,
     },
     Def {
         name: "job_list",
         tier: Tier::Read,
-        desc: "The jobs and their states: this host's and those kept from earlier hosts (every unfinished one and \
-               the newest 100), under their handles.",
-        schema: schema_for_empty_input,
+        desc: "The jobs and their states, newest first: this host's and those kept from earlier hosts (every \
+               unfinished one and the newest 100 downloads and 100 renders), under their handles; kind and limit \
+               narrow it. Render rows are short: job_status has the rest.",
+        schema: input::<JobListArgs>,
         ann: None,
+        gpu: false,
     },
     Def {
         name: "job_wait",
         tier: Tier::Read,
-        desc: "Waits until a job is finished (or wait_s passed), with progress notifications; returns its state.",
+        desc: "Waits until a job is finished (or wait_s passed), with progress notifications; returns its state. A \
+               done still comes with its image.",
         schema: input::<WaitArgs>,
         ann: None,
+        gpu: false,
+    },
+    Def {
+        name: "catalog",
+        tier: Tier::Read,
+        desc: "What render_still and export accept: presets, sizes, codecs, frame rates, looks, adjustments, \
+               stabilisation, projections, defaults, what agents can't do yet, and the GPU's state and limits (it \
+               starts with the first render_still or export).",
+        schema: schema_for_empty_input,
+        ann: None,
+        gpu: true,
     },
     Def {
         name: "album_download",
@@ -300,15 +352,42 @@ pub const TOOLS: &[Def] = &[
                the camera once it is connected (camera_connect), from a card at once while it is mounted.",
         schema: input::<DownloadArgs>,
         ann: Some((false, false)),
+        gpu: false,
     },
     Def {
         name: "job_cancel",
         tier: Tier::Local,
-        desc: "Stops a job's downloads, but not those another uncancelled job of the same items shares nor those a \
-               later album_download started again (that job's now). Their partial files stay, so downloading the \
-               items again resumes them, also in a later host.",
+        desc: "Stops a job. A download's files, but not those another uncancelled job of the same items shares nor \
+               those a later album_download started again (that job's now): their partial files stay, so \
+               downloading the items again resumes them, also in a later host. A render's (render_still, export) \
+               partial file is removed: cancelled means no file.",
         schema: input::<JobArgs>,
         ann: Some((false, true)),
+        gpu: false,
+    },
+    Def {
+        name: "render_still",
+        tier: Tier::Local,
+        desc: "Renders one frame of an X5 recording (a path under the read roots) to a JPEG in the agent folder or a \
+               subfolder, never over a file (names in use are numbered): the 360 sphere (with GPano metadata) or a \
+               flat view. Waits up to wait_s and answers with the file and a preview image; a longer render \
+               answers a job that job_wait finishes with the image. job_cancel stops it and leaves no file. Photos \
+               (.insp): later.",
+        schema: input::<render::StillArgs>,
+        ann: Some((false, false)),
+        gpu: true,
+    },
+    Def {
+        name: "export",
+        tier: Tier::Local,
+        desc: "Exports an X5 recording (a path under the read roots) to an MP4 in the agent folder or a subfolder \
+               of it, never over a file (names in use are numbered): a catalog preset, or its settings changed, \
+               over the whole clip or start_s-end_s. Answers a job at once: follow it with job_wait, stop it with \
+               job_cancel (no file is left). Exports end with this MCP server; they don't carry over. A picture \
+               that can't be decoded fails the export unless allow_frozen.",
+        schema: input::<render::ExportArgs>,
+        ann: Some((false, false)),
+        gpu: true,
     },
     Def {
         name: "camera_connect",
@@ -319,6 +398,7 @@ pub const TOOLS: &[Def] = &[
                shows the camera's files. Fails while another app (the x5desk window, the phone app) holds the camera.",
         schema: input::<ConnectArgs>,
         ann: Some((false, true)),
+        gpu: false,
     },
     Def {
         name: "camera_release",
@@ -327,6 +407,7 @@ pub const TOOLS: &[Def] = &[
                connect.",
         schema: schema_for_empty_input,
         ann: Some((false, true)),
+        gpu: false,
     },
     Def {
         name: "capture_mode",
@@ -336,6 +417,7 @@ pub const TOOLS: &[Def] = &[
                agents.",
         schema: input::<ModeArgs>,
         ann: Some((false, true)),
+        gpu: false,
     },
     Def {
         name: "capture_set",
@@ -345,6 +427,7 @@ pub const TOOLS: &[Def] = &[
                X5 need the user's `untested` tier.",
         schema: input::<SetArgs>,
         ann: Some((false, true)),
+        gpu: false,
     },
     Def {
         name: "capture_photo",
@@ -354,16 +437,19 @@ pub const TOOLS: &[Def] = &[
                downloads it) and whether the album lists it. Not idempotent: each call takes one.",
         schema: input::<PhotoArgs>,
         ann: Some((false, false)),
+        gpu: false,
     },
     Def {
         name: "capture_record",
         tier: Tier::Camera,
         desc: "Starts or stops a recording or timelapse of the current video mode, or waits for the camera to stop \
                capturing. start with seconds (1-600): the host stops it then, and up to 45 s the call waits and \
-               answers the clip. stop answers the clip's album key. A recording this host started stops when the \
-               host ends (status names the host).",
+               answers the clip; refused while this host renders (render_still, export). stop answers the clip's \
+               album key. A recording this host started stops when the host ends (status names the host); a crash \
+               of this host leaves an untimed one running: capture_record stop ends it.",
         schema: input::<RecordArgs>,
         ann: Some((false, false)),
+        gpu: false,
     },
     Def {
         name: "capture_mark",
@@ -371,6 +457,7 @@ pub const TOOLS: &[Def] = &[
         desc: "Marks a highlight in the running recording (modes with highlight marks), at the time it has run.",
         schema: schema_for_empty_input,
         ann: Some((false, false)),
+        gpu: false,
     },
     Def {
         name: "camera_favourite",
@@ -379,6 +466,7 @@ pub const TOOLS: &[Def] = &[
                X5 (firmware v1.13.21) refused it in every form tried.",
         schema: input::<FavArgs>,
         ann: Some((false, true)),
+        gpu: false,
     },
     Def {
         name: "camera_delete",
@@ -389,8 +477,16 @@ pub const TOOLS: &[Def] = &[
                those not verified. Needs the camera connected (camera tier).",
         schema: input::<DeleteArgs>,
         ann: Some((true, false)),
+        gpu: false,
     },
 ];
+
+/// The tools `tools/list` lists for tiers `t`; the GPU's only with a backend (`gpu`).
+pub(crate) fn listed(t: Tiers, gpu: bool) -> impl Iterator<Item = &'static Def> {
+    TOOLS
+        .iter()
+        .filter(move |d| t.has(d.tier) && (gpu || !d.gpu))
+}
 
 fn args<T: DeserializeOwned>(a: JsonObject) -> Result<T, String> {
     serde_json::from_value(Value::Object(a)).map_err(|e| format!("arguments: {e}"))
@@ -567,6 +663,9 @@ enum Fit {
 /// one), past names in use, being written, queued, or `taken` in this call. A stopped download of the same file
 /// resumes under its name, and with one that does, the files the queue finished at that number are kept (a job
 /// cancelled between them); a finished item again goes past them. Names that are no safe file names are refused.
+/// Renders need no rule here: one makes its `<dst>.part` (`O_EXCL`) under `jobs` before it lets go of it, so
+/// [`paths::free`], called under `jobs`, numbers past every unfinished render; and render names never take a camera
+/// file's. Keep it so: a render reserving its `.part` after `jobs` is released would need one.
 fn place(
     q: &dl::Queue,
     dir: &Path,
@@ -660,6 +759,53 @@ fn job_dto(handle: String, j: &Job, p: &Prog, cam: bool, rec: bool) -> Value {
     })
 }
 
+/// The GPU's state as `status` shows it; never starts it.
+fn gpu(sh: &Shared) -> Value {
+    match &sh.render {
+        None => json!({ "state": "none", "note": NO_GPU }),
+        Some(r) => gpu_value(render::gpu_st(&**r), sh.gpu_at.get().copied()),
+    }
+}
+
+/// A GPU state as `status` and `catalog` show it; `started`: when this host's start found it up.
+fn gpu_value(st: GpuSt, started: Option<std::time::SystemTime>) -> Value {
+    match st {
+        GpuSt::Off => {
+            json!({ "state": "off", "note": "it starts with the first render_still or export" })
+        }
+        GpuSt::Starting => json!({ "state": "starting" }),
+        GpuSt::Ready(i) => json!({
+            "state": "ready",
+            "adapter": i.adapter,
+            "backend": i.backend,
+            "driver": i.driver,
+            "decode": i.decode,
+            "encode": i.encode,
+            "max_texture": i.max_texture,
+            "raft": match i.raft {
+                None => json!({ "available": true }),
+                Some(w) => json!({ "available": false, "why": w }),
+            },
+            "errors": i.errors,
+            "suspect": i.suspect,
+            "wedged": i.wedged,
+            "checked_ms": i.ms,
+            "started": started.map(utc),
+        }),
+        GpuSt::Failed {
+            why,
+            step,
+            retry_in,
+        } => json!({
+            "state": "failed",
+            "why": why,
+            "step": step,
+            "retry_in_s": retry_in.map(|d| d.as_secs()),
+        }),
+        GpuSt::Dead(why) => json!({ "state": "dead", "why": why }),
+    }
+}
+
 /// The local copies of an item's files, when all are there: finished downloads of the queue, else by name in the
 /// agent folder (not for a name that is no safe file name).
 fn local(it: &Item, q: &dl::Queue, agent: &Path) -> Option<Vec<String>> {
@@ -676,13 +822,17 @@ fn local(it: &Item, q: &dl::Queue, agent: &Path) -> Option<Vec<String>> {
         .collect()
 }
 
-fn item(it: &Item, have: Option<Vec<String>>) -> Value {
+/// An album item; `card`: the root of the card it is on (its first file's absolute path then in `path`, for the tools
+/// that read local files).
+fn item(it: &Item, have: Option<Vec<String>>, card: Option<&Path>) -> Value {
     let files: Vec<&str> = it.uris.iter().map(|u| album::name(u)).collect();
+    let path = card.zip(it.uris.first());
     json!({
         "key": it.key,
         "kind": kind(it.kind),
         "files": files,
         "uris": it.uris,
+        "path": path.map(|(r, u)| paths::shown(&r.join(u.trim_start_matches('/')))),
         "size_bytes": it.size,
         "date": (it.date > 0).then(|| album::date(it.date)),
         "duration_ms": it.ms,
@@ -786,14 +936,16 @@ impl Conn {
         let roots: Vec<String> = sh.read_roots().iter().map(|r| paths::shown(r)).collect();
         let (run, wait, fin) = {
             let (j, q) = (sh.jobs.lock().unwrap(), sh.q.lock().unwrap());
-            (j.v.iter())
-                .map(|j| j.prog(&q))
-                .fold((0, 0, 0), |(r, w, f), p| match p.state {
+            let dl = j.v.iter().map(|j| j.prog(&q).state);
+            dl.chain((0..j.r.v.len()).map(|i| j.r.prog(i).state))
+                .fold((0, 0, 0), |(r, w, f), p| match p {
                     "running" => (r + 1, w, f),
                     "queued" => (r, w + 1, f),
                     _ => (r, w, f + 1),
                 })
         };
+        // the backend asked with no lock held
+        let g = gpu(sh);
         let s = sh.st.lock().unwrap();
         let t = self.tiers();
         let next = match (s.info.conn, &s.info.src) {
@@ -821,6 +973,7 @@ impl Conn {
             "jobs": { "running": run, "queued": wait, "finished": fin },
             "agent_folder": sh.agent.display().to_string(),
             "read_roots": roots,
+            "gpu": g,
             "next": next,
         }))
     }
@@ -840,7 +993,7 @@ impl Conn {
         let sh = self.sh();
         let q = sh.q.lock().unwrap();
         let v: Vec<Value> = (idx.iter().skip(off).take(n))
-            .map(|&i| item(&items[i], local(&items[i], &q, &sh.agent)))
+            .map(|&i| item(&items[i], local(&items[i], &q, &sh.agent), src.as_deref()))
             .collect();
         drop(q);
         let busy = sh.st.lock().unwrap().info.busy;
@@ -945,29 +1098,58 @@ impl Conn {
         ok(v)
     }
 
-    /// A job's state, its handle and whether the camera is connected.
+    /// A job's state, of either kind, by its handle.
     fn job(&self, h: &str) -> Result<Value, String> {
         let sh = self.sh();
         let (cam, rec) = {
             let s = sh.st.lock().unwrap();
             (s.info.conn == Link::On, s.info.busy)
         };
-        let (jobs, q) = (sh.jobs.lock().unwrap(), sh.q.lock().unwrap());
-        let j = jobs.find(h)?;
-        Ok(job_dto(j.h.clone(), j, &j.prog(&q), cam, rec))
+        let jobs = sh.jobs.lock().unwrap();
+        Ok(match jobs.which(h)? {
+            Which::Dl(i) => {
+                let (j, q) = (&jobs.v[i], sh.q.lock().unwrap());
+                job_dto(j.h.clone(), j, &j.prog(&q), cam, rec)
+            }
+            Which::Render(i) => render::render_dto(&jobs.r.v[i], &jobs.r.prog(i)),
+        })
     }
 
-    fn job_list(&self) -> Result<CallToolResult, String> {
+    /// The jobs of `kind` (all: none), newest first, at most `limit`: downloads in full, renders in short rows.
+    fn job_list(&self, a: JobListArgs) -> Result<CallToolResult, String> {
         let sh = self.sh();
         let (cam, rec) = {
             let s = sh.st.lock().unwrap();
             (s.info.conn == Link::On, s.info.busy)
         };
         let (jobs, q) = (sh.jobs.lock().unwrap(), sh.q.lock().unwrap());
-        let v: Vec<Value> = (jobs.v.iter())
-            .map(|j| job_dto(j.h.clone(), j, &j.prog(&q), cam, rec))
+        let want = |k: JobKind| a.kind.is_none_or(|w| w == k);
+        let mut all: Vec<(std::time::SystemTime, Which)> = vec![];
+        if want(JobKind::Download) {
+            all.extend(jobs.v.iter().enumerate().map(|(i, j)| (j.at, Which::Dl(i))))
+        }
+        for (i, r) in jobs.r.v.iter().enumerate() {
+            let k = match r.kind {
+                crate::render::Kind::Export => JobKind::Export,
+                crate::render::Kind::Still => JobKind::Still,
+            };
+            if want(k) {
+                all.push((r.at, Which::Render(i)))
+            }
+        }
+        // oldest first, those of one time as made; then the other way round
+        all.sort_by_key(|x| x.0);
+        let n = all.len();
+        let v: Vec<Value> = (all.iter().rev().take(a.limit.unwrap_or(50).clamp(1, 500)))
+            .map(|(_, w)| match *w {
+                Which::Dl(i) => {
+                    let j = &jobs.v[i];
+                    job_dto(j.h.clone(), j, &j.prog(&q), cam, rec)
+                }
+                Which::Render(i) => render::row(&jobs.r.v[i], &jobs.r.prog(i)),
+            })
             .collect();
-        ok(json!({ "jobs": v }))
+        ok(json!({ "jobs": v, "total": n }))
     }
 
     async fn job_wait(
@@ -977,6 +1159,10 @@ impl Conn {
     ) -> Result<CallToolResult, String> {
         let sh = self.sh();
         let wait = Duration::from_secs_f64(a.wait_s.unwrap_or(30.0).clamp(0.0, 300.0));
+        let w = sh.jobs.lock().unwrap().which(&a.job)?;
+        if let Which::Render(_) = w {
+            return self.render_wait(&a.job, wait, ctx).await;
+        }
         let (t0, tok) = (Instant::now(), ctx.meta.get_progress_token());
         let (mut sent, mut last) = (t0, -1.0);
         loop {
@@ -1090,11 +1276,14 @@ impl Conn {
 
     async fn job_cancel(&self, a: JobArgs) -> Result<CallToolResult, String> {
         let sh = self.sh();
+        let w = sh.jobs.lock().unwrap().which(&a.job)?;
+        let Which::Dl(i) = w else {
+            return self.render_cancel(&a.job).await;
+        };
         // its own downloads stopped, but none another job still wants (two calls for one item share them) nor one a
-        // later job started again
+        // later job started again (`i` holds: a running host only adds jobs)
         let cut: Vec<PathBuf> = {
             let mut jobs = sh.jobs.lock().unwrap();
-            let i = jobs.at(&a.job)?;
             let cut = jobs.cut(i);
             let mut q = sh.q.lock().unwrap();
             for d in &cut {
@@ -1234,7 +1423,7 @@ impl Conn {
             "card_close" => self.card_close().await,
             "file_info" => self.file_info(args(a)?).await,
             "job_status" => ok(self.job(&args::<JobArgs>(a)?.job)?),
-            "job_list" => self.job_list(),
+            "job_list" => self.job_list(args(a)?),
             "job_wait" => self.job_wait(args(a)?, ctx).await,
             "album_download" => self.album_download(args(a)?).await,
             "job_cancel" => self.job_cancel(args(a)?).await,
@@ -1248,6 +1437,9 @@ impl Conn {
             "capture_mark" => self.capture_mark().await,
             "camera_favourite" => self.camera_favourite(args(a)?).await,
             "camera_delete" => self.camera_delete(args(a)?).await,
+            "catalog" => self.catalog(),
+            "render_still" => self.render_still(a, ctx).await,
+            "export" => self.export(a).await,
             _ => Err(format!("{name}: not implemented")),
         }
     }
@@ -1267,7 +1459,12 @@ impl ServerHandler for Conn {
                  connect the camera (camera_connect) or open a card (card_open), list the album (album_list), and \
                  download into the agent folder (album_download, then job_wait). With the camera tier: \
                  capture_status, then capture_mode, capture_set, capture_photo, capture_record. The camera's clock \
-                 is never set."
+                 is never set.{}",
+                if self.sh().render.is_some() {
+                    RENDERS
+                } else {
+                    ""
+                }
             ),
         };
         ServerConfig::new(
@@ -1285,13 +1482,9 @@ impl ServerHandler for Conn {
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let t = self.tiers();
+        let gpu = self.sh().render.is_some();
         Ok(ListToolsResult::with_all_items(
-            TOOLS
-                .iter()
-                .filter(|d| t.has(d.tier))
-                .map(Def::tool)
-                .collect(),
+            listed(self.tiers(), gpu).map(Def::tool).collect(),
         ))
     }
 
@@ -1307,6 +1500,7 @@ impl ServerHandler for Conn {
                 None,
             ));
         };
+        let gpu = self.sh().render.is_some();
         let a = req.arguments.unwrap_or_default();
         let sum = serde_json::to_string(&a).unwrap_or_default();
         let t0 = Instant::now();
@@ -1320,6 +1514,7 @@ impl ServerHandler for Conn {
             let t = self.tiers();
             let narrow = self.narrow.map_or(call, |n| n.and(call));
             match (t.has(d.tier), Some(narrow).filter(|n| !n.has(d.tier))) {
+                _ if d.gpu && !gpu => Err(format!("{name}: {NO_GPU}")),
                 (true, _) => self.run(&name, a, &ctx).await,
                 (false, Some(n)) => Err(left_out(&name, d.tier, n)),
                 (false, _) => Err(format!(
@@ -1402,6 +1597,23 @@ mod tests {
             TOOLS.iter().all(|d| d.tier != Tier::Untested),
             "untested has no tools"
         );
+        // the GPU tools: catalog read-only, the renders local, both taking a recording's path
+        let gpu: Vec<(&str, Tier)> = (TOOLS.iter().filter(|d| d.gpu))
+            .map(|d| (d.name, d.tier))
+            .collect();
+        assert_eq!(
+            gpu,
+            [
+                ("catalog", Tier::Read),
+                ("render_still", Tier::Local),
+                ("export", Tier::Local)
+            ]
+        );
+        for n in ["render_still", "export"] {
+            let t = TOOLS.iter().find(|d| d.name == n).unwrap().tool();
+            assert_eq!(t.input_schema["required"], json!(["path"]), "{n}");
+            assert_eq!(t.annotations.unwrap().destructive_hint, Some(false), "{n}");
+        }
         let d = TOOLS
             .iter()
             .find(|d| d.name == "camera_delete")
@@ -1425,6 +1637,83 @@ mod tests {
             "connect: failed to open device (error 2)"
         );
         assert_eq!(f("connect: timeout"), "connect: timeout");
+    }
+
+    /// Without a backend the GPU tools are neither listed nor run (Windows, mcp's tests); with one, catalog is in the
+    /// read tier and render_still and export in the local tier, the instructions name them, and status shows the GPU
+    /// without starting it (the fake's start panics).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gpu_tools() {
+        use crate::{
+            Opts,
+            config::Source,
+            render::{Backend, Render, tests::Fake},
+        };
+        use rmcp::ServiceExt;
+        const GPU: [&str; 3] = ["catalog", "render_still", "export"];
+        let names = |t: &str, gpu| -> Vec<&str> {
+            listed(Tiers::parse(t).unwrap(), gpu)
+                .map(|d| d.name)
+                .collect()
+        };
+        assert!(
+            names("read,local,camera", false)
+                .iter()
+                .all(|n| !GPU.contains(n))
+        );
+        assert!(TOOLS.iter().filter(|d| d.gpu).map(|d| d.name).eq(GPU));
+        let r = names("read", true);
+        assert!(
+            r.contains(&"catalog") && !r.contains(&"render_still"),
+            "{r:?}"
+        );
+        let l = names("read,local", true);
+        assert_eq!(l.len(), names("read,local", false).len() + 3, "{l:?}");
+        for gpu in [false, true] {
+            let render = gpu.then(|| Arc::new(Fake::Ok) as Arc<dyn Render>);
+            let h = Host::new(Opts {
+                sim: Some(Default::default()),
+                tiers: Some(Source::Fixed(Tiers::parse("read,local").unwrap())),
+                backend: Backend { render },
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            let (up_c, up_s) = tokio::io::duplex(1 << 16);
+            let (down_s, down_c) = tokio::io::duplex(1 << 16);
+            let hh = h.clone();
+            tokio::spawn(async move { hh.serve(up_s, down_s, "test", None).await });
+            let c = ().serve((down_c, up_c)).await.unwrap();
+            let mut got: Vec<String> = (c.list_all_tools().await.unwrap().into_iter())
+                .map(|t| t.name.to_string())
+                .collect();
+            got.sort();
+            let mut want = names("read,local", gpu);
+            want.sort();
+            assert_eq!(got, want, "gpu {gpu}");
+            let ins = c.peer_info().unwrap().instructions.clone().unwrap();
+            assert_eq!(ins.contains("render_still"), gpu, "{ins}");
+            let call = |n: &str| {
+                let p = CallToolRequestParams::new(n.to_string());
+                c.call_tool(p)
+            };
+            let st = call("status").await.unwrap().structured_content.unwrap();
+            let e = call("render_still").await.unwrap();
+            let t = e.content[0].as_text().unwrap().text.clone();
+            assert_eq!(e.is_error, Some(true));
+            match gpu {
+                false => {
+                    assert_eq!(st["gpu"]["state"], "none", "{st}");
+                    assert_eq!(t, format!("render_still: {NO_GPU}"));
+                }
+                true => {
+                    assert_eq!(st["gpu"]["state"], "off", "{st}");
+                    assert!(t.contains("missing field `path`"), "{t}");
+                }
+            }
+            c.cancel().await.unwrap();
+            h.shutdown().await;
+        }
     }
 
     #[test]

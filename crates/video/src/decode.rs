@@ -324,6 +324,45 @@ impl std::ops::Deref for Decoder {
     }
 }
 
+/// The driver's decode capabilities for profile `pr` (H.265 when `h265`, else H.264), without a session: what
+/// `Decoder::new` and `check` ask. The generic ones and the decode flags; the codec's own aren't used.
+pub(crate) unsafe fn caps(
+    g: &Gpu,
+    pr: &vk::VideoProfileInfoKHR,
+    h265: bool,
+) -> Result<(
+    vk::VideoCapabilitiesKHR<'static>,
+    vk::VideoDecodeCapabilityFlagsKHR,
+)> {
+    let (mut c5, mut c4) = (
+        vk::VideoDecodeH265CapabilitiesKHR::default(),
+        vk::VideoDecodeH264CapabilitiesKHR::default(),
+    );
+    let mut dc = vk::VideoDecodeCapabilitiesKHR::default();
+    let mut caps = vk::VideoCapabilitiesKHR::default();
+    dc.p_next = match h265 {
+        true => &mut c5 as *mut _ as *mut c_void,
+        false => &mut c4 as *mut _ as *mut c_void,
+    };
+    caps.p_next = &mut dc as *mut _ as *mut c_void;
+    unsafe { (g.vqi.fp().get_physical_device_video_capabilities_khr)(g.pd, pr, &mut caps) }
+        .result()?;
+    caps.p_next = ptr::null_mut();
+    Ok((caps, dc.flags))
+}
+
+/// What a decoder here needs of them: DPB and output images distinct (not only coinciding, Intel's mode) and
+/// reference images apart.
+pub(crate) fn distinct(
+    caps: &vk::VideoCapabilitiesKHR,
+    dc: vk::VideoDecodeCapabilityFlagsKHR,
+) -> bool {
+    dc.contains(vk::VideoDecodeCapabilityFlagsKHR::DPB_AND_OUTPUT_DISTINCT)
+        && caps
+            .flags
+            .contains(vk::VideoCapabilityFlagsKHR::SEPARATE_REFERENCE_IMAGES)
+}
+
 fn barrier(
     img: vk::Image,
     from: vk::ImageLayout,
@@ -439,27 +478,8 @@ impl Decoder {
             let list = vk::VideoProfileListInfoKHR::default().profiles(&pr);
             let list = &list as *const _ as *const c_void;
 
-            let (mut c5, mut c4) = (
-                vk::VideoDecodeH265CapabilitiesKHR::default(),
-                vk::VideoDecodeH264CapabilitiesKHR::default(),
-            );
-            let mut dc = vk::VideoDecodeCapabilitiesKHR::default();
-            let mut caps = vk::VideoCapabilitiesKHR::default();
-            dc.p_next = if h265 {
-                &mut c5 as *mut _ as *mut c_void
-            } else {
-                &mut c4 as *mut _ as *mut c_void
-            };
-            caps.p_next = &mut dc as *mut _ as *mut c_void;
-            (g.vqi.fp().get_physical_device_video_capabilities_khr)(g.pd, &pr[0], &mut caps)
-                .result()?;
-            if !dc
-                .flags
-                .contains(vk::VideoDecodeCapabilityFlagsKHR::DPB_AND_OUTPUT_DISTINCT)
-                || !caps
-                    .flags
-                    .contains(vk::VideoCapabilityFlagsKHR::SEPARATE_REFERENCE_IMAGES)
-            {
+            let (caps, dc) = caps(g, &pr[0], h265)?;
+            if !distinct(&caps, dc) {
                 return Err(Bad("the driver lacks distinct DPB / output images"));
             }
             if w > caps.max_coded_extent.width || h > caps.max_coded_extent.height {
@@ -811,6 +831,12 @@ impl Decoder {
         }
         self.params = p;
         Ok(())
+    }
+
+    /// Frames that showed the frame before them: none here, a picture that fails is an error (`decode`). macOS
+    /// conceals instead and counts them.
+    pub fn failed(&self) -> u64 {
+        0
     }
 
     /// Decoding restarts at the next access unit, a random access point (a seek), as in a new decoder: the session is
