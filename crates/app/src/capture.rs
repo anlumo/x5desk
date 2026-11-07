@@ -630,7 +630,7 @@ impl Capture {
                 }
                 self.web = Some(Arc::new(Mutex::new(w)));
             }
-            (Some(_), false) => self.web = None,
+            (Some(_), false) => self.web_off(),
             _ => {}
         }
         if self.timer.is_some_and(|t| Instant::now() >= t) {
@@ -643,23 +643,44 @@ impl Capture {
         }
     }
 
-    /// The test hook's statistics are printed (and the run may end); ready for a screenshot: a second of pictures
-    /// and, with a camera session, the worker's first report on it (it sends one only after reading the mode, its
-    /// values and `/CONF`, which may fail or be absent: a replayed camera without `conf=`).
+    /// Lets go of the Webcam Mode with its device free at once: the next stream's open fails while another handle
+    /// streams, and the Live screen's output may hold the source a pass longer.
+    fn web_off(&mut self) {
+        if let Some(w) = self.web.take() {
+            w.lock().unwrap().stop();
+        }
+    }
+
+    /// The test hook's statistics are printed (and the run may end); ready for a screenshot: a second of pictures (or
+    /// the Webcam Mode's error: none come after it) and, with a camera session, the worker's first report on it (it
+    /// sends one only after reading the mode, its values and `/CONF`, which may fail or be absent: a replayed camera
+    /// without `conf=`).
     pub fn idle(&self) -> bool {
         let shown = match self.src {
-            Src::Preview => self
-                .feed
-                .as_ref()
-                .map_or(0, |f| f.lock().unwrap().counts().dec),
-            Src::Webcam => self.web.as_ref().map_or(0, |w| w.lock().unwrap().taken()),
+            Src::Preview => {
+                (self.feed.as_ref()).is_some_and(|f| f.lock().unwrap().counts().dec > 30)
+            }
+            Src::Webcam => (self.web.as_ref()).is_some_and(|w| {
+                let w = w.lock().unwrap();
+                w.taken() > 30 || w.err().is_some()
+            }),
         };
         let stats = self.hook.as_ref().is_none_or(|h| h.stats.is_none()) || self.done;
         let cam = self.tap.lock().unwrap().cam.is_some();
-        (!self.want || shown > 30) && (!cam || self.st.on) && stats
+        (!self.want || shown) && (!cam || self.st.on) && stats
     }
 
-    /// Prints the statistics once `stats=` seconds of pictures went by (test hook).
+    /// The Webcam Mode's picture is flat (1920 × 1080; before its first picture: the size asked for), where views of
+    /// the 360 picture do not apply.
+    fn flat(&self) -> bool {
+        self.src == Src::Webcam
+            && (self.web.as_ref()).is_some_and(|w| match w.lock().unwrap().pano() {
+                Some(p) => !p,
+                None => matches!(self.web_in, webcam::Input::Uvc(w, h) if w != 2 * h),
+            })
+    }
+
+    /// Prints the statistics once `stats=` seconds of pictures went by, or the Webcam Mode failed (test hook).
     fn measure(&mut self) {
         let Some(secs) = self
             .hook
@@ -669,23 +690,28 @@ impl Capture {
         else {
             return;
         };
-        let (t0, r) = match self.src {
+        let due = |t: Option<Instant>| t.is_some_and(|t| t.elapsed().as_secs_f64() >= secs);
+        let (end, r) = match self.src {
             Src::Preview => match &self.feed {
                 Some(f) => {
                     let f = f.lock().unwrap();
-                    (f.stats.t0, f.report())
+                    (due(f.stats.t0), f.report())
                 }
                 None => return,
             },
+            // after an error no picture comes: the numbers so far, with it
             Src::Webcam => match &self.web {
                 Some(w) => {
                     let w = w.lock().unwrap();
-                    (w.t0, w.report())
+                    match w.err() {
+                        Some(e) => (true, format!("{}; {e}", w.report())),
+                        None => (due(w.t0), w.report()),
+                    }
                 }
                 None => return,
             },
         };
-        if t0.is_some_and(|t| t.elapsed().as_secs_f64() >= secs) {
+        if end {
             let c = self.st.off.map_or("no camera clock".into(), |o| {
                 format!("camera clock round trip {:.1} ms", o.1)
             });
@@ -701,18 +727,20 @@ impl Capture {
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| self.side(ui));
             });
-        let pv = self.src == Src::Preview;
+        let (pv, flat) = (self.src == Src::Preview, self.flat());
         egui::Panel::bottom("cap view").show(ui, |ui| {
             ui.add_space(3.0);
             ui.horizontal_wrapped(|ui| {
                 self.view(|l, v, lv| {
-                    for (x, name) in Look::ALL {
-                        if ui.selectable_label(*l == x, name).clicked() && *l != x {
-                            *l = x;
-                            *v = stitch::View {
-                                yaw: v.yaw,
-                                ..x.view()
-                            };
+                    if !flat {
+                        for (x, name) in Look::ALL {
+                            if ui.selectable_label(*l == x, name).clicked() && *l != x {
+                                *l = x;
+                                *v = stitch::View {
+                                    yaw: v.yaw,
+                                    ..x.view()
+                                };
+                            }
                         }
                     }
                     if pv {
@@ -777,7 +805,8 @@ impl Capture {
                         });
                 }
                 if w != self.web_in {
-                    (self.web_in, self.web) = (w, None);
+                    self.web_in = w;
+                    self.web_off();
                 }
             }
             let on = self.tap.lock().unwrap().cam.is_some();
@@ -809,7 +838,7 @@ impl Capture {
                 },
                 Src::Webcam => match &self.web_in {
                     webcam::Input::File(p) => format!("replaying {}", p.display()),
-                    _ => "The camera in Webcam Mode: on the X5, USB mode → Webcam Mode".into(),
+                    _ => "The camera in Webcam Mode: on the X5, USB mode, then Webcam Mode".into(),
                 },
             };
             ui.label(s);
@@ -823,9 +852,11 @@ impl Capture {
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 0.0, egui::Color32::BLACK);
         let ppp = ui.ctx().pixels_per_point();
+        // a flat picture is shown as it is: no view to fit or steer
+        let flat = self.flat();
         let tex = self.view(|l, v, _| {
-            let r = l.fit(rect);
-            (r, l.steer(ui, &resp, r, v))
+            let r = if flat { rect } else { l.fit(rect) };
+            (r, !flat && l.steer(ui, &resp, r, v))
         });
         let (mut lines, stats) = (vec![], self.stats);
         if let Some((r, dirty)) = tex {
@@ -848,7 +879,7 @@ impl Capture {
                     if w.pano().is_none() {
                         lines.push("Waiting for the Webcam Mode's picture…".into());
                     }
-                    (id, stats.then(|| w.report()), w.err())
+                    (id, stats.then(|| w.report()), w.err().or(w.note()))
                 }
             };
             if let Some(id) = id {

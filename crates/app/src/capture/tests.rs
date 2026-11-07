@@ -160,6 +160,23 @@ fn idle_without_conf() {
     );
 }
 
+/// Ready for a screenshot, its statistics printed, once the Webcam Mode failed (a capture file that is not there): no
+/// picture comes after an error.
+#[test]
+fn idle_webcam_error() {
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = Ctx::new(&g.device, &g.queue);
+    let h = Hook {
+        on: true,
+        webcam: Some(webcam::Input::File("/nonexistent/x5.mjpg".into())),
+        stats: Some(1.0),
+        ..Default::default()
+    };
+    let mut c = Capture::new(&g, &cx, &egui::Context::default(), Taps::default(), Some(h));
+    until(&mut c, 10.0, |c| c.idle());
+    assert!(c.done && c.web.as_ref().unwrap().lock().unwrap().err().is_some());
+}
+
 /// The replayed preview (sent in pairs, as the X5 does) as a live source: 10 s of a 30 fps output clock taking and
 /// drawing it as the Live screen's thread does, a 60 Hz viewer beside it. The clock takes every picture in turn, none
 /// dropped and none repeated but around a stall of this shared host; the viewer shows what the clock takes.
@@ -1324,4 +1341,194 @@ fn real_ilog() {
     );
     drop(r);
     assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// A RenderState on `g` for one frame of a screen without a window.
+fn render(g: &Gpu) -> RenderState {
+    let f = wgpu::TextureFormat::Bgra8Unorm;
+    RenderState {
+        adapter: g.adapter.clone(),
+        available_adapters: vec![],
+        instance: g.instance.clone(),
+        device: g.device.clone(),
+        queue: g.queue.clone(),
+        target_format: f,
+        renderer: Arc::new(egui::mutex::RwLock::new(eframe::egui_wgpu::Renderer::new(
+            &g.device,
+            f,
+            Default::default(),
+        ))),
+    }
+}
+
+/// The views of the 360 picture on offer in one frame of the screen (`ctx` with AccessKit on), by name.
+fn looks(c: &mut Capture, ctx: &egui::Context, rs: &RenderState) -> usize {
+    let raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 800.0),
+        )),
+        ..Default::default()
+    };
+    let mut o = ctx.run_ui(raw, |ui| c.ui(ui, rs));
+    o.textures_delta.clear();
+    let u = o.platform_output.accesskit_update.expect("AccessKit is on");
+    (Look::ALL.iter())
+        .filter(|(_, n)| u.nodes.iter().any(|(_, x)| x.label() == Some(n)))
+        .count()
+}
+
+/// Webcam Mode pictures replayed (`webcam::tests::synth`; skipped without ffmpeg): with a flat
+/// 1920 × 1080 one the screen offers none of the views of the 360 picture (they would do nothing to it), with a 2:1
+/// one all four. (A replay's size is known with its first picture; the camera's from the size asked: `real_webcam`.)
+#[test]
+fn webcam_looks() {
+    let t = crate::clip::tests::Tmp::new("webcam-looks");
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = Ctx::new(&g.device, &g.queue);
+    let (ctx, rs) = (egui::Context::default(), render(&g));
+    ctx.enable_accesskit();
+    for (w, h, n) in [(1920, 1080, 0), (2880, 1440, 4)] {
+        let Some(f) = webcam::tests::synth(&t.0, w, h, 3) else {
+            eprintln!("ffmpeg made no MJPEG: skipping");
+            return;
+        };
+        let hk = Hook {
+            on: true,
+            webcam: Some(webcam::Input::File(f)),
+            ..Default::default()
+        };
+        let mut c = Capture::new(
+            &g,
+            &cx,
+            &egui::Context::default(),
+            Taps::default(),
+            Some(hk),
+        );
+        // the screen's frames draw the viewer, which takes the pictures
+        let t0 = Instant::now();
+        while c
+            .web
+            .as_ref()
+            .is_none_or(|w| w.lock().unwrap().pano().is_none())
+        {
+            assert!(
+                t0.elapsed() < Duration::from_secs(10),
+                "{w} × {h}: no picture"
+            );
+            c.tick();
+            looks(&mut c, &ctx, &rs);
+            thread::sleep(Duration::from_millis(16));
+        }
+        let shown = looks(&mut c, &ctx, &rs);
+        println!("{w} × {h}: {shown} views on offer");
+        assert_eq!(shown, n);
+    }
+}
+
+/// The X5 in Webcam Mode (skipped without it; it shows whoever sits there: nothing of its pictures is kept): the
+/// screen's stream at 2880 × 1440 with the views of the 360 picture on offer, its size switched to 1920 × 1080 while
+/// the Live screen's output holds the source (as during one of its passes) with none on offer, stopped and started,
+/// and the device free for a new stream the moment the screen is gone.
+#[test]
+fn real_webcam() {
+    let Ok(dev) = media::uvc::Uvc::find() else {
+        eprintln!("no X5 in Webcam Mode: skipping");
+        return;
+    };
+    let _cam = webcam::CAM.lock().unwrap_or_else(|e| e.into_inner());
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = Ctx::new(&g.device, &g.queue);
+    let h = Hook {
+        on: true,
+        webcam: Some(webcam::Input::Uvc(2880, 1440)),
+        ..Default::default()
+    };
+    let mut c = Capture::new(&g, &cx, &egui::Context::default(), Taps::default(), Some(h));
+    let t = g.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: 640,
+            height: 360,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: crate::player::FMT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let tv = t.create_view(&Default::default());
+    let (ctx, rs) = (egui::Context::default(), render(&g));
+    ctx.enable_accesskit();
+    let looks = |c: &mut Capture| looks(c, &ctx, &rs);
+    // a viewer at 60 Hz until it showed `n` pictures: how long it took, the picture's shape
+    let show = |c: &mut Capture, n: u64, what: &str| {
+        let t0 = Instant::now();
+        loop {
+            c.tick();
+            let w = c.web.as_ref().unwrap();
+            let mut w = w.lock().unwrap();
+            w.show(&tv, [640, 360], false);
+            assert!(w.err().is_none(), "{what}: {:?}", w.err());
+            if w.shown >= n {
+                println!(
+                    "{what}: {n} pictures in {:.2} s; {}",
+                    t0.elapsed().as_secs_f64(),
+                    w.report()
+                );
+                return w.pano();
+            }
+            drop(w);
+            assert!(
+                t0.elapsed() < Duration::from_secs(10),
+                "{what}: {} pictures",
+                n
+            );
+            thread::sleep(Duration::from_millis(16));
+        }
+    };
+    assert_eq!(show(&mut c, 60, "2880 × 1440"), Some(true));
+    assert_eq!(looks(&mut c), 4);
+    // the size combo's switch, timed: the UI thread waits for the reader to stop
+    let size = |c: &mut Capture, w| {
+        let t0 = Instant::now();
+        c.web_in = w;
+        c.web_off();
+        t0.elapsed().as_secs_f64() * 1e3
+    };
+    let held = c.source(Src::Webcam).unwrap();
+    let ms = size(&mut c, webcam::Input::Uvc(1920, 1080));
+    println!("stopped in {ms:.0} ms");
+    // none from the switch on: the size asked for is flat
+    c.tick();
+    assert_eq!(looks(&mut c), 0);
+    assert_eq!(
+        show(&mut c, 60, "switched to 1920 × 1080 while held"),
+        Some(false)
+    );
+    assert_eq!(looks(&mut c), 0);
+    drop(held);
+    c.want = false;
+    c.tick();
+    assert!(c.web.is_none());
+    c.want = true;
+    assert_eq!(show(&mut c, 30, "stopped and started"), Some(false));
+    // switched back and forth within the camera's mode switch (no frames for ~1.7 s)
+    size(&mut c, webcam::Input::Uvc(2880, 1440));
+    c.tick();
+    thread::sleep(Duration::from_millis(300));
+    let ms = size(&mut c, webcam::Input::Uvc(1920, 1080));
+    println!("stopped within the camera's mode switch in {ms:.0} ms");
+    assert!(ms < 150.0);
+    assert_eq!(show(&mut c, 30, "switched twice"), Some(false));
+    let t0 = Instant::now();
+    drop(c);
+    let mut u = media::uvc::Uvc::open(&dev, 1920, 1080).unwrap();
+    assert!(u.next(&mut vec![], Duration::from_secs(5)).unwrap());
+    println!(
+        "screen gone, a new stream's first frame {:.2} s later",
+        t0.elapsed().as_secs_f64()
+    );
 }

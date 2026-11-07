@@ -437,7 +437,8 @@ impl Tx {
 
     /// Lays `x` (`ch` channels at the stream's rate, starting to play at `ns`) on the stream's timeline: a gap before
     /// it becomes silence, an overlap is cut off its start. Following the source's own audio, they have to exceed
-    /// `JUMP`; at the start of its audio they are exact.
+    /// `JUMP`; at the start of its audio they are exact (a packet cut off whole, heard before the stream started, is
+    /// none of it).
     fn pcm(&mut self, ns: u64, x: &[f32], ch: usize) {
         let (at, r, tol) = (self.next(), self.rate as u64, self.cont as u64 * JUMP);
         if ns > at + tol {
@@ -452,7 +453,7 @@ impl Tx {
             self.buf.extend([f[0], f[(ch > 1) as usize]]);
         }
         self.put(self.buf.len() / 2, false);
-        self.cont = true;
+        self.cont |= !self.buf.is_empty();
     }
 
     /// Silence up to `SLACK` behind `now` once the source's audio is `LATE`.
@@ -2135,13 +2136,14 @@ mod tests {
         assert!(dev < 2e6);
     }
 
-    /// Frame n is the flat colour `col(n)`; audio is a file's AAC on a wall clock from the first call (`t0`, and
-    /// its CLOCK_MONOTONIC ns).
+    /// Frame n is the flat colour `col(n)`; audio is a file's AAC on a wall clock from `back` ns before the first
+    /// call (`t0`, and its CLOCK_MONOTONIC ns): what it heard before comes at once with that call.
     struct Pat {
         g: Arc<Gpu>,
         n: u32,
         tap: Option<Tap>,
         t0: Option<(Instant, u64)>,
+        back: u64,
     }
 
     fn pat(g: &Arc<Gpu>, d: &Path) -> Arc<Mutex<Pat>> {
@@ -2150,6 +2152,7 @@ mod tests {
             n: 0,
             tap: Tap::open(&d.join("v635.insv")),
             t0: None,
+            back: 0,
         }))
     }
 
@@ -2193,8 +2196,14 @@ mod tests {
         }
 
         fn audio(&mut self, f: &mut dyn FnMut(u64, &[u8])) {
-            let t0 = self.t0.get_or_insert_with(|| (Instant::now(), mono())).0;
+            let (b, first) = (self.back, self.t0.is_none());
+            let (t0, a0) = *self
+                .t0
+                .get_or_insert_with(|| (Instant::now() - Duration::from_nanos(b), mono() - b));
             if let Some(t) = &mut self.tap {
+                if first {
+                    t.take(0.0, a0, f);
+                }
                 t.take(t0.elapsed().as_secs_f64(), mono(), f);
             }
         }
@@ -2242,16 +2251,24 @@ mod tests {
     /// re-encoded, continuous, and the file's own audio at the time it was heard.
     #[test]
     fn rtmp() {
-        stream(30);
+        stream(30, 0);
     }
 
     /// The same at 60 fps: the output thread keeps a clock faster than the display's.
     #[test]
     fn rtmp60() {
-        stream(60);
+        stream(60, 0);
     }
 
-    fn stream(fps: u32) {
+    /// The same with the source's first audio the 0.4 s it heard before the stream started, at once (the Webcam
+    /// Mode's microphone, which nobody took): what came before the stream is cut off exactly, the rest heard when it
+    /// was.
+    #[test]
+    fn rtmp_backlog() {
+        stream(30, 400_000_000);
+    }
+
+    fn stream(fps: u32, back: u64) {
         let Some(d) = samples() else { return };
         if tool("ffprobe", &["-version"]).is_none() {
             eprintln!("no ffprobe: skipping");
@@ -2270,6 +2287,7 @@ mod tests {
         };
         let mut l = Live::new(&g, &cx, &egui::Context::default(), Some(hook));
         let p = pat(&g, &d);
+        p.lock().unwrap().back = back;
         run(&mut l, &p, 4.0, |_| {});
         // the thread's last pass hands over the final state
         let sh = l.sh.clone();
@@ -2578,6 +2596,216 @@ mod tests {
         assert!(v[0].1);
         // from about the moment it went live, not from the next GOP (up to 60 frames later)
         assert!(v.len() as u64 + 3 >= f - at, "{} of {}", v.len(), f - at);
+    }
+
+    /// The X5 in Webcam Mode as the source (skipped without it; it shows and hears whoever is there: the listener's
+    /// file is removed with it, nothing else is written), 20 s through the whole RTMP path at 1920 × 1080 (a view of
+    /// the 2880 × 1440 equirect, the flat 1920 × 1080 picture) into `ffmpeg -listen`, no UI running: the size, the
+    /// 30 fps grid, the duration, the publisher's and the source's counts; the microphone's sound in it from the first
+    /// picture on, far above silence, and heard as long after it came as the pictures are shown after theirs, within a
+    /// frame 1 s in and 1 s before the end.
+    #[test]
+    fn rtmp_webcam() {
+        use crate::webcam::{CAM, Input, Webcam};
+        if media::uvc::Uvc::find().is_err() || tool("ffprobe", &["-version"]).is_none() {
+            eprintln!("no X5 in Webcam Mode or no ffprobe: skipping");
+            return;
+        }
+        let _cam = CAM.lock().unwrap_or_else(|e| e.into_inner());
+        let g = Arc::new(Gpu::new().unwrap());
+        let cx = stitch::Ctx::new(&g.device, &g.queue);
+        let (secs, per) = (20.0, 1.0 / 30.0);
+        for (w, h) in [(2880, 1440), (1920, 1080)] {
+            let file = out(&format!("live-webcam{w}.flv"));
+            let f = file.to_str().unwrap();
+            let (mut ff, url, _) = serve(&file);
+            let hook = Hook {
+                rtmp: Some(url),
+                ..Default::default()
+            };
+            let mut l = Live::new(&g, &cx, &egui::Context::default(), Some(hook));
+            let src = Arc::new(Mutex::new(Webcam::new(&g, &cx, Input::Uvc(w, h), || {})));
+            l.tick(Some(src.clone() as Src));
+            // the Live screen shows (the hook's stream starts once the source has a picture)
+            let (t, mut on) = (Instant::now(), None);
+            while on.is_none_or(|o: Instant| o.elapsed().as_secs_f64() < secs) {
+                assert!(
+                    on.is_some() || t.elapsed() < Duration::from_secs(10),
+                    "{w}: never live"
+                );
+                let mut s = l.sh.lock().unwrap();
+                s.seen = Some(Instant::now());
+                if on.is_none() && s.st.rtmp.is_some() {
+                    on = Some(Instant::now());
+                }
+                drop(s);
+                thread::sleep(Duration::from_millis(2));
+            }
+            let sh = l.sh.clone();
+            drop(l);
+            let s = sh.lock().unwrap().st.clone();
+            let r = s.rtmp.as_ref().unwrap();
+            // the sound's delay (ns), the pictures' arrival → tick (ms)
+            let (rep, raw, ad, olat) = {
+                let c = src.lock().unwrap();
+                (c.report(), c.raw(), c.delay().unwrap(), c.olat.pct())
+            };
+            drop(src);
+            println!(
+                "{w}: {:?}, {:.0} kbit/s, {} frames to the encoder, {} not encoded, {} repeated; clock {} made, {} \
+                 missed; {rep}",
+                r.st, r.kbps, r.f, r.skip, r.rep, s.made.0, s.missed
+            );
+            assert_eq!(r.st.state, State::Live);
+            assert!(!rep.contains("NaN") && !rep.contains("No sound"), "{rep}");
+            reap(&mut ff.0);
+            let st = tool(
+                "ffprobe",
+                &[
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_name,profile,width,height,r_frame_rate,sample_rate,channels",
+                    "-of",
+                    "csv=p=0",
+                    f,
+                ],
+            )
+            .unwrap();
+            println!("{w}: streams {}", st.trim().replace('\n', " | "));
+            assert!(
+                st.lines()
+                    .any(|l| l.starts_with("h264,High,1920,1080,30/1")),
+                "{st}"
+            );
+            assert!(st.lines().any(|l| l.starts_with("aac,LC,48000,2")), "{st}");
+            let (v, a) = packets(f);
+            let gaps: Vec<f64> = v.windows(2).map(|w| (w[1].0 - w[0].0) / per).collect();
+            let miss: f64 = gaps.iter().map(|g| g.round() - 1.0).sum();
+            let dur = v[v.len() - 1].0 - v[0].0 + per;
+            let ag = a
+                .windows(2)
+                .map(|w| (w[1] - w[0]) * 1e3)
+                .fold(0.0, f64::max);
+            println!(
+                "{w}: video {} packets over {dur:.2} s ({:.2} fps), first at {:.3} s, {miss} frame periods left out, \
+                 gaps off the grid by up to {:.2} ms; audio {} packets, first at {:.3} s, gaps up to {ag:.0} ms; \
+                 sent {:?}",
+                v.len(),
+                v.len() as f64 / dur,
+                v[0].0,
+                gaps.iter()
+                    .map(|g| (g - g.round()).abs() * per * 1e3)
+                    .fold(0.0, f64::max),
+                a.len(),
+                a[0],
+                r.st.sent
+            );
+            // what the publisher had sent by the last pass arrived and what it sent after (the frames the encoder had
+            // in flight), one frame a tick from the first to the last (but those the encoder had no room for, the ticks
+            // the clock missed), for as long as it streamed
+            assert!(v.len() as u64 >= r.st.sent[0] && a.len() as u64 >= r.st.sent[1]);
+            assert!(v[0].1 && gaps.iter().all(|g| (g - g.round()).abs() * per < 1e-3));
+            assert!(miss as u64 <= r.skip + s.missed, "{miss} left out");
+            assert!(
+                v.len() as u64 + 3 >= r.f && v.len() as u64 <= r.f,
+                "{} of {}",
+                v.len(),
+                r.f
+            );
+            assert!((dur - secs).abs() < 0.5, "{dur} s");
+            // audio from the stream's start with its first picture, continuous (FLV has whole ms)
+            assert!((a[0] - v[0].0).abs() < per && ag < 22.5, "{a:?}");
+            assert!(
+                (a.len() as f64 - dur * 46.875).abs() < 10.0,
+                "{} audio packets",
+                a.len()
+            );
+            // the sound: its level, and where the microphone's own samples are in it. Decoded, the stream starts with
+            // the encoder's priming frame (1024 samples before sample 0); both differenced (the room's rumble left
+            // out of the match)
+            let o = std::process::Command::new("ffmpeg")
+                .args([
+                    "-v", "error", "-i", f, "-map", "0:a", "-ac", "1", "-f", "f32le", "-",
+                ])
+                .output()
+                .unwrap();
+            let rx: Vec<f32> = o
+                .stdout
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect();
+            let db = |x: &[f32]| {
+                10.0 * (x.iter().map(|&v| v as f64 * v as f64).sum::<f64>() / x.len() as f64)
+                    .log10()
+            };
+            let d = |x: &[f32]| x.windows(2).map(|w| w[1] - w[0]).collect::<Vec<f32>>();
+            let rd = d(&rx);
+            // the microphone's samples (mono) and when each period's first came
+            let (tm, mono_): (Vec<u64>, Vec<Vec<f32>>) = raw
+                .into_iter()
+                .map(|(t, x)| (t, x.chunks(2).map(|c| (c[0] + c[1]) / 2.0).collect()))
+                .unzip();
+            // the sound's delay at stream time `at` s (ms after it came, the match): the best match of 0.5 s of the
+            // microphone from the period heard then, within ±100 ms of where `ad` placed it
+            let delay = |at: f64| {
+                let x = (r.t0 + (at * 1e9) as u64).saturating_sub(ad);
+                let c = tm.partition_point(|&t| t < x);
+                let rf = d(&mono_[c..].concat()[..24001]);
+                let e = ((tm[c] + ad - r.t0) as f64 * 48e-6).round() as i64 + 1024;
+                let er = rf.iter().map(|v| v * v).sum::<f32>().sqrt();
+                let (k, cc) = (-4800..=4800i64)
+                    .filter_map(|k| {
+                        let y = rd.get(usize::try_from(e + k).ok()?..)?.get(..rf.len())?;
+                        let xy: f32 = rf.iter().zip(y).map(|(a, b)| a * b).sum();
+                        Some((
+                            k,
+                            xy / (er * y.iter().map(|v| v * v).sum::<f32>().sqrt()).max(1e-12),
+                        ))
+                    })
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                    .unwrap();
+                (ad as f64 / 1e6 + k as f64 / 48.0, cc)
+            };
+            let e: Vec<(f64, f64, f64)> = (0..10)
+                .map(|i| 1.0 + i as f64 * (dur - 2.0) / 9.0)
+                .map(|at| {
+                    let (a, c) = delay(at);
+                    (at, a, c as f64)
+                })
+                .collect();
+            println!(
+                "{w}: the sound heard (ms after it came) at s: {}",
+                e.iter()
+                    .map(|x| format!("{:.1}: {:.1} ({:.2})", x.0, x.1, x.2))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let ((a1, c1), (a2, c2)) = (delay(1.0), delay(dur - 1.0));
+            let [o50, o99, om] = olat.map(f64::from);
+            println!(
+                "{w}: sound {:.1} dB RMS (1 s from 1 s in: {:.1} dB); heard {a1:.1} ms after it came 1 s in (match \
+                 {c1:.2}), {a2:.1} ms at {:.1} s ({c2:.2}): drift {:+.1} ms; placed {:.1} ms after; the pictures \
+                 arrival → tick ms p50 {o50:.1} p99 {o99:.1} max {om:.1}: sound − pictures {:+.1} and {:+.1} ms",
+                db(&rx),
+                db(&rx[48000..96000]),
+                dur - 1.0,
+                a2 - a1,
+                ad as f64 / 1e6,
+                a1 - o50,
+                a2 - o50
+            );
+            // far above the silent track's −91 dB
+            assert!(db(&rx) > -70.0 && db(&rx[48000..96000]) > -70.0);
+            assert!(c1 > 0.5 && c2 > 0.5, "no match");
+            assert!(
+                (a1 - o50).abs() < per * 1e3
+                    && (a2 - o50).abs() < per * 1e3
+                    && (a2 - a1).abs() < per * 1e3
+            );
+        }
     }
 
     fn err(a: [u8; 3], b: [u8; 3]) -> u8 {

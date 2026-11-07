@@ -4,16 +4,26 @@
 //!
 //! Hand-over as the live preview's (`feed`): up to 3 decoded pictures queue, each due at its JPEG's arrival plus the
 //! slowest decode of the last 32, and a consumer takes them in turn ([`feed::pick`]); while the live outputs run they
-//! hold it and the viewer shows what they take.
+//! hold it and the viewer shows what they take. The outputs keep the slack they found at their first picture for as
+//! long as they run, so their pictures come a steady time after their JPEGs.
+//!
+//! The camera's microphone (`media::uvc::mic`) runs with the stream as its sound: AAC-LC for the live outputs, each
+//! packet heard as long after its sound came as the outputs show the pictures after theirs ([`Webcam::delay`]), both
+//! timed by their arrival on CLOCK_MONOTONIC.
 
 use crate::{
     feed::{self, IDLE, LATE, Samples, mono},
     player::{FMT, Look, Tgt},
 };
 use eframe::{egui, egui_wgpu::RenderState};
-use media::mjpeg::{self, Mjpeg};
+use media::{
+    aacenc,
+    mjpeg::{self, Mjpeg},
+    uvc::mic::{self, Mic},
+};
 use std::{
     collections::VecDeque,
+    fmt::Write,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -62,10 +72,77 @@ struct Sh {
     rep: u64,
     dec: Samples,
     err: Option<String>,
+    /// the microphone's AAC packets not handed out yet: per packet when its first frame came (CLOCK_MONOTONIC ns)
+    /// and its end in `ab`; their AudioSpecificConfig while it runs, why it does not; packets made, stretches lost
+    ai: Vec<(u64, usize)>,
+    ab: Vec<u8>,
+    asc: Option<[u8; 2]>,
+    note: Option<String>,
+    made: u64,
+    lost: u64,
+    /// every period it gave: when its first frame came, the samples
+    #[cfg(test)]
+    raw: Vec<(u64, Vec<f32>)>,
 }
 
 fn lock(sh: &Mutex<Sh>) -> std::sync::MutexGuard<'_, Sh> {
     sh.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The slowest decode of the last 32 (arrival → decoded, ns): a picture falls due that long after its JPEG came.
+fn slack(s: &Sh) -> u64 {
+    s.late[..s.nl.min(32)]
+        .iter()
+        .max()
+        .map_or(0, |&l| l.min(66_000_000))
+}
+
+/// AAC-LC of the microphone, kbit/s (stereo): the live outputs encode it again at their own rate.
+const MKBPS: u32 = 256;
+
+/// The camera's microphone into `sh` as AAC-LC (its own thread encodes), for as long as the handle lives; None, and a
+/// note in `sh`, when it is missing or fails.
+fn mic(sh: &Arc<Mutex<Sh>>) -> Option<Mic> {
+    let (s2, s3) = (sh.clone(), sh.clone());
+    let new = || aacenc::Enc::new(mic::RATE, 2, MKBPS * 1000);
+    let (mut enc, mut pi, mut pb) = (None, vec![], vec![]);
+    let m = new().and_then(|e| {
+        let asc = e.asc();
+        let m = Mic::open(
+            move |x, t0, k| {
+                // a stream (the first, or the next after lost input) has its own encoder: pts count from its start
+                if k == 0 {
+                    enc = new().ok();
+                }
+                let Some(e) = enc.as_mut() else { return };
+                pi.clear();
+                pb.clear();
+                // pts in frames from the stream's start (the encoder's priming frame at −1024)
+                e.push(x, |au, pts, _| {
+                    pb.extend_from_slice(au);
+                    pi.push(((t0 as i64 + mic::ns(pts)) as u64, pb.len()));
+                });
+                let mut s = lock(&s2);
+                // a second nobody took (no output listens) is of no use
+                if s.ai.len() > 47 {
+                    s.ai.clear();
+                    s.ab.clear();
+                }
+                let o = s.ab.len();
+                s.ab.extend_from_slice(&pb);
+                s.ai.extend(pi.iter().map(|&(t, e)| (t, o + e)));
+                s.lost += (k == 0 && s.made > 0) as u64;
+                s.made += pi.len() as u64;
+                #[cfg(test)]
+                s.raw.push((t0 + mic::ns(k as i64) as u64, x.to_vec()));
+            },
+            move |m| lock(&s3).note = Some(format!("No sound from the X5's microphone ({m})")),
+        )?;
+        lock(sh).asc = Some(asc);
+        Ok(m)
+    });
+    m.map_err(|e| lock(sh).note = Some(format!("No sound from the X5's microphone ({e})")))
+        .ok()
 }
 
 /// Reads JPEGs and decodes each (2880 × 1440 in ~9 ms here: the camera's 4 queued buffers cover it) into the queue in
@@ -107,12 +184,26 @@ fn run(src: Input, sh: Arc<Mutex<Sh>>, quit: Arc<AtomicBool>, wake: impl Fn()) {
                 Ok(u) => u,
                 Err(e) => return fail(format!("Webcam Mode: {e}")),
             };
-            while !quit.load(Relaxed) {
-                match u.next(&mut j, Duration::from_millis(500)) {
+            let m = mic(&sh);
+            // a stop waits for the reader on the UI thread: this long at most (a mode switch sends nothing for ~1.7 s),
+            // then the closes (in a mode switch: the camera's up to 36 ms, its microphone's 19 ms measured)
+            let e = loop {
+                if quit.load(Relaxed) {
+                    break None;
+                }
+                match u.next(&mut j, Duration::from_millis(20)) {
                     Ok(true) => dec(&j),
                     Ok(false) => {}
-                    Err(e) => return fail(format!("Webcam Mode: {e}")),
+                    Err(e) => break Some(e),
                 }
+            };
+            // the microphone opens after the camera and closes after it: an X5 held the next open ~0.5 s after one
+            // where it opened first or beside it (10 of 12 cycles), and the camera's close after it closed first (1 of
+            // 6, opened after it)
+            drop(u);
+            drop(m);
+            if let Some(e) = e {
+                fail(format!("Webcam Mode: {e}"))
             }
         }
         Input::File(p) => {
@@ -180,6 +271,13 @@ pub struct Webcam {
     pub t0: Option<Instant>,
     pub shown: u64,
     pub lat: Samples,
+    /// JPEG arrival → output tick of the pictures the outputs took, ms
+    pub olat: Samples,
+    /// while the outputs run: their pictures fall due this long (ns) after their JPEG came, the decode's slack when
+    /// they took their first one
+    od: Option<u64>,
+    /// the microphone's AudioSpecificConfig as handed out
+    asc: Option<[u8; 2]>,
 }
 
 impl Webcam {
@@ -244,6 +342,9 @@ impl Webcam {
             t0: None,
             shown: 0,
             lat: Samples::default(),
+            olat: Samples::default(),
+            od: None,
+            asc: None,
         }
     }
 
@@ -258,14 +359,28 @@ impl Webcam {
         self.sh.lock().unwrap().err.clone()
     }
 
+    /// Why the stream has no sound (its microphone missing or failed): the live outputs send silence.
+    pub fn note(&self) -> Option<String> {
+        self.sh.lock().unwrap().note.clone()
+    }
+
     /// Pictures taken (by the viewer or a live output).
     pub fn taken(&self) -> u64 {
         self.sh.lock().unwrap().took
     }
 
-    /// Uploads the picture due at `now` (`feed::pick`); returns its arrival time if it took one. `out`: for the live
+    /// How long after it came (ns) the outputs hear the microphone's sound: as long as they show the pictures after
+    /// theirs. A picture falls due its slack after it came, and a 30 fps clock takes it half a frame (a quarter of the
+    /// pick window) after that on average, its lag sweeping a frame as the camera's 28.8–29.7 fps fall behind it
+    /// (17–21 ms measured at 2880 × 1440; 34 ms at 1920 × 1080, whose delivery jitter keeps a picture more queued:
+    /// there the sound comes ~half a frame early). None before the outputs took a picture.
+    pub fn delay(&self) -> Option<u64> {
+        self.od.map(|d| d + LATE / 4)
+    }
+
+    /// Uploads the picture due at `at` (`feed::pick`); returns its arrival time if it took one. `out`: for the live
     /// outputs, which then hold the hand-over; the viewer takes none meanwhile.
-    fn take(&mut self, now: u64, out: bool) -> Option<u64> {
+    fn take(&mut self, at: u64, out: bool) -> Option<u64> {
         let mut s = self.sh.lock().unwrap();
         let t = mono();
         let ran = t < s.out + IDLE;
@@ -274,16 +389,16 @@ impl Webcam {
         } else if ran {
             return None;
         }
-        // as the preview's outputs: the first picture once it is due a quarter of the window
-        self.start |= out && !ran;
+        // as the preview's outputs: the first picture once it is due a quarter of the window; their slack is set again
+        // with it
+        if out && !ran {
+            (self.start, self.od) = (true, None);
+        }
         let now = match out && self.start {
-            true => now.saturating_sub(LATE / 4),
-            false => now,
+            true => at.saturating_sub(LATE / 4),
+            false => at,
         };
-        let l = s.late[..s.nl.min(32)]
-            .iter()
-            .max()
-            .map_or(0, |&l| l.min(66_000_000));
+        let l = self.od.filter(|_| out).unwrap_or_else(|| slack(&s));
         let i = feed::pick(s.q.iter().map(|p| p.got + l), now);
         if out && self.pic.is_some() {
             s.ticks += 1;
@@ -291,6 +406,9 @@ impl Webcam {
         }
         let i = i?;
         self.start &= !out;
+        if out {
+            self.od.get_or_insert(l);
+        }
         s.skip += i as u64;
         for _ in 0..i {
             let o = s.q.pop_front().unwrap();
@@ -354,6 +472,9 @@ impl Webcam {
             },
         );
         (s.took, self.cur) = (p.seq, (p.seq, p.got));
+        if out {
+            self.olat.push(at.saturating_sub(p.got) as f32 * 1e-6);
+        }
         s.free.push(p.px);
         self.t0.get_or_insert_with(Instant::now);
         Some(p.got)
@@ -436,43 +557,91 @@ impl Webcam {
         }
     }
 
-    pub fn report(&self) -> String {
-        let s = self.sh.lock().unwrap();
-        let secs = self.t0.map_or(0.0, |t| t.elapsed().as_secs_f64());
-        let [d50, d99, dm] = s.dec.pct();
-        let [l50, l99, lm] = self.lat.pct();
-        let (w, h) = self
-            .pic
-            .as_ref()
-            .map_or((0, 0), |p| (p.tex.width(), p.tex.height()));
-        format!(
-            "{:.1} s: {w} × {h}, {} JPEGs read, {} decoded, {} shown ({:.1} fps), {} dropped (never taken); outputs: {} \
-             ticks, {} repeated the last picture; MJPEG decode ms p50 {d50:.1} p99 {d99:.1} max {dm:.1}; arrival → \
-             shown ms p50 {l50:.1} p99 {l99:.1} max {lm:.1}",
-            secs,
-            s.read,
-            s.seq,
-            self.shown,
-            self.shown as f64 / secs.max(1e-9),
-            s.skip,
-            s.ticks,
-            s.rep
-        )
-    }
-}
-
-impl Drop for Webcam {
-    fn drop(&mut self) {
+    /// Ends the stream now: the reader thread and with it the device, also while the live outputs still hold this
+    /// source (they let go of it only after their pass; it keeps its last picture meanwhile).
+    pub fn stop(&mut self) {
         self.quit.store(true, Relaxed);
         if let Some(t) = self.th.take() {
             let _ = t.join();
         }
     }
+
+    /// What was counted: the viewer's part while it showed pictures, the outputs' while they ran (the viewer shows
+    /// none while another screen is up), the microphone's.
+    pub fn report(&self) -> String {
+        let s = self.sh.lock().unwrap();
+        let secs = self.t0.map_or(0.0, |t| t.elapsed().as_secs_f64());
+        let ms = |x: &Samples| {
+            let [a, b, c] = x.pct();
+            format!("ms p50 {a:.1} p99 {b:.1} max {c:.1}")
+        };
+        let (w, h) = self
+            .pic
+            .as_ref()
+            .map_or((0, 0), |p| (p.tex.width(), p.tex.height()));
+        let mut r = format!(
+            "{secs:.1} s: {w} × {h}, {} JPEGs read, {} decoded, {} dropped (never taken)",
+            s.read, s.seq, s.skip
+        );
+        if s.dec.n > 0 {
+            let _ = write!(r, "; MJPEG decode {}", ms(&s.dec));
+        }
+        if self.shown > 0 {
+            let fps = self.shown as f64 / secs.max(1e-9);
+            let _ = write!(
+                r,
+                "; viewer: {} shown ({fps:.1} fps), arrival → shown {}",
+                self.shown,
+                ms(&self.lat)
+            );
+        }
+        if s.ticks > 0 {
+            let _ = write!(
+                r,
+                "; outputs: {} ticks, {} repeated the last picture",
+                s.ticks, s.rep
+            );
+            if self.olat.n > 0 {
+                let _ = write!(r, ", arrival → tick {}", ms(&self.olat));
+            }
+        }
+        match (&s.note, s.asc) {
+            (Some(n), _) => r = r + "; " + n,
+            (None, Some(_)) => {
+                let _ = write!(
+                    r,
+                    "; microphone: {} AAC packets, {} stretches lost",
+                    s.made, s.lost
+                );
+                if let Some(d) = self.delay() {
+                    let _ = write!(r, ", heard {:.1} ms after it came", d as f64 / 1e6);
+                }
+            }
+            _ => {}
+        }
+        r
+    }
+
+    /// Every period the microphone gave so far: when its first frame came, its samples (taken out).
+    #[cfg(test)]
+    pub fn raw(&self) -> Vec<(u64, Vec<f32>)> {
+        std::mem::take(&mut lock(&self.sh).raw)
+    }
+}
+
+impl Drop for Webcam {
+    fn drop(&mut self) {
+        self.stop()
+    }
 }
 
 impl crate::live::Source for Webcam {
+    /// Without its microphone (the Capture screen says why) the outputs' sound is silence.
     fn name(&self) -> &str {
-        "Webcam Mode"
+        match lock(&self.sh).note {
+            Some(_) => "Webcam Mode without sound",
+            None => "Webcam Mode",
+        }
     }
 
     fn tick(&mut self, at: u64) {
@@ -501,35 +670,129 @@ impl crate::live::Source for Webcam {
     }
 
     fn asc(&mut self) -> Option<&[u8]> {
-        None
+        self.asc = lock(&self.sh).asc;
+        self.asc.as_ref().map(|a| &a[..])
     }
 
-    fn audio(&mut self, _: &mut dyn FnMut(u64, &[u8])) {}
+    /// The microphone's packets, each heard [`Webcam::delay`] after its sound came, with the pictures that came with
+    /// it. None before the outputs took a picture: what came meanwhile follows with their first one, from before it.
+    fn audio(&mut self, f: &mut dyn FnMut(u64, &[u8])) {
+        let Some(d) = self.delay() else { return };
+        let mut s = lock(&self.sh);
+        let Sh { ai, ab, .. } = &mut *s;
+        let mut at = 0;
+        for &(t, end) in ai.iter() {
+            f(t + d, &ab[at..end]);
+            at = end;
+        }
+        ai.clear();
+        ab.clear();
+    }
 }
 
+/// The camera is one device: the tests that stream from it take turns.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub static CAM: Mutex<()> = Mutex::new(());
 
-    /// The captures in `X5_WEBCAM` (raw MJPEG of the X5's Webcam Mode; they show a person: nothing derived from them
-    /// is written anywhere) through the whole path: replayed at 30 fps, decoded by the two threads, uploaded and drawn
-    /// by the preview (2880 × 1440: the equirect as a 2:1 equirect, which must give the picture back) or blitted
-    /// (1920 × 1080). Compared on the CPU with the decoder's own RGBA.
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::live::Source;
+
+    /// `n` frames of ffmpeg's test picture at `w` × `h` as a raw MJPEG capture in `d` (ffmpeg CLI, test tool); None
+    /// when it made none.
+    pub(crate) fn synth(d: &std::path::Path, w: u32, h: u32, n: u32) -> Option<PathBuf> {
+        let f = d.join(format!("{w}x{h}.mjpg"));
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=size={w}x{h}:rate=30"))
+            .args(["-frames:v", &n.to_string(), "-c:v", "mjpeg", "-f", "mjpeg"])
+            .arg(&f)
+            .status();
+        made.is_ok_and(|s| s.success()).then_some(f)
+    }
+
+    /// A replayed capture (made by [`synth`]; skipped without ffmpeg) taken by the outputs alone, as while the Live
+    /// screen shows: the report gives what was counted and nothing for the viewer, which showed nothing.
     #[test]
-    fn captures() {
-        let Some(d) = std::env::var_os("X5_WEBCAM").map(PathBuf::from) else {
-            eprintln!("X5_WEBCAM not set: skipping");
+    fn report_outputs() {
+        let t = crate::clip::tests::Tmp::new("webcam-report");
+        let Some(f) = synth(&t.0, 1920, 1080, 3) else {
+            eprintln!("ffmpeg made no MJPEG: skipping");
             return;
         };
         let g = Arc::new(Gpu::new().unwrap());
         let cx = Ctx::new(&g.device, &g.queue);
+        let mut c = Webcam::new(&g, &cx, Input::File(f), || {});
+        let t0 = Instant::now();
+        while c.taken() < 10 {
+            assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", c.err());
+            c.tick(mono());
+            thread::sleep(Duration::from_millis(33));
+        }
+        let r = c.report();
+        println!("{r}");
+        assert!(!r.contains("NaN") && r.contains("; outputs: ") && !r.contains("viewer"));
+    }
+
+    /// The X5 in Webcam Mode with its microphone held by another stream (skipped without it; nothing of what it shows
+    /// or hears is kept): the pictures come, the sound does not. No AudioSpecificConfig (the outputs send silence), a
+    /// note for the Capture screen, its report and the Live screen's name of the source.
+    #[test]
+    fn mic_busy() {
+        if media::uvc::Uvc::find().is_err() {
+            eprintln!("no X5 in Webcam Mode: skipping");
+            return;
+        }
+        let _cam = CAM.lock().unwrap_or_else(|e| e.into_inner());
+        let held = Mic::open(|_, _, _| {}, |e| panic!("{e}")).unwrap();
+        let g = Arc::new(Gpu::new().unwrap());
+        let cx = Ctx::new(&g.device, &g.queue);
+        let mut c = Webcam::new(&g, &cx, Input::Uvc(1920, 1080), || {});
+        let t0 = Instant::now();
+        while c.taken() < 10 {
+            assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", c.err());
+            c.tick(mono());
+            c.audio(&mut |_, _| panic!("sound"));
+            thread::sleep(Duration::from_millis(33));
+        }
+        let (n, r) = (c.note(), c.report());
+        println!("{}: {r}", c.name());
+        assert!(c.err().is_none() && c.asc().is_none() && !r.contains("NaN"));
+        assert!(n.is_some_and(|n| r.ends_with(&n) && n.starts_with("No sound from the X5's microphone")));
+        assert_eq!(c.name(), "Webcam Mode without sound");
+        drop((c, held));
+    }
+
+    /// The captures in `X5_WEBCAM` (raw MJPEG of the X5's Webcam Mode), and the X5 itself in Webcam Mode when it is
+    /// there (they show whoever sits there: nothing derived from them is written anywhere), through the whole path:
+    /// replayed at 30 fps or streamed, decoded by the two threads, uploaded and drawn by the preview (2880 × 1440: the
+    /// equirect as a 2:1 equirect, which must give the picture back) or blitted (1920 × 1080). Compared on the CPU with
+    /// the decoder's own RGBA.
+    #[test]
+    fn captures() {
+        let d = std::env::var_os("X5_WEBCAM").map(PathBuf::from);
+        let cam = media::uvc::Uvc::find().is_ok();
+        if d.is_none() && !cam {
+            eprintln!("X5_WEBCAM not set, no X5 in Webcam Mode: skipping");
+            return;
+        }
+        let _cam = CAM.lock().unwrap_or_else(|e| e.into_inner());
+        let g = Arc::new(Gpu::new().unwrap());
+        let cx = Ctx::new(&g.device, &g.queue);
         // (the first captures, named by the size asked for, hold the stale frames of the other mode)
-        for (f, w, h) in [
-            ("t_2880x1440.mjpg", 2880u32, 1440u32),
-            ("t_1920x1080.mjpg", 1920, 1080),
-        ] {
-            let p = d.join(f);
-            let mut c = Webcam::new(&g, &cx, Input::File(p.clone()), || {});
+        let files = d.iter().flat_map(|d| {
+            [
+                ("t_2880x1440.mjpg", 2880, 1440),
+                ("t_1920x1080.mjpg", 1920, 1080),
+            ]
+            .map(|(f, w, h)| (Input::File(d.join(f)), w, h))
+        });
+        let uvc = [(2880, 1440), (1920, 1080)].map(|(w, h)| (Input::Uvc(w, h), w, h));
+        for (i, w, h) in files.chain(uvc.into_iter().filter(|_| cam)) {
+            let f = format!("{i:?}");
+            let file = matches!(i, Input::File(_));
+            let mut c = Webcam::new(&g, &cx, i, || {});
             let t = g.device.create_texture(&wgpu::TextureDescriptor {
                 label: None,
                 size: wgpu::Extent3d {
@@ -544,9 +807,14 @@ mod tests {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
-            // a viewer at 60 Hz for 4 s
+            // a viewer at 60 Hz for 4 s from the first picture (the camera's mode switch takes ~1.9 s)
             let tv = t.create_view(&Default::default());
-            let t0 = Instant::now();
+            let mut t0 = Instant::now();
+            while c.pano().is_none() && t0.elapsed() < Duration::from_secs(10) {
+                c.show(&tv, [w, h], false);
+                thread::sleep(Duration::from_millis(16));
+            }
+            t0 = Instant::now();
             while t0.elapsed() < Duration::from_secs(4) {
                 c.show(&tv, [w, h], false);
                 thread::sleep(Duration::from_millis(16));
@@ -581,10 +849,14 @@ mod tests {
                 "{f}: output clock {tk} ticks, {r} repeated, {d} dropped, {n} decoded; viewer drew {}",
                 c.shown - s0
             );
-            assert!(tk >= 115 && r <= 2 && d <= 2, "{r} repeated, {d} dropped");
+            // the camera's 28.8–29.7 fps against the 30 fps clock and its delivery jitter repeat a picture on up to
+            // ~5 % of the ticks (0–6 of 121 measured)
+            let rep = if file { 2 } else { 12 };
+            assert!(tk >= 115 && r <= rep && d <= 2, "{r} repeated, {d} dropped");
             // the drawn picture against the decoder's: the same pixels when the view is the picture itself; the
-            // decoder held, the newest one queued is taken (its buffer goes spare, untouched) and compared
-            c.quit.store(true, Relaxed);
+            // decoder stopped, the newest one queued is taken (its buffer goes spare, untouched; the viewer takes
+            // again once the outputs left it alone for `IDLE`) and compared
+            c.stop();
             thread::sleep(Duration::from_millis(100));
             assert!(c.take(u64::MAX, false).is_some());
             let px = c.sh.lock().unwrap().free.last().unwrap().clone();
