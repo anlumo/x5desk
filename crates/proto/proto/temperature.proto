@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.TemperatureState  (insta360/messages/TemperatureState.java:37)
 enum TemperatureState {
   TEMP_LOW           = 0;
   TEMP_ALERT         = 1;
@@ -15,7 +14,6 @@ enum TemperatureState {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.TemperatureTag  (insta360/messages/TemperatureTag.java:37)
 enum TemperatureTag {
   TEMP_SENSOR  = 0;
   TEMP_BATTERY = 1;
@@ -23,7 +21,6 @@ enum TemperatureTag {
   TEMP_NULL    = 3;
 }
 
-// java: insta360.messages.TempState  (insta360/messages/TempState.java:31)
 message TempState {
   TemperatureState temp_state = 1;
   int32 temp_value            = 2;

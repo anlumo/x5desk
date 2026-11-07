@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 2 files
-// java: insta360.messages.PresetIconType  (insta360/messages/PresetIconType.java:37)
 enum PresetIconType {
   PRESETICON_UNKNOW    = 0;
   PRESETICON_SKIING    = 1;

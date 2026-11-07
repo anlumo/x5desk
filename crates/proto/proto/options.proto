@@ -43,7 +43,6 @@ import "storage.proto";
 import "window_crop_info.proto";
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.BTCarCmdID  (insta360/messages/BTCarCmdID.java:37)
 enum BTCarCmdID {
   BTCAR_SWITCH_NORMAL_PHOTO              = 0;
   BTCAR_SWITCH_NORMAL_PHOTO_QUICK        = 1;
@@ -66,14 +65,12 @@ enum BTCarCmdID {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.HeatShellType  (insta360/messages/HeatShellType.java:37)
 enum HeatShellType {
   None     = 0;
   Standard = 1;
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.LastUpgradeResultType  (insta360/messages/LastUpgradeResultType.java:37)
 enum LastUpgradeResultType {
   LAST_UPGRADE_RESULT_UNKNOWN         = 0;
   LAST_UPGRADE_RESULT_SUCCESS         = 1;
@@ -83,7 +80,6 @@ enum LastUpgradeResultType {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.OffsetDetectedType  (insta360/messages/OffsetDetectedType.java:37)
 enum OffsetDetectedType {
   Unkown     = 0;
   Auto_A     = 1;
@@ -96,38 +92,32 @@ enum OffsetDetectedType {
   Auto_ND128 = 8;
 }
 
-// java: insta360.messages.AbnormalInfo  (insta360/messages/AbnormalInfo.java:28)
 message AbnormalInfo {
   NotificationCaptureStopped stop_cause = 1;
   NotificationShutdown shutdown_cause   = 2;
 }
 
-// java: insta360.messages.LastUpgradeSummary  (insta360/messages/LastUpgradeSummary.java:33)
 message LastUpgradeSummary {
   LastUpgradeResultType upgrade_result = 1;
   int32 primary_error_code             = 2;
   bool has_differential_module         = 3;
 }
 
-// java: insta360.messages.ModeCfgCpyInfo  (insta360/messages/ModeCfgCpyInfo.java:30)
 message ModeCfgCpyInfo {
   bool cpy_default      = 1;
   FunctionMode dst_mode = 2;
   FunctionMode src_mode = 3;
 }
 
-// java: insta360.messages.NotificationP2pTransStatus  (insta360/messages/NotificationP2pTransStatus.java:33)
 message NotificationP2pTransStatus {
   P2p_Trans_Status status = 1;
 
-  // java: insta360.messages.NotificationP2pTransStatus$P2p_Trans_Status  (insta360/messages/NotificationP2pTransStatus.java:105)
   enum P2p_Trans_Status {
     P2P_TRANS_STATUS_IDLE        = 0;
     P2P_TRANS_STATUS_TRANSMITING = 1;
   }
 }
 
-// java: insta360.messages.Options  (insta360/messages/Options.java:48)
 message Options {
   VideoResolution video_resolution                                       = 1;
   PhotoSize photo_size                                                   = 2;
@@ -335,7 +325,6 @@ message Options {
   bool switch_shutter                                                    = 206;
   bool switch_wb                                                         = 207;
 
-  // java: insta360.messages.Options$APPWakeUpType  (insta360/messages/Options.java:1024)
   enum APPWakeUpType {
     APP_WAKEUP_TYPE_UNKNOW                    = 0;
     APP_WAKEUP_TYPE_GPS_ASSISTANT             = 1;
@@ -345,7 +334,6 @@ message Options {
     APP_WAKEUP_TYPE_NO_OVERDUE_EDITING_MANUAL = 5;
   }
 
-  // java: insta360.messages.Options$AccFullScaleRange  (insta360/messages/Options.java:1136)
   enum AccFullScaleRange {
     RANGE_2G  = 0;
     RANGE_4G  = 1;
@@ -353,55 +341,47 @@ message Options {
     RANGE_16G = 3;
   }
 
-  // java: insta360.messages.Options$AdoptionSystem  (insta360/messages/Options.java:1240)
   enum AdoptionSystem {
     PHONE_IOS     = 0;
     PHONE_ANDROID = 1;
   }
 
-  // java: insta360.messages.Options$Audio_Recoder_Ctrl  (insta360/messages/Options.java:1560)
   enum Audio_Recoder_Ctrl {
     Audio_Recoder_Ctrl_HIDE = 0;
     Audio_Recoder_Ctrl_OFF  = 1;
     Audio_Recoder_Ctrl_ON   = 2;
   }
 
-  // java: insta360.messages.Options$Audio_Wnr_Type  (insta360/messages/Options.java:1660)
   enum Audio_Wnr_Type {
     Audio_Wnr_Type_Direction_Focus      = 0;
     Audio_Wnr_Type_Wind_Noise_Reduction = 1;
     Audio_Wnr_Type_Stereo               = 2;
   }
 
-  // java: insta360.messages.Options$BTRemoteType  (insta360/messages/Options.java:1950)
   enum BTRemoteType {
     UNKNOWN_BT_REMOTE     = 0;
     BT_REMOTE_WITHOUT_GPS = 1;
     BT_REMOTE_WITH_GPS    = 2;
   }
 
-  // java: insta360.messages.Options$Bt_Wakeup_Sw  (insta360/messages/Options.java:2050)
   enum Bt_Wakeup_Sw {
     Bt_Wakeup_Sw_Off     = 0;
     Bt_Wakeup_Sw_On      = 1;
     Bt_Wakeup_Sw_Unknown = 2;
   }
 
-  // java: insta360.messages.Options$Camera_Bitrate_Type  (insta360/messages/Options.java:4324)
   enum Camera_Bitrate_Type {
     Camera_Bitrate_Type_High     = 0;
     Camera_Bitrate_Type_Low      = 1;
     Camera_Bitrate_Type_Standard = 2;
   }
 
-  // java: insta360.messages.Options$EvoStatusMode  (insta360/messages/Options.java:4441)
   enum EvoStatusMode {
     UNKNOWN_STATUS_MODE = 0;
     DEGREE180           = 1;
     DEGREE360           = 2;
   }
 
-  // java: insta360.messages.Options$ExpectOutputType  (insta360/messages/Options.java:4541)
   enum ExpectOutputType {
     DEFAULT      = 0;
     INSTA_PANO   = 1;
@@ -409,7 +389,6 @@ message Options {
     ONE_TAKE     = 3;
   }
 
-  // java: insta360.messages.Options$GyroFullScaleRange  (insta360/messages/Options.java:5179)
   enum GyroFullScaleRange {
     RANGE_250DPS  = 0;
     RANGE_500DPS  = 1;
@@ -417,27 +396,23 @@ message Options {
     RANGE_2000DPS = 3;
   }
 
-  // java: insta360.messages.Options$Gyro_to_Master_HW_State  (insta360/messages/Options.java:5714)
   enum Gyro_to_Master_HW_State {
     GYRO_HW_INTERFACE_STATE_NORMAL = 0;
     GYRO_HW_INTERFACE_STATE_ERROR  = 1;
   }
 
-  // java: insta360.messages.Options$HwType  (insta360/messages/Options.java:5810)
   enum HwType {
     HW_TYPE_UNKNOWN = 0;
     HW_TYPE_MFI     = 1;
     HW_TYPE_NO_MFI  = 2;
   }
 
-  // java: insta360.messages.Options$Iperf_Status_Type  (insta360/messages/Options.java:5910)
   enum Iperf_Status_Type {
     iperf_status_type_close = 0;
     iperf_status_type_open  = 1;
     iperf_status_type_err   = 2;
   }
 
-  // java: insta360.messages.Options$LANGUAGE_TYPE  (insta360/messages/Options.java:6010)
   enum LANGUAGE_TYPE {
     EN    = 0;
     ZH    = 1;
@@ -461,71 +436,60 @@ message Options {
     TR    = 19;
   }
 
-  // java: insta360.messages.Options$Long_Battery_Mode_Type  (insta360/messages/Options.java:6405)
   enum Long_Battery_Mode_Type {
     LONG_BATTERY_NONE = 0;
     LONG_BATTERY_OFF  = 1;
     LONG_BATTERY_ON   = 2;
   }
 
-  // java: insta360.messages.Options$Product_Id_Type  (insta360/messages/Options.java:6505)
   enum Product_Id_Type {
     Product_Common = 0;
     Product_BMW    = 1;
   }
 
-  // java: insta360.messages.Options$QC_Single_Press_Shoot_Type  (insta360/messages/Options.java:6601)
   enum QC_Single_Press_Shoot_Type {
     QC_SINGLE_PRESS_SHOOT_TYPE_UNKNOWN = 0;
     QC_SINGLE_PRESS_SHOOT_TYPE_CURRENT = 1;
     QC_SINGLE_PRESS_SHOOT_TYPE_FIXED   = 2;
   }
 
-  // java: insta360.messages.Options$QualitySetting  (insta360/messages/Options.java:6701)
   enum QualitySetting {
     HIGH_QUALITY = 0;
     LOW_QUALITY  = 1;
   }
 
-  // java: insta360.messages.Options$Sensor_Lens_283M_Type  (insta360/messages/Options.java:7894)
   enum Sensor_Lens_283M_Type {
     SENSOR_LENS_283M_TYPE_UNKNOW            = 0;
     SENSOR_LENS_283M_TYPE_LOW_TRANSPARENCY  = 1;
     SENSOR_LENS_283M_TYPE_HIGH_TRANSPARENCY = 2;
   }
 
-  // java: insta360.messages.Options$TelevisionSystem  (insta360/messages/Options.java:7994)
   enum TelevisionSystem {
     NTSC = 0;
     PAL  = 1;
   }
 
-  // java: insta360.messages.Options$UdiskMode  (insta360/messages/Options.java:8090)
   enum UdiskMode {
     UDISK_MODE_PC      = 0;
     UDISK_MODE_ANDROID = 1;
   }
 
-  // java: insta360.messages.Options$VideoEncodeType  (insta360/messages/Options.java:8186)
   enum VideoEncodeType {
     ENCODE_H264 = 0;
     ENCODE_H265 = 1;
   }
 
-  // java: insta360.messages.Options$Voice_Ctrl_Language  (insta360/messages/Options.java:8282)
   enum Voice_Ctrl_Language {
     VOICE_CTRL_LANGUAGE_EN = 0;
     VOICE_CTRL_LANGUAGE_CN = 1;
     VOICE_CTRL_LANGUAGE_JA = 2;
   }
 
-  // java: insta360.messages.Options$WifiStatus  (insta360/messages/Options.java:9294)
   enum WifiStatus {
     AUTO = 0;
     ON   = 1;
   }
 
-  // java: insta360.messages.Options$Zoom_Speed  (insta360/messages/Options.java:9390)
   enum Zoom_Speed {
     ZOOM_SPEED_UNKNOW = 0;
     ZOOM_SPEED_SLOW   = 1;
@@ -533,18 +497,15 @@ message Options {
     ZOOM_SPEED_QUICK  = 3;
   }
 
-  // java: insta360.messages.Options$AfLensInfoOption  (insta360/messages/Options.java:1319)
   message AfLensInfoOption {
     bool is_af_lens         = 1;
     AFLensInfo af_lens_info = 2;
   }
 
-  // java: insta360.messages.Options$BTCarCmdInfo  (insta360/messages/Options.java:1743)
   message BTCarCmdInfo {
     repeated BTCarCmdID bt_msg_list = 8 [packed = false];
   }
 
-  // java: insta360.messages.Options$GyroBias  (insta360/messages/Options.java:4628)
   message GyroBias {
     double accel_x = 1;
     double accel_y = 2;
@@ -555,49 +516,41 @@ message Options {
     uint64 ticks   = 7;
   }
 
-  // java: insta360.messages.Options$GyroFilterConfig  (insta360/messages/Options.java:4978)
   message GyroFilterConfig {
     uint32 dlpf_value = 1;
   }
 
-  // java: insta360.messages.Options$GyroInfo  (insta360/messages/Options.java:5266)
   message GyroInfo {
     GyroType gyro_type = 1;
     GyroPos gyro_pos   = 2;
 
-    // java: insta360.messages.Options$GyroInfo$GyroPos  (insta360/messages/Options.java:5354)
     enum GyroPos {
       INSDEV_IMU_POS_VIN0    = 0;
       INSDEV_IMU_POS_VIN1    = 1;
       INSDEV_IMU_POS_UNKNOWN = 2;
     }
 
-    // java: insta360.messages.Options$GyroInfo$GyroType  (insta360/messages/Options.java:5454)
     enum GyroType {
       INSDEV_IMU_TYPE_20948 = 0;
       INSDEV_IMU_TYPE_40609 = 1;
     }
   }
 
-  // java: insta360.messages.Options$LenMInfo  (insta360/messages/Options.java:6144)
   message LenMInfo {
     Sensor_Lens_283M_Type sensor0 = 1;
     Sensor_Lens_283M_Type sensor1 = 2;
   }
 
-  // java: insta360.messages.Options$RcBindInfo  (insta360/messages/Options.java:6780)
   message RcBindInfo {
     repeated uint32 mac = 1;
     uint32 type         = 2;
     bool conn_state     = 3;
   }
 
-  // java: insta360.messages.Options$RectifyGyroBias  (insta360/messages/Options.java:7044)
   message RectifyGyroBias {
     bool need_bias_corrected                   = 1;
     RectifyGyroBiasData rectify_gyro_bias_data = 2;
 
-    // java: insta360.messages.Options$RectifyGyroBias$RectifyGyroBiasData  (insta360/messages/Options.java:7111)
     message RectifyGyroBiasData {
       string rectify_accel_x = 1;
       string rectify_accel_y = 2;
@@ -608,19 +561,16 @@ message Options {
     }
   }
 
-  // java: insta360.messages.Options$SFRCalibrationInfo  (insta360/messages/Options.java:7646)
   message SFRCalibrationInfo {
     uint32 SFR_status         = 1;
     repeated double sfrResult = 20;
   }
 
-  // java: insta360.messages.Options$WifiChannelList  (insta360/messages/Options.java:8365)
   message WifiChannelList {
     string country_code = 1;
     bytes channel_list  = 2;
   }
 
-  // java: insta360.messages.Options$WifiInfo  (insta360/messages/Options.java:8586)
   message WifiInfo {
     string ssid          = 1;
     string password      = 2;
@@ -631,7 +581,6 @@ message Options {
     string mac_addr      = 7;
     bool is_busy         = 8;
 
-    // java: insta360.messages.Options$WifiInfo$Mode  (insta360/messages/Options.java:8764)
     enum Mode {
       AP            = 0;
       STA           = 1;
@@ -640,7 +589,6 @@ message Options {
       IOS_Aware     = 4;
     }
 
-    // java: insta360.messages.Options$WifiInfo$WifiState  (insta360/messages/Options.java:8872)
     enum WifiState {
       UNKNOWN = 0;
       AUTO    = 1;
@@ -649,14 +597,12 @@ message Options {
     }
   }
 
-  // java: insta360.messages.Options$wireless_link_num  (insta360/messages/Options.java:9477)
   message wireless_link_num {
     uint32 bt_link_num     = 1;
     uint32 socket_link_num = 2;
   }
 }
 
-// java: insta360.messages.PreviewModeInfo  (insta360/messages/PreviewModeInfo.java:30)
 message PreviewModeInfo {
   bool temp_view    = 1;
   FunctionMode mode = 2;

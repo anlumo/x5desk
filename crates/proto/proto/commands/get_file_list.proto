@@ -7,7 +7,6 @@ package insta360.messages;
 import "_inferred/insta360/messages/card_location.proto";
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.MediaType  (insta360/messages/MediaType.java:37)
 enum MediaType {
   VIDEO           = 0;
   PHOTO           = 1;
@@ -21,13 +20,11 @@ enum MediaType {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.QuickShareFileType  (insta360/messages/QuickShareFileType.java:37)
 enum QuickShareFileType {
   COMMON      = 0;
   APEI_EXPORT = 1;
 }
 
-// java: insta360.messages.GetFileList  (insta360/messages/GetFileList.java:31)
 message GetFileList {
   MediaType media_type      = 1;
   uint32 start              = 2;
@@ -35,14 +32,12 @@ message GetFileList {
   CardLocation cardLocation = 4;
 }
 
-// java: insta360.messages.GetFileListResp  (insta360/messages/GetFileListResp.java:36)
 message GetFileListResp {
   repeated string uri               = 1;
   uint32 total_count                = 2;
   repeated QuickShareFileItem items = 3;
 }
 
-// java: insta360.messages.QuickShareFileItem  (insta360/messages/QuickShareFileItem.java:30)
 message QuickShareFileItem {
   string uri                   = 1;
   QuickShareFileType file_type = 2;

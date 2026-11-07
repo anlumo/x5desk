@@ -8,7 +8,6 @@ import "_inferred/insta360/messages/function_mode.proto";
 import "_inferred/insta360/messages/photography_option_type.proto";
 import "photography_options.proto";
 
-// java: insta360.messages.NotificationPhotographyOptions  (insta360/messages/NotificationPhotographyOptions.java:34)
 message NotificationPhotographyOptions {
   repeated PhotographyOptionType change_types = 1 [packed = false];
   PhotographyOptions options                  = 2;

@@ -8,7 +8,6 @@ import "_inferred/insta360/messages/button_press_mode.proto";
 import "_inferred/insta360/messages/preset_icon_type.proto";
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.PresetCommandType  (insta360/messages/PresetCommandType.java:37)
 enum PresetCommandType {
   PRESET_CMD_UNKNOW = 0;
   PRESET_CMD_CREATE = 1;
@@ -16,19 +15,16 @@ enum PresetCommandType {
   PRESET_CMD_QUERY  = 3;
 }
 
-// java: insta360.messages.PresetCommand  (insta360/messages/PresetCommand.java:28)
 message PresetCommand {
   PresetCommandType command = 1;
   PresetCommandValue value  = 2;
 }
 
-// java: insta360.messages.PresetCommandValue  (insta360/messages/PresetCommandValue.java:31)
 message PresetCommandValue {
   uint32 index = 1;
   uint32 count = 2;
 }
 
-// java: insta360.messages.PresetInfo  (insta360/messages/PresetInfo.java:34)
 message PresetInfo {
   uint32 index              = 1;
   string name               = 2;
@@ -50,7 +46,6 @@ message PresetInfo {
   uint32 fov                = 18;
 }
 
-// java: insta360.messages.PresetInfos  (insta360/messages/PresetInfos.java:35)
 message PresetInfos {
   repeated PresetInfo info = 1;
   uint32 selected_index    = 2;

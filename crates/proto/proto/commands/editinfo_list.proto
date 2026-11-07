@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.CustomFilmBatchState  (insta360/messages/CustomFilmBatchState.java:37)
 enum CustomFilmBatchState {
   CUSTOM_FILM_BATCH_STATE_UNSPECIFIED = 0;
   CUSTOM_FILM_BATCH_STATE_PENDING     = 1;
@@ -15,7 +14,6 @@ enum CustomFilmBatchState {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.FinishState  (insta360/messages/FinishState.java:37)
 enum FinishState {
   FINISH_STATE_UNSPECIFIED = 0;
   FINISH_STATE_DONE        = 1;
@@ -24,7 +22,6 @@ enum FinishState {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.ResultIndex  (insta360/messages/ResultIndex.java:37)
 enum ResultIndex {
   RESULT_INDEX_UNSPECIFIED = 0;
   RESULT_INDEX_APEI        = 1;
@@ -33,14 +30,12 @@ enum ResultIndex {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.StorageLocation  (insta360/messages/StorageLocation.java:37)
 enum StorageLocation {
   STORAGE_LOCATION_UNSPECIFIED = 0;
   STORAGE_LOCATION_INTERNAL    = 1;
   STORAGE_LOCATION_EXTERNAL    = 2;
 }
 
-// java: insta360.messages.AlgoAnalyzeSubFileInfo  (insta360/messages/AlgoAnalyzeSubFileInfo.java:38)
 message AlgoAnalyzeSubFileInfo {
   string analyze_file_path             = 1;
   int64 last_valid_analyze_size        = 2;
@@ -48,26 +43,22 @@ message AlgoAnalyzeSubFileInfo {
   repeated string segment_file_paths   = 4;
 }
 
-// java: insta360.messages.AnalyzeInfo  (insta360/messages/AnalyzeInfo.java:30)
 message AnalyzeInfo {
   ResultIndex algo_type     = 1;
   bool is_finish            = 2;
   FinishState finish_status = 3;
 }
 
-// java: insta360.messages.CardMemberRef  (insta360/messages/CardMemberRef.java:29)
 message CardMemberRef {
   string file_path = 1;
 }
 
-// java: insta360.messages.CustomFilmDate  (insta360/messages/CustomFilmDate.java:33)
 message CustomFilmDate {
   int64 day_key    = 1;
   bool analyzed    = 2;
   uint32 rule_mask = 3;
 }
 
-// java: insta360.messages.EditFileInfo  (insta360/messages/EditFileInfo.java:38)
 message EditFileInfo {
   string file_path                           = 1;
   FavoriteInfo favorite_info                 = 2;
@@ -77,7 +68,6 @@ message EditFileInfo {
   bool needs_idle_analysis                   = 6;
 }
 
-// java: insta360.messages.EditFileInfoList  (insta360/messages/EditFileInfoList.java:38)
 message EditFileInfoList {
   repeated EditFileInfo edit_file_info_list = 1;
   string device_sn                          = 2;
@@ -90,13 +80,11 @@ message EditFileInfoList {
   string custom_batch_card_id               = 9;
 }
 
-// java: insta360.messages.FavoriteInfo  (insta360/messages/FavoriteInfo.java:32)
 message FavoriteInfo {
   bool playback_is_favorite = 1;
   int64 modify_timestamp    = 2;
 }
 
-// java: insta360.messages.FileMeta  (insta360/messages/FileMeta.java:37)
 message FileMeta {
   int64 creation_time_ms      = 1;
   uint32 duration_ms          = 2;
@@ -104,7 +92,6 @@ message FileMeta {
   FileCategory file_category  = 4;
   uint32 file_scene_info_type = 5;
 
-  // java: insta360.messages.FileMeta$FileCategory  (insta360/messages/FileMeta.java:164)
   enum FileCategory {
     FILE_CATEGORY_UNKNOW                    = 0;
     FILE_CATEGORY_PLANE                     = 1;
@@ -115,7 +102,6 @@ message FileMeta {
     FILE_CATEGORY_EQUIRECTANGULAR_PANO      = 6;
   }
 
-  // java: insta360.messages.FileMeta$SubMediaType  (insta360/messages/FileMeta.java:276)
   enum SubMediaType {
     SUB_MEDIA_TYPE_VIDEO_NORMAL           = 0;
     SUB_MEDIA_TYPE_VIDEO_BULLETTIME       = 1;
@@ -153,7 +139,6 @@ message FileMeta {
   }
 }
 
-// java: insta360.messages.HighlightCard  (insta360/messages/HighlightCard.java:41)
 message HighlightCard {
   string card_id                   = 1;
   int64 day_timestamp              = 2;

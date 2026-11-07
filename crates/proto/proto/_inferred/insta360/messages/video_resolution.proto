@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 8 files
-// java: insta360.messages.VideoResolution  (insta360/messages/VideoResolution.java:37)
 enum VideoResolution {
   RES_3840_1920P30      = 0;
   RES_2560_1280P30      = 1;

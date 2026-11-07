@@ -7,13 +7,11 @@ package insta360.messages;
 import "_inferred/insta360/messages/option_type.proto";
 import "options.proto";
 
-// java: insta360.messages.SetOptions  (insta360/messages/SetOptions.java:34)
 message SetOptions {
   repeated OptionType option_types = 1 [packed = false];
   Options value                    = 2;
 }
 
-// java: insta360.messages.SetOptionsResp  (insta360/messages/SetOptionsResp.java:33)
 message SetOptionsResp {
   repeated OptionType option_types = 1 [packed = false];
 }

@@ -7,13 +7,11 @@ package insta360.messages;
 import "_inferred/insta360/messages/capture_mode.proto";
 import "_inferred/insta360/messages/trigger_source.proto";
 
-// java: insta360.messages.StartCapture  (insta360/messages/StartCapture.java:30)
 message StartCapture {
   CaptureMode mode             = 1;
   TriggerSource trigger_source = 2;
   uint64 config_revision       = 3;
 }
 
-// java: insta360.messages.StartCaptureResp  (insta360/messages/StartCaptureResp.java:25)
 message StartCaptureResp {
 }

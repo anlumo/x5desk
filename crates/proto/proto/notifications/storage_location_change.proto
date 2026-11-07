@@ -6,7 +6,6 @@ package insta360.messages;
 
 import "_inferred/insta360/messages/card_location.proto";
 
-// java: insta360.messages.NotificationStorageLocationChange  (insta360/messages/NotificationStorageLocationChange.java:28)
 message NotificationStorageLocationChange {
   CardLocation location = 1;
 }

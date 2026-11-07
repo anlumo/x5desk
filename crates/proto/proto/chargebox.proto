@@ -6,7 +6,6 @@ package insta360.messages;
 
 import "battery.proto";
 
-// java: insta360.messages.ChargeboxConnectedStatus  (insta360/messages/ChargeboxConnectedStatus.java:33)
 message ChargeboxConnectedStatus {
   ChargeboxConnectedType chargebox_connected_state          = 1;
   BatteryInfo chargingbox_battery_status                    = 2;
@@ -15,19 +14,16 @@ message ChargeboxConnectedStatus {
   ChargeboxUsbBtConnectedType chargebox_bt_connected_state  = 5;
   ChargeboxOnOffInfo chargebox_to_camera_onoff_             = 6;
 
-  // java: insta360.messages.ChargeboxConnectedStatus$ChargeboxConnectedType  (insta360/messages/ChargeboxConnectedStatus.java:176)
   enum ChargeboxConnectedType {
     disconnected = 0;
     connected    = 1;
   }
 
-  // java: insta360.messages.ChargeboxConnectedStatus$ChargeboxOnOffInfo  (insta360/messages/ChargeboxConnectedStatus.java:272)
   enum ChargeboxOnOffInfo {
     offline = 0;
     online  = 1;
   }
 
-  // java: insta360.messages.ChargeboxConnectedStatus$ChargeboxUsbBtConnectedType  (insta360/messages/ChargeboxConnectedStatus.java:368)
   enum ChargeboxUsbBtConnectedType {
     usb_bt_status_undefined    = 0;
     usb_bt_status_disconnected = 1;

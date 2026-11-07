@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 2 files
-// java: insta360.messages.CaptureStateSubmode  (insta360/messages/CaptureStateSubmode.java:37)
 enum CaptureStateSubmode {
   get_capture_state_submod_null                            = 0;
   get_capture_state_submod_pause                           = 1;

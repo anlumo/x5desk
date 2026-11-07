@@ -4,7 +4,6 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.Photo  (insta360/messages/Photo.java:33)
 message Photo {
   string uri        = 1;
   uint64 file_size  = 2;

@@ -7,7 +7,6 @@ package insta360.messages;
 import "_inferred/insta360/messages/button_press_mode.proto";
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.ButtonFollowMode  (insta360/messages/ButtonFollowMode.java:37)
 enum ButtonFollowMode {
   FOLLOW_UNKNOWN = 0;
   FOLLOW_FULL    = 1;
@@ -16,7 +15,6 @@ enum ButtonFollowMode {
   FOLLOW_NONE    = 4;
 }
 
-// java: insta360.messages.ButtonFollowOptions  (insta360/messages/ButtonFollowOptions.java:28)
 message ButtonFollowOptions {
   ButtonFollowMode click                 = 1;
   ButtonFollowMode double_click          = 2;
@@ -28,7 +26,6 @@ message ButtonFollowOptions {
   ButtonFollowMode shutdown_long_press   = 8;
 }
 
-// java: insta360.messages.ButtonPressOptions  (insta360/messages/ButtonPressOptions.java:28)
 message ButtonPressOptions {
   ButtonPressMode click                 = 1;
   ButtonPressMode double_click          = 2;

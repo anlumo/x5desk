@@ -17,7 +17,7 @@ fn main() {
     walk(Path::new("proto"), &mut v);
     v.sort();
     let fds = protox::compile(&v, ["proto"]).unwrap();
-    // The schema comments are only Java class references from the app.
+    // The schema comments are reconstruction notes, not API docs.
     prost_build::Config::new()
         .disable_comments(["."])
         .compile_fds(fds)

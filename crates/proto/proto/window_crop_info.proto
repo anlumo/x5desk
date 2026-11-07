@@ -4,7 +4,6 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.WindowCropInfo  (insta360/messages/WindowCropInfo.java:31)
 message WindowCropInfo {
   uint32 src_width    = 1;
   uint32 src_height   = 2;

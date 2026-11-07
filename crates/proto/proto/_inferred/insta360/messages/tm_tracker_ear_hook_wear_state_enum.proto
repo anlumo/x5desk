@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 2 files
-// java: insta360.messages.TmTrackerEarHookWearStateEnum  (insta360/messages/TmTrackerEarHookWearStateEnum.java:37)
 enum TmTrackerEarHookWearStateEnum {
   kTmTrackerEarHookWearUnknown = 0;
   kTmTrackerEarHookNotWorn     = 1;

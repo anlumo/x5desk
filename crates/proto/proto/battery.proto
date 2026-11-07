@@ -4,7 +4,6 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.BatteryInfo  (insta360/messages/BatteryInfo.java:36)
 message BatteryInfo {
   PowerType power_type      = 1;
   uint32 battery_level      = 2;
@@ -12,7 +11,6 @@ message BatteryInfo {
   Battery_type battery_type = 4;
   uint32 battery_temp       = 5;
 
-  // java: insta360.messages.BatteryInfo$Battery_type  (insta360/messages/BatteryInfo.java:87)
   enum Battery_type {
     THICK    = 0;
     THIN     = 1;
@@ -20,7 +18,6 @@ message BatteryInfo {
     NONE     = 100;
   }
 
-  // java: insta360.messages.BatteryInfo$PowerType  (insta360/messages/BatteryInfo.java:267)
   enum PowerType {
     BATTERY  = 0;
     ADAPTER_ = 1;

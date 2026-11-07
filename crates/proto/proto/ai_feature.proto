@@ -7,7 +7,6 @@ package insta360.messages;
 import "_inferred/insta360/messages/ai_feature_type.proto";
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.AiAssistantPermissionState  (insta360/messages/AiAssistantPermissionState.java:37)
 enum AiAssistantPermissionState {
   AI_ASSISTANT_PERMISSION_STATE_UNKNOWN = 0;
   AI_ASSISTANT_PERMISSION_STATE_GRANTED = 1;
@@ -15,7 +14,6 @@ enum AiAssistantPermissionState {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.AiAssistantPermissionType  (insta360/messages/AiAssistantPermissionType.java:37)
 enum AiAssistantPermissionType {
   AI_ASSISTANT_PERMISSION_UNKNOWN                  = 0;
   AI_ASSISTANT_PERMISSION_NOTIFICATION             = 1;
@@ -25,7 +23,6 @@ enum AiAssistantPermissionType {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.AiAssistantWakeupState  (insta360/messages/AiAssistantWakeupState.java:37)
 enum AiAssistantWakeupState {
   AI_ASSISTANT_WAKEUP_STATE_UNKNOWN   = 0;
   AI_ASSISTANT_WAKEUP_STATE_NOT_WAKEN = 1;
@@ -33,7 +30,6 @@ enum AiAssistantWakeupState {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.AiFeatureErrorCode  (insta360/messages/AiFeatureErrorCode.java:37)
 enum AiFeatureErrorCode {
   AI_FEATURE_ERROR_NONE                       = 0;
   AI_FEATURE_ERROR_UNKNOWN                    = 1;
@@ -50,7 +46,6 @@ enum AiFeatureErrorCode {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.AiFeatureState  (insta360/messages/AiFeatureState.java:37)
 enum AiFeatureState {
   AI_FEATURE_STATE_IDLE     = 0;
   AI_FEATURE_STATE_RUNNING  = 1;
@@ -59,7 +54,6 @@ enum AiFeatureState {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.AiFeatureSwtich  (insta360/messages/AiFeatureSwtich.java:37)
 enum AiFeatureSwtich {
   AI_FEATURE_UNKOWN  = 0;
   AI_FEATURE_DISABLE = 1;
@@ -67,7 +61,6 @@ enum AiFeatureSwtich {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.AiIntentType  (insta360/messages/AiIntentType.java:37)
 enum AiIntentType {
   AI_INTENT_UNKNOWN                  = 0;
   AI_INTENT_TAKE_PHOTO               = 1;
@@ -91,7 +84,6 @@ enum AiIntentType {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.AiPhotoQaStatus  (insta360/messages/AiPhotoQaStatus.java:37)
 enum AiPhotoQaStatus {
   AI_PHOTO_QA_STATUS_UNKNOWN  = 0;
   AI_PHOTO_QA_STATUS_DISABLED = 1;
@@ -99,7 +91,6 @@ enum AiPhotoQaStatus {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.AiVoiceFeatureFlag  (insta360/messages/AiVoiceFeatureFlag.java:37)
 enum AiVoiceFeatureFlag {
   AI_VOICE_FEATURE_UNKNOWN   = 0;
   AI_VOICE_FEATURE_AUDIO     = 1;
@@ -108,7 +99,6 @@ enum AiVoiceFeatureFlag {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.AudioActivityState  (insta360/messages/AudioActivityState.java:37)
 enum AudioActivityState {
   AUDIOACTIVITY_UNKOWN    = 0;
   AUDIOACTIVITY_NO_SILENT = 1;
@@ -116,7 +106,6 @@ enum AudioActivityState {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.AudioStreamCtrlType  (insta360/messages/AudioStreamCtrlType.java:37)
 enum AudioStreamCtrlType {
   AUDIOSTREAMCTRL_UNKOWN  = 0;
   AUDIOSTREAMCTRL_DISABLE = 1;
@@ -124,7 +113,6 @@ enum AudioStreamCtrlType {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.TranslateLanguage  (insta360/messages/TranslateLanguage.java:37)
 enum TranslateLanguage {
   TRANSLATE_LANG_AUTO = 0;
   TRANSLATE_LANG_ZH   = 1;
@@ -138,7 +126,6 @@ enum TranslateLanguage {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.TranslateModeChangeType  (insta360/messages/TranslateModeChangeType.java:37)
 enum TranslateModeChangeType {
   TRANSLATE_MODE_CHANGE_UNKNOWN = 0;
   TRANSLATE_MODE_CHANGE_ENTER   = 1;
@@ -146,7 +133,6 @@ enum TranslateModeChangeType {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.TranslateModeSwitchType  (insta360/messages/TranslateModeSwitchType.java:37)
 enum TranslateModeSwitchType {
   TRANSLATE_MODE_SWITCH_TYPE_UNKNOWN = 0;
   TRANSLATE_MODE_SWITCH_TYPE_AUTO    = 1;
@@ -154,7 +140,6 @@ enum TranslateModeSwitchType {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.TranslateModelSwitchAction  (insta360/messages/TranslateModelSwitchAction.java:37)
 enum TranslateModelSwitchAction {
   TRANSLATE_MODEL_SWITCH_ACTION_UNKNOWN = 0;
   TRANSLATE_MODEL_SWITCH_ACTION_CLOSE   = 1;
@@ -162,37 +147,31 @@ enum TranslateModelSwitchAction {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.TranslateModelSwitchResultType  (insta360/messages/TranslateModelSwitchResultType.java:37)
 enum TranslateModelSwitchResultType {
   TRANSLATE_MODEL_SWITCH_RESULT_UNKNOWN = 0;
   TRANSLATE_MODEL_SWITCH_RESULT_SUCCESS = 1;
   TRANSLATE_MODEL_SWITCH_RESULT_FAILED  = 2;
 }
 
-// java: insta360.messages.AIFeatureSwtichCtrl  (insta360/messages/AIFeatureSwtichCtrl.java:28)
 message AIFeatureSwtichCtrl {
   AiFeatureType type           = 1;
   AiFeatureSwtich swtich_state = 2;
 }
 
-// java: insta360.messages.AiAssistantAppInfo  (insta360/messages/AiAssistantAppInfo.java:30)
 message AiAssistantAppInfo {
   string chat_session_id = 1;
   string app_ver         = 2;
 }
 
-// java: insta360.messages.AiAssistantPermissionItem  (insta360/messages/AiAssistantPermissionItem.java:28)
 message AiAssistantPermissionItem {
   AiAssistantPermissionType type   = 1;
   AiAssistantPermissionState state = 2;
 }
 
-// java: insta360.messages.AiAssistantPermissionReport  (insta360/messages/AiAssistantPermissionReport.java:33)
 message AiAssistantPermissionReport {
   repeated AiAssistantPermissionItem permissions = 1;
 }
 
-// java: insta360.messages.AiFeatureStatusItem  (insta360/messages/AiFeatureStatusItem.java:29)
 message AiFeatureStatusItem {
   AiFeatureType feature_type    = 1;
   AiFeatureSwtich swtich_state  = 2;
@@ -201,70 +180,57 @@ message AiFeatureStatusItem {
   bytes mac_address             = 5;
 }
 
-// java: insta360.messages.AiIntentCtrl  (insta360/messages/AiIntentCtrl.java:30)
 message AiIntentCtrl {
   AiIntentType type = 1;
   int32 value       = 2;
 }
 
-// java: insta360.messages.AiPhotoQaCtrl  (insta360/messages/AiPhotoQaCtrl.java:28)
 message AiPhotoQaCtrl {
   AiPhotoQaStatus status = 1;
 }
 
-// java: insta360.messages.AiQuitAssistantCtrl  (insta360/messages/AiQuitAssistantCtrl.java:25)
 message AiQuitAssistantCtrl {
 }
 
-// java: insta360.messages.AiVoiceFeatureReport  (insta360/messages/AiVoiceFeatureReport.java:28)
 message AiVoiceFeatureReport {
   AiVoiceFeatureFlag ai_voice_feature_flag = 1;
 }
 
-// java: insta360.messages.AiWakeupAssistantCtrl  (insta360/messages/AiWakeupAssistantCtrl.java:28)
 message AiWakeupAssistantCtrl {
   AiAssistantWakeupState state = 1;
 }
 
-// java: insta360.messages.AssistantLanguageCtrl  (insta360/messages/AssistantLanguageCtrl.java:30)
 message AssistantLanguageCtrl {
   string voice_language     = 1;
   string translate_language = 2;
 }
 
-// java: insta360.messages.AudioStreamCtrl  (insta360/messages/AudioStreamCtrl.java:28)
 message AudioStreamCtrl {
   AudioStreamCtrlType enable = 1;
 }
 
-// java: insta360.messages.NotificationAudioActivityStatus  (insta360/messages/NotificationAudioActivityStatus.java:28)
 message NotificationAudioActivityStatus {
   AudioActivityState vad_state = 1;
 }
 
-// java: insta360.messages.NotificationTranslateModeChange  (insta360/messages/NotificationTranslateModeChange.java:28)
 message NotificationTranslateModeChange {
   TranslateModeChangeType change_type = 1;
 }
 
-// java: insta360.messages.TranslateConfig  (insta360/messages/TranslateConfig.java:28)
 message TranslateConfig {
   TranslateLanguage src_language = 1;
   TranslateLanguage dst_language = 2;
 }
 
-// java: insta360.messages.TranslateInteractionMode  (insta360/messages/TranslateInteractionMode.java:28)
 message TranslateInteractionMode {
   TranslateModeSwitchType mode_type = 1;
 }
 
-// java: insta360.messages.TranslateModelSwitchResult  (insta360/messages/TranslateModelSwitchResult.java:28)
 message TranslateModelSwitchResult {
   TranslateModelSwitchResultType result = 1;
   TranslateModelSwitchAction action     = 2;
 }
 
-// java: insta360.messages.UserRegionCtrl  (insta360/messages/UserRegionCtrl.java:29)
 message UserRegionCtrl {
   string region = 1;
 }

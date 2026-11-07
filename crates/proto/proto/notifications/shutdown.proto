@@ -4,12 +4,10 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.NotificationShutdown  (insta360/messages/NotificationShutdown.java:34)
 message NotificationShutdown {
   ErrorCode error_code = 1;
   string message       = 2;
 
-  // java: insta360.messages.NotificationShutdown$ErrorCode  (insta360/messages/NotificationShutdown.java:122)
   enum ErrorCode {
     BATTERT_RUNOUT         = 0;
     TEMPERATURE_OVERLIMIT  = 1;

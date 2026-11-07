@@ -4,13 +4,11 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.SetKeyTimePoint  (insta360/messages/SetKeyTimePoint.java:36)
 message SetKeyTimePoint {
   uint64 timestamp      = 1;
   KeyTimePointType type = 2;
   string typeDetail     = 3;
 
-  // java: insta360.messages.SetKeyTimePoint$KeyTimePointType  (insta360/messages/SetKeyTimePoint.java:137)
   enum KeyTimePointType {
     INSTANT = 0;
     START   = 1;
@@ -18,6 +16,5 @@ message SetKeyTimePoint {
   }
 }
 
-// java: insta360.messages.SetKeyTimePointResp  (insta360/messages/SetKeyTimePointResp.java:25)
 message SetKeyTimePointResp {
 }

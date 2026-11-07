@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.ActionType  (insta360/messages/ActionType.java:37)
 enum ActionType {
   ACTION_TYPE_SWITCH_MODE           = 0;
   ACTION_TYPE_SWITCH_PRESET         = 1;
@@ -18,7 +17,6 @@ enum ActionType {
   ACTION_TYPE_ENTER_SETTING         = 8;
 }
 
-// java: insta360.messages.QButtonCustomActionInfo  (insta360/messages/QButtonCustomActionInfo.java:30)
 message QButtonCustomActionInfo {
   ActionType type  = 1;
   uint32 preset_id = 2;

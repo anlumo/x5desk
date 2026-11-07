@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 3 files
-// java: insta360.messages.RawCaptureType  (insta360/messages/RawCaptureType.java:37)
 enum RawCaptureType {
   RAW_CAPTURE_TYPE_OFF          = 0;
   RAW_CAPTURE_TYPE_DNG          = 1;

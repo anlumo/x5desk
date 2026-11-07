@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 4 files
-// java: insta360.messages.TimelapseMode  (insta360/messages/TimelapseMode.java:37)
 enum TimelapseMode {
   TIMELAPSE_MIXED                  = 0;
   MOBILE_TIMELAPSE_VIDEO           = 1;

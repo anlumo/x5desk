@@ -4,14 +4,12 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.PhoneInfo  (insta360/messages/PhoneInfo.java:35)
 message PhoneInfo {
   PhoneType device_type = 1;
   string manufacturer   = 2;
   string model          = 3;
   string os_version     = 4;
 
-  // java: insta360.messages.PhoneInfo$PhoneType  (insta360/messages/PhoneInfo.java:155)
   enum PhoneType {
     UNKNOWN        = 0;
     IOS_DEVICE     = 1;
@@ -19,6 +17,5 @@ message PhoneInfo {
   }
 }
 
-// java: insta360.messages.PhoneInfoResp  (insta360/messages/PhoneInfoResp.java:25)
 message PhoneInfoResp {
 }

@@ -7,7 +7,6 @@ package insta360.messages;
 import "_inferred/insta360/messages/function_mode.proto";
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.IntervalRecSceneType  (insta360/messages/IntervalRecSceneType.java:37)
 enum IntervalRecSceneType {
   INTERVAL_REC_SCENE_TYPE_DIY       = 0;
   INTERVAL_REC_SCENE_TYPE_VLOG      = 1;
@@ -21,7 +20,6 @@ enum IntervalRecSceneType {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.IntervalRecStatusType  (insta360/messages/IntervalRecStatusType.java:37)
 enum IntervalRecStatusType {
   INTERVAL_REC_STATUS_NULL      = 0;
   INTERVAL_REC_STATUS_IDLE      = 1;
@@ -30,7 +28,6 @@ enum IntervalRecStatusType {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.IntervalRecToastType  (insta360/messages/IntervalRecToastType.java:37)
 enum IntervalRecToastType {
   INTERVAL_REC_TOAST_NULL              = 0;
   INTERVAL_REC_TOAST_START             = 1;
@@ -43,7 +40,6 @@ enum IntervalRecToastType {
   INTERVAL_REC_TOAST_AUTO_END_WITH_APP = 8;
 }
 
-// java: insta360.messages.IntervalRecInfo  (insta360/messages/IntervalRecInfo.java:31)
 message IntervalRecInfo {
   uint32 bEnable                 = 1;
   uint32 totalCount              = 2;
@@ -58,7 +54,6 @@ message IntervalRecInfo {
   FunctionMode functionMode      = 11;
 }
 
-// java: insta360.messages.IntervalRecSceneInfo  (insta360/messages/IntervalRecSceneInfo.java:31)
 message IntervalRecSceneInfo {
   uint32 mode                    = 1;
   uint32 singleDuration          = 2;
@@ -69,12 +64,10 @@ message IntervalRecSceneInfo {
   uint32 intervalRecFunctionMode = 7;
 }
 
-// java: insta360.messages.IntervalRecSceneInfoResp  (insta360/messages/IntervalRecSceneInfoResp.java:33)
 message IntervalRecSceneInfoResp {
   repeated IntervalRecSceneInfo info = 1;
 }
 
-// java: insta360.messages.IntervalRecStatus  (insta360/messages/IntervalRecStatus.java:28)
 message IntervalRecStatus {
   IntervalRecStatusType status = 1;
 }

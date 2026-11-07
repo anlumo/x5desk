@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.FlashLightConnected  (insta360/messages/FlashLightConnected.java:37)
 enum FlashLightConnected {
   FLASH_LIGHT_STATUS_UNKNOWN      = 0;
   FLASH_LIGHT_STATUS_CONNECTED    = 1;
@@ -13,7 +12,6 @@ enum FlashLightConnected {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.FlashLightMode  (insta360/messages/FlashLightMode.java:37)
 enum FlashLightMode {
   FLASH_LIGHT_MODE_UNKNOWN = 0;
   FLASH_LIGHT_MODE_CLOSE   = 1;
@@ -21,7 +19,6 @@ enum FlashLightMode {
   FLASH_LIGHT_MODE_LIGHT   = 3;
 }
 
-// java: insta360.messages.FlashLightInfo  (insta360/messages/FlashLightInfo.java:28)
 message FlashLightInfo {
   FlashLightConnected connected = 1;
   FlashLightMode mode           = 2;

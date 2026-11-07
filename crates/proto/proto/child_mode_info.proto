@@ -4,7 +4,6 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.ChildModeInfo  (insta360/messages/ChildModeInfo.java:31)
 message ChildModeInfo {
   bool enable       = 1;
   bool close_sound  = 2;

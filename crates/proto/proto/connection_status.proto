@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.BluetoothConnectStatus  (insta360/messages/BluetoothConnectStatus.java:37)
 enum BluetoothConnectStatus {
   BLUETOOTH_CONNECT_STATUS_UNKNOWN      = 0;
   BLUETOOTH_CONNECT_STATUS_DISCONNECTED = 1;
@@ -13,14 +12,12 @@ enum BluetoothConnectStatus {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.SocketConnectStatus  (insta360/messages/SocketConnectStatus.java:37)
 enum SocketConnectStatus {
   SOCKET_CONNECT_STATUS_UNKNOWN      = 0;
   SOCKET_CONNECT_STATUS_DISCONNECTED = 1;
   SOCKET_CONNECT_STATUS_CONNECTED    = 2;
 }
 
-// java: insta360.messages.ConnectionStatus  (insta360/messages/ConnectionStatus.java:31)
 message ConnectionStatus {
   BluetoothConnectStatus bluetooth_status = 1;
   SocketConnectStatus socket_status       = 2;

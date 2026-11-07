@@ -8,7 +8,6 @@ import "_inferred/insta360/messages/card_location.proto";
 import "_inferred/insta360/messages/card_state.proto";
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.CardNotificationType  (insta360/messages/CardNotificationType.java:37)
 enum CardNotificationType {
   CARD_NOTIFICATION_UNKNOW = 0;
   CARD_NOTIFICATION_UPDATE = 1;
@@ -16,7 +15,6 @@ enum CardNotificationType {
   CARD_NOTIFICATION_REMOVE = 3;
 }
 
-// java: insta360.messages.NotificationCardUpdate  (insta360/messages/NotificationCardUpdate.java:28)
 message NotificationCardUpdate {
   CardState state                        = 1;
   CardLocation location                  = 2;

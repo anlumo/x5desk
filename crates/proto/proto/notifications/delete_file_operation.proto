@@ -4,7 +4,6 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.NotificationDeleteFileOperation  (insta360/messages/NotificationDeleteFileOperation.java:30)
 message NotificationDeleteFileOperation {
   uint32 delete_operation = 1;
 }

@@ -10,7 +10,6 @@ import "_inferred/insta360/messages/trigger_source.proto";
 import "extra_info.proto";
 import "photo.proto";
 
-// java: insta360.messages.TakePicture  (insta360/messages/TakePicture.java:42)
 message TakePicture {
   Mode mode                       = 1;
   ExtraMetadata extra_metadata    = 2;
@@ -22,7 +21,6 @@ message TakePicture {
   TriggerSource trigger_source    = 8;
   uint64 config_revision          = 9;
 
-  // java: insta360.messages.TakePicture$Mode  (insta360/messages/TakePicture.java:233)
   enum Mode {
     NORMAL      = 0;
     AEB         = 1;
@@ -33,7 +31,6 @@ message TakePicture {
   }
 }
 
-// java: insta360.messages.TakePictureResponse  (insta360/messages/TakePictureResponse.java:34)
 message TakePictureResponse {
   Photo image                 = 1;
   repeated Photo aeb_images   = 2;

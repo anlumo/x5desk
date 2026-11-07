@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 3 files
-// java: insta360.messages.AuthorizationOperationType  (insta360/messages/AuthorizationOperationType.java:37)
 enum AuthorizationOperationType {
   BLE_CONNECT                = 0;
   WIFI_PWD_SETTING           = 1;

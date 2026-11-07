@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 2 files
-// java: insta360.messages.AiFeatureType  (insta360/messages/AiFeatureType.java:37)
 enum AiFeatureType {
   AI_FEATURE_TYPE_NONE     = 0;
   AI_FEATURE_TYPE_VOICE    = 1;

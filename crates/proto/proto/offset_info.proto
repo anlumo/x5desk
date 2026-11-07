@@ -4,7 +4,6 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.OffsetInfo  (insta360/messages/OffsetInfo.java:32)
 message OffsetInfo {
   int32 offset_version = 1;
   string offset        = 2;

@@ -7,7 +7,6 @@ package insta360.messages;
 import "options.proto";
 import "window_crop_info.proto";
 
-// java: insta360.messages.LiveStreamParamsUpdate  (insta360/messages/LiveStreamParamsUpdate.java:34)
 message LiveStreamParamsUpdate {
   Options.VideoEncodeType video_encode_type = 1;
   uint32 res_width                          = 2;

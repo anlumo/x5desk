@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 3 files
-// java: insta360.messages.PhotoSize  (insta360/messages/PhotoSize.java:37)
 enum PhotoSize {
   Size_6912_3456  = 0;
   Size_6272_3136  = 1;

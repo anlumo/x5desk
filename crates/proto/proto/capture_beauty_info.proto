@@ -4,7 +4,6 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.CaptureBeautyParams  (insta360/messages/CaptureBeautyParams.java:37)
 message CaptureBeautyParams {
   float skin_care_strength       = 1;
   float blemish_removal_strength = 2;

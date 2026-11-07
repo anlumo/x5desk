@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 2 files
-// java: insta360.messages.Street_Photo_Type  (insta360/messages/Street_Photo_Type.java:37)
 enum Street_Photo_Type {
   NO_ADORN = 0;
   ADORN    = 1;
