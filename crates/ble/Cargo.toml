@@ -2,6 +2,7 @@
 name = "ble"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [features]
 # `Ble::sim`: a simulated adapter and camera for tests of the code above the crate.

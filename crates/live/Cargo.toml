@@ -2,6 +2,7 @@
 name = "live"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
