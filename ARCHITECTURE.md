@@ -11,10 +11,13 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   comes from each file's trailer, never from the repo. Seam flow uses RAFT (open model), no Insta360 models.
 - The UI thread never paces playback. Media threads decode ahead of the audio clock.
 - Tests that need sample footage read the directory in `X5_SAMPLES` (`v635.insv`, `v606.insv`, `v627.insv`, `v635.lrv`)
-  and return early with a note when it is unset. `track`'s `tests/footage.rs` `subject` with `X5_REF` (a reference track
-  checked by eye) asserts the box on the subject itself on half the frames, without it just a box. `track`'s
-  `tests/footage.rs` `plates` checks the plate pass against plates labelled by eye (`<clip>_plates.txt` in
-  `X5_FIXTURES`, never in git) and skips each clip without them. Track test results depend on the kernels burn's
+  and return early with a note when it is unset. The app's `faces`, `plates` and `timeline_faces` (and `ai`'s
+  `track_v606` and `auto_v635`) check what those clips show; its blur parity tests (`privacy_parity`,
+  `agent_grab_parity`) compare two passes, so any X5 recording will do (`v635.insv`, else the first `.insv`;
+  `X5_PLATES_AT`, `X5_BLUR_AT`: a time with vehicles, with a face or plate). `track`'s `tests/footage.rs` `subject` with
+  `X5_REF` (a reference track checked by eye) asserts the box on the subject itself on half the frames, without it just
+  a box. `track`'s `tests/footage.rs` `plates` checks the plate pass against plates labelled by eye (`<clip>_plates.txt`
+  in `X5_FIXTURES`, never in git) and skips each clip without them. Track test results depend on the kernels burn's
   autotune picks (other kernels round VitTrack's confidence across its thresholds differently): a cold cubecl slot (App,
   burn's cache) tunes them under whatever else runs on the GPU.
 - Tests on numbered clips (`clip::tests::numbered`, made with the ffmpeg CLI: the B-frame, open-GOP and 10-bit tests of
@@ -52,13 +55,13 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 | `stab` | Stabilisation maths: trailer gyro / accelerometer → per-frame orientation, smoothing (FlowState-like), horizon and direction lock, rolling-shutter terms |
 | `fx` | Image effects on the shared device: colour adjustments (incl. brightness, brilliance), automatic colour and underwater correction, `.cube` LUTs and our own looks, defringe (purple / green / blue), clarity, overlays (watermark, stickers, text) |
 | `edit` | Editor model: timeline, clips with a look and colour adjustments each (`fx::Params`: edit depends on fx), trim / split / speed / freeze, reframing keyframes and camera-movement presets, undo (a drag that ends where it started leaves no undo step and keeps the redo list), project files |
-| `export` | Render jobs: decode → stitch → stabilise → effects → encode → mux, 360 and flat, queue; editor timelines (`Cut::Edit`: speed ramps, freeze frames, views, each clip's adjustments and look via `fx`, audio mixed with music, RNNoise-denoised after the time-stretch when `Edit::denoise` is set, and AAC-encoded, or copied for plain 1× cuts without denoise); photo frame grabs (JPEG with GPano; the encoder is `media::jpeg`, also reachable as `export::jpeg`). `export::locks(gate, burn)` hands it the app's GATE / BURN; `Job::flat` keeps a flat 2:1 picture from a 360 hook untagged. Output: `<path>.part` made new at the job's start (`media::part::create`; one there fails it, "being written by another export") or reserved by the caller (`run_into`'s `Dest`), written through the open file, published only if nothing is at `path` and `stop` is still clear after the last write, every error removing it and only it (`media::part::finish`; the job's closures dropped first, one that panics as it drops failing the job). `Dest::strict`: the MP4's frame count or the still's JPEG decode and size checked before the publish, and a concealed picture (`Progress::concealed`, from `Decoder::failed`) fails the job (`CONCEALED`) unless `frozen_ok`. `stop` reaches the decode pass (its catch-up from the sync sample too), the renderer (a 100 ms `recv_timeout`: a stalled decode), the encoder's drain and the faststart shift. `Queue`: `with(name)` (queues on one device run side by side), `push_into` (a reserved `.part`; Err: the thread gone, the `.part` removed), a queued job's cancel final at once (its `.part` removed), a panic failing its job alone (`catch_unwind` per job), a device poll after each job (`lost`), `busy`, `alive`, `trim` (its RAFT model dropped), `forget`, `detach` (no join; `Drop` joins). `source` reads a recording as a job would, without the GPU (`Src`: rate, frames, length, each lens's codec, depth and size, IMU, AAC); `scoped` is public (a host's GPU work). Feature `synth`: a synthetic X5 recording for the tests of this crate and those above it (`synth::insv`, `damaged`: both lenses as H.264 High tracks of `video::check`'s I_PCM pictures, an IDR every 30 frames, 29.97 fps, a V3 trailer with a synthetic calibration, no IMU, no audio) |
+| `export` | Render jobs: decode → stitch → stabilise → effects → encode → mux, 360 and flat, queue; editor timelines (`Cut::Edit`: speed ramps, freeze frames, views, each clip's adjustments and look via `fx`, audio mixed with music, RNNoise-denoised after the time-stretch when `Edit::denoise` is set, and AAC-encoded, or copied for plain 1× cuts without denoise); photo frame grabs (JPEG with GPano; the encoder is `media::jpeg`, also reachable as `export::jpeg`). `export::locks(gate, burn)` hands it the app's GATE / BURN; `Job::flat` keeps a flat 2:1 picture from a 360 hook untagged. Output: `<path>.part` made new at the job's start (`media::part::create`; one there fails it, "being written by another export") or reserved by the caller (`run_into`'s `Dest`), written through the open file, published only if nothing is at `path` and `stop` is still clear after the last write, every error removing it and only it (`media::part::finish`; the job's closures dropped first, one that panics as it drops failing the job). `Dest::strict`: the MP4's frame count or the still's JPEG decode and size checked before the publish, and a concealed picture (`Progress::concealed`, from `Decoder::failed`) fails the job (`CONCEALED`) unless `frozen_ok`. `stop` reaches the decode pass (its catch-up from the sync sample too), the renderer (a 100 ms `recv_timeout`: a stalled decode), the encoder's drain and the faststart shift. `Queue`: `with(name)` (queues on one device run side by side), `push_into` (a reserved `.part`; Err: the thread gone, the `.part` removed), a queued job's cancel final at once (its `.part` removed), a panic failing its job alone (`catch_unwind` per job), a device poll after each job (`lost`), `busy`, `alive`, `trim` (its RAFT model dropped), `forget`, `detach` (no join; `Drop` joins). `source` reads a recording as a job would, without the GPU (`Src`: rate, frames, length, each lens's codec, depth and size, IMU, AAC); `scoped` is public (a host's GPU work). `Job::pre`: what a job's frames need first (an agent's blur pass), run once on its render thread in an error scope of its own, after the plan and before RAFT loads, with the job's stop (looked at again after it); a hook it hands back runs on each frame before `Job::fx`. Feature `synth`: a synthetic X5 recording for the tests of this crate and those above it (`synth::insv`, `damaged`: both lenses as H.264 High tracks of `video::check`'s I_PCM pictures, an IDR every 30 frames, 29.97 fps, a V3 trailer with a synthetic calibration, no IMU, no audio) |
 | `track` | AI with open models (burn on the shared device; macOS: the face detector through Core ML, `coreml.rs`): subject tracker on the sphere with re-identification (LOMO colour and texture histograms with Fisher weights learnt per session, no model), detector, auto framing, face and licence plate privacy blur regions (plates: a YOLOv9-t plate detector from open-image-models, cut before its NMS, on square crops around the vehicles YOLOX finds at score 0.1 or more: `Ai::plates`, `plate_crops`; regions through the same `Hide` and `Blur` as faces; licence questions in `models/plate-detector-licensing.md`), highlights → `edit::Timeline`. The tracker finds a lost subject again only within its reach (`Seen::prior`, `Seen::speed`: the speed, in its own heights a second, it needs to be a candidate since it was last seen for sure, its heading carried on for up to a second; beyond what it reaches setting off at a walk and speeding up by 3 heights/s² to a sprint's 3, it is someone else; within it, its similarity loses 0.1 × (speed / 1 height a second)²), and a person only with the pick's template's box on it (`vit::hit`: never on the detector's box alone); a person at least as like one `find` took and the tracker lost again before VitTrack was sure of them as like the subject (`vit::Tried`, the last 8; not added to the gallery, as the subject can be one) needs VitTrack 0.5, not 0.25 (`Tried::need`, also for whoever the tracker takes on its own after a gap). `Tracker::fps` is the clip's frame rate (30 until set) |
 | `ble` | Camera BLE: scan, wake, pairing, Wi-Fi credentials (btleplug). The X5's wake-up brings up its radios and session, never its screen. Feature `sim`: `Ble::sim`, a simulated adapter and camera on the real session code ; macOS: `Error::Off` / `Error::Denied` and `Event::Adapter` (Bluetooth off, not allowed, back) |
 | `live` | FLV and RTMP client, OBS frame protocol (Unix socket + DMA-BUF fds), PipeWire camera node (the last three Linux only: elsewhere `stub.rs` keeps their API and refuses to start) |
 | `obs` | OBS source plugin (`cdylib`) that imports our frames |
 | `cam` | The app's camera code without its UI, so the app and a headless host run the same session code: the camera worker (`camera`: session, clock, album and thumbnails, download queue, commands, mounted cards; at its end a running download, a card import too, goes back to the queue stopped, `dl::Queue::quit`, one whose cancel it had yet to see paused, and kept so whatever ends its transfer; the queue file leaves out an entry its lines cannot hold: a line break in a URI or path, a tab in a URI, a path that is no UTF-8) and the capture worker (`capture`: mode, settings and shutter from `/CONF`; a command sent as `Cmd::Ask` gets its outcome, `capture::Out`, in the report after it under the caller's number, kept across sessions, refused unless the camera is as the caller checked it: mode, lens block, a sub-mode the protocol knows, `capture::Seen`; a start whose capture state cannot be read first, or that the camera answers with an error, sent or began nothing, `Out::No`, a failure after it went out may have begun, `Out::Failed`; `St::vals` names the mode whose values the last load read, and a setting is written, a photo taken, only with them, read once more first when a load failed; the 10 s status poll reads the capture state too, and loads again while a load failed, at most once a minute; a `/CONF` that did not parse is not fetched again in the session; a reload the session's close cuts short notes nothing), with `album`, `dl`, `disk`, `conf`, `work` (a recording's files), `dirs` (config, cache and video folders; on Windows the profile's), `awake` (App Nap's `hold`; `keep`, for an agent's renders: an activity of its own that keeps idle system sleep off too; both nothing elsewhere), `mono`. The workers guard what any host sends: no delete while the camera records or captures (`Info::busy`, and the capture status read before the delete), a setting only to a value `/CONF` allows now (`St::allowed`), no mode or setting change while the camera captures (its capture state read first), no exposure write without the camera's exposure values (a default one would reset the program and shutter), no start of a recording or timelapse at 5 % battery or less unless charging (`camera::empty`), an explicit `Start` / `Stop` (the camera's capture state read first, nothing sent when it already is so); a connect sets the camera clock only when asked to (`Cmd::Connect { clock }`, the app's own always; its retries and its reconnects after a lost link, by the 2 s timer or the camera back on the bus, the same). The camera's listing leaves out files whose names are no safe file names (`album::safe`: a separator, `:`, `..`, a control character, a trailing dot or space, a Windows device name), in a note, so no host joins them to a folder. Outside Linux and macOS: no card found (a card source given still lists, its URIs `/`-separated); not unix: the camera clock never set (no IANA zone known; said once), the favourite timestamp from the system's zone rules (Windows: `GetTimeZoneInformation`). `conf` also holds what ran on an X5 (360, fw v1.13.21): the settings `CHECKED`, the mode switches `SWITCHED`, the shutters `SHOT`; `conf::known`: sub-mode values the protocol knows (one it does not reads as VIDEO_NORMAL or PHOTO_SINGLE); `conf::show`: a value as people read it. Feature `sim`: a simulated X5 with a fake card for the tests above it, capture on request (`sim::capture`: a `/CONF` of tested and untested modes and settings, sub-modes as raw values, photography options per function mode, photos and clips added with their notifications). No egui, wgpu or video |
-| `mcp` | x5desk as an MCP server (rmcp 3.8, stdio framing; clients on 2025-11-25 and 2026-07-28). `host`: the headless host, cam's camera worker following USB but never connecting on its own or setting the camera clock, its capture worker kept on the same session (a thread of its own, recording every asked command's outcome by number; a report of the connection come or gone moves the state's session on at once, so a gone session's capture state is never read as the camera's, while that session's late reports still end a recording this host started), the download queue, the jobs and the render jobs (kept in `<config>/x5desk` for the next host, see Agents), cards watched, a pump thread turning the worker's reports into the state the tools wait on, a poller following this host's renders (their records, the watchdog, a suspect GPU's probe, the idle trim, idle sleep kept off); the camera is released after 5 min without a call (not while a call runs, a download runs or can start: a card import whose card went does not count, or the camera captures; renders don't hold it) and by `Host::shutdown`, which first cancels this host's renders (waited for up to `RENDERS`, 8 s, then settled by identity) and stops a recording this host started; a stopped download keeps its `.part`, which downloading the item again resumes, in a later host too. One `Host` per process, one rmcp service per connection over it (`Host::serve` on any reader and writer, narrowed by that client's own `--tiers` if any). `server`: the tools, a table by tier (`read`, `local`, `camera`, `delete`; `untested` has none, it widens `camera`) that `tools/list` and `tools/call` both filter by the enabled tiers, the GPU tools only with a backend (`server::listed`), the capture tools and the camera's file writes in `server::capture`, the GPU tools and the render jobs in `server::render`; results are JSON built field by field (never the access point's password or the Wi-Fi client id), thumbnails JPEG; a Wi-Fi connect goes only to a private or link-local address. `config`: the tiers in `<config>/x5desk/mcp` (0600), `--tiers` only narrowing, re-read every 2 s, a change sent as `tools/list_changed` (2026-07-28: on `subscriptions/listen`); its writers (`enable`, `disable`, a host keeping its Wi-Fi id) take turns under an `flock` on `mcp.lock` (0600), each through a temp name of its own. `job`: downloads and renders followed by `<host id>-<n>` handles, of the host that made the job, numbered over both kinds (`Jobs::which`; downloads kept with the queue as a JSON object a line, so they work in later hosts; one that ended and is not kept, an ended host's or one this host pruned, says so); jobs of one item share a file's download while it waits or runs; one that stopped, failed, or finished and went is the job's alone that starts it again (the older jobs show it as it was then); a cancel stops only the job's own downloads that no other uncancelled job shares, and downloading an item again resumes its stopped files under their names, the finished ones kept. The jobs are locked before the queue. `paths`: writes only into `<videos>/x5desk/agent` (subfolders without `..`, `:` or control characters, made only where no link leads out of it: the part that exists is checked first; names in use, a dangling link too, or being written numbered alike per item, camera names checked again), reads only of X5 files under the canonicalised read roots (the agent folder, the app's `dest=` and `<videos>/x5desk` looked up at each use, cards, `--allow-dir`s), a path outside them answered alike whether it exists or not; on Windows paths shown without `\\?\`. `scrub`: every line written to a client and to the log with each secret, raw and JSON-escaped, masked (none under 4 bytes); a client's line stays JSON, only its strings and keys masked (a result's text, JSON in a string, as JSON too), numbers as they are, one that does not parse masked as bytes. `log`: `<cache>/x5desk/mcp.log`, a line per call, 1 MB then `.1`. `sim`: `--sim`, cam's simulated X5 (an access-point password the host learns only from it, and a marker it knows from its start, both looked for by the scrub tests) and a fake card in temp dirs. `render`: the seam to the GPU, plain data (`Render`, `Run`, `Catalog`, `Plan`, `GpuInfo`; `Backend`, which the app hands `mcp::main`: no GPU dependency here, no GPU tools without one). `renders`: the render records in `mcp-renders`, their crash cleanup by identity. The process side (Agents, below): `cli` (`x5desk mcp …`, its `gpu-check` child), `out` (the stdout guard), `endpoint` (the per-user socket or pipe, the election), `front` (stdio's lines to the host of this process or another's, the handshake replayed, re-election, `--tiers` for its own client only, its own host told of stdin's end first, `Host::closing`, the answers passed on after it) |
+| `mcp` | x5desk as an MCP server (rmcp 3.8, stdio framing; clients on 2025-11-25 and 2026-07-28). `host`: the headless host, cam's camera worker following USB but never connecting on its own or setting the camera clock, its capture worker kept on the same session (a thread of its own, recording every asked command's outcome by number; a report of the connection come or gone moves the state's session on at once, so a gone session's capture state is never read as the camera's, while that session's late reports still end a recording this host started), the download queue, the jobs and the render jobs (kept in `<config>/x5desk` for the next host, see Agents), cards watched, a pump thread turning the worker's reports into the state the tools wait on, a poller following this host's renders (their records, the watchdog, a suspect GPU's probe, the idle trim, idle sleep kept off); the camera is released after 5 min without a call (not while a call runs, a download runs or can start: a card import whose card went does not count, or the camera captures; renders don't hold it) and by `Host::shutdown`, which first cancels this host's renders (waited for up to `RENDERS`, 8 s, then settled by identity) and stops a recording this host started; a stopped download keeps its `.part`, which downloading the item again resumes, in a later host too. One `Host` per process, one rmcp service per connection over it (`Host::serve` on any reader and writer, narrowed by that client's own `--tiers` if any). `server`: the tools, a table by tier (`read`, `local`, `camera`, `delete`; `untested` has none, it widens `camera`) that `tools/list` and `tools/call` both filter by the enabled tiers, the GPU tools only with a backend (`server::listed`), the capture tools and the camera's file writes in `server::capture`, the GPU tools and the render jobs in `server::render`; results are JSON built field by field (never the access point's password or the Wi-Fi client id), thumbnails JPEG; a Wi-Fi connect goes only to a private or link-local address. `config`: the tiers in `<config>/x5desk/mcp` (0600), `--tiers` only narrowing, re-read every 2 s, a change sent as `tools/list_changed` (2026-07-28: on `subscriptions/listen`); its writers (`enable`, `disable`, a host keeping its Wi-Fi id) take turns under an `flock` on `mcp.lock` (0600), each through a temp name of its own. `job`: downloads and renders followed by `<host id>-<n>` handles, of the host that made the job, numbered over both kinds (`Jobs::which`; downloads kept with the queue as a JSON object a line, so they work in later hosts; one that ended and is not kept, an ended host's or one this host pruned, says so); jobs of one item share a file's download while it waits or runs; one that stopped, failed, or finished and went is the job's alone that starts it again (the older jobs show it as it was then); a cancel stops only the job's own downloads that no other uncancelled job shares, and downloading an item again resumes its stopped files under their names, the finished ones kept. The jobs are locked before the queue. `paths`: writes only into `<videos>/x5desk/agent` (subfolders without `..`, `:` or control characters, made only where no link leads out of it: the part that exists is checked first; names in use, a dangling link too, or being written numbered alike per item, camera names checked again), reads only of X5 files under the canonicalised read roots (the agent folder, the app's `dest=` and `<videos>/x5desk` looked up at each use, cards, `--allow-dir`s), a path outside them answered alike whether it exists or not; on Windows paths shown without `\\?\`. `scrub`: every line written to a client and to the log with each secret, raw and JSON-escaped, masked (none under 4 bytes); a client's line stays JSON, only its strings and keys masked (a result's text, JSON in a string, as JSON too), numbers as they are, one that does not parse masked as bytes. `log`: `<cache>/x5desk/mcp.log`, a line per call, 1 MB then `.1`. `sim`: `--sim`, cam's simulated X5 (an access-point password the host learns only from it, and a marker it knows from its start, both looked for by the scrub tests) and a fake card in temp dirs. `render`: the seam to the GPU, plain data (`Render`, `Run`, `Catalog`, `Plan`, `GpuInfo`, `Found`; `Backend`, which the app hands `mcp::main`: no GPU dependency here, no GPU tools without one). `renders`: the render records in `mcp-renders`, their crash cleanup by identity. The process side (Agents, below): `cli` (`x5desk mcp …`, its `gpu-check` child), `out` (the stdout guard), `endpoint` (the per-user socket or pipe, the election), `front` (stdio's lines to the host of this process or another's, the handshake replayed, re-election, `--tiers` for its own client only, its own host told of stdin's end first, `Host::closing`, the answers passed on after it) |
 | `app` | egui (eframe 0.37) UI, binary `x5desk` (`x5desk mcp …` hands over to `mcp::main` first thing in `main`, the app's engine, `export::agent`, as its GPU backend; `_exit` after it while a GPU thread may be in the driver) |
 
 ## Shared device contract (`video::Gpu`)
@@ -212,15 +215,15 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   GPU to the stitcher. The compiled model is kept in `x5desk-coreml` in the temp dir (made 0700; used only if it is
   this user's and nobody else can write to it, else compiled into a dir of the process's own), one per package (its
   hash), compiled beside it and renamed into place by the first process that needs it, a stale one moved aside first;
-  Core ML keeps its own Neural Engine cache under `~/Library/Caches/<process name>`, test-hook runs too. The first face
-  pass loads it (≈ 0.6 s, against burn's 11 s of kernel compiles). The crops reach it through a mapped copy of the crop
-  pass's buffer; its scores and boxes come back in burn's layout, so the decoding after is the same. Every Core ML call
-  runs in an autorelease pool (the app's threads have none: a prediction autoreleases 12 MB of outputs). M4, footage
-  medians (`tests/footage.rs` `privacy`, `X5_YUNET=burn` for burn's): 42 ms per frame of 20 tiles instead of 80, a run
-  of up to 8 tiles with copies, read-back and decoding 11.5 ms instead of 24 (Core ML's prediction of 8 alone: 9 ms),
-  the same faces and tracks. `Ai::coreml` (on) picks it, `Ai::coreml_used` tells whether it runs; a model that won't
-  load, or a run it fails, leaves burn's YuNet, which the other platforms run. The plate pass stays on burn's GPU
-  (YOLOX, the plate detector).
+  Core ML keeps its own Neural Engine cache under `~/Library/Caches/<process name>` (of `CFFIXED_USER_HOME` when set,
+  not `HOME`), test-hook runs too. The first face pass loads it (≈ 0.6 s, against burn's 11 s of kernel compiles). The
+  crops reach it through a mapped copy of the crop pass's buffer; its scores and boxes come back in burn's layout, so
+  the decoding after is the same. Every Core ML call runs in an autorelease pool (the app's threads have none: a
+  prediction autoreleases 12 MB of outputs). M4, footage medians (`tests/footage.rs` `privacy`, `X5_YUNET=burn` for
+  burn's): 42 ms per frame of 20 tiles instead of 80, a run of up to 8 tiles with copies, read-back and decoding 11.5 ms
+  instead of 24 (Core ML's prediction of 8 alone: 9 ms), the same faces and tracks. `Ai::coreml` (on) picks it,
+  `Ai::coreml_used` tells whether it runs; a model that won't load, or a run it fails, leaves burn's YuNet, which the
+  other platforms run. The plate pass stays on burn's GPU (YOLOX, the plate detector).
 - App Nap: long work holds an `awake::Hold` (one ref-counted NSProcessInfo activity, user initiated, idle system sleep
   allowed; a no-op elsewhere): each job on the export thread (exports, frame grabs, Shot Lab exports), Deep Track and
   auto edit, Shot Lab previews, the live outputs while one runs (RTMP, a watched OBS output, the PipeWire camera; not
@@ -327,10 +330,13 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   Deep Track, auto edit and every privacy pass. Deep Track sets `Tracker::fps` from the clip
   (`shotlab::Clip::meta.fps`); its directions are in the frame of the track's stabilisation and are turned into any
   other frame with `Track::turn` / `ai::rots`. The privacy blur also covers editor timelines (one face pass per clip)
-  and Shot Lab passes (before the effect). The privacy pass (the export's `Keep::privacy`, the player's preview
-  `ai::privacy`) finds faces and/or licence plates every 3rd frame, each linked by a `Hide` of its own; with plates it
-  stitches 7680 wide and finds faces there too, else 3072. The player's Blur faces and Blur license plates previews
-  carry into the export (`Spec::faces`, `Spec::plates`).
+  and Shot Lab passes (before the effect). The privacy pass (the export's `Keep::privacy` over `export::privacy_pass`,
+  the player's preview `ai::privacy`) finds faces and/or licence plates every 3rd frame, each linked by a `Hide` of its
+  own; with plates it stitches 7680 wide and finds faces there too, else 3072. `Keep::privacy` holds `ai::MODELS` for
+  the whole pass (`Hold::Pass`); the agents' lanes run the same pass from `Job::pre` (Agents) and hold the models per
+  searched frame (`Hold::Frame`, through `Models::with_stop`, whose wait for them sees the job's stop), so the other
+  lane waits out one detection, not a pass. `Models::trim` drops them when nobody holds them (an idle MCP host's trim).
+  The player's Blur faces and Blur license plates previews carry into the export (`Spec::faces`, `Spec::plates`).
 - Editor projects are edit's JSON plus a top-level `"x5desk"` object (overlays, denoise, stabilisation). A clip's
   look (one of fx's looks by name or a `.cube` path) and colour adjustments (per clip `"adjust"`: the `fx::Params`
   fields that differ from the defaults) live in edit's clips; a file from before per-clip adjustments holds the
@@ -597,35 +603,55 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 - GPU tools (`server::render`). `catalog` (read): what the other two accept, from the app's tables (presets, the video
   sizes: 360 widths without the photos' 11904 and the flat sizes, codecs, rates and ranges, frame rates, looks with
   their names and aliases, the editor's adjustments, stabilisation modes, the flat projections, the still's preset-free
-  defaults: 360 at 7680, flat 1920 × 1080, quality 92; what agents can't do yet: face and plate blur, follow, photos,
-  LUTs, overlays, timelines, Shot Lab), narrowed to what the device takes once it is up, and the GPU's state; it never
-  starts the GPU. `render_still` and `export` (local) take an X5 recording under the read roots (an `.insv`, paired by
-  `cam::work::pair`: an `.lrv` or `_10_` file finds the `.insv` beside it; a proxy alone, a photo or an `.mp4` refused,
-  saying what to give) and write into the agent folder or a `subdir` of it, under `name` (a safe file name of 120 bytes
-  at most, the kind's extension stripped, not in a camera file's pattern) or `<stem>_<tag>` (the app's `stem_tag`),
-  numbered past a name in use. A call is checked in order before the GPU starts: its arguments (a feature agents can't
-  use yet, or the other tool's field, said by name), every id and range against the catalog (an export's video size from
-  its lists only; a still's free: 360 a multiple of 8, 512 to 8192 wide, flat 16 to 8192 a side), the host (its jobs
-  file its own, not ending, no timed recording of its own), the source, the backend's check of it (`Render::check`:
-  trailer, both lenses, calibration, IMU, rate, length, tracks; stabilisation `horizon` by default when it has IMU data,
-  else `off`), the device's limits once it is up (the texture size, the source's tracks among what it decodes, the
-  codec, size and rate among what it encodes, RAFT there), then the destination (made only inside the agent folder,
-  UTF-8, not on FAT or exFAT, its free space) and the reservation (Renders, below). An export starts from the user's
-  default preset (the app's `preset=` when it is a catalog id; not under `--sim` or `X5DESK_TEST`), else `pano57`; RAFT
-  is the default seam unless the GPU is up without it (then `raft: true` is refused with why). `render_still` waits up
-  to `wait_s` (50 s, also the most: `server::WAIT_MAX`) and answers a done still as `album_thumbnail` answers: its JSON
-  in a text block and a preview after it (a long edge of 1568, under 1 MB at quality 85, 70 or 55; the newest 8 kept),
-  no structured content; else the job, which `job_wait` finishes with the image; once reserved, the call's cancel leaves
-  the still to finish. `export` answers its job at once with the length, frames and size and a time guess from the last
-  done export of that size and seam. Agent jobs are strict: an export fails at the first picture that could not be
-  decoded (after the Mac slept, a damaged GOP), its error naming `allow_frozen: true`, which exports it with repeated
-  frames and counts them (`concealed_frames`); a still ends done with `concealed`. The job tools take both kinds under
-  one numbering: `job_status` and `job_wait` (50 s a call at most, then called again) in frames, with the settings and a
-  phase (`gpu_starting`, `waiting`, `setting_up`, `compiling`: the first RAFT flow, `frames`, `finishing`), progress the
-  frames plus a creep while none comes (a quarter of what is left to the next every 5 s) out of the frames + 1, a
-  notification a second at most; `job_list` newest first, `kind` and `limit` (50, at most 500), render rows short;
-  `job_cancel` ends a render with no file and no `.part` (waited for 3 s, else "stopping at its next frame"). `status`
-  shows the GPU without starting it and counts both kinds; a card's `album_list` items carry their first file's path.
+  defaults: 360 at 7680, flat 1920 × 1080, quality 92; the blur targets, `faces` and `plates` with their aliases, and
+  the pass: one source frame in `blur_every` (3) searched, best effort, what it costs, unavailable with why while the
+  GPU is up without burn; what agents can't do yet: follow, photos, LUTs, overlays, timelines, Shot Lab), narrowed to
+  what the device takes once it is up, and the GPU's state; it never starts the GPU. `render_still` and `export` (local)
+  take an X5 recording under the read roots (an `.insv`, paired by `cam::work::pair`: an `.lrv` or `_10_` file finds the
+  `.insv` beside it; a proxy alone, a photo or an `.mp4` refused, saying what to give) and write into the agent folder
+  or a `subdir` of it, under `name` (a safe file name of 120 bytes at most, the kind's extension stripped, not in a
+  camera file's pattern) or `<stem>_<tag>` (the app's `stem_tag`; blurred `<stem>_blur_<tag>`, agents' only, so a
+  blurred file is never taken for the sharp one), numbered past a name in use. `blur` (both tools; off unless asked):
+  catalog blur ids or aliases, one or a list, or `true` for both. A call is checked in order before the GPU starts: its
+  arguments (a feature agents can't use yet, the other tool's field, or a word agents may guess for `blur`, such as
+  `faces`, `face_blur` or `redact`, said by name, one set to no told to leave it out; a `blur` of the wrong type), every
+  id and range against the catalog (an export's video size from its lists only; a still's free: 360 a multiple of 8, 512
+  to 8192 wide, flat 16 to 8192 a side), the host (its jobs file its own, not ending, no timed recording of its own),
+  the source, the backend's check of it (`Render::check`: trailer, both lenses, calibration, IMU, rate, length, tracks;
+  stabilisation `horizon` by default when it has IMU data, else `off`; with blur: a recording in a file per lens and
+  `mcp-noattach` refused, the clip opened as the pass reads it, shotlab's IMU: an asked stabilisation it has none for
+  refused, a defaulted one `off`, and the frames its pass searches counted, `Plan::search`), the device's limits once it
+  is up (the texture size, the source's tracks among what it decodes, the codec, size and rate among what it encodes,
+  burn there for RAFT and blur), then the destination (made only inside the agent folder, UTF-8, not on FAT or exFAT,
+  its free space) and the reservation (Renders, below). An export starts from `pano57` unless it names a preset: none of
+  the GUI's settings reach agents. RAFT is the default seam unless the GPU is up without burn (then `raft: true` is
+  refused with why); `blur` is then refused with why too (`render::no_blur`: mcp's device check, the backend's check
+  under `mcp-noattach` and its submit), with no default to fall back to, so a blurred job parked while the GPU came up
+  so fails at its submit: a blur asked for is never dropped. `render_still` waits up to `wait_s` (50 s, also the most:
+  `server::WAIT_MAX`) and answers a done still as `album_thumbnail` answers: its JSON in a text block and a preview
+  after it (a long edge of 1568, under 1 MB at quality 85, 70 or 55; the newest 8 kept), no structured content; else the
+  job, which `job_wait` finishes with the image; once reserved, the call's cancel leaves the still to finish. `export`
+  answers its job at once with the length, frames and size and a time guess from the last done export of that size and
+  seam (its blur pass taken out: `renders::render_secs`, a record skipped when under 1 s or 10 frames are left), for a
+  blurred one the pass first, from the last pass of those targets on this server (else "roughly 1.6 times the span's
+  length on an Apple M4", as measured there; the tool texts say so too). Agent jobs are strict: an export fails at the
+  first picture that could not be decoded (after the Mac slept, a damaged GOP), its error naming `allow_frozen: true`,
+  which exports it with repeated frames and counts them (`concealed_frames`); a still ends done with `concealed`. The
+  job tools take both kinds under one numbering: `job_status` and `job_wait` (50 s a call at most, then called again) in
+  frames, with the settings and a phase (`gpu_starting`, `waiting`, `detecting`: the blur pass, `setting_up`,
+  `compiling`: the first RAFT flow, `frames`, `finishing`), progress the frames searched and made plus a creep while
+  none comes (a quarter of what is left to the next every 5 s) out of the frames to search (the record's `search`, so
+  the total holds from the first answer) + the frames + 1, a notification a second at most (while detecting the frames
+  searched and the pass's time left, before the first "loading the detectors"). A blurred job's result has a `blur`
+  object: its targets, the frames searched and to search, while detecting the pass's frames/s and seconds left (the
+  top-level `fps` and `eta_s`, the frames', null then), once done what it found (detections and tracks per target asked,
+  the frames blurred of the span's, the pass's seconds; `End::found` in the record; one that ended before done keeps the
+  frames it searched, `End::searched`) and a note: detection is best effort (it can miss small, distant, turned-away or
+  partly hidden faces and plates), as the schema, the tool texts and the catalog say too; a job that found nothing ends
+  done, its note saying nothing was blurred. `job_list` newest first, `kind` and `limit` (50, at most 500), render rows
+  short; `job_cancel` ends a render with no file and no `.part` (waited for 3 s, else "stopping at its next frame").
+  `status` shows the GPU without starting it and counts both kinds; a card's `album_list` items carry their first file's
+  path.
 - The GPU (`export::agent`, the app's engine behind `mcp::render::Render`; mcp has no GPU dependency, and its side is
   tested on a fake). One engine per process (`ENG`, never dropped: dropping an `export::Queue` joins its thread, which
   may be in the driver), its device opened at the first `render_still` or `export` that passed its checks (never by
@@ -650,10 +676,22 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   min; three crashed or hung children turn GPU tools off for the process, as does any failure once it has a device (a
   second device and attach would leak burn's runtime); a halted start counts nothing, a panic in it is a failure. Two
   lanes, each an `export::Queue` on the one device (`x5-still`, `x5-export`), so a still never waits behind an export.
-  A job is the one the Export screen would queue (`set_of` sets what its widgets would; `span`, `clip_job`), written
-  into the `.part` mcp reserved (`Dest`, strict), its frames checked against the plan's at the submit ("the source
-  changed since it was checked"). burn's base: `<cache>/x5desk/cubecl-mcp`, under `--sim` and `X5DESK_TEST` the test
-  hook's `x5desk-cubecl` (App).
+  A job is the one the Export screen would queue (`set_of` sets what its widgets would, the Blur boxes too; `span`,
+  `clip_job`), written into the `.part` mcp reserved (`Dest`, strict), its frames checked against the plan's at the
+  submit ("the source changed since it was checked"). A blurred job runs the Export screen's privacy pass first, on its
+  lane (`Job::pre`: serialised with the lane's GPU work, its stop the job's, the lane `busy`), with the plan's
+  stabilisation and targets at the source's rate, in a `scoped` of its own (a wgpu error or panic in it fails the job at
+  once, "the blur pass: …"; never exported without it), the models held per searched frame (`ai::MODELS` serves one at a
+  time: a still waits out one detection of the export lane, not its pass); then the pass's hook blurs each frame in the
+  job's fixed view. Its first use in the process loads the detectors (YuNet on Core ML ≈ 0.6 s, on burn 11-17 s of
+  compiles; YOLOX and the plate detector compile per new batch size, also mid-pass), none of it cancellable. Blur is
+  gated on burn as RAFT is: `track::Ai::new` would attach burn, and cubecl's panicking handler with it over the host's
+  `Log` policy. On the M4 (the user's recording, 2880² lenses; faces and plates, so 7680 wide) the pass searches
+  6.25-6.3 frames/s, about 19 source frames/s: a 10 s span detects for about 16 s before its first frame, a whole 818 s
+  clip for about 22 min; a blurred 360 still at 3840 takes about 1 s once warm (its pass 0.4 s; the first with every
+  cache cold 28 s), the first searched frame comes about 0.5 s after the submit (3 s when the server loads the
+  detectors), and blur's `check` adds about 55 ms. burn's base: `<cache>/x5desk/cubecl-mcp`, under `--sim` and
+  `X5DESK_TEST` the test hook's `x5desk-cubecl` (App).
 - GPU faults. The headless policy (`gpu::Policy::Log`, App) never panics on an uncaptured error; each lane polls the
   device after a job (an error there, or its thread gone, makes the GPU suspect too). The poller (one task per host,
   every 200 ms from its first render job until it ends) writes each run's state into its record (readers never ask the
@@ -661,14 +699,22 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   failed as a lost device fails one or a watchdog cancel, and a suspect one at most every 30 s: `poll(Poll)`, then a
   4 × 4 clear read back within 5 s. A failed probe makes it `Dead`: GPU tools off until the server restarts (Claude
   Code: `/mcp`, reconnect), every run of the host cancelled and settled failed 15 s later at the latest. The watchdog
-  cancels a run that does not move for 120 s making frames, or 180 s setting up or in the first RAFT compile (never
-  while it finishes its file: the faststart shift reads its stop per 4 MiB), whatever the probe says (a decode stuck on
-  its own queue passes one). A run not ended 15 s after such a cancel or a lost device's (`GRACE`) is settled failed,
-  its lane wedged when the watchdog stopped it (the lane's queued jobs failed, new ones refused until the server
-  restarts; the other lane works), and from then on timed recordings are refused (`Shared::wedged`: its thread may still
-  be in the driver, which may take the process down). After 5 min without an unfinished render job of the host (once per
-  idle spell) the GPU is trimmed: `Gpu::trim`, and each lane drops its RAFT model (about 150 ms to load again). While
-  one is unfinished the poller holds `cam::awake::keep()` (macOS: no idle sleep; Linux: nothing yet).
+  cancels a run that does not move for 120 s making frames, or 180 s in its blur pass (a searched frame is a move; the
+  first loads the detectors), setting up or in the first RAFT compile (never while it finishes its file: the faststart
+  shift reads its stop per 4 MiB), whatever the probe says (a decode stuck on its own queue passes one). A run not ended
+  15 s after such a cancel or a lost device's (`GRACE`) is settled failed, its lane wedged when the watchdog stopped it
+  (the lane's queued jobs failed, new ones refused until the server restarts; the other lane works), and from then on
+  timed recordings are refused (`Shared::wedged`: its thread may still be in the driver, which may take the process
+  down). After 5 min without an unfinished render job of the host (once per idle spell) the GPU is trimmed: `Gpu::trim`,
+  each lane drops its RAFT model (about 150 ms to load again), and the blur's detectors go unless a pass holds them
+  (`Models::trim`, under BURN: on the M4 a faces and plates pass leaves about 160 MB of them, faces alone 135 MB; they
+  load again in about 20 ms, burn's kernels kept). A blurred job waiting for the models sees its stop
+  (`Models::with_stop`), so a detection wedged on the other lane leaves it cancellable, and once that lane is wedged
+  blur is refused while it holds them (`Models::holder`, `GpuInfo::blur_stuck`: the backend's check and submit, mcp's
+  device check, the catalog and `status`; `render::stuck_blur`), and RAFT too, whose flows would wait for its BURN past
+  their stop: off by default, refused when asked (`render::stuck_raft`); a decoder wedged in the pass (shotlab's frames
+  never look at the stop) goes the way of a wedged driver. While one is unfinished the poller holds
+  `cam::awake::keep()` (macOS: no idle sleep; Linux: nothing yet).
 - Renders: records and files. Render jobs are kept in `mcp-renders` beside `mcp-jobs`, under its lock, a JSON object a
   line (an older x5desk never reads it), their handles from the jobs' numbering; never resumed by another host. A host
   keeps every unfinished one and the newest 100 finished (`renders::KEEP`, its own pruned as they end; downloads keep
@@ -707,7 +753,8 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   none starts), else it `exit`s.
 - Logs: `<cache>/x5desk/mcp.log` (0600, scrubbed, a line per call and per host event, 1 MB then `.1`; the GPU's
   lines as `gpu: …`: its start, the self-test child's stderr and its pass, uncaptured errors, warn-level log lines, 20
-  a minute; each render's reservation and end); fronts say what they host or proxy, and every switch, on stderr.
+  a minute; each render's reservation and end, a blurred one's with what its pass found in the GUI note's words and its
+  frames/s without the pass); fronts say what they host or proxy, and every switch, on stderr.
 - Test hooks: `X5DESK_MCP_ENDPOINT=<path or pipe name>` overrides the endpoint; without it `--sim` and `X5DESK_TEST` use
   none (they never probe or bind the user's). `X5DESK_TEST` without `--sim` keeps the agent folder and log in
   `$TMPDIR/x5desk-mcp-<pid>` and no thumbnail cache (`Opts::dir`), and its token `mcp-print` prints a line through
@@ -753,23 +800,45 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   panicking, the still's image (also after its call's cancel), the host's end (runs running, queued, submitting, stuck
   in the driver: settled within 11 s, nothing joined), a call held in the check at the end, a record that can't be
   saved, FAT refused (`X5_FAT_DIR`), the next host's cleanup by identity (also after a host killed mid-export in a child
-  process of the test), pruning by kind, the job tools by kind, a start that fails, rising progress, and the scrub's
-  marker through every argument; `server::render`'s unit tests have the checks, the parking, the poller's probes and
-  trims, the watchdog, a dead GPU, the end and `Host::closing` at their `cfg(test)` times (1 s). `render`'s own `Fake`
-  (a self-test that passes, fails or panics) drives `cli`'s `gpu-check` line and `server`'s listing; `cli`'s `reaps`
-  starts a server's SIGCHLD ignored. The app's `tests/mcp.rs` runs the GPU tools on this machine's GPU, one server at a
-  time, on `export::synth`'s recording (300 frames of 256² a lens): `gpu-check`'s one line, `mcp-noattach` (a still
-  without RAFT, `raft: true` refused), a 360 still and two exports followed to done, a cancel at 10 frames or more
-  leaving nothing, a still overtaking a RAFT export (the lanes), stdin's end and SIGTERM mid-export, SIGTERM in the
-  first RAFT compile (burn's cache cold: the end waits `RENDERS`, settles and `_exit`s), a proxied client's export
-  ending with the hosting client's host; their `XDG_RUNTIME_DIR` is a kept `<temp>/x5mcp-gpu-run`, so the hook's cubecl
-  cache stays warm across them. Its `x5_samples` (`X5_SAMPLES`: `v635.insv`, else its first `.insv`) is the milestone on
-  real footage: the catalog, RAFT stills 360 at 3840 and flat 1920 × 1080, 2-5 s exported flat 1280 × 720 H.264 and as
-  `pano4k` with RAFT, a whole-clip `pano57` cancelled at 30 frames or more, stdin's end with an export running (the
-  files copied to `X5_EXPORT_OUT` when set). Below them: export's `tests/export.rs` on the synthetic recording (the
-  handed `.part` published, nothing replaced, a link at the `.part`, a stop in the last frame and in the faststart
-  shift, a queued cancel, panics in a job and as it drops, two lanes at once, `detach`, strict and `frozen_ok` on a
-  damaged recording), `video::check`'s GPU tests (the streams, the pixel check at 256² and 400², the X5's H.265 Main and
-  Main 10, every profile's caps and encode probe), the app's `export::agent` unit tests (the catalog's tables, `set_of`,
-  ranges, the settings shown, `busy` while a lane or a probe may be in the driver, the size estimates against sizes this
-  Mac's encoders made) and `export::tests::parity` (`span` and `clip_job` build the jobs `Keep::video` built).
+  process of the test), pruning by kind, the job tools by kind, a start that fails, rising progress, blur (the Fake's
+  pass searches first: the refusals, its status and progress out of the frames to search + the frames + 1, a cancel and
+  the host's end mid-pass, one held in its pass, a GPU up without burn; `tests/tools.rs`: a blurred record a later host
+  lists) and the scrub's marker through every argument; `server::render`'s unit tests have the checks, the parking, the
+  poller's probes and trims, the watchdog (a searched frame a move too), a dead GPU, the end and `Host::closing` at
+  their `cfg(test)` times (1 s), the blur's result and time guess. `render`'s own `Fake` (a self-test that passes, fails
+  or panics) drives `cli`'s `gpu-check` line and `server`'s listing; `cli`'s `reaps` starts a server's SIGCHLD ignored.
+  The app's `tests/mcp.rs` runs the GPU tools on this machine's GPU, one server at a time, on `export::synth`'s
+  recording (300 frames of 256² a lens): `gpu-check`'s one line, `mcp-noattach` (a still without RAFT, `raft: true` and
+  blur refused), a 360 still and two exports followed to done, a cancel at 10 frames or more leaving nothing, a still
+  overtaking a RAFT export (the lanes), blurred a still and an export followed to done (`gpu_blur_synth`), one cancelled
+  in its pass and a still done while a whole-clip export still detects (`gpu_blur_lanes`, no RAFT: the models held per
+  frame), stdin's end and SIGTERM mid-export, SIGTERM in the first RAFT compile (burn's cache cold: the end waits
+  `RENDERS`, settles and `_exit`s), a proxied client's export ending with the hosting client's host; their
+  `XDG_RUNTIME_DIR` is a kept `<temp>/x5mcp-gpu-run`, so the hook's cubecl cache stays warm across them, and on macOS
+  `CFFIXED_USER_HOME` the test's home. Its `x5_samples` (`X5_SAMPLES`: `v635.insv`, else its first `.insv`) is the
+  milestone on real footage: the catalog, RAFT stills 360 at 3840 and flat 1920 × 1080, 2-5 s exported flat 1280 × 720
+  H.264 and as `pano4k` with RAFT, a whole-clip `pano57` cancelled at 30 frames or more, stdin's end with an export
+  running (the files copied to `X5_EXPORT_OUT` when set). Its `x5_blur` (`X5_SAMPLES` too) asserts nothing of the
+  content: blurred 360 stills across the clip find something and differ from the sharp one past its noise floor
+  (rendered twice), a 3 s export's frames between the searched ones keep the blur (`Hide`'s bridge), a whole-clip pass
+  with a still overtaking it, cancelled, and at stdin's end. Below them: export's `tests/export.rs` on the synthetic
+  recording (the handed `.part` published, nothing replaced, a link at the `.part`, a stop in the last frame and in the
+  faststart shift, a queued cancel, panics in a job and as it drops, two lanes at once, `detach`, strict and `frozen_ok`
+  on a damaged recording; `Job::pre` first, once, on the lane, and a cancel, an error, a wgpu error or a panic in it or
+  its hook failing the job with nothing left), `video::check`'s GPU tests (the streams, the pixel check at 256² and
+  400², the X5's H.265 Main and Main 10, every profile's caps and encode probe), the app's `export::agent` unit tests
+  (the catalog's tables, `set_of`, ranges, the settings shown, `busy` while a lane or a probe may be in the driver, the
+  size estimates against sizes this Mac's encoders made; blur's check, a blurred run on the tests' device, `blur_run`:
+  detecting, then frames, what it found, a cancel in its pass, a still after the trim (which dropped the detectors);
+  `blur_stuck`: blur refused at check, submit and in the GPU's info while a wedged lane holds the models, RAFT off by
+  default and refused at submit; `agent_grab_parity`: an agent's blurred still the Export screen's grab byte for byte,
+  `X5_SAMPLES`),
+  `export::tests::parity` (`span` and `clip_job` build the jobs `Keep::video` built), `privacy_synth` (the pass's counts
+  and note on synth, recorded before the pass was factored out), `privacy_parity` (`Keep::privacy` against that old
+  code, `X5_SAMPLES`, each case finding each kind it asks for: its plates-only frame at `X5_PLATES_AT` s, 2 by default)
+  and `ai`'s `with_stop` and `trim` (loaded models dropped). The app's tests that load Core ML in the test process (a
+  face pass: `export::tests`' `plates`, `faces`, `timeline_faces`, `gate`, `privacy_synth` and `privacy_parity`,
+  `export::agent`'s `blur_run` and `agent_grab_parity`, `ai`'s `auto_v635`) skip on macOS without `CFFIXED_USER_HOME`
+  (`ai::tests::no_cf_home`), so they never write the real `~/Library/Caches`: set it, with the rest of a scratch home,
+  for cargo runs there. Crate track's do too (their own `no_cf_home`): `tests::coreml`, and footage's `privacy`,
+  `plates` and `highlights`.

@@ -5,6 +5,8 @@
 //! source ([`Render::check`]), starts the device once per process ([`Render::start`]) and runs the jobs on its lanes
 //! ([`Render::submit`]). `check`, `start`, `submit`, `probe`, `wedge` and `trim` block and run on `spawn_blocking`;
 //! `catalog`, `gpu` and [`Run`]'s calls are quick and called inline, inside `catch_unwind`, with no lock of mcp held.
+//! A blurred job ([`Plan::blur`]) runs its detection pass first ([`Phase::Detecting`], the frames it searched in
+//! [`RunSt::Running`]) and ends done with what it found ([`Found`]).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -67,7 +69,8 @@ pub trait Render: Send + Sync + 'static {
     ) -> Result<Arc<dyn Run>, String>;
     /// `lane` unusable for this process: its queued runs end `Failed(why)`, later submits are refused.
     fn wedge(&self, lane: Lane, why: &str);
-    /// Idle for 5 min: the decoder bin freed, the lanes' RAFT models dropped (they load again, about 150 ms).
+    /// Idle for 5 min: the decoder bin freed, the lanes' RAFT models and the blur's detectors dropped unless in use
+    /// (they load again, about 150 ms and 20 ms).
     fn trim(&self);
 }
 
@@ -86,15 +89,21 @@ pub enum RunSt {
         phase: Phase,
         done: u64,
         total: u64,
+        /// frames/s and seconds left; in `Detecting` the pass's (searched frames/s, its seconds left)
         fps: f64,
         eta: f64,
         concealed: u64,
+        /// the blur pass's source frames searched (0: no pass), its count kept in the phases after it; how many it
+        /// searches is the plan's `search`
+        searched: u64,
     },
     Done {
         frames: u64,
         secs: f64,
         bytes: u64,
         concealed: u64,
+        /// what its blur pass found (None: no pass)
+        found: Option<Found>,
     },
     Failed(String),
     Cancelled,
@@ -103,12 +112,55 @@ pub enum RunSt {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
+    /// the blur pass: source frames searched for faces and plates (`RunSt::Running::searched`)
+    Detecting,
     /// plan, decoders, model
     Setup,
     /// the first RAFT flow
     Compiling,
     Frames,
     Finishing,
+}
+
+/// What a blur pass found: detections per searched frame summed, the tracks they link into (about the faces and
+/// plates seen; one lost for over a second counts again), the source frames searched, those blurred (a region on
+/// them) of the span's, the pass's wall time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Found {
+    pub faces: u64,
+    pub plates: u64,
+    pub face_tracks: u64,
+    pub plate_tracks: u64,
+    pub searched: u64,
+    pub blurred: u64,
+    pub frames: u64,
+    pub secs: f64,
+}
+
+/// Why `blur` is refused on a GPU whose burn did not attach (`why`): mcp's device check and the backend's own.
+pub fn no_blur(why: &str) -> String {
+    format!(
+        "blur is unavailable on this GPU: its detectors run on burn, which did not attach ({why}); leave out blur"
+    )
+}
+
+/// Why `blur` is refused once `lane`, wedged, is stuck in a detection: it holds the detectors (and burn) until that
+/// detection ends, if it ever does.
+pub fn stuck_blur(lane: Lane) -> String {
+    format!(
+        "blur is unavailable while the GPU's {} lane is stuck in a detection, which holds the detectors: if it never \
+         ends, this MCP server must restart to blur; leave out blur",
+        lane.name()
+    )
+}
+
+/// Why RAFT is refused then: its job would wait for that lane's burn past its stop, and wedge its own lane.
+pub fn stuck_raft(lane: Lane) -> String {
+    format!(
+        "RAFT (optical-flow seams) is unavailable while the GPU's {} lane is stuck in a detection, which holds burn; \
+         pass raft: false",
+        lane.name()
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,8 +218,12 @@ pub struct GpuInfo {
     /// empty: stills only
     pub encode: Vec<Cap>,
     pub max_texture: u32,
-    /// None: available; Some(why): burn's attach failed
+    /// None: burn attached (RAFT and blur); Some(why): it is not
     pub raft: Option<String>,
+    /// a wedged lane stuck in a detection, which holds the detectors and burn: blur refused ([`stuck_blur`]), RAFT too
+    /// ([`stuck_raft`]: off by default then)
+    #[serde(default)]
+    pub blur_stuck: Option<Lane>,
     /// uncaptured errors since the start
     pub errors: u32,
     /// a probe is due: OOM/Internal outside a scope, cubecl's loss line
@@ -252,6 +308,8 @@ pub struct Want {
     pub smoothing_s: Option<f64>,
     pub raft: Option<bool>,
     pub colour_match: Option<bool>,
+    /// catalog blur ids, in the catalog's order; empty: none
+    pub blur: Vec<String>,
     // stills
     pub time_s: Option<f64>,
     pub jpeg_quality: Option<u8>,
@@ -277,6 +335,10 @@ pub struct Plan {
     pub codec: Option<String>,
     pub ten_bit: bool,
     pub raft: bool,
+    /// the blur ids it renders with (empty: none)
+    pub blur: Vec<String>,
+    /// the source frames its blur pass searches (0: none)
+    pub search: u64,
     pub mbps: Option<f32>,
     pub qp: Option<u8>,
     /// the source's video tracks, for the decode caps
@@ -303,7 +365,7 @@ pub struct Track {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Catalog {
     pub presets: Vec<Preset>,
-    /// exports' default without the user's `preset=`
+    /// exports' default preset
     pub default_preset: String,
     /// video sizes: 360 widths (the height is half), flat sizes
     pub pano_widths: Vec<u32>,
@@ -325,6 +387,12 @@ pub struct Catalog {
     pub adjust: Vec<Adjust>,
     pub projections: Vec<Projection>,
     pub still: Still,
+    /// what `blur` takes (none: this x5desk has no blur)
+    #[serde(default)]
+    pub blur: Vec<Named>,
+    /// a blur pass searches every this many source frames
+    #[serde(default)]
+    pub blur_every: u32,
     /// what agents can't do yet
     pub later: Vec<Later>,
 }

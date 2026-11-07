@@ -31,7 +31,7 @@ use crate::{
     log::Log,
     paths,
     render::{Backend, CONCEALED, GpuSt, Kind, Lane, Phase, Plan, Render, Req, Run, RunSt},
-    renders::{ENDED, End, Renders, Snap, frames},
+    renders::{ENDED, End, Renders, Snap, frames, render_secs, searched},
     scrub::{self, Secrets},
     server::{
         Conn,
@@ -95,9 +95,9 @@ pub const RENDERS: Duration = Duration::from_secs(1);
 /// How often the poller reads the runs.
 const POLL: Duration = Duration::from_millis(200);
 
-/// A run that does not move this long is stuck (making frames; setting up or compiling the first RAFT flow; never
-/// while it finishes its file): cancelled whatever the GPU's state. One not ended [`GRACE`] after a cancel of the
-/// watchdog's (or of a lost device's) is settled failed, its lane wedged when it was stuck.
+/// A run that does not move this long is stuck (making frames; in its blur pass, setting up or compiling the first
+/// RAFT flow; never while it finishes its file): cancelled whatever the GPU's state. One not ended [`GRACE`] after a
+/// cancel of the watchdog's (or of a lost device's) is settled failed, its lane wedged when it was stuck.
 #[cfg(not(test))]
 const QUIET: [Duration; 2] = [Duration::from_secs(120), Duration::from_secs(180)];
 #[cfg(test)]
@@ -460,8 +460,9 @@ impl Shared {
         // a parked job's file closed before its name goes
         drop(l.st);
         let r = jobs.r.v.iter().find(|r| r.h == h);
-        // a run settled before it ended (stuck, the host's end) made the frames its last reading says
-        let had = r.and_then(|r| r.live.as_ref()).map_or(0, |s| frames(&s.st));
+        // a run settled before it ended (stuck, the host's end) made and searched the frames its last reading says
+        let (had, sought) =
+            (r.and_then(|r| r.live.as_ref())).map_or((0, 0), |s| (frames(&s.st), searched(&s.st)));
         let secs = match end.secs > 0.0 {
             true => end.secs,
             false => r.map_or(0.0, |r| {
@@ -481,18 +482,28 @@ impl Shared {
             Settled::Gone => End {
                 secs,
                 frames: end.frames.max(had),
+                searched: end.searched.max(sought),
                 ..end
             },
         };
         let kind = r.map_or("render", |r| r.kind.name());
         let name = l.dst.file_name().unwrap_or_default().to_string_lossy();
+        // the GUI note's words
+        let blur = end.found.map_or(String::new(), |f| {
+            format!(
+                "; blur: {} face and {} plate detections, {} and {} tracks, on {} of {} frames, pass {:.1} s",
+                f.faces, f.plates, f.face_tracks, f.plate_tracks, f.blurred, f.frames, f.secs
+            )
+        });
+        // the frames' rate without the blur pass
+        let rate = render_secs(&end).map_or(String::new(), |s| {
+            format!(" ({:.1} frames/s)", end.frames as f64 / s)
+        });
         self.log.line(&match (end.state.as_str(), kind) {
-            ("done", "still") => format!("still {h} done in {:.1} s → {name}", end.secs),
+            ("done", "still") => format!("still {h} done in {:.1} s → {name}{blur}", end.secs),
             ("done", _) => format!(
-                "{kind} {h} done: {} frames in {:.1} s ({:.1} frames/s) → {name}",
-                end.frames,
-                end.secs,
-                end.frames as f64 / end.secs.max(1e-3)
+                "{kind} {h} done: {} frames in {:.1} s{rate} → {name}{blur}",
+                end.frames, end.secs
             ),
             ("failed", _) => format!("{kind} {h} failed: {}", end.err),
             _ if end.err.is_empty() => format!("{kind} {h} cancelled"),
@@ -571,8 +582,9 @@ impl Shared {
                 else {
                     continue;
                 };
-                // the frames it made, which a failed or cancelled reading does not say
-                let had = r.live.as_ref().map_or(0, |p| frames(&p.st));
+                // the frames it made and searched, which a failed or cancelled reading does not say
+                let (had, sought) =
+                    (r.live.as_ref()).map_or((0, 0), |p| (frames(&p.st), searched(&p.st)));
                 let s = Snap::after(r.live.as_ref(), st, now, r.at);
                 let end = match &s.st {
                     RunSt::Done {
@@ -580,7 +592,11 @@ impl Shared {
                         secs,
                         bytes,
                         concealed,
-                    } => Some(End::done(*frames, *secs, *bytes, *concealed)),
+                        found,
+                    } => Some(End {
+                        found: *found,
+                        ..End::done(*frames, *secs, *bytes, *concealed)
+                    }),
                     RunSt::Failed(e) => {
                         // a device loss says so: the probe tells a lost GPU from a failed job
                         k.probe |= e.to_ascii_lowercase().contains("lost");
@@ -599,11 +615,17 @@ impl Shared {
                 }
                 .map(|e| match e.state == "done" {
                     true => e,
-                    false => End { frames: had, ..e },
+                    false => End {
+                        frames: had,
+                        searched: sought,
+                        ..e
+                    },
                 });
                 // the faststart rewrite makes no frames, and reads its stop per chunk
                 let quiet = match &s.st {
                     RunSt::Running { phase, .. } => match phase {
+                        // a searched frame counts as a move (`Snap::after`); the first loads the detectors
+                        Phase::Detecting => Some(("detecting", QUIET[1])),
                         Phase::Frames => Some(("frames", QUIET[0])),
                         Phase::Setup => Some(("setup", QUIET[1])),
                         Phase::Compiling => Some(("compiling", QUIET[1])),
@@ -1552,8 +1574,8 @@ async fn kept(dir: Option<&Path>, agent: &Path) -> (dl::Queue, Jobs, Option<File
 }
 
 /// The `id=` of the app's `<config>/x5desk/settings` (the client id the camera remembers once its user allowed this
-/// computer), its thumbnail cache limit, and its default export preset (`preset=`, agents' exports start from it).
-pub(crate) fn app_settings() -> (Option<String>, Option<u64>, Option<String>) {
+/// computer) and its thumbnail cache limit. Nothing else of the GUI's settings reaches agents.
+pub(crate) fn app_settings() -> (Option<String>, Option<u64>) {
     let f = cam::dirs::xdg("XDG_CONFIG_HOME", ".config").map(|d| d.join("x5desk").join("settings"));
     let t = f
         .and_then(|f| std::fs::read_to_string(f).ok())
@@ -1562,7 +1584,6 @@ pub(crate) fn app_settings() -> (Option<String>, Option<u64>, Option<String>) {
     (
         v("id=").filter(|s| !s.is_empty()).map(String::from),
         v("cache=").and_then(|s| s.parse().ok()),
-        v("preset=").filter(|s| !s.is_empty()).map(String::from),
     )
 }
 

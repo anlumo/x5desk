@@ -6,10 +6,12 @@
 //! `export::Queue` on the one device: stills, and exports, so a still never waits behind an export. A job is the one
 //! the Export screen would queue (`set_of` sets what its widgets would, `span` and `clip_job` build it), written into
 //! the `.part` mcp reserved and strict: a picture that could not be decoded fails an export unless `allow_frozen`.
-//! `X5DESK_TEST=mcp-noattach` keeps burn off the device, as a failed attach would: RAFT is off.
+//! A blurred job runs the screen's privacy pass first on its lane (`Job::pre`), the models held per searched frame.
+//! `X5DESK_TEST=mcp-noattach` keeps burn off the device, as a failed attach would: RAFT and blur are off.
 
 use super::{
-    ABR, FLAT, FPS, H264_MAX, H265_MAX, PANO, PRESETS, Set, Spec, clip_job, probe, span, stem_tag,
+    ABR, CANCELLED, FLAT, FPS, H264_MAX, H265_MAX, Hold, PANO, PRESETS, STEP, Set, Spec, clip_job,
+    hook, keys, privacy_pass, probe, span, stem_tag,
 };
 use crate::{editor::doc, gpu, gyro, lab, player};
 use ::export::Dest;
@@ -27,7 +29,7 @@ use std::{
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError,
         atomic::{
-            AtomicBool, AtomicU32,
+            AtomicBool, AtomicU32, AtomicU64,
             Ordering::{Acquire, Relaxed, Release},
         },
         mpsc,
@@ -85,10 +87,17 @@ const VIEWS: [(&str, &[&str], player::Look); 3] = [
     ("panini", &[], player::Look::Panini),
     ("planet", &[], player::Look::Planet),
 ];
+/// Blur targets (stable API): id, name, aliases, in `Set::faces`, `Set::plates` order.
+const BLUR: [(&str, &str, &[&str]); 2] = [
+    ("faces", "Faces", &["face"]),
+    (
+        "plates",
+        "Licence plates",
+        &["plate", "licence_plates", "license_plates", "number_plates"],
+    ),
+];
 /// What agents can't do yet: id, name, the argument names that ask for it (Shot Lab's effects are `lab::FXS`').
-const LATER: [(&str, Option<&str>, &[&str]); 8] = [
-    ("face_blur", None, &["faces", "blur"]),
-    ("plate_blur", None, &["plates"]),
+const LATER: [(&str, Option<&str>, &[&str]); 6] = [
     ("follow", Some("Deep Track follow"), &["track"]),
     ("photos", None, &[]),
     ("cube_luts", None, &["lut"]),
@@ -157,6 +166,15 @@ impl Ready {
             Lane::Still => &self.still,
             Lane::Export => &self.export,
         }
+    }
+
+    /// The wedged lane stuck in a detection, if one is: it holds the models (and BURN), so blur and RAFT are refused.
+    fn stuck(&self) -> Option<Lane> {
+        let h = crate::ai::MODELS.holder()?;
+        let at = |l: &LaneQ| l.q.thread() == Some(h) && lock(&l.wedged).is_some();
+        [Lane::Still, Lane::Export]
+            .into_iter()
+            .find(|&l| at(self.lane(l)))
     }
 }
 
@@ -231,7 +249,7 @@ impl Agent {
     }
 
     /// `rd`'s info as it is now: uncaptured errors, suspicion (a lane's new device-poll error, or its thread gone,
-    /// too), the lanes wedged or gone.
+    /// too), the lanes wedged or gone, blur refused while one of them is stuck in a detection.
     fn info(&self, rd: &Ready) -> GpuInfo {
         let mut i = rd.info.clone();
         let mut seen = lock(&self.lost);
@@ -251,6 +269,7 @@ impl Agent {
             .into_iter()
             .filter(|&l| lock(&rd.lane(l).wedged).is_some() || !rd.lane(l).q.alive())
             .collect();
+        i.blur_stuck = rd.stuck();
         i
     }
 
@@ -311,9 +330,10 @@ impl Agent {
         }))
     }
 
-    /// The default seam: RAFT, unless the GPU is up without it (burn did not attach).
+    /// The default seam: RAFT, unless the GPU is up without it (burn did not attach) or a lane stuck in a detection
+    /// holds burn.
     fn raft_ok(&self) -> bool {
-        !matches!(&*lock(&self.st), Eng::Ready(rd) if rd.info.raft.is_some())
+        (self.ready()).is_none_or(|rd| rd.info.raft.is_none() && rd.stuck().is_none())
     }
 }
 
@@ -525,11 +545,33 @@ impl Render for Agent {
     fn check(&self, q: &Req) -> Result<Plan, String> {
         let still = q.kind == Kind::Still;
         let src = ::export::source(&q.files, false)?;
+        // blur: refused where its pass can't run, before the GPU starts, never dropped; the clip as the pass reads it
+        let clip = match q.want.blur.is_empty() {
+            true => None,
+            false if q.files.len() > 1 => {
+                return Err("blur: a recording in a file per lens (_00_ + _10_) is not supported yet; leave out \
+                            blur"
+                    .into());
+            }
+            false if self.noattach => return Err(r::no_blur(gpu::NOATTACH)),
+            false => match self.dev.get().and_then(|rd| rd.stuck()) {
+                Some(l) => return Err(r::stuck_blur(l)),
+                None => Some(shotlab::Clip::open(&q.files[0]).map_err(|e| format!("blur: {e}"))?),
+            },
+        };
+        // the pass stabilises with shotlab's reading of the IMU
+        let no_imu = clip.as_ref().is_some_and(|c| c.imu.is_none());
         // horizon when the recording can be stabilised, unless asked otherwise
         let given = q.want.stabilisation.as_deref();
         let stab = match given.unwrap_or(if src.imu { "horizon" } else { "off" }) {
             "off" => "off",
             s => match ::export::source(&q.files, true) {
+                Ok(_) if no_imu && given.is_none() => "off",
+                Ok(_) if no_imu => {
+                    return Err(
+                        "blur: no IMU record to stabilise with: use stabilisation off".into(),
+                    );
+                }
                 Ok(_) => s,
                 Err(_) if given.is_none() => "off",
                 Err(e) => return Err(format!("{e}: use stabilisation off")),
@@ -558,6 +600,8 @@ impl Render for Agent {
             return Err(e);
         }
         let ab = span(asked, still, fps, dur);
+        // the source frames its pass searches (the pass's own `keys`)
+        let search = clip.map_or(0, |c| keys(&c.times, ab).2.len() as u64);
         let at = move |_| v;
         let (_, frames) = clip_job(
             &q.files,
@@ -574,6 +618,11 @@ impl Render for Agent {
         let stem = (q.files[0].file_stem()).map_or("x5".into(), |n| n.to_string_lossy());
         let [pw, ph] = x.size();
         let secs = ab[1] - ab[0];
+        // a blurred file is never taken for the sharp one
+        let pre = match x.faces || x.plates {
+            true => "blur_",
+            false => "",
+        };
         Ok(Plan {
             frames,
             secs,
@@ -581,6 +630,8 @@ impl Render for Agent {
             codec: (!still).then(|| codec_id(x.codec).into()),
             ten_bit: !still && x.deep && x.codec == Codec::H265,
             raft: x.raft,
+            blur: blur_ids(&x),
+            search,
             mbps: (!still && x.qp.is_none()).then_some(x.mbps),
             qp: x.qp.filter(|_| !still),
             tracks: (src.tracks.iter())
@@ -590,7 +641,7 @@ impl Render for Agent {
                     size: t.size,
                 })
                 .collect(),
-            stem: stem_tag(&stem, &x, still.then_some(asked[0]), ""),
+            stem: stem_tag(&stem, &x, still.then_some(asked[0]), pre),
             ext: if still { "jpg" } else { "mp4" },
             bytes: match still {
                 true => pw as u64 * ph as u64 / 2,
@@ -783,10 +834,21 @@ impl Render for Agent {
         (w.stabilisation, w.raft) = (checked.or(w.stabilisation), Some(p.raft));
         let (rate, dur) = probe(&q.files[0])?;
         let (x, v, _) = set_of(&w, q.kind, p.raft)?;
+        // mcp's device check refuses it first
+        if let (true, Some(why)) = (x.faces || x.plates, &rd.info.raft) {
+            return Err(r::no_blur(why));
+        }
+        if let (true, Some(l)) = (x.faces || x.plates, rd.stuck()) {
+            return Err(r::stuck_blur(l));
+        }
+        // its flows would wait for that lane's burn past the stop, and wedge this lane too
+        if let (true, Some(l)) = (x.raft, rd.stuck()) {
+            return Err(r::stuck_raft(l));
+        }
         let fps = x.rate(rate);
         let ab = span(range(&w, q.kind, fps, dur)?, still, fps, dur);
         let at = move |_| v;
-        let (job, n) = clip_job(
+        let (mut job, n) = clip_job(
             &q.files,
             dur,
             rate,
@@ -803,6 +865,11 @@ impl Render for Agent {
                 "the source changed since it was checked: {n} frames, not {}",
                 p.frames
             ));
+        }
+        // its blur pass, at the source's rate (`rate`: `Hide` links and pads by it, not by the output's `fps`)
+        let scan = (x.faces || x.plates).then(|| Arc::new(Scan::default()));
+        if let Some(s) = &scan {
+            job.pre = Some(pre(&rd.g, &q.files, &x, ab, rate, v, s.clone()));
         }
         let d = Dest {
             part: Some(part),
@@ -827,6 +894,8 @@ impl Render for Agent {
             dst: dst.into(),
             cut: AtomicBool::new(false),
             t: Mutex::new((Instant::now(), None, None)),
+            scan,
+            search: p.search,
         }))
     }
 
@@ -849,7 +918,10 @@ impl Render for Agent {
             self.driver(|| {
                 rd.g.trim();
                 rd.still.q.trim();
-                rd.export.q.trim()
+                rd.export.q.trim();
+                // the blur's detectors too, unless a pass holds them (a faces and plates pass leaves about 160 MB of
+                // them on the M4; they load again in about 20 ms, burn's kernels kept)
+                crate::ai::MODELS.trim();
             });
         }
     }
@@ -984,6 +1056,80 @@ struct AgentRun {
     cut: AtomicBool,
     /// submitted, first seen running, the wall time once done (s)
     t: Mutex<(Instant, Option<Instant>, Option<f64>)>,
+    /// its blur pass (None: no blur), the source frames it searches (the plan's)
+    scan: Option<Arc<Scan>>,
+    search: u64,
+}
+
+/// A blur pass's progress, shared by its job's `pre` and its `AgentRun`: source frames searched (of the plan's
+/// `search`), when the first was, its end (the hook made), what it found.
+#[derive(Default)]
+struct Scan {
+    searched: AtomicU64,
+    first: OnceLock<Instant>,
+    over: AtomicBool,
+    found: Mutex<Option<r::Found>>,
+}
+
+/// Job `x`'s blur pass (`Job::pre`): the Export screen's privacy pass over `ab` of `files` with `x`'s stabilisation
+/// and targets, the models held per searched frame; then its hook for `x`'s output in view `v`. `src`: the source's
+/// rate (`probe`), not the output's `x.rate(src)`: `Hide` links and pads by it.
+fn pre(
+    g: &Arc<Gpu>,
+    files: &[PathBuf],
+    x: &Set,
+    ab: [f64; 2],
+    src: edit::Rate,
+    v: View,
+    s: Arc<Scan>,
+) -> ::export::Pre {
+    let (g, files) = (g.clone(), files.to_vec());
+    let (stab, kinds, flat) = (x.stab.map(|l| (l, x.smooth)), [x.faces, x.plates], !x.pano);
+    Box::new(move |cx: &stitch::Ctx, stop: &AtomicBool| {
+        let t0 = Instant::now();
+        let mut say = |i: usize, _| {
+            if i == 1 {
+                let _ = s.first.set(Instant::now());
+            }
+            s.searched.store(i as u64, Relaxed)
+        };
+        // its own scope: a wgpu error or panic in the pass fails the job now, named, not once the frames ran
+        let (times, regs, c) = ::export::scoped(&g.device, || {
+            privacy_pass(
+                &g,
+                cx,
+                &files,
+                stab,
+                ab,
+                src,
+                kinds,
+                Hold::Frame,
+                stop,
+                None,
+                &mut say,
+            )
+        })
+        .map_err(|e| match e == CANCELLED {
+            true => e,
+            false => format!("the blur pass: {e}"),
+        })?;
+        let [ff, fp, n, tf, tp, on, all] = c.map(|n| n as u64);
+        *lock(&s.found) = Some(r::Found {
+            faces: ff,
+            plates: fp,
+            face_tracks: tf,
+            plate_tracks: tp,
+            searched: n,
+            blurred: on,
+            frames: all,
+            secs: t0.elapsed().as_secs_f64(),
+        });
+        s.over.store(true, Release);
+        // as `Keep::video`'s: output time t shows source ab[0] + t, in the job's fixed view
+        Ok(Some(hook(&g, flat, vec![(times, regs)], move |_, t| {
+            Some((0, ab[0] + t, v))
+        })))
+    })
 }
 
 impl Drop for AgentRun {
@@ -1011,19 +1157,35 @@ impl Run for AgentRun {
                 if p.done > 0 && self.raft {
                     self.r.warm.store(true, Relaxed)
                 }
+                // `Running` is set before the pass starts: its phase from the first look
+                let scan = self.scan.as_deref();
+                let pass = scan.is_some_and(|s| !s.over.load(Acquire));
                 let phase = match p.done {
+                    0 if pass => Phase::Detecting,
                     0 if self.raft && !self.r.warm.load(Relaxed) => Phase::Compiling,
                     0 => Phase::Setup,
                     n if n >= p.total => Phase::Finishing,
                     _ => Phase::Frames,
                 };
+                let searched = scan.map_or(0, |s| s.searched.load(Relaxed));
+                // while detecting the rates are the pass's (the frames' are 0): searched frames/s since the first, once
+                // two are, and its seconds left
+                let (fps, eta) = match (phase, scan.and_then(|s| s.first.get())) {
+                    (Phase::Detecting, Some(t)) if searched >= 2 => {
+                        let f = (searched - 1) as f64 / t.elapsed().as_secs_f64().max(1e-3);
+                        (f, self.search.saturating_sub(searched) as f64 / f)
+                    }
+                    (Phase::Detecting, _) => (0.0, 0.0),
+                    _ => (p.fps, p.eta),
+                };
                 RunSt::Running {
                     phase,
                     done: p.done,
                     total: p.total,
-                    fps: p.fps,
-                    eta: p.eta,
+                    fps,
+                    eta,
                     concealed: p.concealed,
+                    searched,
                 }
             }
             Some(::export::State::Done(p)) => {
@@ -1041,6 +1203,7 @@ impl Run for AgentRun {
                     secs,
                     bytes: std::fs::symlink_metadata(&self.dst).map_or(0, |m| m.len()),
                     concealed: p.concealed,
+                    found: self.scan.as_ref().and_then(|s| *lock(&s.found)),
                 }
             }
             Some(::export::State::Failed(e)) => RunSt::Failed(e),
@@ -1059,7 +1222,7 @@ impl Run for AgentRun {
 
 /// The catalog from this screen's tables (built once): its presets, sizes (360 videos without the photos' 11904),
 /// codecs, rates and ranges; the looks, the editor's adjustments, the stabilisation modes, the player's flat
-/// projections; the still's preset-free defaults; what agents can't do yet.
+/// projections; the still's preset-free defaults; the blur targets and the pass's stride; what agents can't do yet.
 fn catalog() -> Catalog {
     let range = |min: f64, max: f64, d: Option<f64>| r::Range {
         min,
@@ -1142,6 +1305,14 @@ fn catalog() -> Catalog {
             flat: STILL_FLAT,
             jpeg_quality: range(50.0, 100.0, Some(JQ as f64)),
         },
+        blur: (BLUR.iter())
+            .map(|(id, name, al)| r::Named {
+                id: (*id).into(),
+                name: Some((*name).into()),
+                aliases: al.iter().map(|a| a.to_string()).collect(),
+            })
+            .collect(),
+        blur_every: STEP as u32,
         later: (LATER.iter())
             .map(|(id, name, al)| r::Later {
                 id: (*id).into(),
@@ -1159,7 +1330,8 @@ fn catalog() -> Catalog {
 /// `w`, every option already checked against the catalog by mcp, as the Export screen's settings and flat view (and
 /// its projection's id) hold them, set as its widgets set them: a still from preset-free defaults (360 at 7680, flat
 /// 1920 × 1080, quality 92), an export from its preset (a changed size, codec, depth or rate clears it, as on the
-/// screen); then the options asked. `raft`: the seam's default. `w.stabilisation` is the resolved one (`check`).
+/// screen); then the options asked, the blur's boxes too. `raft`: the seam's default. `w.stabilisation` is the
+/// resolved one (`check`).
 fn set_of(w: &Want, kind: Kind, raft: bool) -> Result<(Set, View, &'static str), String> {
     let bad = |what: &str, v: &str| format!("{what} {v:?}: not in the catalog");
     let flat = w.output == Some(Output::Flat);
@@ -1239,7 +1411,13 @@ fn set_of(w: &Want, kind: Kind, raft: bool) -> Result<(Set, View, &'static str),
         let i = (doc::ADJ.iter().position(|a| a.0 == k)).ok_or_else(|| bad("adjust", k))?;
         *doc::adj(&mut x.adj)[i] = v;
     }
-    (x.faces, x.plates) = (false, false);
+    for b in &w.blur {
+        if !BLUR.iter().any(|t| t.0 == b) {
+            return Err(bad("blur", b));
+        }
+    }
+    let on = |i: usize| w.blur.iter().any(|b| b == BLUR[i].0);
+    (x.faces, x.plates) = (on(0), on(1));
     let a = w.view.clone().unwrap_or_default();
     let p = a.projection.as_deref().unwrap_or(VIEWS[0].0);
     let (id, l) = (VIEWS.iter().find(|v| v.0 == p || v.1.contains(&p)))
@@ -1281,7 +1459,15 @@ fn range(w: &Want, kind: Kind, fps: edit::Rate, dur: f64) -> Result<[f64; 2], St
     Ok([a, b])
 }
 
-/// The settings a job renders with, as results show them; `t`: a still's time asked.
+/// The blur ids `x` renders with, in the catalog's order (none: no pass).
+fn blur_ids(x: &Set) -> Vec<String> {
+    (BLUR.iter().zip([x.faces, x.plates]))
+        .filter(|(_, on)| *on)
+        .map(|(t, _)| t.0.into())
+        .collect()
+}
+
+/// The settings a job renders with, as results show them (`blur` always, `[]` without); `t`: a still's time asked.
 fn settings(x: &Set, v: &View, proj: &str, w: &Want, kind: Kind, ab: [f64; 2], t: f64) -> Value {
     let [pw, ph] = x.size();
     let stab = (gyro::MODES.iter().position(|m| m.0 == x.stab)).map_or("off", |i| STAB[i]);
@@ -1297,6 +1483,7 @@ fn settings(x: &Set, v: &View, proj: &str, w: &Want, kind: Kind, ab: [f64; 2], t
         "look": look,
         "look_strength": x.amt,
         "adjust": w.adjust,
+        "blur": blur_ids(x),
     });
     if !x.pano {
         s["view"] = json!({ "projection": proj, "yaw": v.yaw, "pitch": v.pitch, "roll": v.roll, "fov": v.fov });

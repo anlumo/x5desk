@@ -64,6 +64,16 @@ fn gpu() -> MutexGuard<'static, Gpu> {
     .unwrap_or_else(|e| e.into_inner())
 }
 
+/// Skips a test that loads Core ML in this process unless `CFFIXED_USER_HOME` is set: Core ML's ANE cache follows it,
+/// not HOME, so it would land in the real `~/Library/Caches`.
+fn no_cf_home() -> bool {
+    let unset = cfg!(target_os = "macos") && std::env::var_os("CFFIXED_USER_HOME").is_none();
+    if unset {
+        eprintln!("CFFIXED_USER_HOME unset (Core ML's cache would go to the real home): skipped");
+    }
+    unset
+}
+
 fn samples() -> Option<PathBuf> {
     let d = std::env::var_os("X5_SAMPLES").map(PathBuf::from);
     if d.is_none() {
@@ -1239,6 +1249,9 @@ fn covered(r: &[Region], x: &Region) -> bool {
 #[test]
 fn privacy() {
     let Some(d) = samples() else { return };
+    if no_cf_home() {
+        return;
+    }
     let names = std::env::var("X5_PRIVACY").unwrap_or_else(|_| "v635,v606,v627".into());
     let cap: usize = std::env::var("X5_FRAMES").map_or(usize::MAX, |v| v.parse().unwrap());
     let g = gpu();
@@ -1463,6 +1476,9 @@ fn labels(name: &str) -> Option<Labels> {
 #[test]
 fn plates() {
     let Some(d) = samples() else { return };
+    if no_cf_home() {
+        return;
+    }
     let names = std::env::var("X5_PLATES").unwrap_or_else(|_| "v635,v606,v627".into());
     let all: Vec<_> = (names.split(','))
         .filter_map(|n| match n {
@@ -1580,6 +1596,9 @@ fn plates() {
 #[test]
 fn highlights() {
     let Some(d) = samples() else { return };
+    if no_cf_home() {
+        return;
+    }
     let names = std::env::var("X5_HIGH").unwrap_or_else(|_| "v635,v606,v627".into());
     let g = gpu();
     let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();

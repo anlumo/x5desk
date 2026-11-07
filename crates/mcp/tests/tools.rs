@@ -5,7 +5,7 @@
 use mcp::{
     Host, Opts, Tiers,
     config::Source,
-    render::{Backend, Catalog, GpuInfo, GpuSt, Kind, Lane, Plan, Render, Req, Run, Start},
+    render::{Backend, Catalog, Found, GpuInfo, GpuSt, Kind, Lane, Plan, Render, Req, Run, Start},
     renders::{End, GONE, RJob, Renders},
     sim,
 };
@@ -1179,8 +1179,8 @@ async fn across_hosts() {
 }
 
 /// Render jobs an earlier host left: the next host settles an unfinished one by its `.part`'s identity (cancelled,
-/// the `.part` gone) and shows them in the job tools beside the downloads, newest first, by kind and limit; job_wait
-/// and job_cancel answer a finished one at once, as it ended.
+/// the `.part` gone) and shows them in the job tools beside the downloads, newest first, by kind and limit, a blurred
+/// one with what its pass found; job_wait and job_cancel answer a finished one at once, as it ended.
 #[tokio::test(flavor = "multi_thread")]
 async fn renders_kept() {
     let d = std::env::temp_dir().join(format!("x5desk-mcp-rkept-{}", std::process::id()));
@@ -1202,6 +1202,7 @@ async fn renders_kept() {
         },
         settings: json!({ "preset": "pano57" }),
         frames: if kind == Kind::Still { 1 } else { 175 },
+        search: 0,
         bytes: 92_000_000,
         cancelled: false,
         end: None,
@@ -1219,6 +1220,28 @@ async fn renders_kept() {
     );
     s.end = Some(End::done(1, 3.4, 5_000, 0));
     r.add("zz.0001-2".into(), s);
+    // a blurred export that finished: what its pass found
+    let mut b = job(
+        Kind::Export,
+        agent.join("VID_20260117_141148_00_635_blur_pano57.mp4"),
+        t0 + Duration::from_secs(2),
+    );
+    (b.settings["blur"], b.search) = (json!(["faces", "plates"]), 59);
+    let found = Found {
+        faces: 31,
+        plates: 4,
+        face_tracks: 3,
+        plate_tracks: 1,
+        searched: 59,
+        blurred: 120,
+        frames: 177,
+        secs: 7.0,
+    };
+    b.end = Some(End {
+        found: Some(found),
+        ..End::done(175, 21.0, 80_000_000, 0)
+    });
+    r.add("zz.0001-3".into(), b);
     r.save().unwrap();
     let h = Host::new(Opts {
         sim: Some(sim::Opts {
@@ -1279,17 +1302,48 @@ async fn renders_kept() {
             (h, v["total"].as_u64().unwrap(), v)
         }
     };
+    // the blurred one as it ended: its pass's counts, the frames' rate without the pass
+    let v = ok(&c, "job_status", json!({ "job": "zz.0001-3" })).await;
+    assert_eq!(
+        (&v["state"], &v["fps"], &v["blur"]["targets"]),
+        (&json!("done"), &json!(12.5), &json!(["faces", "plates"])),
+        "{v}"
+    );
+    assert_eq!(
+        (
+            &v["blur"]["frames_searched"],
+            &v["blur"]["frames_to_search"]
+        ),
+        (&json!(59), &json!(59))
+    );
+    assert_eq!(
+        v["blur"]["found"],
+        json!({
+            "faces": { "detections": 31, "tracks": 3 }, "plates": { "detections": 4, "tracks": 1 },
+            "blurred_frames": 120, "frames": 177, "pass_s": 7.0,
+        })
+    );
     let (l, n, v) = list(json!({})).await;
     assert_eq!(
         (l, n),
-        (vec!["zz.0001-2".to_string(), "zz.0001-1".into()], 2)
+        (
+            vec![
+                "zz.0001-3".to_string(),
+                "zz.0001-2".into(),
+                "zz.0001-1".into()
+            ],
+            3
+        )
     );
     assert!(v["jobs"][0].get("settings").is_none(), "a short row: {v}");
-    assert_eq!(v["jobs"][1]["state"], "cancelled");
+    assert_eq!(v["jobs"][2]["state"], "cancelled");
     assert_eq!(list(json!({ "kind": "still" })).await.0, ["zz.0001-2"]);
-    assert_eq!(list(json!({ "kind": "export" })).await.0, ["zz.0001-1"]);
+    assert_eq!(
+        list(json!({ "kind": "export" })).await.0,
+        ["zz.0001-3", "zz.0001-1"]
+    );
     assert_eq!(list(json!({ "kind": "download" })).await.1, 0);
-    assert_eq!(list(json!({ "limit": 1 })).await.0, ["zz.0001-2"]);
+    assert_eq!(list(json!({ "limit": 1 })).await.0, ["zz.0001-3"]);
     assert!(
         err(&c, "job_list", json!({ "kind": "photo" }))
             .await
@@ -1309,10 +1363,10 @@ async fn renders_kept() {
     );
     assert_eq!(
         ok(&c, "status", json!({})).await["jobs"],
-        json!({ "running": 0, "queued": 0, "finished": 2 })
+        json!({ "running": 0, "queued": 0, "finished": 3 })
     );
     assert!(
-        err(&c, "job_status", json!({ "job": "zz.0001-3" }))
+        err(&c, "job_status", json!({ "job": "zz.0001-4" }))
             .await
             .contains("its host has ended")
     );
@@ -1323,7 +1377,11 @@ async fn renders_kept() {
         (k.v.iter())
             .map(|r| r.end.as_ref().unwrap().state.as_str())
             .collect::<Vec<_>>(),
-        ["cancelled", "done"]
+        ["cancelled", "done", "done"]
+    );
+    assert_eq!(
+        (k.v[2].search, k.v[2].end.as_ref().unwrap().found),
+        (59, Some(found))
     );
     std::fs::remove_dir_all(&d).unwrap();
 }

@@ -56,6 +56,17 @@ fn diff(a: &[f32], b: &[f32]) -> (f32, f32) {
     })
 }
 
+/// Skips a test that loads Core ML in this process unless `CFFIXED_USER_HOME` is set: Core ML's ANE cache follows it,
+/// not HOME, so it would land in the real `~/Library/Caches`.
+#[cfg(target_os = "macos")]
+fn no_cf_home() -> bool {
+    let unset = cfg!(target_os = "macos") && std::env::var_os("CFFIXED_USER_HOME").is_none();
+    if unset {
+        eprintln!("CFFIXED_USER_HOME unset (Core ML's cache would go to the real home): skipped");
+    }
+    unset
+}
+
 /// A device opened like `video::Gpu`: every adapter feature (burn needs them), the experimental ones. From the test
 /// binary's one instance: instances created on parallel test threads race in NVIDIA's ICD (`video::gpu` `SCAN`).
 fn open() -> (wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue) {
@@ -950,6 +961,9 @@ fn blur() {
 #[cfg(target_os = "macos")]
 #[test]
 fn coreml() {
+    if no_cf_home() {
+        return;
+    }
     let (inst, ad, dev, q) = open();
     let (w, h) = (3072u32, 1536u32);
     let px: Vec<u8> = (0..w * h)

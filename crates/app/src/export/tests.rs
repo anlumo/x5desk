@@ -1,4 +1,5 @@
 use super::*;
+pub(super) use crate::ai::tests::no_cf_home;
 
 /// The preview's ray of pixel `p` on an `s` target (`blur.wgsl` `ray`, `stitch.wgsl`), in the view camera frame.
 fn ray(p: Vec2, mode: u32, f: f32, d: f32, s: Vec2) -> Vec3 {
@@ -237,6 +238,9 @@ fn player_spec() {
 /// checked on a view aimed there; wider than tall); with faces alone none lies there.
 #[test]
 fn plates() {
+    if no_cf_home() {
+        return;
+    }
     let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
         eprintln!("X5_SAMPLES unset: skipped");
         return;
@@ -576,7 +580,7 @@ fn parity() {
 }
 
 /// One device for the GPU tests, one test at a time.
-fn gpu() -> (std::sync::MutexGuard<'static, ()>, Arc<Gpu>, Ctx) {
+pub(super) fn gpu() -> (std::sync::MutexGuard<'static, ()>, Arc<Gpu>, Ctx) {
     static G: std::sync::OnceLock<(Mutex<()>, Arc<Gpu>, Ctx)> = std::sync::OnceLock::new();
     let (m, g, cx) = G.get_or_init(|| {
         let g = Arc::new(Gpu::new().expect("GPU"));
@@ -598,7 +602,7 @@ fn fixture(name: &str) -> PathBuf {
     d.join(name)
 }
 
-fn task(spec: Spec, set: Set, path: PathBuf, range: [f64; 2], grab: bool) -> Task {
+pub(super) fn task(spec: Spec, set: Set, path: PathBuf, range: [f64; 2], grab: bool) -> Task {
     Task {
         it: Arc::new(Item {
             name: String::new(),
@@ -961,6 +965,9 @@ fn ff_frame(p: &Path, k: usize) -> Vec<u8> {
 /// frame 0 differs inside the face's region and is the same away from it.
 #[test]
 fn faces() {
+    if no_cf_home() {
+        return;
+    }
     let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
         eprintln!("X5_SAMPLES unset: skipped");
         return;
@@ -1095,6 +1102,9 @@ fn faces() {
 /// away from all regions: each output frame takes its own clip's face pass and view.
 #[test]
 fn timeline_faces() {
+    if no_cf_home() {
+        return;
+    }
     let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
         eprintln!("X5_SAMPLES unset: skipped");
         return;
@@ -1333,6 +1343,9 @@ fn queue() {
 /// the locks and must see the job's submits, or the check proves nothing.
 #[test]
 fn gate() {
+    if no_cf_home() {
+        return;
+    }
     let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
         eprintln!("X5_SAMPLES unset: skipped");
         return;
@@ -1389,4 +1402,377 @@ fn gate() {
     assert!(matches!(it.st(), St::Done(p, _) if p.done == p.total && p.total > 0));
     assert!(held[0] >= 3 && held[1] >= 3 && busy > 0);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A pass's regions per frame as bits (direction, size, score), to compare runs exactly.
+fn bits(r: &Regs) -> Vec<Vec<[u32; 6]>> {
+    let b = |q: &track::Region| {
+        let ([x, y, z], [w, h]) = (q.dir.to_array(), q.size.to_array());
+        [x, y, z, w, h, q.score].map(f32::to_bits)
+    };
+    r.iter().map(|r| r.iter().map(b).collect()).collect()
+}
+
+/// The privacy pass before it was factored out of `Keep::privacy`: a verbatim copy of crates/app/src/export.rs
+/// 1338-1444 at 2c08b85, so `privacy_parity` judges the refactor against the code it replaced.
+impl Keep {
+    #[allow(clippy::too_many_arguments)]
+    fn old_privacy(
+        &mut self,
+        g: &Arc<Gpu>,
+        cx: &Ctx,
+        t: &Task,
+        f: &[PathBuf],
+        stab: Option<(stab::Lock, f64)>,
+        [a, b]: [f64; 2],
+        fps: edit::Rate,
+        sum: &mut [usize; 7],
+        ctx: &egui::Context,
+    ) -> Result<(Vec<f64>, Regs), String> {
+        if f.len() > 1 {
+            return Err("privacy blur: recordings in a file per lens are not supported yet".into());
+        }
+        let c = shotlab::Clip::open(&f[0])?;
+        let poses = match stab {
+            Some((l, s)) => Some(
+                c.poses(l, s)
+                    .ok_or("privacy blur: no IMU record to stabilise with")?,
+            ),
+            None => None,
+        };
+        let (fa, pl) = (t.set.faces, t.set.plates);
+        let what = match (fa, pl) {
+            (true, false) => "faces",
+            (false, true) => "license plates",
+            _ => "faces and license plates",
+        };
+        let k0 = clip::frame_at(&c.times, a);
+        let k1 = c.times.partition_point(|&x| x < b - 1e-3).max(k0 + 1) - 1;
+        let ks: Vec<usize> = (k0..=k1).step_by(STEP).collect();
+        let (it, n, tiles) = (&t.it, ks.len(), track::face_tiles());
+        let (mut hide, mut pano, mut i, mut found) =
+            ([track::Hide::new(), track::Hide::new()], None, 0, [0; 2]);
+        it.set(St::Privacy(0, n, what));
+        crate::ai::MODELS.with(g, false, Some(ctx), |ai| {
+            // shotlab decodes and submits each stitch on this thread between the calls: a surface configure the UI
+            // retries waits for that (no wait there depends on another thread); the detection runs under BURN instead,
+            // never inside GATE (the UI takes BURN, then GATE)
+            let mut gate = Some(crate::GATE.read());
+            c.frames(
+                g,
+                cx,
+                if pl { PLATES_W } else { FACES_W },
+                false,
+                &ks,
+                |k| c.pose(k, poses.as_deref()),
+                |tex, k| {
+                    if it.stop.load(Relaxed) {
+                        return Err(CANCELLED.into());
+                    }
+                    let p =
+                        pano.get_or_insert_with(|| ai.pano(&tex.create_view(&Default::default())));
+                    gate.take();
+                    // burn submits throughout
+                    let r = {
+                        let _b = crate::BURN.lock();
+                        let f = if fa {
+                            ai.faces(p, &tiles, MIN)
+                        } else {
+                            Ok(vec![])
+                        };
+                        let q = if pl { ai.plates(p, PMIN) } else { Ok(vec![]) };
+                        f.and_then(|f| Ok([f, q?]))
+                    };
+                    gate = Some(crate::GATE.read());
+                    for (j, r) in r?.into_iter().enumerate() {
+                        found[j] += r.len();
+                        hide[j].push(k, r);
+                    }
+                    i += 1;
+                    it.set(St::Privacy(i, n, what));
+                    ctx.request_repaint();
+                    Ok(())
+                },
+            )
+        })?;
+        let fps = fps.num as f32 / fps.den as f32;
+        let [rf, rp] = hide.each_ref().map(|h| h.regions(c.times.len(), fps));
+        let r: Regs = rf
+            .into_iter()
+            .zip(rp)
+            .map(|(a, b)| [a, b].concat())
+            .collect();
+        let on = r[k0..=k1].iter().filter(|r| !r.is_empty()).count();
+        let tr = hide.each_ref().map(|h| h.tracks(fps).len());
+        for (s, x) in sum
+            .iter_mut()
+            .zip([found[0], found[1], n, tr[0], tr[1], on, k1 + 1 - k0])
+        {
+            *s += x;
+        }
+        let [ff, fp, n, tf, tp, on, all] = *sum;
+        let (d, tr) = match (fa, pl) {
+            (true, false) => (format!("{ff} face"), tf.to_string()),
+            (false, true) => (format!("{fp} plate"), tp.to_string()),
+            _ => (
+                format!("{ff} face and {fp} plate"),
+                format!("{tf} and {tp}"),
+            ),
+        };
+        *it.note.lock().unwrap_or_else(|e| e.into_inner()) =
+            format!("{d} detections on {n} frames, {tr} tracks, blurred on {on} of {all} frames");
+        Ok((c.times, r))
+    }
+}
+
+/// A privacy pass on the synthetic recording (300 frames of grey per GOP, no IMU) over [0, 2] s with faces and plates:
+/// 20 frames searched of 60, all 300 frame times, nothing found, the note and the last state the Export screen shows
+/// (recorded from `Keep::privacy` before the pass was factored out of it). A recording in a file per lens, and a
+/// stabilisation without IMU records, are refused.
+#[test]
+fn privacy_synth() {
+    if no_cf_home() {
+        return;
+    }
+    let (_l, g, cx) = gpu();
+    let f = fixture("privacy_synth.insv");
+    ::export::synth::insv(&f, 300, 256).unwrap();
+    let (fps, dur) = probe(&f).unwrap();
+    let spec = Spec {
+        files: vec![f.clone()],
+        photo: false,
+        dur,
+        t: 0.0,
+        view: View::default(),
+        look: Look::Perspective,
+        stab: None,
+        smooth: 0.0,
+        follow: None,
+        faces: false,
+        plates: false,
+    };
+    let set = Set {
+        faces: true,
+        plates: true,
+        stab: None,
+        ..Set::default()
+    };
+    let (mut k, ctx, ab) = (Keep::default(), egui::Context::default(), [0.0, 2.0]);
+    let t = task(spec.clone(), set, fixture("privacy_synth.mp4"), ab, false);
+    let mut sum = [0; 7];
+    let (times, r) = (k.privacy(&g, &cx, &t, &spec.files, None, ab, fps, &mut sum, &ctx)).unwrap();
+    assert_eq!((times.len(), r.len()), (300, 300));
+    assert!(r.iter().all(|r| r.is_empty()), "a region on grey");
+    assert_eq!(sum, [0, 0, 20, 0, 0, 0, 60]);
+    assert_eq!(t.it.st(), St::Privacy(20, 20, "faces and license plates"));
+    assert_eq!(
+        t.it.note(),
+        "0 face and 0 plate detections on 20 frames, 0 and 0 tracks, blurred on 0 of 60 frames"
+    );
+    let two = [f.clone(), f.clone()];
+    let e = k.privacy(&g, &cx, &t, &two, None, ab, fps, &mut sum, &ctx);
+    assert_eq!(
+        e.unwrap_err(),
+        "privacy blur: recordings in a file per lens are not supported yet"
+    );
+    let horizon = Some((stab::Lock::Horizon, gyro::SMOOTH));
+    let e = k.privacy(&g, &cx, &t, &spec.files, horizon, ab, fps, &mut sum, &ctx);
+    assert_eq!(
+        e.unwrap_err(),
+        "privacy blur: no IMU record to stabilise with"
+    );
+    // the pass itself with either hold: the same, its progress from 0 of 20 to 20 of 20, a stop seen at the next frame
+    for hold in [Hold::Pass, Hold::Frame] {
+        let (stop, mut said) = (AtomicBool::new(false), vec![]);
+        let pass = |f: &[PathBuf], stab, say: &mut dyn FnMut(usize, usize)| {
+            privacy_pass(&g, &cx, f, stab, ab, fps, [true; 2], hold, &stop, None, say)
+        };
+        let (times, r, c) = pass(&spec.files, None, &mut |i, n| said.push((i, n))).unwrap();
+        assert_eq!(
+            (times.len(), r.len(), c),
+            (300, 300, [0, 0, 20, 0, 0, 0, 60]),
+            "{hold:?}"
+        );
+        assert!(r.iter().all(|r| r.is_empty()), "{hold:?}: a region on grey");
+        assert_eq!(
+            said,
+            (0..=20).map(|i| (i, 20)).collect::<Vec<_>>(),
+            "{hold:?}"
+        );
+        let mut last = 0;
+        let e = pass(&spec.files, None, &mut |i, _| {
+            last = i;
+            stop.store(i == 5, Relaxed);
+        });
+        assert_eq!((e.map(drop), last), (Err(CANCELLED.into()), 5), "{hold:?}");
+        stop.store(false, Relaxed);
+        let e = pass(&two, None, &mut |_, _| {});
+        assert_eq!(
+            e.map(drop).unwrap_err(),
+            "privacy blur: recordings in a file per lens are not supported yet"
+        );
+        let e = pass(&spec.files, horizon, &mut |_, _| {});
+        assert_eq!(
+            e.map(drop).unwrap_err(),
+            "privacy blur: no IMU record to stabilise with"
+        );
+    }
+    std::fs::remove_file(&f).unwrap();
+}
+
+/// What a privacy pass gives: frame times, regions per frame (bits), note, last state, counts.
+type Pass = (Vec<f64>, Vec<Vec<[u32; 6]>>, String, St, [usize; 7]);
+
+/// Where two passes differ, if they do.
+fn differ(a: &Pass, b: &Pass) -> Option<String> {
+    if a.0 != b.0 {
+        return Some("the frame times".into());
+    }
+    if let Some(k) = (0..a.1.len().max(b.1.len())).find(|&k| a.1.get(k) != b.1.get(k)) {
+        return Some(format!(
+            "frame {k}'s regions: {:?} and {:?}",
+            a.1.get(k),
+            b.1.get(k)
+        ));
+    }
+    (a.2 != b.2 || a.3 != b.3 || a.4 != b.4).then(|| {
+        format!(
+            "{:?} {:?} {:?} and {:?} {:?} {:?}",
+            a.2, a.3, a.4, b.2, b.3, b.4
+        )
+    })
+}
+
+/// The recording the privacy tests take from `X5_SAMPLES` (`d`): v635, else its first `.insv`.
+pub(super) fn sample(d: &Path) -> PathBuf {
+    match d.join("v635.insv") {
+        f if f.exists() => f,
+        _ => {
+            let mut v: Vec<PathBuf> = (std::fs::read_dir(d).unwrap())
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|x| x == "insv"))
+                .collect();
+            v.sort();
+            v.into_iter().next().expect("an .insv in X5_SAMPLES")
+        }
+    }
+}
+
+/// `Keep::privacy` finds what the pass found before it was factored out of it (`old_privacy`), on a recording
+/// (`X5_SAMPLES`: v635, else its first `.insv`): faces over [0, 3] s, faces and plates over [1, 2] s with the horizon
+/// lock, plates on the one frame at `X5_PLATES_AT` (s, 2 by default; one with a plate). Each case finds something; the
+/// same frame times, regions (by their bits), note, last state and counts. The old pass runs twice: if those differ,
+/// the detectors aren't deterministic in this process and the test says so instead of comparing.
+#[test]
+fn privacy_parity() {
+    if no_cf_home() {
+        return;
+    }
+    let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+        eprintln!("X5_SAMPLES unset: skipped");
+        return;
+    };
+    let f = sample(&d);
+    let at: f64 =
+        std::env::var("X5_PLATES_AT").map_or(2.0, |s| s.parse().expect("X5_PLATES_AT: seconds"));
+    let (_l, g, cx) = gpu();
+    let (fps, dur) = probe(&f).unwrap();
+    let spec = Spec {
+        files: vec![f],
+        photo: false,
+        dur,
+        t: at,
+        view: View::default(),
+        look: Look::Perspective,
+        stab: None,
+        smooth: 0.0,
+        follow: None,
+        faces: false,
+        plates: false,
+    };
+    let horizon = Some((stab::Lock::Horizon, gyro::SMOOTH));
+    let one = span([at; 2], true, fps, dur);
+    let cases = [
+        ([true, false], None, [0.0, 3.0]),
+        ([true, true], horizon, [1.0, 2.0]),
+        ([false, true], None, one),
+    ];
+    let (mut k, ctx) = (Keep::default(), egui::Context::default());
+    for ([faces, plates], stab, ab) in cases {
+        let mut run = |old: bool| -> Pass {
+            let set = Set {
+                faces,
+                plates,
+                stab: stab.map(|s| s.0),
+                ..Set::default()
+            };
+            let t = task(spec.clone(), set, fixture("privacy.mp4"), ab, false);
+            let (fs, mut sum) = (&spec.files, [0; 7]);
+            let (times, r) = match old {
+                true => k.old_privacy(&g, &cx, &t, fs, stab, ab, fps, &mut sum, &ctx),
+                false => k.privacy(&g, &cx, &t, fs, stab, ab, fps, &mut sum, &ctx),
+            }
+            .unwrap();
+            (times, bits(&r), t.it.note(), t.it.st(), sum)
+        };
+        let t0 = Instant::now();
+        let old = run(true);
+        eprintln!(
+            "faces {faces}, plates {plates}, {ab:?} s, stab {stab:?}: {} ({:.1} s)",
+            old.2,
+            t0.elapsed().as_secs_f64()
+        );
+        if let Some(e) = differ(&old, &run(true)) {
+            panic!(
+                "the detectors aren't deterministic in this process: two runs of the old pass differ in {e}"
+            );
+        }
+        if let Some(e) = differ(&old, &run(false)) {
+            panic!("Keep::privacy differs from the old pass in {e}");
+        }
+        // the agents' pass: the models held per searched frame, no note
+        let (mut said, stop) = ((0, 0), AtomicBool::new(false));
+        let (fs, hold) = (&spec.files, Hold::Frame);
+        let (times, r, c) = privacy_pass(
+            &g,
+            &cx,
+            fs,
+            stab,
+            ab,
+            fps,
+            [faces, plates],
+            hold,
+            &stop,
+            None,
+            &mut |i, n| said = (i, n),
+        )
+        .unwrap();
+        let St::Privacy(.., what) = old.3 else {
+            panic!("{:?}", old.3)
+        };
+        let frame = (
+            times,
+            bits(&r),
+            old.2.clone(),
+            St::Privacy(said.0, said.1, what),
+            c,
+        );
+        if let Some(e) = differ(&old, &frame) {
+            panic!("the agents' pass (Hold::Frame) differs from the old pass in {e}");
+        }
+        // each kind a case asks for on real detections, or it shows no parity (the plates-only one's frame:
+        // `X5_PLATES_AT`)
+        for (asked, n, kind) in [(faces, old.4[0], "face"), (plates, old.4[1], "plate")] {
+            assert!(
+                !asked || n > 0,
+                "faces {faces}, plates {plates}: no {kind} found over {ab:?} s on {}: no parity shown{}",
+                spec.files[0].display(),
+                if faces {
+                    ""
+                } else {
+                    "; X5_PLATES_AT: a time with a plate"
+                }
+            );
+        }
+    }
 }
