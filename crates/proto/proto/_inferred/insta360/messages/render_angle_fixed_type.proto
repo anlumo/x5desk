@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 2 files
-// java: insta360.messages.Render_Angle_Fixed_Type  (insta360/messages/Render_Angle_Fixed_Type.java:37)
 enum Render_Angle_Fixed_Type {
   UNKNOWN_360 = 0;
   YAW_360     = 1;

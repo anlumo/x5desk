@@ -4,11 +4,9 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.NotificationCameraPostureUpdate  (insta360/messages/NotificationCameraPostureUpdate.java:33)
 message NotificationCameraPostureUpdate {
   CameraPostureType camera_posture = 1;
 
-  // java: insta360.messages.NotificationCameraPostureUpdate$CameraPostureType  (insta360/messages/NotificationCameraPostureUpdate.java:88)
   enum CameraPostureType {
     CAMERA_POSTURE_ROTATE_0   = 0;
     CAMERA_POSTURE_ROTATE_90  = 1;

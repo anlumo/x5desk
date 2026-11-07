@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 16 files
-// java: insta360.messages.FunctionMode  (insta360/messages/FunctionMode.java:37)
 enum FunctionMode {
   FUNCTION_MODE_NORMAL                  = 0;
   FUNCTION_MODE_LIVE_STREAM             = 1;

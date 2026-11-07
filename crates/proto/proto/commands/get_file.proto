@@ -6,12 +6,10 @@ package insta360.messages;
 
 import "_inferred/insta360/messages/file_type.proto";
 
-// java: insta360.messages.GetFile  (insta360/messages/GetFile.java:28)
 message GetFile {
   FileType file_type = 1;
 }
 
-// java: insta360.messages.GetFileResp  (insta360/messages/GetFileResp.java:32)
 message GetFileResp {
   string uri    = 1;
   int32 version = 2;

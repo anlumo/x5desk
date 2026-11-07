@@ -6,13 +6,11 @@ package insta360.messages;
 
 import "_inferred/insta360/messages/detachable_screen_connection_type.proto";
 
-// java: insta360.messages.DetachableScreenBatteryInfo  (insta360/messages/DetachableScreenBatteryInfo.java:36)
 message DetachableScreenBatteryInfo {
   PowerType power_type                                              = 1;
   uint32 battery_level                                              = 2;
   DetachableScreenConnectionType detachable_screen_connection_state = 3;
 
-  // java: insta360.messages.DetachableScreenBatteryInfo$PowerType  (insta360/messages/DetachableScreenBatteryInfo.java:137)
   enum PowerType {
     BATTERY        = 0;
     ADAPTER_NORMAL = 1;

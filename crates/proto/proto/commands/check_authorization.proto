@@ -4,13 +4,11 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.CheckAuthorization  (insta360/messages/CheckAuthorization.java:36)
 message CheckAuthorization {
   string id                    = 1;
   InitiatorType initiator_type = 2;
   string device_id             = 3;
 
-  // java: insta360.messages.CheckAuthorization$InitiatorType  (insta360/messages/CheckAuthorization.java:140)
   enum InitiatorType {
     UNKNOWN                = 0;
     PHONE_IOS              = 1;
@@ -24,14 +22,12 @@ message CheckAuthorization {
   }
 }
 
-// java: insta360.messages.CheckAuthorizationResp  (insta360/messages/CheckAuthorizationResp.java:37)
 message CheckAuthorizationResp {
   AuthorizationStatus authorization_status = 1;
   FindmyPairStatus findmy_pair_status      = 2;
   uint32 findmy_pair_id                    = 3;
   string device_id                         = 4;
 
-  // java: insta360.messages.CheckAuthorizationResp$AuthorizationStatus  (insta360/messages/CheckAuthorizationResp.java:85)
   enum AuthorizationStatus {
     AUTHORIZED                       = 0;
     UNAUTHORIZED                     = 1;
@@ -43,7 +39,6 @@ message CheckAuthorizationResp {
     AUTHORIZATION_FAILED_SLEEPING    = 7;
   }
 
-  // java: insta360.messages.CheckAuthorizationResp$FindmyPairStatus  (insta360/messages/CheckAuthorizationResp.java:269)
   enum FindmyPairStatus {
     FINDMY_PAIR_STATUS_NONE   = 0;
     FINDMY_PAIR_STATUS_UNPAIR = 1;

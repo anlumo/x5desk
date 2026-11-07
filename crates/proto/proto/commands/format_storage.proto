@@ -6,7 +6,6 @@ package insta360.messages;
 
 import "_inferred/insta360/messages/card_location.proto";
 
-// java: insta360.messages.FormatStorage  (insta360/messages/FormatStorage.java:28)
 message FormatStorage {
   CardLocation location = 1;
 }

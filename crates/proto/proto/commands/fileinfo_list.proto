@@ -6,19 +6,16 @@ package insta360.messages;
 
 import "_inferred/insta360/messages/card_location.proto";
 
-// java: insta360.messages.FileInfo  (insta360/messages/FileInfo.java:31)
 message FileInfo {
   string file_path = 1;
   bytes metadata   = 2;
 }
 
-// java: insta360.messages.FileInfo_List  (insta360/messages/FileInfo_List.java:35)
 message FileInfo_List {
   repeated FileInfo file_info = 1;
   int32 cardLocation          = 2;
 }
 
-// java: insta360.messages.GetFileInfoList  (insta360/messages/GetFileInfoList.java:28)
 message GetFileInfoList {
   CardLocation cardLocation = 1;
 }

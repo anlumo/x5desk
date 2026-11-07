@@ -4,26 +4,22 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.GetFileExtra  (insta360/messages/GetFileExtra.java:35)
 message GetFileExtra {
   string uri               = 1;
   uint32 extra_type        = 2;
   GyroOptions gyro_options = 3;
 
-  // java: insta360.messages.GetFileExtra$GyroOptions  (insta360/messages/GetFileExtra.java:118)
   message GyroOptions {
     oneof Range {
       IndexRange index_range = 1;
       TimeRange time_range   = 2;
     }
 
-    // java: insta360.messages.GetFileExtra$GyroOptions$IndexRange  (insta360/messages/GetFileExtra.java:189)
     message IndexRange {
       int32 start = 1;
       int32 count = 2;
     }
 
-    // java: insta360.messages.GetFileExtra$GyroOptions$TimeRange  (insta360/messages/GetFileExtra.java:405)
     message TimeRange {
       int64 start    = 1;
       int64 duration = 2;

@@ -4,7 +4,6 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.AFLensInfo  (insta360/messages/AFLensInfo.java:31)
 message AFLensInfo {
   int32 range_near = 1;
   int32 range_far  = 2;

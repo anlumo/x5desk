@@ -4,12 +4,10 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.Error  (insta360/messages/Error.java:34)
 message Error {
   ErrorCode code = 1;
   string message = 2;
 
-  // java: insta360.messages.Error$ErrorCode  (insta360/messages/Error.java:122)
   enum ErrorCode {
     UNKNOWN_ERROR                     = 0;
     UNKNOWN_MSG_CODE                  = 1;

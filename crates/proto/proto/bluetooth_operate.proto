@@ -7,7 +7,6 @@ package insta360.messages;
 import "phone_info.proto";
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.BluetoothOpenType  (insta360/messages/BluetoothOpenType.java:37)
 enum BluetoothOpenType {
   OPEN_TYPE_UNKNOWN        = 0;
   OPEN_TYPE_SCAN_CONNECT   = 1;
@@ -15,7 +14,6 @@ enum BluetoothOpenType {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.BluetoothOperateResult  (insta360/messages/BluetoothOperateResult.java:37)
 enum BluetoothOperateResult {
   OPERATERESULT_UNKNOWN       = 0;
   OPERATERESULT_OPEN_SUCCESS  = 1;
@@ -25,7 +23,6 @@ enum BluetoothOperateResult {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.BluetoothOperateType  (insta360/messages/BluetoothOperateType.java:37)
 enum BluetoothOperateType {
   Operate_TYPE_UNKNOWN = 0;
   Operate_TYPE_OPEN    = 1;
@@ -33,7 +30,6 @@ enum BluetoothOperateType {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.BluetoothType  (insta360/messages/BluetoothType.java:37)
 enum BluetoothType {
   BLUETOOTHTYPE_UNKNOWN = 0;
   BLUETOOTHTYPE_BLE     = 1;
@@ -41,7 +37,6 @@ enum BluetoothType {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.FeatureType  (insta360/messages/FeatureType.java:37)
 enum FeatureType {
   FEATURE_TYPE_UNKNOWN            = 0;
   Feature_Type_GPS_ASSISTANT      = 1;
@@ -50,7 +45,6 @@ enum FeatureType {
   Feature_Type_AI_VOICE_ASSISTANT = 4;
 }
 
-// java: insta360.messages.BluetoothOperate  (insta360/messages/BluetoothOperate.java:31)
 message BluetoothOperate {
   uint32 session_id            = 1;
   BluetoothOperateType op_id   = 2;
@@ -58,14 +52,12 @@ message BluetoothOperate {
   BluetoothOpenType open_type  = 4;
 }
 
-// java: insta360.messages.CameraBluetoothBindInfo  (insta360/messages/CameraBluetoothBindInfo.java:29)
 message CameraBluetoothBindInfo {
   FeatureType feature_type        = 1;
   PhoneInfo.PhoneType device_type = 2;
   string uuid                     = 3;
 }
 
-// java: insta360.messages.CameraBluetoothCurrInfo  (insta360/messages/CameraBluetoothCurrInfo.java:31)
 message CameraBluetoothCurrInfo {
   uint32 session_id                        = 1;
   BluetoothType bluetooth_type             = 2;
@@ -74,14 +66,12 @@ message CameraBluetoothCurrInfo {
   BluetoothOperateResult bt_operate_result = 5;
 }
 
-// java: insta360.messages.FeatureBluetoothMacBind  (insta360/messages/FeatureBluetoothMacBind.java:28)
 message FeatureBluetoothMacBind {
   BluetoothType bluetooth_type    = 1;
   FeatureType feature_type        = 2;
   PhoneInfo.PhoneType device_type = 3;
 }
 
-// java: insta360.messages.GetBluetoothBindInfo  (insta360/messages/GetBluetoothBindInfo.java:28)
 message GetBluetoothBindInfo {
   FeatureType feature_type = 1;
 }

@@ -7,13 +7,11 @@ package insta360.messages;
 import "_inferred/insta360/messages/video_resolution.proto";
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.AACBSType  (insta360/messages/AACBSType.java:37)
 enum AACBSType {
   RAW  = 0;
   ADTS = 1;
 }
 
-// java: insta360.messages.StartLiveStream  (insta360/messages/StartLiveStream.java:38)
 message StartLiveStream {
   bool enableAudio            = 1;
   bool enableVideo            = 2;
@@ -32,7 +30,6 @@ message StartLiveStream {
   bool enablePtz              = 15;
   ClientType client_type      = 16;
 
-  // java: insta360.messages.StartLiveStream$ClientType  (insta360/messages/StartLiveStream.java:308)
   enum ClientType {
     UNKNOWN        = 0;
     IOS            = 1;
@@ -41,7 +38,6 @@ message StartLiveStream {
     BEACON_GLASSES = 4;
   }
 
-  // java: insta360.messages.StartLiveStream$startLiveViewSource  (insta360/messages/StartLiveStream.java:433)
   enum startLiveViewSource {
     Start_LiveViewSource_NULL = 0;
     Start_LiveViewSource_USB  = 1;
@@ -50,6 +46,5 @@ message StartLiveStream {
   }
 }
 
-// java: insta360.messages.StartLiveStreamResp  (insta360/messages/StartLiveStreamResp.java:25)
 message StartLiveStreamResp {
 }

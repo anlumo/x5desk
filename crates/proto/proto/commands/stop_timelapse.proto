@@ -9,14 +9,12 @@ import "_inferred/insta360/messages/trigger_source.proto";
 import "extra_info.proto";
 import "video.proto";
 
-// java: insta360.messages.StopTimelapse  (insta360/messages/StopTimelapse.java:28)
 message StopTimelapse {
   TimelapseMode mode           = 1;
   ExtraMetadata extra_metadata = 2;
   TriggerSource trigger_source = 3;
 }
 
-// java: insta360.messages.StopTimelapseResp  (insta360/messages/StopTimelapseResp.java:28)
 message StopTimelapseResp {
   Video video = 1;
 }

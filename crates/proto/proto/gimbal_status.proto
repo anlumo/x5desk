@@ -4,7 +4,6 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.GimbalStatus  (insta360/messages/GimbalStatus.java:31)
 message GimbalStatus {
   bool roll_limit  = 1;
   bool pitch_limit = 2;

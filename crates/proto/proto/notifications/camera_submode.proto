@@ -8,7 +8,6 @@ import "_inferred/insta360/messages/photo_sub_mode.proto";
 import "_inferred/insta360/messages/sensor_device.proto";
 import "_inferred/insta360/messages/video_sub_mode.proto";
 
-// java: insta360.messages.NotifyCameraSubMode  (insta360/messages/NotifyCameraSubMode.java:28)
 message NotifyCameraSubMode {
   PhotoSubMode photo_submode = 1;
   VideoSubMode video_submode = 2;

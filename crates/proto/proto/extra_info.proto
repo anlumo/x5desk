@@ -11,7 +11,6 @@ import "commands/editinfo_list.proto";
 import "offset_info.proto";
 import "window_crop_info.proto";
 
-// java: insta360.messages.ExtraMetadata  (insta360/messages/ExtraMetadata.java:50)
 message ExtraMetadata {
   string serial_number                                           = 1;
   string camera_type                                             = 2;
@@ -223,14 +222,12 @@ message ExtraMetadata {
   string simulation_path                                         = 219;
   AudioConcertSceneType audio_concert_scene                      = 220;
 
-  // java: insta360.messages.ExtraMetadata$AISwitchState  (insta360/messages/ExtraMetadata.java:1312)
   enum AISwitchState {
     AI_SWITCH_UNKNOW = 0;
     AI_SWITCH_OFF    = 1;
     AI_SWITCH_ON     = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$AeFlickerType  (insta360/messages/ExtraMetadata.java:1412)
   enum AeFlickerType {
     AEFLICKER_TYPE_UNCOMPLETE = 0;
     AEFLICKER_TYPE_NONE       = 1;
@@ -239,7 +236,6 @@ message ExtraMetadata {
     AEFLICKER_TYPE_60HZ       = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$AeState  (insta360/messages/ExtraMetadata.java:1520)
   enum AeState {
     AE_EXTERNAL_OFF   = 0;
     AE_EXTERNAL_ON_V1 = 1;
@@ -248,20 +244,17 @@ message ExtraMetadata {
     AE_EXTERNAL_ON_V4 = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$AiAlgorithm  (insta360/messages/ExtraMetadata.java:1628)
   enum AiAlgorithm {
     SINGLE = 0;
     PANO   = 1;
   }
 
-  // java: insta360.messages.ExtraMetadata$AiPlatform  (insta360/messages/ExtraMetadata.java:1973)
   enum AiPlatform {
     CV5  = 0;
     CV22 = 1;
     H22  = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$AudioChannelMode  (insta360/messages/ExtraMetadata.java:2073)
   enum AudioChannelMode {
     AUDIO_CHANNEL_MODE_UNKNOWN = 0;
     AUDIO_CHANNEL_MODE_MONO    = 1;
@@ -269,14 +262,12 @@ message ExtraMetadata {
     AUDIO_CHANNEL_MODE_STEREO  = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$AudioConcertSceneType  (insta360/messages/ExtraMetadata.java:2177)
   enum AudioConcertSceneType {
     AUDIO_CONCERT_SCENE_UNKNOWN = 0;
     AUDIO_CONCERT_SCENE_STAGE   = 1;
     AUDIO_CONCERT_SCENE_VENUE   = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$AudioFocusMode  (insta360/messages/ExtraMetadata.java:2277)
   enum AudioFocusMode {
     AUDIO_FOCUS_MODE_UNKNOWN          = 0;
     AUDIO_FOCUS_MODE_OMNIDIRECTIONAL  = 1;
@@ -285,7 +276,6 @@ message ExtraMetadata {
     AUDIO_FOCUS_MODE_FORWARD_BACKWARD = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$AudioModeType  (insta360/messages/ExtraMetadata.java:2385)
   enum AudioModeType {
     AUDIO_MODE_UNKNOWN                           = 0;
     AUDIO_MODE_FOCUS                             = 1;
@@ -317,13 +307,11 @@ message ExtraMetadata {
     AUDIO_MODE_CONCERT                           = 27;
   }
 
-  // java: insta360.messages.ExtraMetadata$AutoClipDataStorage  (insta360/messages/ExtraMetadata.java:2870)
   enum AutoClipDataStorage {
     STORAGE_TYPE_NORMAL = 0;
     STORAGE_TYPE_LOOP   = 1;
   }
 
-  // java: insta360.messages.ExtraMetadata$AvSynthStatus  (insta360/messages/ExtraMetadata.java:3945)
   enum AvSynthStatus {
     AV_SYNTH_UNSPECIFIED  = 0;
     AV_SYNTH_NO_TASK      = 1;
@@ -332,14 +320,12 @@ message ExtraMetadata {
     AV_SYNTH_FAILED       = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$Battery_type  (insta360/messages/ExtraMetadata.java:4053)
   enum Battery_type {
     THICK    = 0;
     THIN     = 1;
     VERTICAL = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$Camera_Posture  (insta360/messages/ExtraMetadata.java:7635)
   enum Camera_Posture {
     CAMERA_ROTATE_0   = 0;
     CAMERA_ROTATE_90  = 1;
@@ -347,14 +333,12 @@ message ExtraMetadata {
     CAMERA_ROTATE_270 = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$Camera_Screen_Orientation  (insta360/messages/ExtraMetadata.java:7739)
   enum Camera_Screen_Orientation {
     CAM_SCREEN_UNKNOWN = 0;
     CAM_SCREEN_VERTI   = 1;
     CAM_SCREEN_HORIZ   = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$CaptureFilpType  (insta360/messages/ExtraMetadata.java:7839)
   enum CaptureFilpType {
     CAPTURE_FILP_TYPE_NULL            = 0;
     CAPTURE_FILP_TYPE_0_HORZ_FLIP     = 1;
@@ -362,13 +346,11 @@ message ExtraMetadata {
     CAPTURE_FILP_TYPE_PHOTO_HORZ_FLIP = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$CaptureRecommendStitchType  (insta360/messages/ExtraMetadata.java:8159)
   enum CaptureRecommendStitchType {
     CAPTURE_RECOMMEND_STITCH_TYPE_UNKNOWN = 0;
     CAPTURE_RECOMMEND_STITCH_TYPE_AI_2    = 1;
   }
 
-  // java: insta360.messages.ExtraMetadata$CloudVideoType  (insta360/messages/ExtraMetadata.java:8255)
   enum CloudVideoType {
     CLOUD_VIDEO_TYPE_ORIGINAL       = 0;
     CLOUD_VIDEO_TYPE_AGENT          = 1;
@@ -377,7 +359,6 @@ message ExtraMetadata {
     CLOUD_VIDEO_TYPE_SINGLE_FISHEYE = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$CodecType  (insta360/messages/ExtraMetadata.java:8363)
   enum CodecType {
     VIDEO_CODEC_TYPE_UNKNOW     = 0;
     VIDEO_CODEC_TYPE_H264       = 1;
@@ -387,7 +368,6 @@ message ExtraMetadata {
     VIDEO_CODEC_TYPE_H265_INTRA = 5;
   }
 
-  // java: insta360.messages.ExtraMetadata$ColorCorrectionType  (insta360/messages/ExtraMetadata.java:8475)
   enum ColorCorrectionType {
     COLOR_CORRECTION_TYPE_UNKNOW      = 0;
     COLOR_CORRECTION_TYPE_NONE        = 1;
@@ -395,14 +375,12 @@ message ExtraMetadata {
     COLOR_CORRECTION_TYPE_DYNAMIC_MAP = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$CoolingShellAlgoDetectedState  (insta360/messages/ExtraMetadata.java:8980)
   enum CoolingShellAlgoDetectedState {
     ALGO_NONE = 0;
     ALGO_ON   = 1;
     ALGO_OFF  = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$CoolingShellSelectedState  (insta360/messages/ExtraMetadata.java:9080)
   enum CoolingShellSelectedState {
     SELECTED_UNKNOW = 0;
     SELECTED_AUTO   = 1;
@@ -410,35 +388,30 @@ message ExtraMetadata {
     SELECTED_OFF    = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$DeWarpType  (insta360/messages/ExtraMetadata.java:9184)
   enum DeWarpType {
     DEWARP_TYPE_UNKNOWN = 0;
     DEWARP_TYPE_OFF     = 1;
     DEWARP_TYPE_ON      = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$DirectionLockType  (insta360/messages/ExtraMetadata.java:9284)
   enum DirectionLockType {
     DIRECTION_LOCK_TYPE_UNKNOW    = 0;
     DIRECTION_LOCK_TYPE_OFF       = 1;
     DIRECTION_LOCK_TYPE_PANOFPVON = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$EvMapLevel  (insta360/messages/ExtraMetadata.java:9384)
   enum EvMapLevel {
     EVMAP_LEVEL_OFF  = 0;
     EVMAP_LEVEL_LOW  = 1;
     EVMAP_LEVEL_HIGH = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$EvoStatusMode  (insta360/messages/ExtraMetadata.java:9484)
   enum EvoStatusMode {
     UNKNOWN_STATUS_MODE = 0;
     DEGREE180           = 1;
     DEGREE360           = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$ExpectOutputType  (insta360/messages/ExtraMetadata.java:9584)
   enum ExpectOutputType {
     DEFAULT      = 0;
     INSTA_PANO   = 1;
@@ -446,14 +419,12 @@ message ExtraMetadata {
     ONE_TAKE     = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$ExtremeLowPowerModeType  (insta360/messages/ExtraMetadata.java:10451)
   enum ExtremeLowPowerModeType {
     EXTREME_LOWPOAER_MODE_UNKNOW = 0;
     EXTREME_LOWPOAER_MODE_OFF    = 1;
     EXTREME_LOWPOAER_MODE_ON     = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$FileCategory  (insta360/messages/ExtraMetadata.java:10551)
   enum FileCategory {
     FILE_CATEGORY_UNKNOW                    = 0;
     FILE_CATEGORY_PLANE                     = 1;
@@ -464,7 +435,6 @@ message ExtraMetadata {
     FILE_CATEGORY_EQUIRECTANGULAR_PANO      = 6;
   }
 
-  // java: insta360.messages.ExtraMetadata$FileRotate  (insta360/messages/ExtraMetadata.java:10964)
   enum FileRotate {
     FILE_ROTATE_UNKNOW = 0;
     FILE_ROTATE_0      = 1;
@@ -473,27 +443,23 @@ message ExtraMetadata {
     File_ROTATE_270    = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$FileSplitType  (insta360/messages/ExtraMetadata.java:11506)
   enum FileSplitType {
     FILE_SPLIT_TYPE_UNKNOW    = 0;
     FILE_SPLIT_TYPE_NOT_SPLIT = 1;
     FILE_SPLIT_TYPE_SPLITTED  = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$FolderType  (insta360/messages/ExtraMetadata.java:11907)
   enum FolderType {
     FOLDERTYPE_UNKNOWN        = 0;
     FOLDERTYPE_INTERVAL_VIDEO = 1;
   }
 
-  // java: insta360.messages.ExtraMetadata$GpsSource  (insta360/messages/ExtraMetadata.java:12219)
   enum GpsSource {
     GSV       = 0;
     DASHBOARD = 1;
     REMOTE    = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$GuardDetectedType  (insta360/messages/ExtraMetadata.java:12319)
   enum GuardDetectedType {
     UNKNOW = 0;
     A      = 1;
@@ -506,34 +472,29 @@ message ExtraMetadata {
     ND128  = 8;
   }
 
-  // java: insta360.messages.ExtraMetadata$GyroType  (insta360/messages/ExtraMetadata.java:12869)
   enum GyroType {
     INSDEV_IMU_TYPE_20948 = 0;
     INSDEV_IMU_TYPE_40609 = 1;
   }
 
-  // java: insta360.messages.ExtraMetadata$Gyro_FilterType  (insta360/messages/ExtraMetadata.java:12965)
   enum Gyro_FilterType {
     GYRO_FILTER_TYPE_UNKNOWN = 0;
     GYRO_FILTER_TYPE_BRUTE   = 1;
     GYRO_FILTER_TYPE_AKF     = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$HDR_STATE  (insta360/messages/ExtraMetadata.java:13065)
   enum HDR_STATE {
     NOT_HDR         = 0;
     WAITING_PROCESS = 1;
     PROCESSED       = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$HdrModeType  (insta360/messages/ExtraMetadata.java:13165)
   enum HdrModeType {
     HDR_MODE_UNKNOW = 0;
     HDR_MODE_OFF    = 1;
     HDR_MODE_ON     = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$HdrProcessType  (insta360/messages/ExtraMetadata.java:13265)
   enum HdrProcessType {
     HDR_PROCESS_EXTERNAL          = 0;
     HDR_PROCESS_INNER             = 1;
@@ -541,21 +502,18 @@ message ExtraMetadata {
     HDR_PROCESS_EXTERNAL_VERSION2 = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$HighLightSource  (insta360/messages/ExtraMetadata.java:13369)
   enum HighLightSource {
     HIGHLIGHTSOURCE_NONE   = 0;
     HIGHLIGHTSOURCE_SELFIE = 1;
     HIGHLIGHTSOURCE_TM1    = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$ImageStitchType  (insta360/messages/ExtraMetadata.java:13469)
   enum ImageStitchType {
     IMAGE_STITCH_TYPE_UNKNOWN  = 0;
     IMAGE_STITCH_TYPE_ORIGINAL = 1;
     IMAGE_STITCH_TYPE_STITCHED = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$Image_FovType  (insta360/messages/ExtraMetadata.java:13569)
   enum Image_FovType {
     FOV_TYPE_UNKNOWN          = 0;
     FOV_TYPE_WIDE             = 1;
@@ -580,14 +538,12 @@ message ExtraMetadata {
     FOV_TYPE_NUM              = 20;
   }
 
-  // java: insta360.messages.ExtraMetadata$Lens283MType  (insta360/messages/ExtraMetadata.java:13941)
   enum Lens283MType {
     LENS_UNKNOW            = 0;
     LENS_LOW_TRANSPARENCY  = 1;
     LENS_HIGH_TRANSPARENCY = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$LensAccessoryType  (insta360/messages/ExtraMetadata.java:14041)
   enum LensAccessoryType {
     LENS_ACCESSORIES_TYPE_UNKOWN                    = 0;
     LENS_ACCESSORIES_TYPE_STANDARD                  = 1;
@@ -623,28 +579,24 @@ message ExtraMetadata {
     LENS_ACCESSORIES_TYPE_UV_FILTER_DIVING_HOUSING  = 31;
   }
 
-  // java: insta360.messages.ExtraMetadata$LensModuleType  (insta360/messages/ExtraMetadata.java:14228)
   enum LensModuleType {
     LENS_MODULE_UNKOWN   = 0;
     LENS_MODULE_SHUNYU   = 1;
     LENS_MODULE_HONGJING = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$LiveModeType  (insta360/messages/ExtraMetadata.java:14328)
   enum LiveModeType {
     LIVE_MODE_TYPE_INVALID = 0;
     LIVE_MODE_TYPE_PHOTO   = 1;
     LIVE_MODE_TYPE_VIDEO   = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$LiveSDKVersion  (insta360/messages/ExtraMetadata.java:14428)
   enum LiveSDKVersion {
     LIVE_SDK_VERSION_INVALID = 0;
     LIVE_SDK_VERSION_NORMAL  = 1;
     LIVE_SDK_VERSION_Z03_V1  = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$LiveSceneType  (insta360/messages/ExtraMetadata.java:14528)
   enum LiveSceneType {
     LIVE_SCENE_TYPE_INVALID          = 0;
     LIVE_SCENE_TYPE_FIRST_CAPTURE    = 1;
@@ -652,14 +604,12 @@ message ExtraMetadata {
     LIVE_SCENE_TYPE_DYNAMIC_FPS      = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$LowLightStabilizationModeType  (insta360/messages/ExtraMetadata.java:14632)
   enum LowLightStabilizationModeType {
     LOWLIGHT_STABILIZATION_MODE_UNKNOW               = 0;
     LOWLIGHT_STABILIZATION_MODE_JITTER_BLUR_REDUTION = 1;
     LOWLIGHT_STABILIZATION_MODE_ANTI_FLICKER         = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$MCTFProcessType  (insta360/messages/ExtraMetadata.java:14732)
   enum MCTFProcessType {
     MCTF_PROCESS_TYPE_UNKNOW     = 0;
     MCTF_PROCESS_TYPE_OFF        = 1;
@@ -669,7 +619,6 @@ message ExtraMetadata {
     MCTF_PROCESS_TYPE_AMBA_INSTA = 5;
   }
 
-  // java: insta360.messages.ExtraMetadata$OffsetVersion  (insta360/messages/ExtraMetadata.java:15862)
   enum OffsetVersion {
     OFFSET_UNKNOWN = 0;
     OFFSET_V1      = 1;
@@ -679,7 +628,6 @@ message ExtraMetadata {
     OFFSET_V8      = 5;
   }
 
-  // java: insta360.messages.ExtraMetadata$OnlineFlowstateLevel  (insta360/messages/ExtraMetadata.java:15974)
   enum OnlineFlowstateLevel {
     ONLINE_FLOWSTATE_LEVEL_UNKNOW   = 0;
     ONLINE_FLOWSTATE_LEVEL_STANDARD = 1;
@@ -688,21 +636,18 @@ message ExtraMetadata {
     ONLINE_FLOWSTATE_LEVEL_OFF      = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$PanoRecordMultiTrackOrder  (insta360/messages/ExtraMetadata.java:16082)
   enum PanoRecordMultiTrackOrder {
     PANO_RECORD_TRACK_ORDER_UNKNOW          = 0;
     PANO_RECORD_TRACK_ORDER_TRACK0_STREAM10 = 1;
     PANO_RECORD_TRACK_ORDER_TRACK0_STREAM00 = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$PanoRecordType  (insta360/messages/ExtraMetadata.java:16182)
   enum PanoRecordType {
     PANO_RECORD_TYPE_UNKNOW      = 0;
     PANO_RECORD_TYPE_SPLIT_FILE  = 1;
     PANO_RECORD_TYPE_MULTI_TRACK = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$PropellerGuardStatusType  (insta360/messages/ExtraMetadata.java:16282)
   enum PropellerGuardStatusType {
     PROPELLER_GUARD_STATUS_NONE        = 0;
     PROPELLER_GUARD_STATUS_WEAR        = 1;
@@ -710,7 +655,6 @@ message ExtraMetadata {
     PROPELLER_GUARD_STATUS_WEAR_DONGLE = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$PrsestType  (insta360/messages/ExtraMetadata.java:16386)
   enum PrsestType {
     PRESET_TYPE_BASE         = 0;
     PRESET_TYPE_VLOG         = 1;
@@ -724,13 +668,11 @@ message ExtraMetadata {
     PRESET_TYPE_DIY          = 9;
   }
 
-  // java: insta360.messages.ExtraMetadata$PureShotProcessType  (insta360/messages/ExtraMetadata.java:16507)
   enum PureShotProcessType {
     PURESHOT_PROCESS_EXTERNAL = 0;
     PURESHOT_PROCESS_INNER    = 1;
   }
 
-  // java: insta360.messages.ExtraMetadata$RawCaptureType  (insta360/messages/ExtraMetadata.java:16603)
   enum RawCaptureType {
     RAW_CAPTURE_TYPE_OFF          = 0;
     RAW_CAPTURE_TYPE_DNG          = 1;
@@ -739,38 +681,32 @@ message ExtraMetadata {
     RAW_CAPTURE_TYPE_PURESHOT_RAW = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$RemovePurpleFringing  (insta360/messages/ExtraMetadata.java:16711)
   enum RemovePurpleFringing {
     REMOVR_PURPLE_FRINGING_NOT_SUPPORT = 0;
     REMOVR_PURPLE_FRINGING_INNER       = 1;
     REMOVR_PURPLE_FRINGING_EXTERNAL    = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$RepairedType  (insta360/messages/ExtraMetadata.java:16811)
   enum RepairedType {
     UNKNOWN              = 0;
     FILE_REPAIRED_ASSIST = 1;
   }
 
-  // java: insta360.messages.ExtraMetadata$ReprocessingType  (insta360/messages/ExtraMetadata.java:16907)
   enum ReprocessingType {
     REPROCESSING_TYPE_UNKNOWN = 0;
     REPROCESSING_TYPE_INSIDE  = 1;
   }
 
-  // java: insta360.messages.ExtraMetadata$ResolutiuonType  (insta360/messages/ExtraMetadata.java:17003)
   enum ResolutiuonType {
     INS_RES_UNKNOW = 0;
     INS_RES_PLUS   = 1;
   }
 
-  // java: insta360.messages.ExtraMetadata$SceneType  (insta360/messages/ExtraMetadata.java:17099)
   enum SceneType {
     SCENE_TYPE_UNKNOW      = 0;
     SCENE_TYPE_UNDER_WATER = 1;
   }
 
-  // java: insta360.messages.ExtraMetadata$SensorDevice  (insta360/messages/ExtraMetadata.java:17195)
   enum SensorDevice {
     SENSOR_DEVICE_UNKNOWN = 0;
     SENSOR_DEVICE_FRONT   = 1;
@@ -778,19 +714,16 @@ message ExtraMetadata {
     SENSOR_DEVICE_ALL     = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$SharpenState  (insta360/messages/ExtraMetadata.java:17299)
   enum SharpenState {
     SHARPEN_EXTERNAL_OFF = 0;
     SHARPEN_EXTERNAL_ON  = 1;
   }
 
-  // java: insta360.messages.ExtraMetadata$ShootingAccessoriesType  (insta360/messages/ExtraMetadata.java:17395)
   enum ShootingAccessoriesType {
     ACCESSORIES_NONE   = 0;
     ACCESSORIES_STREET = 1;
   }
 
-  // java: insta360.messages.ExtraMetadata$StreamType  (insta360/messages/ExtraMetadata.java:18506)
   enum StreamType {
     STREAM_TYPE_UNKNOW                    = 0;
     STREAM_TYPE_SINGLE_STREAM_FILE        = 1;
@@ -799,14 +732,12 @@ message ExtraMetadata {
     STREAM_TYPE_DUAL_STREAM_TRACK_REVERSE = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$StreetPhotoHorizCorrection  (insta360/messages/ExtraMetadata.java:18614)
   enum StreetPhotoHorizCorrection {
     HORIZ_CORRECTION_UNKNOWN = 0;
     HORIZ_CORRECTION_OFF     = 1;
     HORIZ_CORRECTION_ON      = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$SubMediaType  (insta360/messages/ExtraMetadata.java:18714)
   enum SubMediaType {
     VIDEO_NORMAL           = 0;
     VIDEO_BULLETTIME       = 1;
@@ -844,14 +775,12 @@ message ExtraMetadata {
     VIDEO_CONCERT          = 33;
   }
 
-  // java: insta360.messages.ExtraMetadata$ThumbnailStitchType  (insta360/messages/ExtraMetadata.java:19421)
   enum ThumbnailStitchType {
     THUMBNAIL_STITCH_TYPE_UNKNOWN  = 0;
     THUMBNAIL_STITCH_TYPE_ORIGINAL = 1;
     THUMBNAIL_STITCH_TYPE_STITCHED = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$ThumbnailType  (insta360/messages/ExtraMetadata.java:19521)
   enum ThumbnailType {
     THUMBNAIL_TYPE_UNKNOWN = 0;
     THUMBNAIL_TYPE_YUV     = 1;
@@ -859,7 +788,6 @@ message ExtraMetadata {
     THUMBNAIL_TYPE_H264    = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$TimeScale  (insta360/messages/ExtraMetadata.java:19625)
   enum TimeScale {
     TIMESCALE_1X   = 0;
     TIMESCALE_4X   = 1;
@@ -868,14 +796,12 @@ message ExtraMetadata {
     TIMESCALE_1_8X = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$TimelapsStorageType  (insta360/messages/ExtraMetadata.java:19733)
   enum TimelapsStorageType {
     TIMELAPS_STORAGE_TYPE_UNKNOW     = 0;
     TIMELAPS_STORAGE_TYPE_GYRO       = 1;
     TIMELAPS_STORAGE_TYPE_QUATERNION = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$TriggerSource  (insta360/messages/ExtraMetadata.java:19833)
   enum TriggerSource {
     Unknown       = 0;
     CameraButton  = 1;
@@ -884,7 +810,6 @@ message ExtraMetadata {
     BtRemote      = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$UavCameraMode  (insta360/messages/ExtraMetadata.java:19941)
   enum UavCameraMode {
     UAV_CAM_MODE_RECORD         = 0;
     UAV_CAM_MODE_PHOTO          = 1;
@@ -899,7 +824,6 @@ message ExtraMetadata {
     UAV_CAM_MODE_PLAYBACK       = 10;
   }
 
-  // java: insta360.messages.ExtraMetadata$UavControlType  (insta360/messages/ExtraMetadata.java:20065)
   enum UavControlType {
     UAV_CONTROL_TYPE_UNKNOWN = 0;
     UAV_CONTROL_TYPE_SRC     = 1;
@@ -908,7 +832,6 @@ message ExtraMetadata {
     UAV_CONTROL_TYPE_BVC     = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$UavDisplayType  (insta360/messages/ExtraMetadata.java:20173)
   enum UavDisplayType {
     UAV_DISPLAY_TYPE_UNKNOWN = 0;
     UAV_DISPLAY_TYPE_DGS     = 1;
@@ -917,14 +840,12 @@ message ExtraMetadata {
     UAV_DISPLAY_TYPE_BVC     = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$UnderWaterModeType  (insta360/messages/ExtraMetadata.java:20281)
   enum UnderWaterModeType {
     UNDER_WATER_MODE_UNKNOW = 0;
     UNDER_WATER_MODE_OFF    = 1;
     UNDER_WATER_MODE_ON     = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$VideoBitDepth  (insta360/messages/ExtraMetadata.java:20597)
   enum VideoBitDepth {
     VIDEO_BITDEPTH_UNKNOWN = 0;
     VIDEO_BITDEPTH_8       = 1;
@@ -933,7 +854,6 @@ message ExtraMetadata {
     VIDEO_BITDEPTH_16      = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$VideoColorSpace  (insta360/messages/ExtraMetadata.java:20705)
   enum VideoColorSpace {
     VIDEO_NamedColorSpace_UNKNOWN          = 0;
     VIDEO_NamedColorSpace_BT709            = 1;
@@ -942,7 +862,6 @@ message ExtraMetadata {
     VIDEO_NamedColorSpace_DOLBY_VISION_8_4 = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$VideoMediaDataRotateAngle  (insta360/messages/ExtraMetadata.java:20813)
   enum VideoMediaDataRotateAngle {
     MEDIA_DATA_ROTATE_UNKNOWN   = 0;
     MEDIA_DATA_ROTATE_ANGLE_0   = 1;
@@ -951,14 +870,12 @@ message ExtraMetadata {
     MEDIA_DATA_ROTATE_ANGLE_270 = 8;
   }
 
-  // java: insta360.messages.ExtraMetadata$VideoPtsType  (insta360/messages/ExtraMetadata.java:20921)
   enum VideoPtsType {
     VIDEO_PTS_UNKNOWN       = 0;
     VIDEO_PTS_MP4           = 1;
     VIDEO_PTS_EXPOSURE_FILE = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$WaterMarkStyle  (insta360/messages/ExtraMetadata.java:21021)
   enum WaterMarkStyle {
     WATERMARK_STYLE_UNKNOWN        = 0;
     STREET_PHOTO_WATERMARK_SIMPLE  = 1;
@@ -966,7 +883,6 @@ message ExtraMetadata {
     STREET_PHOTO_WATERMARK_VINYL   = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$WaterMarkType  (insta360/messages/ExtraMetadata.java:21125)
   enum WaterMarkType {
     WATER_MARK_TYPE_UNKNOW  = 0;
     WATER_MARK_TYPE_OFF     = 1;
@@ -975,21 +891,18 @@ message ExtraMetadata {
     WATER_MARK_TYPE_EIS_ON  = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$AIGCInfo  (insta360/messages/ExtraMetadata.java:1043)
   message AIGCInfo {
     bool isAIGC      = 1;
     string aigcToken = 2;
     bool isAigcHd    = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$AiLibVersion  (insta360/messages/ExtraMetadata.java:1707)
   message AiLibVersion {
     uint32 major = 1;
     uint32 minor = 2;
     uint32 patch = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$AudioTrackInfo  (insta360/messages/ExtraMetadata.java:2543)
   message AudioTrackInfo {
     int32 volume                  = 1;
     int32 delay_time              = 2;
@@ -997,7 +910,6 @@ message ExtraMetadata {
     AudioFocusMode focus_mode     = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$AutoClipParam  (insta360/messages/ExtraMetadata.java:2949)
   message AutoClipParam {
     AutoClipVersion version                   = 1;
     float sample_rate                         = 2;
@@ -1016,7 +928,6 @@ message ExtraMetadata {
     uint32 apei_fps                           = 15;
   }
 
-  // java: insta360.messages.ExtraMetadata$AutoClipVersion  (insta360/messages/ExtraMetadata.java:3603)
   message AutoClipVersion {
     AiPlatform platform    = 1;
     AiAlgorithm algorithm  = 2;
@@ -1024,7 +935,6 @@ message ExtraMetadata {
     AiLibVersion svc_ver   = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$BigboomTracks  (insta360/messages/ExtraMetadata.java:4136)
   message BigboomTracks {
     repeated double sfov       = 1;
     repeated double attrs      = 2;
@@ -1036,14 +946,12 @@ message ExtraMetadata {
     int32 aspect               = 8;
   }
 
-  // java: insta360.messages.ExtraMetadata$CameraCalibAdditionalInfo  (insta360/messages/ExtraMetadata.java:6877)
   message CameraCalibAdditionalInfo {
     float sensor0_temper = 1;
     float sensor1_temper = 2;
     float env_temper     = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$CameraOffsetCalib  (insta360/messages/ExtraMetadata.java:7127)
   message CameraOffsetCalib {
     string offset_v3_dual         = 1;
     string offset_v3_cam0         = 2;
@@ -1056,13 +964,11 @@ message ExtraMetadata {
     string offset_v7_dual_refined = 9;
   }
 
-  // java: insta360.messages.ExtraMetadata$CaptureImageQualityInfo  (insta360/messages/ExtraMetadata.java:7926)
   message CaptureImageQualityInfo {
     int32 image_luminance_value_index         = 1;
     uint32 image_correlated_color_temperature = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$ContinueRecordInfo  (insta360/messages/ExtraMetadata.java:8579)
   message ContinueRecordInfo {
     int64 first_frame_timestamp = 1;
     int64 end_frame_timestamp   = 2;
@@ -1073,7 +979,6 @@ message ExtraMetadata {
     int32 submediatype          = 7;
   }
 
-  // java: insta360.messages.ExtraMetadata$ExtraUserOptions  (insta360/messages/ExtraMetadata.java:9671)
   message ExtraUserOptions {
     string filter                                     = 1;
     string befilter                                   = 2;
@@ -1087,14 +992,12 @@ message ExtraMetadata {
     repeated OffsetConvertState offset_convert_states = 10 [packed = false];
     double play_trim_recommend_timestamp              = 11;
 
-    // java: insta360.messages.ExtraMetadata$ExtraUserOptions$LogoType  (insta360/messages/ExtraMetadata.java:9892)
     enum LogoType {
       UNKNOWN_LOGO_TYPE = 0;
       NO_LOGO           = 1;
       INSTA_LOGO        = 2;
     }
 
-    // java: insta360.messages.ExtraMetadata$ExtraUserOptions$OffsetConvertState  (insta360/messages/ExtraMetadata.java:9992)
     enum OffsetConvertState {
       WaterProof         = 0;
       DivingWater        = 1;
@@ -1106,7 +1009,6 @@ message ExtraMetadata {
     }
   }
 
-  // java: insta360.messages.ExtraMetadata$FileGroupInfo  (insta360/messages/ExtraMetadata.java:10646)
   message FileGroupInfo {
     SubMediaType type = 1;
     uint32 index      = 2;
@@ -1114,7 +1016,6 @@ message ExtraMetadata {
     uint32 total      = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$FileSceneInfo  (insta360/messages/ExtraMetadata.java:11055)
   message FileSceneInfo {
     uint32 type                     = 1;
     string identity                 = 2;
@@ -1125,7 +1026,6 @@ message ExtraMetadata {
     uint32 select_frame_num         = 7;
   }
 
-  // java: insta360.messages.ExtraMetadata$FolderInfo  (insta360/messages/ExtraMetadata.java:11589)
   message FolderInfo {
     FolderType type = 1;
     uint32 index    = 2;
@@ -1133,43 +1033,36 @@ message ExtraMetadata {
     uint32 max_num  = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$FrameRateAVRational  (insta360/messages/ExtraMetadata.java:11986)
   message FrameRateAVRational {
     uint32 num = 1;
     uint32 den = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$GyroConfigInfo  (insta360/messages/ExtraMetadata.java:12420)
   message GyroConfigInfo {
     uint32 acc_range  = 1;
     uint32 gyro_range = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$GyroIndex  (insta360/messages/ExtraMetadata.java:12636)
   message GyroIndex {
     int32 index     = 1;
     int64 timestamp = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$IntervaRecTakeoverInfo  (insta360/messages/ExtraMetadata.java:13706)
   message IntervaRecTakeoverInfo {
     uint64 start_timestamp = 1;
     uint64 end_timestamp   = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$MagCalib  (insta360/messages/ExtraMetadata.java:14827)
   message MagCalib {
     repeated float bias  = 1;
     repeated float scale = 2;
     repeated float cross = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$MagQI  (insta360/messages/ExtraMetadata.java:15109)
   message MagQI {
     repeated float q_i_mag = 1;
   }
 
-  // java: insta360.messages.ExtraMetadata$Material3AInfo  (insta360/messages/ExtraMetadata.java:15305)
   message Material3AInfo {
     float ev      = 1;
     uint32 wb     = 2;
@@ -1177,14 +1070,12 @@ message ExtraMetadata {
     float shutter = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$MetaTrackParam  (insta360/messages/ExtraMetadata.java:15593)
   message MetaTrackParam {
     uint64 ImuDataSize = 1;
     uint64 AAADataSize = 2;
     uint32 Compress    = 3;
   }
 
-  // java: insta360.messages.ExtraMetadata$ShootingParamInfo  (insta360/messages/ExtraMetadata.java:17474)
   message ShootingParamInfo {
     uint32 contrast_level          = 1;
     uint32 saturation_level        = 2;
@@ -1195,7 +1086,6 @@ message ExtraMetadata {
     string lut_type                = 7;
     ColorMode color_mode           = 8;
 
-    // java: insta360.messages.ExtraMetadata$ShootingParamInfo$ColorMode  (insta360/messages/ExtraMetadata.java:17635)
     enum ColorMode {
       COLOR_MODE_UNKNOWN  = 0;
       COLOR_MODE_STANDARD = 1;
@@ -1203,7 +1093,6 @@ message ExtraMetadata {
       COLOR_MODE_DOLBY    = 3;
     }
 
-    // java: insta360.messages.ExtraMetadata$ShootingParamInfo$FocusMode  (insta360/messages/ExtraMetadata.java:17756)
     enum FocusMode {
       FOCUS_MODE_UNKNOWN     = 0;
       FOCUS_MODE_MANUAL      = 1;
@@ -1215,21 +1104,18 @@ message ExtraMetadata {
       FOCUS_MODE_SHOW        = 7;
     }
 
-    // java: insta360.messages.ExtraMetadata$ShootingParamInfo$FovcFlag  (insta360/messages/ExtraMetadata.java:17871)
     enum FovcFlag {
       FOVC_FLAG_UNKNOWN = 0;
       FOVC_FLAG_DISABLE = 1;
       FOVC_FLAG_ENABLE  = 2;
     }
 
-    // java: insta360.messages.ExtraMetadata$ShootingParamInfo$MeteringMode  (insta360/messages/ExtraMetadata.java:17971)
     enum MeteringMode {
       METERING_MODE_UNKNOWN = 0;
       METERING_MODE_AVERAGE = 1;
       METERING_MODE_FACE    = 2;
     }
 
-    // java: insta360.messages.ExtraMetadata$ShootingParamInfo$SharpnessLevel  (insta360/messages/ExtraMetadata.java:18071)
     enum SharpnessLevel {
       SHARPNESS_LEVEL_UNKNOWN = 0;
       SHARPNESS_LEVEL_LOW     = 1;
@@ -1238,13 +1124,11 @@ message ExtraMetadata {
     }
   }
 
-  // java: insta360.messages.ExtraMetadata$ThumbnailHeroRotQuatData  (insta360/messages/ExtraMetadata.java:18890)
   message ThumbnailHeroRotQuatData {
     ThumbnailRotQuat still_rot_quat       = 1;
     ThumbnailRotQuat hero_offset_rot_quat = 2;
   }
 
-  // java: insta360.messages.ExtraMetadata$ThumbnailRotQuat  (insta360/messages/ExtraMetadata.java:19122)
   message ThumbnailRotQuat {
     float w = 1;
     float x = 2;
@@ -1252,14 +1136,12 @@ message ExtraMetadata {
     float z = 4;
   }
 
-  // java: insta360.messages.ExtraMetadata$Vector2  (insta360/messages/ExtraMetadata.java:20364)
   message Vector2 {
     int32 x = 1;
     int32 y = 2;
   }
 }
 
-// java: insta360.messages.FileExtraMetadataResp  (insta360/messages/FileExtraMetadataResp.java:36)
 message FileExtraMetadataResp {
   repeated string uri                 = 1;
   repeated ExtraMetadata mediaData    = 2;

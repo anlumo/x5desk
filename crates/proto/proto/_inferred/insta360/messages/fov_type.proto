@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 4 files
-// java: insta360.messages.FovType  (insta360/messages/FovType.java:37)
 enum FovType {
   FOV_WIDE              = 0;
   FOV_LINEAR            = 1;

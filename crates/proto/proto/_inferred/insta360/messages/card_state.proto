@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 2 files
-// java: insta360.messages.CardState  (insta360/messages/CardState.java:37)
 enum CardState {
   STOR_CS_PASS           = 0;
   STOR_CS_NOCARD         = 1;

@@ -6,7 +6,6 @@ package insta360.messages;
 
 import "video.proto";
 
-// java: insta360.messages.NotificationCaptureAutoSplit  (insta360/messages/NotificationCaptureAutoSplit.java:28)
 message NotificationCaptureAutoSplit {
   Video video = 1;
 }

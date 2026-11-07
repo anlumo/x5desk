@@ -8,7 +8,6 @@ import "_inferred/insta360/messages/timelapse_mode.proto";
 import "_inferred/insta360/messages/trigger_source.proto";
 import "extra_info.proto";
 
-// java: insta360.messages.StartTimelapse  (insta360/messages/StartTimelapse.java:31)
 message StartTimelapse {
   TimelapseMode mode           = 1;
   ExtraMetadata extra_metadata = 2;
@@ -16,6 +15,5 @@ message StartTimelapse {
   TriggerSource trigger_source = 4;
 }
 
-// java: insta360.messages.StartTimelapseResp  (insta360/messages/StartTimelapseResp.java:25)
 message StartTimelapseResp {
 }

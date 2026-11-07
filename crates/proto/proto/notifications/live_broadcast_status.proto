@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.LiveErrorCode  (insta360/messages/LiveErrorCode.java:37)
 enum LiveErrorCode {
   LIVE_ERROR_NONE          = 0;
   LIVE_ERROR_NORMAL        = 1;
@@ -16,7 +15,6 @@ enum LiveErrorCode {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.LiveStatus  (insta360/messages/LiveStatus.java:37)
 enum LiveStatus {
   LIVE_STATUS_IDLE     = 0;
   LIVE_STATUS_PREPARE  = 1;
@@ -25,7 +23,6 @@ enum LiveStatus {
   LIVE_STATUS_STOPPING = 4;
 }
 
-// java: insta360.messages.LiveBroadCastStatus  (insta360/messages/LiveBroadCastStatus.java:28)
 message LiveBroadCastStatus {
   LiveStatus live_status        = 1;
   LiveErrorCode live_error_code = 2;

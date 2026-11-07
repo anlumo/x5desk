@@ -6,12 +6,10 @@ package insta360.messages;
 
 import "video.proto";
 
-// java: insta360.messages.NotificationCaptureStopped  (insta360/messages/NotificationCaptureStopped.java:33)
 message NotificationCaptureStopped {
   ErrorCode err_code = 1;
   Video video        = 2;
 
-  // java: insta360.messages.NotificationCaptureStopped$ErrorCode  (insta360/messages/NotificationCaptureStopped.java:120)
   enum ErrorCode {
     OVER_TIME_LIMIT        = 0;
     STORAGE_FULL           = 1;

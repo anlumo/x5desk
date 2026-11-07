@@ -8,13 +8,11 @@ import "_inferred/insta360/messages/function_mode.proto";
 import "_inferred/insta360/messages/photography_option_type.proto";
 import "photography_options.proto";
 
-// java: insta360.messages.GetPhotographyOptions  (insta360/messages/GetPhotographyOptions.java:34)
 message GetPhotographyOptions {
   repeated PhotographyOptionType option_types = 1 [packed = false];
   FunctionMode function_mode                  = 2;
 }
 
-// java: insta360.messages.GetPhotographyOptionsResp  (insta360/messages/GetPhotographyOptionsResp.java:34)
 message GetPhotographyOptionsResp {
   repeated PhotographyOptionType option_types = 1 [packed = false];
   PhotographyOptions value                    = 2;

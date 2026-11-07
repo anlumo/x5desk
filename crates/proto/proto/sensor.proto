@@ -4,13 +4,11 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.Sensor  (insta360/messages/Sensor.java:38)
 message Sensor {
   repeated string serials = 1;
   Type type               = 2;
   repeated string id      = 3;
 
-  // java: insta360.messages.Sensor$Type  (insta360/messages/Sensor.java:151)
   enum Type {
     PANO_577   = 0;
     WIDE_577   = 1;

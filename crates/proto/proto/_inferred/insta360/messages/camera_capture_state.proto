@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 4 files
-// java: insta360.messages.CameraCaptureState  (insta360/messages/CameraCaptureState.java:37)
 enum CameraCaptureState {
   NOT_CAPTURE                = 0;
   NORMAL_CAPTURE             = 1;

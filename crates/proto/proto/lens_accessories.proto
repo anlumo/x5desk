@@ -4,11 +4,9 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.LensAccessoriesInfo  (insta360/messages/LensAccessoriesInfo.java:33)
 message LensAccessoriesInfo {
   Lens_Accessories_Type lens_accessories_type = 1;
 
-  // java: insta360.messages.LensAccessoriesInfo$Lens_Accessories_Type  (insta360/messages/LensAccessoriesInfo.java:105)
   enum Lens_Accessories_Type {
     LENS_ACCESSORIES_TYPE_UNKOWN                           = 0;
     LENS_ACCESSORIES_TYPE_STANDARD                         = 1;

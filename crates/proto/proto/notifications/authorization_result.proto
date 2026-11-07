@@ -6,12 +6,10 @@ package insta360.messages;
 
 import "_inferred/insta360/messages/authorization_operation_type.proto";
 
-// java: insta360.messages.NotificationAuthorizationResult  (insta360/messages/NotificationAuthorizationResult.java:33)
 message NotificationAuthorizationResult {
   AuthorizationResult authorization_result                = 1;
   AuthorizationOperationType authorization_operation_type = 2;
 
-  // java: insta360.messages.NotificationAuthorizationResult$AuthorizationResult  (insta360/messages/NotificationAuthorizationResult.java:72)
   enum AuthorizationResult {
     SUCCESS     = 0;
     REJECT      = 1;

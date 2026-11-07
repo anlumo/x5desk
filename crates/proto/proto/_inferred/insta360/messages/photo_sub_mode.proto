@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 3 files
-// java: insta360.messages.PhotoSubMode  (insta360/messages/PhotoSubMode.java:37)
 enum PhotoSubMode {
   PHOTO_SINGLE         = 0;
   PHOTO_HDR            = 1;

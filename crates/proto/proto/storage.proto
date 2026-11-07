@@ -7,7 +7,6 @@ package insta360.messages;
 import "_inferred/insta360/messages/card_location.proto";
 import "_inferred/insta360/messages/card_state.proto";
 
-// java: insta360.messages.StorageState  (insta360/messages/StorageState.java:31)
 message StorageState {
   CardState card_state  = 1;
   uint64 free_space     = 2;

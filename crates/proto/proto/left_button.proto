@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.LeftButtonAction  (insta360/messages/LeftButtonAction.java:37)
 enum LeftButtonAction {
   LEFT_BUTTON_ACTION_UNKNOWN        = 0;
   LEFT_BUTTON_ACTION_PRE_RECORD     = 1;
@@ -14,7 +13,6 @@ enum LeftButtonAction {
   LEFT_BUTTON_ACTION_RATIO_SWITCH   = 4;
 }
 
-// java: insta360.messages.LeftButtonOptions  (insta360/messages/LeftButtonOptions.java:28)
 message LeftButtonOptions {
   LeftButtonAction click        = 1;
   LeftButtonAction double_click = 2;

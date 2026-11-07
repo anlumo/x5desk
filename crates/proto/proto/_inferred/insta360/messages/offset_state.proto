@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 3 files
-// java: insta360.messages.OffsetState  (insta360/messages/OffsetState.java:37)
 enum OffsetState {
   Common          = 0;
   SphereProtect   = 1;

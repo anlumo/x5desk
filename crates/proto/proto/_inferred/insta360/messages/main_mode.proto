@@ -5,7 +5,6 @@ syntax = "proto3";
 package insta360.messages;
 
 // placement inferred: referenced from 2 files
-// java: insta360.messages.MainMode  (insta360/messages/MainMode.java:37)
 enum MainMode {
   MAIN_MODE_VIDEO = 0;
   MAIN_MODE_PHOTO = 1;

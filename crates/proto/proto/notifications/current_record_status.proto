@@ -7,13 +7,12 @@ package insta360.messages;
 import "_inferred/insta360/messages/camera_capture_state.proto";
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.CameraRecordState  (insta360/messages/CameraRecordState.java:37)
 enum CameraRecordState {
   RECORD_IDLE                          = 0;
   RECORD_READY                         = 1;
   RECORD_PREPARE_REC                   = 2;
   RECORD_START                         = 3;
-  CAMERA_RECORD_STATE_RECORD_RECORDING = 4;  // java: RECORD_RECORDING
+  CAMERA_RECORD_STATE_RECORD_RECORDING = 4;
   RECORD_STOP                          = 5;
   RECORD_SAVED                         = 6;
   RECORD_EXPOSURING                    = 7;
@@ -22,7 +21,6 @@ enum CameraRecordState {
 }
 
 // placement inferred: only referenced from this file
-// java: insta360.messages.RecordControlSrc  (insta360/messages/RecordControlSrc.java:37)
 enum RecordControlSrc {
   RECORD_CONTROL_SRC_UNKNOW      = 0;
   RECORD_CONTROL_SRC_BUTTON      = 1;
@@ -33,7 +31,6 @@ enum RecordControlSrc {
   RECORD_CONTROL_SRC_MOBVOI      = 6;
 }
 
-// java: insta360.messages.RecordStatus  (insta360/messages/RecordStatus.java:31)
 message RecordStatus {
   CameraRecordState state         = 1;
   uint32 time                     = 2;

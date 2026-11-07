@@ -9,7 +9,6 @@ import "_inferred/insta360/messages/camera_capture_trigger_source.proto";
 import "_inferred/insta360/messages/capture_state_submode.proto";
 import "interval_rec_info.proto";
 
-// java: insta360.messages.CaptureStatus  (insta360/messages/CaptureStatus.java:33)
 message CaptureStatus {
   CameraCaptureState state                  = 1;
   uint32 capture_time                       = 2;

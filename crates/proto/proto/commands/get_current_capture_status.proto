@@ -9,7 +9,6 @@ import "_inferred/insta360/messages/camera_capture_trigger_source.proto";
 import "_inferred/insta360/messages/capture_state_submode.proto";
 import "interval_rec_info.proto";
 
-// java: insta360.messages.CameraCaptureStatus  (insta360/messages/CameraCaptureStatus.java:33)
 message CameraCaptureStatus {
   CameraCaptureState state                  = 1;
   uint32 capture_time                       = 2;
@@ -31,7 +30,6 @@ message CameraCaptureStatus {
   uint32 current_exposure_time              = 18;
 }
 
-// java: insta360.messages.GetCurrentCaptureStatusResp  (insta360/messages/GetCurrentCaptureStatusResp.java:28)
 message GetCurrentCaptureStatusResp {
   CameraCaptureStatus status = 1;
 }

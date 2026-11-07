@@ -4,7 +4,6 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.DashCamInfo  (insta360/messages/DashCamInfo.java:31)
 message DashCamInfo {
   uint64 disk_total_space    = 1;
   uint64 disk_free_size      = 2;

@@ -6,7 +6,6 @@ package insta360.messages;
 
 import "battery.proto";
 
-// java: insta360.messages.NotificationBatteryLow  (insta360/messages/NotificationBatteryLow.java:28)
 message NotificationBatteryLow {
   BatteryInfo battery_status = 1;
 }

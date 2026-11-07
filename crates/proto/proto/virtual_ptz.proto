@@ -6,7 +6,6 @@ package insta360.messages;
 
 import "_inferred/insta360/messages/render_angle_fixed_type.proto";
 
-// java: insta360.messages.Ptz_Movement_Status  (insta360/messages/Ptz_Movement_Status.java:32)
 message Ptz_Movement_Status {
   Render_Angle_Fixed_Type angle_fixed_type = 1;
   bool movement_status                     = 2;

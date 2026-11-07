@@ -4,11 +4,9 @@ syntax = "proto3";
 
 package insta360.messages;
 
-// java: insta360.messages.NotificationTakePictureStateUpdate  (insta360/messages/NotificationTakePictureStateUpdate.java:33)
 message NotificationTakePictureStateUpdate {
   TakePictureState state = 1;
 
-  // java: insta360.messages.NotificationTakePictureStateUpdate$TakePictureState  (insta360/messages/NotificationTakePictureStateUpdate.java:105)
   enum TakePictureState {
     SHUTTER    = 0;
     COMPRESS   = 1;
