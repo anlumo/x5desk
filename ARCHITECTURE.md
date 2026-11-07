@@ -466,8 +466,9 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
     the dir owner-only, the file 0600; under an `flock` on `mcp.lock`, so a host storing its Wi-Fi id meanwhile loses
     neither) and prints what is enabled; `disable` turns every tier off. Hosts follow within 2 s.
   - `x5desk mcp --print-config` prints `claude mcp add --transport stdio x5desk -- <exe> mcp` and Claude Desktop's
-    `mcpServers` entry for `current_exe()`; exit 1 from a disk image (`/Volumes/…`) or a translocated copy
-    (`/AppTranslocation/`), paths that are gone later.
+    `mcpServers` entry for `current_exe()`, to be added while Claude Desktop is quit (on Linux it writes the file
+    over while it runs); exit 1 from a disk image (`/Volumes/…`) or a translocated copy (`/AppTranslocation/`), paths
+    that are gone later.
   - `x5desk mcp gpu-check` (not in the usage): the GPU self-test child (The GPU, below). Its stdout guarded as a
     server's, one JSON line on it, `{"v":1,"ok":true,"info":…}` or `{"v":1,"ok":false,"step":…,"why":…}`
     (`cli::gpu_check`, read back by `gpu_checked`; a panic in the test a failure without a step); it `_exit`s once
@@ -605,19 +606,19 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   UTF-8, not on FAT or exFAT, its free space) and the reservation (Renders, below). An export starts from the user's
   default preset (the app's `preset=` when it is a catalog id; not under `--sim` or `X5DESK_TEST`), else `pano57`; RAFT
   is the default seam unless the GPU is up without it (then `raft: true` is refused with why). `render_still` waits up
-  to `wait_s` (50 s, at most 300) and answers a done still as `album_thumbnail` answers: its JSON in a text block and a
-  preview after it (a long edge of 1568, under 1 MB at quality 85, 70 or 55; the newest 8 kept), no structured content;
-  else the job, which `job_wait` finishes with the image; once reserved, the call's cancel leaves the still to finish.
-  `export` answers its job at once with the length, frames and size and a time guess from the last done export of that
-  size and seam. Agent jobs are strict: an export fails at the first picture that could not be decoded (after the Mac
-  slept, a damaged GOP), its error naming `allow_frozen: true`, which exports it with repeated frames and counts them
-  (`concealed_frames`); a still ends done with `concealed`. The job tools take both kinds under one numbering:
-  `job_status` and `job_wait` in frames, with the settings and a phase (`gpu_starting`, `waiting`, `setting_up`,
-  `compiling`: the first RAFT flow, `frames`, `finishing`), progress the frames plus a creep while none comes (a quarter
-  of what is left to the next every 5 s) out of the frames + 1, a notification a second at most; `job_list` newest
-  first, `kind` and `limit` (50, at most 500), render rows short; `job_cancel` ends a render with no file and no `.part`
-  (waited for 3 s, else "stopping at its next frame"). `status` shows the GPU without starting it and counts both kinds;
-  a card's `album_list` items carry their first file's path.
+  to `wait_s` (50 s, also the most: `server::WAIT_MAX`) and answers a done still as `album_thumbnail` answers: its JSON
+  in a text block and a preview after it (a long edge of 1568, under 1 MB at quality 85, 70 or 55; the newest 8 kept),
+  no structured content; else the job, which `job_wait` finishes with the image; once reserved, the call's cancel leaves
+  the still to finish. `export` answers its job at once with the length, frames and size and a time guess from the last
+  done export of that size and seam. Agent jobs are strict: an export fails at the first picture that could not be
+  decoded (after the Mac slept, a damaged GOP), its error naming `allow_frozen: true`, which exports it with repeated
+  frames and counts them (`concealed_frames`); a still ends done with `concealed`. The job tools take both kinds under
+  one numbering: `job_status` and `job_wait` (50 s a call at most, then called again) in frames, with the settings and a
+  phase (`gpu_starting`, `waiting`, `setting_up`, `compiling`: the first RAFT flow, `frames`, `finishing`), progress the
+  frames plus a creep while none comes (a quarter of what is left to the next every 5 s) out of the frames + 1, a
+  notification a second at most; `job_list` newest first, `kind` and `limit` (50, at most 500), render rows short;
+  `job_cancel` ends a render with no file and no `.part` (waited for 3 s, else "stopping at its next frame"). `status`
+  shows the GPU without starting it and counts both kinds; a card's `album_list` items carry their first file's path.
 - The GPU (`export::agent`, the app's engine behind `mcp::render::Render`; mcp has no GPU dependency, and its side is
   tested on a fake). One engine per process (`ENG`, never dropped: dropping an `export::Queue` joins its thread, which
   may be in the driver), its device opened at the first `render_still` or `export` that passed its checks (never by

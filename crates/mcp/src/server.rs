@@ -103,6 +103,19 @@ const OFF: &str = "x5desk (Insta360 X5 camera control) has no tools enabled. The
 const RENDERS: &str = " Stills and exports of X5 recordings: catalog, then render_still or export, then job_wait; \
                        photos: later.";
 
+/// The longest a call waits (`job_wait`, `render_still`), s: under the 60 s MCP clients commonly give a request
+/// (Claude Code ended a 240 s `job_wait` with "Request timed out"); for a longer job the agent calls again.
+pub(crate) const WAIT_MAX: f64 = 50.0;
+
+/// A call's wait: `s` (`d` when not given or not finite) within 0 and [`WAIT_MAX`].
+pub(crate) fn wait_for(s: Option<f64>, d: f64) -> Duration {
+    Duration::from_secs_f64(
+        s.filter(|s| s.is_finite())
+            .unwrap_or(d)
+            .clamp(0.0, WAIT_MAX),
+    )
+}
+
 /// A tool: name, tier, description, input schema, annotations.
 pub struct Def {
     /// the tool's name (API: kept)
@@ -181,7 +194,7 @@ struct JobArgs {
 struct WaitArgs {
     /// a job handle (`<host>-<n>`) as album_download, render_still or export returned it
     job: String,
-    /// seconds to wait at most (default 30, at most 300)
+    /// seconds to wait at most (default 30, at most 50: clients end longer calls; call again for a longer job)
     wait_s: Option<f64>,
 }
 
@@ -326,8 +339,8 @@ pub const TOOLS: &[Def] = &[
     Def {
         name: "job_wait",
         tier: Tier::Read,
-        desc: "Waits until a job is finished (or wait_s passed), with progress notifications; returns its state. A \
-               done still comes with its image.",
+        desc: "Waits until a job is finished (or wait_s passed, 50 s at most: call it again for a longer job), with \
+               progress notifications; returns its state. A done still comes with its image.",
         schema: input::<WaitArgs>,
         ann: None,
         gpu: false,
@@ -370,7 +383,7 @@ pub const TOOLS: &[Def] = &[
         tier: Tier::Local,
         desc: "Renders one frame of an X5 recording (a path under the read roots) to a JPEG in the agent folder or a \
                subfolder, never over a file (names in use are numbered): the 360 sphere (with GPano metadata) or a \
-               flat view. Waits up to wait_s and answers with the file and a preview image; a longer render \
+               flat view. Waits up to wait_s (50 s at most) and answers with the file and a preview image; a longer render \
                answers a job that job_wait finishes with the image. job_cancel stops it and leaves no file. Photos \
                (.insp): later.",
         schema: input::<render::StillArgs>,
@@ -1158,7 +1171,7 @@ impl Conn {
         ctx: &RequestContext<RoleServer>,
     ) -> Result<CallToolResult, String> {
         let sh = self.sh();
-        let wait = Duration::from_secs_f64(a.wait_s.unwrap_or(30.0).clamp(0.0, 300.0));
+        let wait = wait_for(a.wait_s, 30.0);
         let w = sh.jobs.lock().unwrap().which(&a.job)?;
         if let Which::Render(_) = w {
             return self.render_wait(&a.job, wait, ctx).await;
@@ -1557,6 +1570,30 @@ impl ServerHandler for Conn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call's wait: its default, clamped to 0..=50 s whatever is asked (a 240 s job_wait timed out in Claude Code).
+    #[test]
+    fn waits() {
+        let w = |s: Option<f64>| wait_for(s, 30.0).as_secs_f64();
+        assert_eq!(w(None), 30.0);
+        assert_eq!(w(Some(12.5)), 12.5);
+        assert_eq!(w(Some(240.0)), 50.0);
+        assert_eq!(w(Some(-3.0)), 0.0);
+        assert_eq!(w(Some(f64::NAN)), 30.0);
+        assert_eq!(w(Some(f64::INFINITY)), 30.0);
+        assert_eq!(wait_for(None, 99.0).as_secs_f64(), WAIT_MAX);
+        // what agents read says so
+        for t in ["job_wait", "render_still"] {
+            let d = TOOLS.iter().find(|d| d.name == t).unwrap();
+            assert!(d.desc.contains("50 s at most"), "{t}: {}", d.desc);
+            assert!(
+                serde_json::to_string(&*(d.schema)())
+                    .unwrap()
+                    .contains("at most 50"),
+                "{t}"
+            );
+        }
+    }
 
     #[test]
     fn base64() {

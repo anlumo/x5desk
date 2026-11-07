@@ -88,9 +88,16 @@ async fn real_camera() {
     let j = call(&c, "album_download", json!({ "keys": [it["key"]] }))
         .await
         .unwrap();
-    let w = call(&c, "job_wait", json!({ "job": j["job"], "wait_s": 300 }))
-        .await
-        .unwrap();
+    // a call waits 50 s at most: called again, up to 300 s
+    let mut w = Value::Null;
+    for _ in 0..6 {
+        w = call(&c, "job_wait", json!({ "job": j["job"], "wait_s": 50 }))
+            .await
+            .unwrap();
+        if w["finished"] == true {
+            break;
+        }
+    }
     assert_eq!(w["state"], "done", "{w}");
     for f in w["files"].as_array().unwrap() {
         let p = PathBuf::from(f["path"].as_str().unwrap());

@@ -201,7 +201,8 @@ fn configs(exe: &str) -> String {
     let j = json!({ "mcpServers": { "x5desk": { "command": exe, "args": ["mcp"] } } });
     format!(
         "# Claude Code\nclaude mcp add --transport stdio x5desk -- {} mcp\n\n\
-         # Claude Desktop: in claude_desktop_config.json\n{}\n",
+         # Claude Desktop: in claude_desktop_config.json, edited while Claude Desktop is quit (running, it may\n\
+         # write the file over and drop the entry)\n{}\n",
         quote(exe),
         serde_json::to_string_pretty(&j).unwrap_or_default()
     )
@@ -719,6 +720,8 @@ mod tests {
         );
         let exe = "/Users/a b/it's/x5desk";
         let c = configs(exe);
+        // Claude Desktop on Linux writes its config over while it runs: an entry added then is dropped
+        assert!(c.contains("edited while Claude Desktop is quit"), "{c}");
         if !cfg!(windows) {
             assert!(
                 c.contains(r"x5desk -- '/Users/a b/it'\''s/x5desk' mcp"),

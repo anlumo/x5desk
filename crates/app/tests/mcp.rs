@@ -652,19 +652,30 @@ impl Kid {
         (data(&r), r)
     }
 
-    /// `job_wait` on `job` up to `secs` with a progress token: its JSON, the job's progress notifications.
+    /// `job_wait` on `job` up to `secs` with a progress token, called again while it runs (a call waits 50 s at
+    /// most): its JSON, the job's progress notifications.
     fn wait_job(&mut self, job: &str, secs: u64) -> (Value, Vec<Value>) {
-        let a = json!({ "job": job, "wait_s": secs });
-        let p = json!({ "name": "job_wait", "arguments": a, "_meta": { "progressToken": job } });
-        let id = self.request("tools/call", p);
-        let (r, n) = self.answer_in(id, secs + 20);
-        assert_eq!(r["result"]["isError"], false, "{r}");
-        let n = (n.into_iter())
-            .filter(|v| {
+        let end = Instant::now() + Duration::from_secs(secs);
+        let mut all = vec![];
+        loop {
+            let w = end
+                .saturating_duration_since(Instant::now())
+                .as_secs()
+                .clamp(1, 50);
+            let a = json!({ "job": job, "wait_s": w });
+            let p =
+                json!({ "name": "job_wait", "arguments": a, "_meta": { "progressToken": job } });
+            let id = self.request("tools/call", p);
+            let (r, n) = self.answer_in(id, w + 20);
+            assert_eq!(r["result"]["isError"], false, "{r}");
+            all.extend(n.into_iter().filter(|v| {
                 v["method"] == "notifications/progress" && v["params"]["progressToken"] == job
-            })
-            .collect();
-        (data(&r), n)
+            }));
+            let v = data(&r);
+            if v["finished"] == true || Instant::now() >= end {
+                return (v, all);
+            }
+        }
     }
 
     /// Job `job`'s state once `f` holds (looked at every 50 ms, up to `secs`); it must not finish before.

@@ -42,9 +42,8 @@ const STILL_FLAT: u32 = 16;
 /// A name's bytes at most.
 const NAME: usize = 120;
 
-/// How long render_still waits by default and at most, s.
-const WAIT: f64 = 50.0;
-const WAIT_MAX: f64 = 300.0;
+/// How long render_still waits by default, s (at most [`WAIT_MAX`]).
+const WAIT: f64 = WAIT_MAX;
 
 /// The preview: its long edge at most, its bytes at most, the qualities tried in turn, the previews kept.
 const PREVIEW: u32 = 1568;
@@ -210,7 +209,7 @@ render_args! {
         time_s: Option<f64>,
         /// 50-100 (default 92)
         jpeg_quality: Option<u8>,
-        /// how long this call waits, s (default 50, at most 300; 0: answer the job at once)
+        /// how long this call waits, s (default and at most 50: clients end longer calls; 0: answer the job at once)
         wait_s: Option<f64>,
     }
 }
@@ -1715,11 +1714,7 @@ impl Conn {
         ctx: &RequestContext<RoleServer>,
     ) -> Result<CallToolResult, String> {
         let m = self.make(RKind::Still, a).await?;
-        let wait = m.ask.wait_s.unwrap_or(WAIT);
-        let wait = Duration::from_secs_f64(match wait.is_finite() {
-            true => wait.clamp(0.0, WAIT_MAX),
-            false => WAIT,
-        });
+        let wait = wait_for(m.ask.wait_s, WAIT);
         // from here on the call's cancel leaves the still running (job_cancel stops it)
         let mut v = self.follow(&m.h, wait, ctx).await?;
         match v["state"].as_str() {

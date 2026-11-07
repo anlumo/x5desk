@@ -658,7 +658,7 @@ async fn camera() {
     let job = j["job"].as_str().unwrap().to_string();
     assert!(job.starts_with(&format!("{}-", h.id())), "{job}");
     assert_eq!(j["files"].as_array().unwrap().len(), 2);
-    let w = ok(&c, "job_wait", json!({ "job": job, "wait_s": 60 })).await;
+    let w = ok(&c, "job_wait", json!({ "job": job, "wait_s": 50 })).await;
     assert_eq!(
         (w["state"].as_str(), w["finished"].as_bool()),
         (Some("done"), Some(true)),
@@ -733,7 +733,7 @@ async fn camera() {
         j3["files"][0]["path"], names[0],
         "a stopped download resumes, not numbered again"
     );
-    let w = ok(&c, "job_wait", json!({ "job": j3["job"], "wait_s": 60 })).await;
+    let w = ok(&c, "job_wait", json!({ "job": j3["job"], "wait_s": 50 })).await;
     assert_eq!(w["state"], "done", "{w}");
     same(sim, &w["files"]);
 
@@ -933,7 +933,7 @@ async fn shared() {
     // the cancelled job stays so, and cancelling it again leaves the new job's download
     let x = ok(&c, "job_cancel", json!({ "job": a["job"] })).await;
     assert_eq!(x["state"], "cancelled", "{x}");
-    let w = ok(&c, "job_wait", json!({ "job": j["job"], "wait_s": 60 })).await;
+    let w = ok(&c, "job_wait", json!({ "job": j["job"], "wait_s": 50 })).await;
     assert_eq!(w["state"], "done", "{w}");
     same(sim, &w["files"]);
     assert_eq!(sim.fake.lock().unwrap().opens.get(u).copied(), opens);
@@ -1135,7 +1135,7 @@ async fn across_hosts() {
         s["done_bytes"].as_u64().unwrap() >= had * 3 / 4,
         "resumed from {had}: {s}"
     );
-    let w = ok(&c, "job_wait", json!({ "job": j["job"], "wait_s": 60 })).await;
+    let w = ok(&c, "job_wait", json!({ "job": j["job"], "wait_s": 50 })).await;
     assert_eq!(w["state"], "done", "{w}");
     same(b.sim().unwrap(), &w["files"]);
     // the cancelled item again: under its names, the old job as it was
@@ -1147,7 +1147,7 @@ async fn across_hosts() {
             .unwrap()
             .starts_with(&format!("{}-", b.id()))
     );
-    let w = ok(&c, "job_wait", json!({ "job": q["job"], "wait_s": 60 })).await;
+    let w = ok(&c, "job_wait", json!({ "job": q["job"], "wait_s": 50 })).await;
     assert_eq!(w["state"], "done", "{w}");
     same(b.sim().unwrap(), &w["files"]);
     assert_eq!(
@@ -1404,7 +1404,7 @@ async fn held_up() {
         .await;
     assert_eq!((size(), opens()), (had, o1), "the old worker kept off");
     ok(&c, "camera_connect", json!({})).await;
-    let w = ok(&c, "job_wait", json!({ "job": j["job"], "wait_s": 60 })).await;
+    let w = ok(&c, "job_wait", json!({ "job": j["job"], "wait_s": 50 })).await;
     assert_eq!(w["state"], "done", "{w}");
     same(b.sim().unwrap(), &w["files"]);
     b.shutdown().await;

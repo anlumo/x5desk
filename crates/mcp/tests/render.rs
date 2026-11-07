@@ -2357,7 +2357,7 @@ async fn progress_rises() {
     let h = host(&f, &rec, "read,local", None).await;
     let c = connect(&h, None).await;
     let v = ok(&c, "export", json!({ "path": p })).await;
-    let w = ok(&c, "job_wait", json!({ "job": v["job"], "wait_s": 60 })).await;
+    let w = ok(&c, "job_wait", json!({ "job": v["job"], "wait_s": 50 })).await;
     assert_eq!(w["state"], "done");
     let pr = c.h.prog.lock().unwrap().clone();
     assert!(pr.len() >= 3, "{pr:?}");
