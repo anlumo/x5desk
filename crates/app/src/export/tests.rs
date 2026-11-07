@@ -73,6 +73,21 @@ fn projection() {
     }
 }
 
+/// A name is free only when neither the file nor its `.part` is there: a job in another process (an agent's) may be
+/// writing that name. A dangling link at either name takes it too (a writer would write through it).
+#[test]
+fn free_names() {
+    let d = crate::clip::tests::Tmp::new("free");
+    let p = |n: &str| d.0.join(n);
+    std::fs::write(p("a.mp4"), b"").unwrap();
+    std::fs::write(p("b.mp4.part"), b"").unwrap();
+    std::os::unix::fs::symlink(p("nowhere"), p("d.mp4.part")).unwrap();
+    assert!(!free(&p("a.mp4")));
+    assert!(!free(&p("b.mp4")));
+    assert!(free(&p("c.mp4")));
+    assert!(!free(&p("d.mp4")));
+}
+
 /// Presets apply their output settings and keep the rest; the hook's tokens; H.264 stops at 4096 px.
 #[test]
 fn presets() {
@@ -285,6 +300,281 @@ fn plates() {
     assert!(!on(&run(true, false)), "a face region on the plate");
 }
 
+/// Output names: a preset's key while it is unchanged, else the kind; a grab by its time and kind; a photo by its kind
+/// alone; the prefix (Shot Lab, follow); numbered past a taken name; an editor timeline by its project's name.
+#[test]
+fn names() {
+    let (_l, g, cx) = gpu();
+    let dir = fixture("names").parent().unwrap().join("names");
+    let mut e = Exp::new(&g, &cx, &egui::Context::default(), Some(dir.clone()), false);
+    let s = Spec {
+        files: vec!["/x/VID_1_00_001.insv".into()],
+        photo: false,
+        dur: 5.0,
+        t: 1.234,
+        view: View::default(),
+        look: Look::Perspective,
+        stab: None,
+        smooth: 0.5,
+        follow: None,
+        faces: false,
+        plates: false,
+    };
+    let ph = Spec {
+        files: vec!["/x/IMG_1.insp".into()],
+        photo: true,
+        ..s.clone()
+    };
+    let d = Set::default();
+    let flat = parse(d, "flat1080").unwrap();
+    let free = Set {
+        preset: None,
+        ..flat
+    };
+    let pano = Set {
+        preset: None,
+        w: 7680,
+        ..d
+    };
+    let p = |e: &Exp, s: &Spec, x: &Set, grab: bool, pre: &str| {
+        let p = e.path(s, x, grab, pre);
+        p.file_name().unwrap().to_string_lossy().into_owned()
+    };
+    assert_eq!(p(&e, &s, &d, false, ""), "VID_1_00_001_pano57.mp4");
+    assert_eq!(
+        p(&e, &s, &free, false, ""),
+        "VID_1_00_001_flat_1920x1080.mp4"
+    );
+    assert_eq!(
+        p(&e, &s, &flat, true, ""),
+        "VID_1_00_001_1.23s_flat_1920x1080.jpg"
+    );
+    assert_eq!(
+        p(&e, &s, &pano, true, ""),
+        "VID_1_00_001_1.23s_360_7680.jpg"
+    );
+    assert_eq!(
+        p(&e, &s, &d, false, "mosaic_"),
+        "VID_1_00_001_mosaic_pano57.mp4"
+    );
+    assert_eq!(
+        p(&e, &s, &free, false, "follow_"),
+        "VID_1_00_001_follow_flat_1920x1080.mp4"
+    );
+    assert_eq!(p(&e, &ph, &d, false, ""), "IMG_1_360_5760.jpg");
+    assert_eq!(p(&e, &ph, &flat, false, ""), "IMG_1_flat_1920x1080.jpg");
+    assert_eq!(p(&e, &ph, &free, true, ""), "IMG_1_flat_1920x1080.jpg");
+    // unnumbered, without the extension, as agents' jobs take it
+    assert_eq!(stem_tag("v", &d, None, ""), "v_pano57");
+    assert_eq!(stem_tag("v", &pano, Some(3.0), "x_"), "v_x_3.00s_360_7680");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("VID_1_00_001_pano57.mp4"), b"").unwrap();
+    assert_eq!(p(&e, &s, &d, false, ""), "VID_1_00_001_pano57-2.mp4");
+    // timelines: the job fails at once (no such file); only its name matters
+    let mut tl = edit::Timeline::new(edit::Rate { num: 30, den: 1 });
+    tl.files.push(edit::File {
+        path: "/x/VID_1_00_001.insv".into(),
+        dur: 5.0,
+    });
+    tl.clips.push(edit::Clip::new(0, 0.0, 2.0));
+    tl.fix();
+    let t = Tl {
+        name: "trip".into(),
+        tl,
+        files: vec![vec![]],
+        looks: Default::default(),
+        over: vec![],
+        denoise: None,
+        stab: None,
+        smooth: 0.5,
+    };
+    e.timeline(t.clone(), d).unwrap();
+    e.timeline(t.clone(), free).unwrap();
+    e.timeline(t, d).unwrap();
+    let n: Vec<_> = (e.items.iter())
+        .map(|i| i.path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        n,
+        [
+            "trip_pano57.mp4",
+            "trip_flat_1920x1080.mp4",
+            "trip_pano57-2.mp4"
+        ]
+    );
+    drop(e);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `parity`'s jobs: three presets with other settings over a range, a grab at the clip's end (flat) and one in 360.
+fn cases(file: &Path) -> Vec<(Spec, Set, [f64; 2], bool)> {
+    let s = Spec {
+        files: vec![file.to_path_buf()],
+        photo: false,
+        dur: 5.0,
+        t: 4.99,
+        view: View {
+            yaw: 30.0,
+            pitch: -10.0,
+            fov: 90.0,
+            ..View::default()
+        },
+        look: Look::Perspective,
+        stab: None,
+        smooth: 0.5,
+        follow: None,
+        faces: false,
+        plates: false,
+    };
+    let d = Set::default();
+    let flat = Set {
+        fps: Some((25, 1)),
+        amt: 0.7,
+        adj: fx::Params {
+            exposure: 0.5,
+            ..Default::default()
+        },
+        stab: None,
+        colour: false,
+        ..parse(d, "flat1080:film:qp=23").unwrap()
+    };
+    let vert = Set {
+        raft: false,
+        stab: Some(stab::Lock::Direction),
+        smooth: 1.5,
+        ..parse(d, "vert1080").unwrap()
+    };
+    let grab = Set {
+        preset: None,
+        jq: 85,
+        ..flat
+    };
+    let pano = Set {
+        preset: None,
+        w: 7680,
+        ..d
+    };
+    vec![
+        (s.clone(), d, [1.0, 3.5], false),
+        (s.clone(), flat, [0.5, 2.0], false),
+        (s.clone(), vert, [4.0, 5.0], false),
+        (s.clone(), grab, [0.0, 5.0], true),
+        (Spec { t: 1.0, ..s }, pano, [0.0, 5.0], true),
+    ]
+}
+
+/// FNV-1a, 64 bits.
+fn fnv(s: &str) -> u64 {
+    (s.bytes()).fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
+    })
+}
+
+/// What `parity` compares of a job (paths as file names): the clip's range, look and frames, the whole timeline as a
+/// hash of its Debug, the files, looks, output (a flat view at 0 and 1 s), encoding, seam, colour, stabilisation.
+fn fields(j: &mut ::export::Job, n: u64) -> String {
+    let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
+    let ::export::Cut::Edit(e) = &j.cut else {
+        panic!("a job of spans")
+    };
+    let mut tl = e.tl.clone();
+    for f in &mut tl.files {
+        f.path = name(Path::new(&f.path));
+    }
+    let c = &tl.clips[0];
+    let files: Vec<Vec<_>> = (e.files.iter())
+        .map(|f| f.iter().map(|p| name(p)).collect())
+        .collect();
+    let mut looks: Vec<_> = (e.looks.iter()).map(|(k, c)| (k, &c.title)).collect();
+    looks.sort();
+    let cut = format!(
+        "{:?} {}..{} {:?} {} len {} tl {:016x} files {files:?} looks {looks:?} over {} abr {} denoise {:?}",
+        tl.out.fps,
+        c.a,
+        c.b,
+        c.look,
+        c.amt,
+        tl.len(),
+        fnv(&format!("{tl:?}")),
+        e.over.len(),
+        e.abr,
+        e.denoise
+    );
+    let v = |v: View| {
+        format!(
+            "{:?} {:?}",
+            v.mode,
+            [v.yaw, v.pitch, v.roll, v.fov, v.panini, v.planet]
+        )
+    };
+    let out = match &mut j.out {
+        ::export::Out::Pano(w) => format!("pano {w}"),
+        ::export::Out::Flat { w, h, view } => {
+            let f = view.as_mut().expect("a view");
+            format!("flat {w}x{h} {} {}", v(f(0.0)), v(f(1.0)))
+        }
+    };
+    format!(
+        "{cut} | {out} | {:?} raft {} colour {:?} stab {:?} flat {} fx {} path {} n {n}",
+        j.enc,
+        j.raft,
+        j.colour,
+        j.stab,
+        j.flat,
+        j.fx.is_some(),
+        j.path.display()
+    )
+}
+
+/// `span` and `clip_job` build the jobs `Keep::video` built before they were factored out of it: `cases` at 29.97 fps,
+/// compared with what `fields` read from `Keep::video`'s jobs then.
+#[test]
+fn parity() {
+    const WANT: [&str; 5] = [
+        "Rate { num: 30000, den: 1001 } 1..3.5 \"\" 1 len 75 tl 0a044c2975e68409 files [[\"v.insv\"]] looks [] over 0 \
+         abr 192000 denoise None | pano 5760 | Video { codec: H265, deep: true, rate: Cbr(120000000), gop: 30 } \
+         raft true colour Some(0.1) stab Some((Horizon, 0.5)) flat false fx false path o.mp4 n 75",
+        "Rate { num: 25, den: 1 } 0.5..2 \"Film\" 0.7 len 38 tl 053399d64078cf89 files [[\"v.insv\"]] \
+         looks [(\"Film\", \"Film\")] over 0 abr 192000 denoise None | flat 1920x1080 \
+         Perspective [30.0, -10.0, 0.0, 90.0, 0.0, 1.0] Perspective [30.0, -10.0, 0.0, 90.0, 0.0, 1.0] | \
+         Video { codec: H264, deep: false, rate: Qp(23), gop: 25 } raft true colour None stab None flat false \
+         fx false path o.mp4 n 38",
+        "Rate { num: 30000, den: 1001 } 4..5 \"\" 1 len 30 tl 9e6c7bde94342b30 files [[\"v.insv\"]] looks [] over 0 \
+         abr 192000 denoise None | flat 1080x1920 Perspective [30.0, -10.0, 0.0, 90.0, 0.0, 1.0] \
+         Perspective [30.0, -10.0, 0.0, 90.0, 0.0, 1.0] | \
+         Video { codec: H264, deep: false, rate: Cbr(20000000), gop: 30 } raft false colour Some(0.1) \
+         stab Some((Direction, 1.5)) flat false fx false path o.mp4 n 30",
+        "Rate { num: 25, den: 1 } 4.96..5 \"Film\" 0.7 len 1 tl 97f2b9a45f78a9dd files [[\"v.insv\"]] \
+         looks [(\"Film\", \"Film\")] over 0 abr 192000 denoise None | flat 1920x1080 \
+         Perspective [30.0, -10.0, 0.0, 90.0, 0.0, 1.0] Perspective [30.0, -10.0, 0.0, 90.0, 0.0, 1.0] | \
+         Jpeg(85) raft true colour None stab None flat false fx false path o.mp4 n 1",
+        "Rate { num: 30000, den: 1001 } 1..1.0333666666666668 \"\" 1 len 1 tl 330828e57e6f3050 files [[\"v.insv\"]] \
+         looks [] over 0 abr 192000 denoise None | pano 7680 | Jpeg(92) raft true colour Some(0.1) \
+         stab Some((Horizon, 0.5)) flat false fx false path o.mp4 n 1",
+    ];
+    let src = edit::Rate {
+        num: 30000,
+        den: 1001,
+    };
+    for ((s, x, r, grab), want) in cases(Path::new("/x/v.insv")).into_iter().zip(WANT) {
+        let ab = span(if grab { [s.t; 2] } else { r }, grab, x.rate(src), s.dur);
+        let v = s.view;
+        let (mut j, n) = clip_job(
+            &s.files,
+            s.dur,
+            src,
+            &x,
+            ab,
+            grab,
+            move |_| v,
+            "o.mp4".into(),
+            None,
+            false,
+        );
+        assert_eq!(fields(&mut j, n), want, "{x:?}");
+    }
+}
+
 /// One device for the GPU tests, one test at a time.
 fn gpu() -> (std::sync::MutexGuard<'static, ()>, Arc<Gpu>, Ctx) {
     static G: std::sync::OnceLock<(Mutex<()>, Arc<Gpu>, Ctx)> = std::sync::OnceLock::new();
@@ -323,6 +613,7 @@ fn task(spec: Spec, set: Set, path: PathBuf, range: [f64; 2], grab: bool) -> Tas
         grab,
         ed: None,
         lab: None,
+        dest: Mutex::new(None),
     }
 }
 

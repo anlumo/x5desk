@@ -35,57 +35,85 @@ pub struct Prefs {
 /// the Settings screen.
 static AUDIO: Out = Out::new(media::audio::device);
 
-/// An output device looked up off the UI thread (an id lists ALSA's devices): the device of the newest pick looked up
-/// so far, the picks made, the newest one looked up; the lookup (`media::audio::device`).
+/// An output device looked up off the UI thread (an id lists ALSA's devices): the newest pick looked up so far (its
+/// id, the device with that id when there was one), the picks made, the newest one looked up; the lookup
+/// (`media::audio::device`).
 struct Out {
-    m: Mutex<(Option<cpal::Device>, u32, u32)>,
+    m: Mutex<(Option<String>, Option<cpal::Device>, u32, u32)>,
     c: Condvar,
     look: fn(Option<&str>) -> Option<cpal::Device>,
 }
 
 /// A pick's lookup result, handed over when it drops: also when the lookup panics, which left every later `get` (each
 /// file opened) waiting.
-struct Done(&'static Out, u32, Option<cpal::Device>);
+struct Done(&'static Out, u32, Option<String>, Option<cpal::Device>);
 
 impl Drop for Done {
     fn drop(&mut self) {
         let mut m = self.0.m.lock().unwrap_or_else(|e| e.into_inner());
         // an earlier pick whose lookup ends later changes nothing
-        if self.1 > m.2 {
-            (m.0, m.2) = (self.2.take(), self.1);
+        if self.1 > m.3 {
+            (m.0, m.1, m.3) = (self.2.take(), self.3.take(), self.1);
         }
         self.0.c.notify_all();
     }
 }
 
+/// Whether `d` is the device with this id (as [`Prefs::audio`] keeps it).
+fn is(d: &cpal::Device, id: &str) -> bool {
+    d.id().is_ok_and(|x| x.to_string() == id)
+}
+
 impl Out {
     const fn new(look: fn(Option<&str>) -> Option<cpal::Device>) -> Out {
         Out {
-            m: Mutex::new((None, 0, 0)),
+            m: Mutex::new((None, None, 0, 0)),
             c: Condvar::new(),
             look,
         }
     }
 
-    /// Looks up the device with this id (as [`Prefs::audio`] keeps it; unknown or None: the system default) on a
-    /// thread of its own.
+    /// Looks up the device with this id (as [`Prefs::audio`] keeps it) on a thread of its own. Unknown or None: the
+    /// system default, as it is at each `get`.
     fn pick(&'static self, id: Option<String>) {
         let n = {
             let mut m = self.m.lock().unwrap();
-            m.1 += 1;
-            m.1
+            m.2 += 1;
+            m.2
         };
         thread::spawn(move || {
-            let mut d = Done(self, n, None);
-            d.2 = (self.look)(id.as_deref());
+            let mut d = Done(self, n, id, None);
+            if let Some(i) = d.2.as_deref() {
+                d.3 = (self.look)(Some(i)).filter(|x| is(x, i));
+            }
         });
     }
 
-    /// The newest pick's device, else the system default; waits while its lookup runs.
+    /// The newest pick's device, else the system default; waits while its lookup runs. macOS: a picked device that was
+    /// not there at the pick or is gone since (the device kept names it by CoreAudio's id, which lasts while it is
+    /// connected) is looked up again here, and kept when found: one back under a new id plays there again.
     fn get(&self) -> Option<cpal::Device> {
-        let m = self.c.wait_while(self.m.lock().unwrap(), |m| m.2 < m.1);
-        let d = m.unwrap().0.clone();
-        d.or_else(|| cpal::default_host().default_output_device())
+        let def = || cpal::default_host().default_output_device();
+        let m = self.c.wait_while(self.m.lock().unwrap(), |m| m.3 < m.2);
+        let m = m.unwrap();
+        let d = m.1.clone();
+        #[cfg(target_os = "macos")]
+        if let Some(i) = (m.0.clone()).filter(|i| !d.as_ref().is_some_and(|d| is(d, i))) {
+            let (n, look) = (m.2, self.look);
+            drop(m);
+            // a lookup that panics gives the default, as at the pick
+            let d = std::panic::catch_unwind(|| look(Some(&i)));
+            let d = d.ok().flatten().filter(|x| is(x, &i));
+            let mut m = self.m.lock().unwrap();
+            // unless a newer pick came meanwhile
+            if m.2 == n {
+                m.1 = d.clone();
+            }
+            drop(m);
+            return d.or_else(def);
+        }
+        drop(m);
+        d.or_else(def)
     }
 }
 
@@ -215,7 +243,21 @@ pub struct Settings {
 
 type Usage = (usize, u64);
 
+/// The driver's name and version as wgpu has them, the backend when it has none (Metal: the system's own).
+pub fn driver(i: &wgpu::AdapterInfo) -> String {
+    let v: Vec<&str> = [&i.driver, &i.driver_info]
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    match v.is_empty() {
+        true => format!("{:?}", i.backend),
+        false => v.join(" "),
+    }
+}
+
 /// Codec operations of a video queue, as text.
+#[cfg(target_os = "linux")]
 fn ops(f: ash::vk::VideoCodecOperationFlagsKHR) -> String {
     use ash::vk::VideoCodecOperationFlagsKHR as V;
     let v: Vec<&str> = [
@@ -247,20 +289,40 @@ impl Settings {
                     i.device_type, i.vendor, i.device, i.backend
                 ),
             ),
-            ("Driver", format!("{} {}", i.driver, i.driver_info)),
-            ("Video decode", ops(g.dec.ops)),
-            (
-                "Video encode",
-                g.enc.as_ref().map_or("none".into(), |q| ops(q.ops)),
-            ),
-            (
-                "DMA-BUF export",
-                match g.mem_fd.is_some() {
-                    true => "yes (OBS, PipeWire camera)".into(),
-                    false => "no".into(),
-                },
-            ),
+            ("Driver", driver(&i)),
         ];
+        #[cfg(target_os = "linux")]
+        let gpu = [
+            gpu,
+            vec![
+                ("Video decode", ops(g.dec.ops)),
+                (
+                    "Video encode",
+                    g.enc.as_ref().map_or("none".into(), |q| ops(q.ops)),
+                ),
+                (
+                    "DMA-BUF export",
+                    match g.mem_fd.is_some() {
+                        true => "yes (OBS, PipeWire camera)".into(),
+                        false => "no".into(),
+                    },
+                ),
+            ],
+        ]
+        .concat();
+        #[cfg(target_os = "macos")]
+        let gpu = [
+            gpu,
+            vec![
+                ("Video decode", "VideoToolbox: H.264, H.265".into()),
+                ("Video encode", "VideoToolbox: H.264, H.265".into()),
+                (
+                    "DMA-BUF export",
+                    "no (OBS, PipeWire camera: Linux only)".into(),
+                ),
+            ],
+        ]
+        .concat();
         let cache = p.thumbs();
         AUDIO.pick(p.audio.clone());
         Settings {
@@ -567,6 +629,36 @@ mod tests {
         assert_eq!(get(), Ok(def.clone()), "waits for the lookup that panicked");
         O.pick(None);
         assert_eq!(get(), Ok(def));
+    }
+
+    /// macOS: a picked device that was not there at its pick, or whose kept device now names another one or none
+    /// (CoreAudio's ids last while a device is connected), is looked up again at the next `get` and kept: one back
+    /// under a new id plays there again.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn out_again() {
+        static O: Out = Out::new(media::audio::device);
+        let id = |d: &cpal::Device| d.id().unwrap().to_string();
+        let outs: Vec<cpal::Device> =
+            (cpal::default_host().output_devices().into_iter().flatten()).collect();
+        let Some(a) = outs.first() else {
+            eprintln!("no output device: skipped");
+            return;
+        };
+        let kept = || O.m.lock().unwrap().1.as_ref().map(id);
+        *O.m.lock().unwrap() = (Some(id(a)), None, 1, 1);
+        let t0 = std::time::Instant::now();
+        let got = O.get().as_ref().map(id);
+        let (ms, n) = (t0.elapsed().as_secs_f64() * 1e3, outs.len());
+        println!("{n} output devices; {ms:.2} ms to look one up again");
+        assert_eq!(got, Some(id(a)), "not there at the pick");
+        assert_eq!(kept(), Some(id(a)));
+        if let Some(b) = outs.get(1) {
+            O.m.lock().unwrap().1 = Some(b.clone());
+            let got = O.get().as_ref().map(id);
+            assert_eq!(got, Some(id(a)), "kept as another device");
+            assert_eq!(kept(), Some(id(a)));
+        }
     }
 
     /// The page reads and trims the thumbnail cache on a thread of its own: its first frame (pass 1 here, which the

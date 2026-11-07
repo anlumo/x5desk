@@ -224,6 +224,7 @@ impl Track {
         thread::Builder::new()
             .name("deep track".into())
             .spawn(move || {
+                let _a = crate::awake::hold();
                 let t = &t2;
                 let r = crate::export::scoped(&g.device, || t.run(&g, &cx, &ctx, k1, s));
                 let ts = t.times.get().map_or(&[][..], |v| &v[..]);
@@ -596,6 +597,7 @@ impl Auto {
         thread::Builder::new()
             .name("auto edit".into())
             .spawn(move || {
+                let _a = crate::awake::hold();
                 let a = &a2;
                 let r = crate::export::scoped(&g.device, || a.run(&g, &cx, &ctx, aspect));
                 *lock(&a.st) = match r {

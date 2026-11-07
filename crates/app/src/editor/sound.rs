@@ -5,11 +5,12 @@
 //! An underrun holds the clock. Without a device the clock runs on wall time and nothing is mixed. A mixer that fails
 //! reports why and plays silence on, so the clock (and the picture) keep going. The device is looked up, opened and
 //! closed on the sound's own thread, one stream at a time: on the UI thread that took 7–8 ms at every Play, seek during
-//! playback and denoise change (and listed every ALSA device for a picked one).
+//! playback and denoise change (and listed every ALSA device for a picked one). The stream runs in the format
+//! `audio::Conv::on` picks for the mix (macOS: the device's own rate), the mix converted to it.
 
 use cpal::traits::{DeviceTrait, StreamTrait};
 use media::{
-    audio::Aac,
+    audio::{Aac, Conv},
     denoise::{self, Stereo},
     mix::{self, Kind, Mixer, Track},
     mp4::{self, Mp4},
@@ -28,16 +29,28 @@ use std::{
 
 const R: f64 = mix::RATE;
 const BLOCK: usize = 1024;
-/// Ring of interleaved stereo samples: 0.34 s.
+/// Ring of interleaved samples: 0.34 s of 48 kHz stereo.
 const RING: usize = 1 << 15;
 
+/// The open stream's ring of interleaved samples: [`RING`], more for a stream of more samples a second (macOS: a
+/// device at its own rate). Made on the sound's thread with the stream.
+type Ring = Arc<[AtomicU32]>;
+
+fn ring(cv: &Conv) -> Ring {
+    let k = (cv.rate as usize * cv.ch as usize).div_ceil(2 * R as usize);
+    (0..RING * k.next_power_of_two())
+        .map(|_| AtomicU32::new(0))
+        .collect()
+}
+
 struct Sh {
-    ring: Box<[AtomicU32]>,
+    /// samples written to the ring, read from it
     w: AtomicUsize,
     r: AtomicUsize,
-    /// frames the device took from the ring; the device's queue, frames
+    /// frames the device took from the ring; the device's queue, frames; the stream's rate
     played: AtomicU64,
     lat: AtomicU64,
+    rate: AtomicU32,
     vol: AtomicU32,
     quit: AtomicBool,
     /// the mixer's first error
@@ -68,11 +81,11 @@ impl Sound {
     /// Plays `m` from output time `t0` at volume `vol`.
     pub fn start(m: Mix, t0: f64, vol: f32) -> Sound {
         let sh = Arc::new(Sh {
-            ring: (0..RING).map(|_| AtomicU32::new(0)).collect(),
             w: AtomicUsize::new(0),
             r: AtomicUsize::new(0),
             played: AtomicU64::new(0),
             lat: AtomicU64::new(0),
+            rate: AtomicU32::new(R as u32),
             vol: AtomicU32::new(vol.to_bits()),
             quit: AtomicBool::new(false),
             err: Default::default(),
@@ -85,21 +98,24 @@ impl Sound {
             .spawn(move || {
                 let _dev = DEV.lock().unwrap_or_else(|e| e.into_inner());
                 // a Sound dropped while waiting (playback restarted again) opens nothing
-                let Some(_out) = (!s.quit.load(Relaxed)).then(|| open(&s)).flatten() else {
+                let o = (!s.quit.load(Relaxed)).then(|| open(&s)).flatten();
+                let Some((_st, mut cv, rg)) = o else {
                     let _ = s.wall.set(Instant::now());
                     s.on.store(2, Release);
                     return;
                 };
+                s.rate.store(cv.rate, Relaxed);
                 s.on.store(1, Release);
-                if let Err(e) = run(&s, &m, t0) {
+                if let Err(e) = run(&s, &rg, &m, t0, &mut cv) {
                     eprintln!("editor mix: {e}");
                     *s.err.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
+                    let n = rg.len();
                     while !s.quit.load(Relaxed) {
                         let (r, w) = (s.r.load(Acquire), s.w.load(Relaxed));
-                        for i in w..r + RING {
-                            s.ring[i % RING].store(0, Relaxed);
+                        for i in w..r + n {
+                            rg[i % n].store(0, Relaxed);
                         }
-                        s.w.store(r + RING, Release);
+                        s.w.store(r + n, Release);
                         thread::sleep(Duration::from_millis(5));
                     }
                 }
@@ -112,7 +128,10 @@ impl Sound {
     pub fn now(&self) -> f64 {
         let sh = &self.sh;
         match sh.on.load(Acquire) {
-            1 => self.t0 + sh.played.load(Relaxed).saturating_sub(sh.lat.load(Relaxed)) as f64 / R,
+            1 => {
+                let n = sh.played.load(Relaxed).saturating_sub(sh.lat.load(Relaxed));
+                self.t0 + n as f64 / sh.rate.load(Relaxed) as f64
+            }
             2 => self.t0 + sh.wall.get().map_or(0.0, |w| w.elapsed().as_secs_f64()),
             _ => self.t0,
         }
@@ -138,15 +157,30 @@ impl Drop for Sound {
     }
 }
 
-/// The output stream draining `sh`'s ring, playing.
-fn open(sh: &Arc<Sh>) -> Option<cpal::Stream> {
+/// The output stream draining its ring, playing, the mix's conversion to its format and the ring. macOS: a stream that
+/// fails on the device picked plays on the system default, as the player's does.
+fn open(sh: &Arc<Sh>) -> Option<(cpal::Stream, Conv, Ring)> {
     let dev = crate::settings::output()?;
+    let r = stream(sh, &dev);
+    #[cfg(target_os = "macos")]
+    let r = r.or_else(|e| {
+        use cpal::traits::HostTrait;
+        eprintln!("editor audio: {e}: the default output");
+        stream(sh, &cpal::default_host().default_output_device().ok_or(e)?)
+    });
+    r.ok()
+}
+
+/// [`open`] on `dev`, in the format `Conv::on` picks for the mix.
+fn stream(sh: &Arc<Sh>, dev: &cpal::Device) -> std::io::Result<(cpal::Stream, Conv, Ring)> {
+    let cv = Conv::on(dev, R as u32, 2)?;
     let cfg = cpal::StreamConfig {
-        channels: 2,
-        sample_rate: R as u32,
+        channels: cv.ch,
+        sample_rate: cv.rate,
         buffer_size: cpal::BufferSize::Default,
     };
-    let s = sh.clone();
+    let (s, rg, rate, ch) = (sh.clone(), ring(&cv), cv.rate as f64, cv.ch as usize);
+    let b = rg.clone();
     let cb = move |o: &mut [f32], info: &cpal::OutputCallbackInfo| {
         // stopped: silence until the stream closes
         if s.quit.load(Relaxed) {
@@ -155,22 +189,22 @@ fn open(sh: &Arc<Sh>) -> Option<cpal::Stream> {
         }
         let ts = info.timestamp();
         let q = ts.playback.duration_since(ts.callback).as_secs_f64();
-        s.lat.store((q * R) as u64, Relaxed);
+        s.lat.store((q * rate) as u64, Relaxed);
         let (r, w) = (s.r.load(Relaxed), s.w.load(Acquire));
-        let k = (w - r).min(o.len()) & !1;
+        let k = (w - r).min(o.len()) / ch * ch;
         let v = f32::from_bits(s.vol.load(Relaxed));
         for (i, x) in o[..k].iter_mut().enumerate() {
-            *x = f32::from_bits(s.ring[(r + i) % RING].load(Relaxed)) * v;
+            *x = f32::from_bits(b[(r + i) % b.len()].load(Relaxed)) * v;
         }
         o[k..].fill(0.0);
         s.r.store(r + k, Release);
-        s.played.fetch_add(k as u64 / 2, Relaxed);
+        s.played.fetch_add((k / ch) as u64, Relaxed);
     };
     let st = dev
         .build_output_stream(cfg, cb, |e| eprintln!("editor audio: {e}"), None)
-        .ok()?;
-    st.play().ok()?;
-    Some(st)
+        .map_err(std::io::Error::other)?;
+    st.play().map_err(std::io::Error::other)?;
+    Ok((st, cv, rg))
 }
 
 /// A clip's audio from output frame `j` on: its AAC decoded in order, fed to the time-stretch one output frame at a
@@ -346,8 +380,8 @@ impl Voice {
     }
 }
 
-/// The mixer thread: mixes block after block from `t0` while the ring has room.
-fn run(sh: &Sh, m: &Mix, t0: f64) -> Result<(), String> {
+/// The mixer thread: mixes block after block from `t0` while ring `rg` has room, converted by `cv`.
+fn run(sh: &Sh, rg: &[AtomicU32], m: &Mix, t0: f64, cv: &mut Conv) -> Result<(), String> {
     let (tl, fps) = (&m.tl, m.tl.out.fps);
     let (mut mx, mut vs) = (Mixer::new(), vec![]);
     let mut mp4s: Vec<Option<(Mp4, usize)>> = (0..tl.files.len()).map(|_| None).collect();
@@ -408,9 +442,10 @@ fn run(sh: &Sh, m: &Mix, t0: f64) -> Result<(), String> {
     }
     // past the timeline's end the mix is silence, which keeps the clock running to the end
     let (lat, mut at, mut o) = (mix::LATENCY as u64, start, vec![0f32; 2 * BLOCK]);
+    let (room, mut c) = (cv.most(BLOCK), vec![]);
     while !sh.quit.load(Relaxed) {
         let (r, w) = (sh.r.load(Acquire), sh.w.load(Relaxed));
-        if RING - (w - r) < 2 * BLOCK {
+        if rg.len() - (w - r) < room {
             thread::sleep(Duration::from_millis(5));
             continue;
         }
@@ -464,11 +499,13 @@ fn run(sh: &Sh, m: &Mix, t0: f64) -> Result<(), String> {
         mx.run(p as f64 / R, &mut o);
         // output frame i of a block is its input frame i − LATENCY: the first LATENCY frames are before t0
         let s = 2 * (start + lat).saturating_sub(p).min(n) as usize;
+        c.clear();
+        cv.run(&o[s..], &mut c);
         let w = sh.w.load(Relaxed);
-        for (i, x) in o[s..].iter().enumerate() {
-            sh.ring[(w + i) % RING].store(x.to_bits(), Relaxed);
+        for (i, x) in c.iter().enumerate() {
+            rg[(w + i) % rg.len()].store(x.to_bits(), Relaxed);
         }
-        sh.w.store(w + o.len() - s, Release);
+        sh.w.store(w + c.len(), Release);
         at = q;
     }
     Ok(())
@@ -478,27 +515,37 @@ fn run(sh: &Sh, m: &Mix, t0: f64) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// `secs` of `m` mixed from `t0` by the mixer thread, the test draining the ring as the device would.
-    fn mixdown(m: &Mix, t0: f64, secs: f64) -> Vec<f32> {
-        let sh = Sh {
-            ring: (0..RING).map(|_| AtomicU32::new(0)).collect(),
+    /// A sound's state as on a 48 kHz device, playing.
+    fn sh() -> Sh {
+        Sh {
             w: AtomicUsize::new(0),
             r: AtomicUsize::new(0),
             played: AtomicU64::new(0),
             lat: AtomicU64::new(0),
+            rate: AtomicU32::new(R as u32),
             vol: AtomicU32::new(1f32.to_bits()),
             quit: AtomicBool::new(false),
             err: Default::default(),
             on: AtomicU8::new(1),
             wall: OnceLock::new(),
-        };
-        let want = 2 * (secs * R) as usize;
+        }
+    }
+
+    /// `secs` of `m` mixed from `t0` by the mixer thread, the test draining the ring as the device would.
+    fn mixdown(m: &Mix, t0: f64, secs: f64) -> Vec<f32> {
+        mixdown_on(m, t0, secs, Conv::new(R as u32, 2, R as u32, 2).unwrap())
+    }
+
+    /// [`mixdown`] for a stream in `cv`'s format.
+    fn mixdown_on(m: &Mix, t0: f64, secs: f64, mut cv: Conv) -> Vec<f32> {
+        let (sh, rg) = (sh(), ring(&cv));
+        let want = cv.ch as usize * (secs * cv.rate as f64) as usize;
         thread::scope(|sc| {
-            let h = sc.spawn(|| run(&sh, m, t0));
-            let mut o = Vec::with_capacity(want + RING);
+            let h = sc.spawn(|| run(&sh, &rg, m, t0, &mut cv));
+            let mut o = Vec::with_capacity(want + rg.len());
             while o.len() < want && !h.is_finished() {
                 let (r, w) = (sh.r.load(Relaxed), sh.w.load(Acquire));
-                o.extend((r..w).map(|i| f32::from_bits(sh.ring[i % RING].load(Relaxed))));
+                o.extend((r..w).map(|i| f32::from_bits(rg[i % rg.len()].load(Relaxed))));
                 sh.r.store(w, Release);
                 thread::sleep(Duration::from_millis(1));
             }
@@ -619,6 +666,63 @@ mod tests {
         let _ = std::fs::remove_file(&w);
     }
 
+    /// On a device at another rate and channel count (44.1 kHz mono: macOS opens a device at its own rate) the preview
+    /// plays the 48 kHz stereo mix resampled and mixed down, sample for sample, and its clock reads the device's frames
+    /// at that rate. The mix: a chord as music, under a clip whose file is not there.
+    #[test]
+    fn resampled() {
+        let d = std::env::var_os("X5_FIXTURES").map_or_else(std::env::temp_dir, PathBuf::from);
+        let w = d.join(format!("x5desk-chord-{}.wav", std::process::id()));
+        crate::editor::tests::chord(&w, 3.0);
+        let mut tl = edit::Timeline::new(edit::Rate {
+            num: 30000,
+            den: 1001,
+        });
+        for p in [d.join("x5desk-nowhere.mp4"), w.clone()] {
+            tl.files.push(edit::File {
+                path: p.to_string_lossy().into(),
+                dur: 3.0,
+            });
+        }
+        tl.clips.push(edit::Clip::new(0, 0.0, 3.0));
+        tl.out.music = Some(edit::Music {
+            file: 1,
+            offset: 0.0,
+            gain: 1.0,
+            duck: false,
+        });
+        tl.fix();
+        let m = Mix {
+            files: tl.files.iter().map(|f| PathBuf::from(&f.path)).collect(),
+            tl,
+            denoise: None,
+        };
+        let a = mixdown(&m, 0.5, 2.0);
+        let b = mixdown_on(&m, 0.5, 2.0, Conv::new(R as u32, 2, 44100, 1).unwrap());
+        let _ = std::fs::remove_file(&w);
+        let mut want = vec![];
+        Conv::new(R as u32, 2, 44100, 1).unwrap().run(&a, &mut want);
+        // the resampler holds back its last input frames: compare what both have
+        let n = b.len().min(want.len());
+        eprintln!(
+            "{} frames at 44.1 kHz mono, rms {:.4} (48 kHz stereo {:.4}); {n} as the mix resampled",
+            b.len(),
+            rms(&b[..n]),
+            rms(&a)
+        );
+        assert!(n > 88000 && b[..n] == want[..n] && rms(&b) > 0.05);
+        let s = Sound {
+            sh: Arc::new(Sh {
+                played: AtomicU64::new(66150),
+                lat: AtomicU64::new(22050),
+                rate: AtomicU32::new(44100),
+                ..sh()
+            }),
+            t0: 0.5,
+        };
+        assert_eq!(s.now(), 1.5);
+    }
+
     /// A mixer told to quit before it opened the clips' files (its Sound dropped by a seek during playback) opens
     /// none: the next Sound waits for its thread (`DEV`). The files are FIFOs, whose open waits for a writer.
     #[test]
@@ -656,20 +760,16 @@ mod tests {
             denoise: None,
         };
         let sh = Sh {
-            ring: (0..RING).map(|_| AtomicU32::new(0)).collect(),
-            w: AtomicUsize::new(0),
-            r: AtomicUsize::new(0),
-            played: AtomicU64::new(0),
-            lat: AtomicU64::new(0),
             vol: AtomicU32::new(0),
             quit: AtomicBool::new(true),
-            err: Default::default(),
             on: AtomicU8::new(0),
-            wall: OnceLock::new(),
+            ..sh()
         };
+        let mut cv = Conv::new(R as u32, 2, R as u32, 2).unwrap();
+        let rg = ring(&cv);
         thread::scope(|sc| {
             let t = Instant::now();
-            let h = sc.spawn(|| run(&sh, &m, 0.0));
+            let h = sc.spawn(|| run(&sh, &rg, &m, 0.0, &mut cv));
             while !h.is_finished() && t.elapsed() < Duration::from_secs(2) {
                 thread::sleep(Duration::from_millis(5));
             }

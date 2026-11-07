@@ -6,44 +6,61 @@
 //! an editor timeline that is more than a plain cut mixes its clips' audio, time-stretched to their speed (and
 //! denoised), with the music and encodes it (`Edit`). Either way the audio ends with the last video frame. Frame grabs
 //! (`Enc::Jpeg`) take the same path into a JPEG (`jpeg`, GPano for 360). `Queue` runs jobs one after another on a
-//! background thread with progress and cancel.
+//! background thread with progress and cancel. `source` reads what a recording holds without the GPU.
 //!
-//! Output goes to `<path>.part` and is renamed to `path` once complete; an error or a cancel removes it. wgpu errors and
-//! panics on the job's threads (render, decode, encode) are caught (error scopes, `catch_unwind`) and fail the job
-//! instead of reaching the device's handler or hanging the other threads. A host that reconfigures a surface on the
-//! device hands the job's threads its locks around their GPU work (`locks`).
+//! Output goes to `<path>.part`, made new at the job's start (or reserved by the caller, `Dest`) and known by its
+//! identity from then on (`media::part`); once complete it is published to `path` without replacing anything there.
+//! An error or a cancel removes it, and only it. wgpu errors and panics on the job's threads (render, decode, encode)
+//! are caught (error scopes, `catch_unwind`) and fail the job instead of reaching the device's handler or hanging the
+//! other threads. A host that reconfigures a surface on the device hands the job's threads its locks around their GPU
+//! work (`locks`).
 
-pub mod jpeg;
+// the photo encoder lives in media, beside the decoder
+pub use media::jpeg;
 
 use media::{
     aacenc,
     audio::Aac,
     denoise::{self, Stereo},
     insv::{self, Trailer},
-    mix::{self, Kind, Mixer, Track},
+    mix::{self, Kind, Mixer},
     mp4::{self, Mp4},
     music::Music,
     mux::Mux,
+    part::{self, Part},
     stretch::{self, Stretch},
 };
 use std::{
+    cell::Cell,
     collections::HashMap,
+    fs::File,
+    io::{self, Read, Seek, SeekFrom, Write},
     ops::Range,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard,
-        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
-        mpsc,
+        atomic::{
+            AtomicBool, AtomicU64,
+            Ordering::{Acquire, Relaxed, Release},
+        },
+        mpsc::{self, RecvTimeoutError},
     },
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use stitch::{Calib, Ctx, Flow, Fmt, Frame, Mode, Opts, Pose, Preview, Raft, Stitcher, View, Yuv};
 use video::{Cfg, Codec, Decoder, Encoder, Gpu, Packet, Rate, decode::OUT};
 
+#[cfg(feature = "synth")]
+pub mod synth;
+
 /// A frame counts as shown at t this much early (a time rounded to audio samples still shows its frame).
 const EPS: f64 = 1e-3;
-const CANCELLED: &str = "cancelled";
+const CANCELLED: &str = part::CANCELLED;
+/// What a strict job's error says of a source picture that could not be decoded (`Dest::frozen_ok` unset): callers
+/// that offer a way out look for it.
+pub const CONCEALED: &str = "could not be decoded and would repeat the one before";
 /// The soundtrack's rate (the mixer's; the X5 records at it) and mixing block, frames.
 const R: f64 = mix::RATE;
 const BLOCK: u64 = 1024;
@@ -227,13 +244,51 @@ pub struct Job {
 pub type Hook = Box<dyn FnMut(Fx<'_>) + Send>;
 
 /// Frames done of all, steady throughput (frames per second after the first frame, which includes RAFT's warm-up),
-/// estimated seconds left.
+/// estimated seconds left; source pictures that could not be decoded and repeat the one before (VideoToolbox
+/// conceals them: after the Mac slept, in a damaged GOP).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Progress {
     pub done: u64,
     pub total: u64,
     pub fps: f64,
     pub eta: f64,
+    pub concealed: u64,
+}
+
+/// Where a job writes and how strictly (`run_into`). The default: `<path>.part` made at the start, not strict (the
+/// app's export screen).
+#[derive(Debug, Default)]
+pub struct Dest {
+    /// `<path>.part`, reserved by the caller (`media::part::create`); None: made at the job's start
+    pub part: Option<Part>,
+    /// Checked before publishing: an MP4's frame count, a still's decode; a concealed picture fails the job
+    pub strict: bool,
+    /// With `strict`: concealed pictures are counted (`Progress::concealed`) instead
+    pub frozen_ok: bool,
+}
+
+/// A recording as `source` reads it, without the GPU.
+#[derive(Clone, Debug)]
+pub struct Src {
+    /// Lens 0's timescale and frame duration
+    pub fps: [u32; 2],
+    /// Frames both lenses have, and their length (s): the last one's end, edit shift included
+    pub frames: u64,
+    pub dur: f64,
+    /// lens 0, lens 1
+    pub tracks: [Track; 2],
+    /// IMU and exposure records are there (`source` with `stab`: read, and enough to stabilise with)
+    pub imu: bool,
+    pub aac: bool,
+    pub meta: insv::Meta,
+}
+
+/// A lens's video track: codec, 10-bit (H.265 Main 10), coded size from its sample entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Track {
+    pub codec: Codec,
+    pub deep: bool,
+    pub size: [u32; 2],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -261,8 +316,20 @@ struct Clip {
     poses: Option<Vec<stab::Pose>>,
 }
 
-impl Clip {
-    fn open(files: &[PathBuf], lock: Option<(stab::Lock, f64)>) -> Result<Clip, String> {
+/// What `Clip::open` and `source` read first: the trailer, the calibration, the lenses' tracks.
+struct Head {
+    tr: Trailer,
+    meta: insv::Meta,
+    cal: Calib,
+    mp4: Vec<Mp4>,
+    lens: [(usize, usize); 2],
+    times: Vec<f64>,
+    fps: [u32; 2],
+    aac: Option<(usize, usize)>,
+}
+
+impl Head {
+    fn open(files: &[PathBuf]) -> Result<Head, String> {
         let f0 = files.first().ok_or("segment without files")?;
         let tr = Trailer::open(f0)
             .map_err(|e| format!("{}: no Insta360 trailer ({e})", f0.display()))?;
@@ -302,20 +369,86 @@ impl Clip {
         if n == 0 || fps[1] == 0 {
             return Err(format!("{}: empty video track", f0.display()));
         }
+        Ok(Head {
+            tr,
+            meta,
+            cal,
+            mp4,
+            lens,
+            times,
+            fps,
+            aac,
+        })
+    }
+
+    /// The IMU and exposure records, enough to stabilise with.
+    fn motion(&self, f0: &Path) -> Result<(Vec<insv::Imu>, Vec<insv::Exposure>), String> {
+        let err = |e: std::io::Error| format!("{}: trailer: {e}", f0.display());
+        let (imu, ex) = (
+            self.tr.imu().map_err(err)?,
+            self.tr.frames(insv::EXPOSURE).map_err(err)?,
+        );
+        if imu.len() < 2 || ex.is_empty() {
+            return Err(format!(
+                "{}: no IMU or exposure data to stabilise with",
+                f0.display()
+            ));
+        }
+        Ok((imu, ex))
+    }
+}
+
+/// What `files` (as `Seg::files`) hold, read as a job reads them but without the GPU and the poses: the errors a job
+/// would fail with at its start ("no Insta360 trailer", "needs both lenses", "empty video track", the calibration,
+/// an H.265 SPS; with `stab`, "no IMU or exposure data to stabilise with").
+pub fn source(files: &[PathBuf], stab: bool) -> Result<Src, String> {
+    let h = Head::open(files)?;
+    let f0 = &files[0];
+    let imu = match stab {
+        true => h.motion(f0).map(|_| true)?,
+        false => [insv::GYRO, insv::EXPOSURE]
+            .iter()
+            .all(|&k| (h.tr.recs.iter()).any(|r| r.kind == k && r.size > 0)),
+    };
+    let tracks = h.lens.map(|(i, t)| {
+        let t = &h.mp4[i].tracks[t];
+        let (codec, deep) = match &t.codec {
+            mp4::Codec::Hevc { ps, .. } => {
+                let sps = (ps.iter()).find(|n| n.len() > 2 && video::h265::nal_type(n) == 33);
+                let s = sps.map(|n| video::h265::sps(n)).transpose();
+                let s = s.map_err(|e| format!("{}: H.265 SPS: {e}", files[i].display()))?;
+                (Codec::H265, s.is_some_and(|s| s.depth > 8))
+            }
+            // H.264 is 8-bit here (the decoders refuse more)
+            _ => (Codec::H264, false),
+        };
+        Ok::<_, String>(Track {
+            codec,
+            deep,
+            size: [t.width, t.height],
+        })
+    });
+    let [a, b] = tracks;
+    let t0 = &h.mp4[h.lens[0].0].tracks[h.lens[0].1];
+    let n = h.times.len();
+    Ok(Src {
+        fps: h.fps,
+        frames: n as u64,
+        dur: h.times[n - 1] + t0.samples[n - 1].dur as f64 / t0.timescale as f64,
+        tracks: [a?, b?],
+        imu,
+        aac: h.aac.is_some(),
+        meta: h.meta,
+    })
+}
+
+impl Clip {
+    fn open(files: &[PathBuf], lock: Option<(stab::Lock, f64)>) -> Result<Clip, String> {
+        let h = Head::open(files)?;
         let poses = match lock {
             Some((lock, smooth)) => {
-                let err = |e: std::io::Error| format!("{}: trailer: {e}", f0.display());
-                let (imu, ex) = (
-                    tr.imu().map_err(err)?,
-                    tr.frames(insv::EXPOSURE).map_err(err)?,
-                );
-                if imu.len() < 2 || ex.is_empty() {
-                    return Err(format!(
-                        "{}: no IMU or exposure data to stabilise with",
-                        f0.display()
-                    ));
-                }
-                let o = stab::Opts::new(&meta, lock, smooth);
+                let (imu, ex) = h.motion(&files[0])?;
+                let o = stab::Opts::new(&h.meta, lock, smooth);
                 Some(stab::poses(
                     &stab::Track::new(&imu, stab::KP, stab::KI),
                     &ex,
@@ -325,13 +458,13 @@ impl Clip {
             None => None,
         };
         Ok(Clip {
-            mp4,
-            lens,
-            times,
-            fps,
-            meta,
-            cal,
-            aac,
+            mp4: h.mp4,
+            lens: h.lens,
+            times: h.times,
+            fps: h.fps,
+            meta: h.meta,
+            cal: h.cal,
+            aac: h.aac,
             poses,
         })
     }
@@ -758,7 +891,7 @@ impl<'a> Mixdown<'a> {
             }
             let n = tl.frames(k);
             let span = [fps.t(n.start), fps.t(n.end)];
-            let mut t = Track::new(Kind::Clip, span);
+            let mut t = mix::Track::new(Kind::Clip, span);
             t.fade = [0.005; 2];
             // the envelope on content time, sampled per output frame
             if !c.vol.is_empty() {
@@ -783,7 +916,7 @@ impl<'a> Mixdown<'a> {
             let span = [(-m.offset).max(0.0), tl.dur().min(len - m.offset)];
             if span[1] > span[0] {
                 mu.seek(span[0] + m.offset).map_err(err)?;
-                let mut t = Track::new(Kind::Music, span);
+                let mut t = mix::Track::new(Kind::Music, span);
                 t.gain = m.gain;
                 mx.tracks.push(t);
                 // the mixer ducks: edit's own factor (`Eval::music`) would duck twice
@@ -887,11 +1020,11 @@ fn panicked(x: Box<dyn std::any::Any + Send>) -> String {
     format!("panic: {}", m.unwrap_or_default())
 }
 
-/// Runs `f` with this thread's wgpu errors and panics captured: they come back as `Err` instead of reaching the
-/// device's uncaptured-error handler (the app's panics) or unwinding past the job's cleanup. A panic must not end a
-/// job's thread silently: the others would wait for it (a decoder spinning on a full ring, the renderer on the
-/// encoder's input).
-fn scoped<T>(dev: &wgpu::Device, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+/// Runs `f` with this thread's wgpu errors and panics captured: they come back as `Err` ("wgpu: …", "panic: …")
+/// instead of reaching the device's uncaptured-error handler (the app's panics) or unwinding past the job's cleanup.
+/// A panic must not end a job's thread silently: the others would wait for it (a decoder spinning on a full ring, the
+/// renderer on the encoder's input). For any GPU work of a host, as for the jobs' threads.
+pub fn scoped<T>(dev: &wgpu::Device, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     use wgpu::ErrorFilter as E;
     let s = [E::Validation, E::OutOfMemory, E::Internal].map(|f| dev.push_error_scope(f));
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
@@ -924,22 +1057,28 @@ fn nals<'a>(mut b: &'a [u8], n: usize, out: &mut [&'a [u8]]) -> usize {
 /// The media thread of one decode pass: decodes both lenses from the last sync sample before the first frame
 /// through the last and hands over the decoder indices of each frame from the first on, also of those the pass skips
 /// (faster than 1×): a release frees every earlier frame too, so only the renderer, which holds them in order, may
-/// release once it has one. Frames before the first are released here, unseen.
+/// release once it has one. Frames before the first are released here, unseen. With each frame go the pictures the
+/// decoders concealed so far (`Decoder::failed`). Ends early, Ok, at `stop` or `quit`.
 fn decode(
     g: &Gpu,
     c: &Clip,
     ks: &[usize],
     mut d: [Decoder; 2],
-    tx: &mpsc::SyncSender<Result<(usize, [u64; 2]), String>>,
-    quit: &AtomicBool,
+    tx: &mpsc::SyncSender<Got>,
+    [stop, quit]: [&AtomicBool; 2],
 ) -> Result<(), String> {
     let tr = c.lens.map(|(i, t)| &c.mp4[i].tracks[t]);
     let nal = tr.map(|t| match t.codec {
         mp4::Codec::Hevc { nal, .. } | mp4::Codec::Avc { nal, .. } => nal as usize,
         _ => 4,
     });
+    let end = || stop.load(Relaxed) || quit.load(Relaxed);
     let mut buf = vec![];
     for k in c.key(ks[0])..=ks[ks.len() - 1] {
+        // also while catching up from the sync sample, which the renderer doesn't see
+        if end() {
+            return Ok(());
+        }
         let mut f = [0; 2];
         for l in 0..2 {
             let (m, x) = (&c.mp4[c.lens[l].0], tr[l].samples[k]);
@@ -956,7 +1095,7 @@ fn decode(
                 };
                 match r {
                     Ok(x) => break x,
-                    Err(video::Error::Full) if !quit.load(Relaxed) => {}
+                    Err(video::Error::Full) if !end() => {}
                     Err(video::Error::Full) => return Ok(()),
                     Err(e) => return Err(format!("decode frame {k}, lens {l}: {e}")),
                 }
@@ -966,29 +1105,35 @@ fn decode(
             for (x, f) in d.iter().zip(f) {
                 x.release(g, f);
             }
-        } else if tx.send(Ok((k, f))).is_err() {
+        } else if tx.send(Ok((k, f, d[0].failed() + d[1].failed()))).is_err() {
             break;
         }
     }
     Ok(())
 }
 
+/// What a decode pass hands the renderer per frame: its index, its pictures in the lenses' decoders, the pictures
+/// they concealed so far.
+type Got = Result<(usize, [u64; 2], u64), String>;
+
 /// The encoder thread: encodes the frames the renderer releases, muxes the packets and the soundtrack up to each
-/// packet's end, ends the soundtrack with the last frame, finishes the file (`moov` in front).
+/// packet's end into `f` (`part`), ends the soundtrack with the last frame, finishes the file (`moov` in front).
+/// `stop` or `quit` ends it, also while it drains the encoder and within a chunk of the faststart rewrite.
 #[allow(clippy::too_many_arguments)]
 fn mux(
     g: &Gpu,
     mut e: Encoder,
     rx: mpsc::Receiver<u64>,
-    part: &Path,
+    (f, part): (&File, &Path),
     c: &Cfg,
     sph: bool,
     clips: &[Clip],
     mut au: Option<Sound>,
-    quit: &AtomicBool,
+    [stop, quit]: [&AtomicBool; 2],
 ) -> Result<(), String> {
     let io = |e: std::io::Error| format!("{}: {e}", part.display());
-    let mut m = Mux::create(part).map_err(io)?;
+    let end = || stop.load(Relaxed) || quit.load(Relaxed);
+    let mut m = Mux::new(f.try_clone().map_err(io)?).map_err(io)?;
     let ps = e.params.clone();
     let codec = match c.codec {
         Codec::H265 => mp4::Codec::Hevc { ps, nal: 4 },
@@ -1019,6 +1164,8 @@ fn mux(
         Some(Sound::Copy(a)) => a.start,
         _ => 0,
     };
+    // packets taken: one per frame encoded, in order (`Encoder::packet`), so `e.frame` above it is still in flight
+    let got = Cell::new(0u64);
     // a video packet, then the soundtrack up to its end (None: the rest)
     let mut put = |m: &mut Mux, p: Option<&Packet>| -> Result<(), String> {
         if let Some(p) = p {
@@ -1027,6 +1174,7 @@ fn mux(
             m.write(v, &b, p.dts * d, p.pts * d, d as u32, p.key)
                 .map_err(io)?;
             vend = vend.max((p.pts + 1) * d);
+            got.set(got.get() + 1);
         }
         // track ticks of video ticks t
         let tk = |t: i64, ts: u32| {
@@ -1068,7 +1216,7 @@ fn mux(
                 Err(video::Error::Full) => {
                     if e.packet(&mut p, 50_000_000).map_err(err)? {
                         put(&mut m, Some(&p))?;
-                    } else if quit.load(Relaxed) {
+                    } else if end() {
                         return Err(CANCELLED.into());
                     }
                 }
@@ -1079,14 +1227,23 @@ fn mux(
             put(&mut m, Some(&p))?;
         }
     }
-    if quit.load(Relaxed) {
+    // the frames in flight, with a look at `stop` between waits
+    while got.get() < e.frame {
+        if end() {
+            return Err(CANCELLED.into());
+        }
+        if e.packet(&mut p, 50_000_000).map_err(err)? {
+            put(&mut m, Some(&p))?;
+        }
+    }
+    if end() {
         return Err(CANCELLED.into());
     }
-    while e.packet(&mut p, u64::MAX).map_err(err)? {
-        put(&mut m, Some(&p))?;
-    }
     put(&mut m, None)?;
-    m.finish(true).map_err(io)
+    m.finish_with(true, &end).map_err(|e| match e.kind() {
+        io::ErrorKind::Interrupted => CANCELLED.into(),
+        _ => io(e),
+    })
 }
 
 /// What draws a clip's frames: the stitcher (the 360 output, or only the seam flow of a flat view) and the flat
@@ -1184,22 +1341,42 @@ impl Draw {
 /// it. `raft` is created on the first RAFT job and kept: attach burn to the device (`stitch::attach`) before
 /// installing the device's error handler, or `Raft::new` replaces it. `stop` cancels (checked every frame);
 /// `progress` sees every frame. Returns the final progress. Errors (a cancel: "cancelled"; a panic, e.g. in
-/// `Job::fx`: "panic: …") remove the partial output; it never panics.
+/// `Job::fx`: "panic: …") remove the partial output; it never panics. `run_into` with `Dest::default()`.
 pub fn run(
     g: &Gpu,
     cx: &Ctx,
     raft: &mut Option<Raft>,
-    mut job: Job,
+    job: Job,
     stop: &AtomicBool,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<Progress, String> {
-    let mut part = job.path.clone().into_os_string();
-    part.push(".part");
-    let part = PathBuf::from(part);
+    run_into(g, cx, raft, job, Dest::default(), stop, progress)
+}
+
+/// `run`, writing into `d.part` (or a `<path>.part` it makes new: one already there fails the job, "being written by
+/// another export"). The file is published to `job.path` only if nothing is there by then and `stop` is still clear
+/// after the last write; every error removes it, and only it (`media::part::finish`). `d.strict` checks the file
+/// first and fails at the first concealed picture unless `d.frozen_ok`.
+pub fn run_into(
+    g: &Gpu,
+    cx: &Ctx,
+    raft: &mut Option<Raft>,
+    mut job: Job,
+    d: Dest,
+    stop: &AtomicBool,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<Progress, String> {
+    let (path, pp) = (job.path.clone(), part::of(&job.path));
+    let Part { f, .. } = match d.part {
+        Some(p) => p,
+        None => reserve(&path)?,
+    };
+    let (still, strict) = (matches!(job.enc, Enc::Jpeg(_)), d.strict && !d.frozen_ok);
+    let mut size = (0, 0);
     // also a panic while setting up (a damaged clip's parser, the model) ends as an error
     let r = scoped(&g.device, || {
         let mut p = plan(&job.cut, job.stab)?;
-        if matches!(job.enc, Enc::Jpeg(_)) {
+        if still {
             p.runs.truncate(1);
             p.runs[0].k.truncate(1);
         }
@@ -1211,6 +1388,7 @@ pub fn run(
         if w == 0 || h == 0 || w > max || h > max {
             return Err(format!("output {w}x{h} outside 1..={max}"));
         }
+        size = (w, h);
         if job.raft && raft.is_none() {
             let _b = burn();
             *raft = Some(Raft::new(&g.instance, &g.adapter, &g.device, &g.queue)?);
@@ -1223,18 +1401,45 @@ pub fn run(
             &mut job,
             &p,
             (w, h),
-            &part,
+            (&f, &pp),
+            strict,
             stop,
             progress,
         )
     });
-    match &r {
-        Ok(_) => {
-            std::fs::rename(&part, &job.path).map_err(|e| format!("{}: {e}", job.path.display()))?
+    // the job's closures go before anything is published: one that panics as it drops fails the job
+    let r = match catch_unwind(AssertUnwindSafe(|| drop(job))) {
+        Ok(()) => r,
+        Err(x) => r.and(Err(panicked(x))),
+    };
+    let io = |e: io::Error| format!("{}: {e}", pp.display());
+    let r = r.and_then(|p| match () {
+        _ if !d.strict => Ok(p),
+        _ if still => {
+            let mut b = vec![];
+            (&f).seek(SeekFrom::Start(0)).map_err(io)?;
+            (&f).read_to_end(&mut b).map_err(io)?;
+            let mut px = vec![];
+            match media::mjpeg::Mjpeg::default().rgba(&b, &mut px) {
+                Ok((w, h)) if (w as u32, h as u32) == size => Ok(p),
+                Ok((w, h)) => Err(format!("the JPEG is {w}x{h}, not {}x{}", size.0, size.1)),
+                Err(e) => Err(format!("the JPEG doesn't decode: {e}")),
+            }
         }
-        Err(_) => _ = std::fs::remove_file(&part),
-    }
-    r
+        _ => {
+            let m = Mp4::from_file(f.try_clone().map_err(io)?).map_err(io)?;
+            let n: Vec<u64> = (m.tracks.iter())
+                .filter(|t| matches!(t.codec, mp4::Codec::Hevc { .. } | mp4::Codec::Avc { .. }))
+                .map(|t| t.samples.len() as u64)
+                .collect();
+            match n[..] {
+                [n] if n == p.total => Ok(p),
+                [n] => Err(format!("the file has {n} of {} frames", p.total)),
+                _ => Err(format!("the file has {} video tracks", n.len())),
+            }
+        }
+    });
+    part::finish(&pp, &path, &f, stop, r)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1245,7 +1450,8 @@ fn render(
     job: &mut Job,
     pl: &Plan,
     (w, h): (u32, u32),
-    part: &Path,
+    (file, part): (&File, &Path),
+    strict: bool,
     stop: &AtomicBool,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<Progress, String> {
@@ -1361,7 +1567,9 @@ fn render(
             let c = cfg.as_ref().unwrap();
             let clips = &pl.clips[..];
             sc.spawn(move || {
-                let r = scoped(&g.device, || mux(g, e, erx, part, c, sph, clips, au, quit));
+                let r = scoped(&g.device, || {
+                    mux(g, e, erx, (file, part), c, sph, clips, au, [stop, quit])
+                });
                 if r.is_err() {
                     quit.store(true, Relaxed);
                 }
@@ -1369,7 +1577,8 @@ fn render(
             })
         });
         let r = scoped(&g.device, || -> Result<(), String> {
-            let mut n = 0u64;
+            // pictures concealed in the passes before this one
+            let (mut n, mut hid) = (0u64, 0u64);
             for run in &pl.runs {
                 let c = &pl.clips[run.c];
                 let mut d = vec![];
@@ -1395,7 +1604,7 @@ fn render(
                 let rings = [d0.ring.clone(), d1.ring.clone()];
                 let bg: [Vec<stitch::Src>; 2] = [&d0, &d1].map(|d| {
                     (0..OUT as u64)
-                        .map(|s| cx.rect(d.texture(s), d.view))
+                        .map(|s| cx.rect(&d.planes(s), d.view))
                         .collect()
                 });
                 let j = (&job.out, job.enc, job.raft, job.colour);
@@ -1404,13 +1613,31 @@ fn render(
                 let (tx, rx) = mpsc::sync_channel(OUT);
                 let ks = &run.k[..];
                 sc.spawn(move || {
-                    if let Err(e) = scoped(&g.device, || decode(g, c, ks, [d0, d1], &tx, quit)) {
+                    let r = scoped(&g.device, || decode(g, c, ks, [d0, d1], &tx, [stop, quit]));
+                    if let Err(e) = r {
                         let _ = tx.send(Err(e));
                     }
                 });
                 let mut i = 0;
-                for m in rx {
-                    let (k, f) = m?;
+                loop {
+                    // a stalled decode (a wedged driver) still sees `stop`
+                    let m = match rx.recv_timeout(Duration::from_millis(100)) {
+                        Ok(m) => m,
+                        Err(RecvTimeoutError::Timeout) if stop.load(Relaxed) => {
+                            return Err(CANCELLED.into());
+                        }
+                        Err(RecvTimeoutError::Timeout) => continue,
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    };
+                    let (k, f, x) = m?;
+                    p.concealed = hid + x;
+                    if strict && p.concealed > 0 {
+                        let s = if p.concealed == 1 { "" } else { "s" };
+                        return Err(format!(
+                            "frame {n}: {} source picture{s} {CONCEALED} (did the computer sleep?)",
+                            p.concealed
+                        ));
+                    }
                     let release = || {
                         for (r, f) in rings.iter().zip(f) {
                             r.release(g, f);
@@ -1498,8 +1725,11 @@ fn render(
                                 let Enc::Jpeg(q) = job.enc else { return Ok(()) };
                                 let xmp = sph.then(|| jpeg::gpano(w, h));
                                 let b = jpeg::encode(&px, w, h, q, xmp.as_deref())?;
-                                return std::fs::write(part, b)
-                                    .map_err(|e| format!("{}: {e}", part.display()));
+                                let io = |e: io::Error| format!("{}: {e}", part.display());
+                                let mut o = file;
+                                o.set_len(0).map_err(io)?;
+                                o.seek(SeekFrom::Start(0)).map_err(io)?;
+                                return o.write_all(&b).map_err(io);
                             };
                             y.encode(&mut e);
                             // outside the gate: the encoder thread takes it to free a slot
@@ -1543,6 +1773,11 @@ fn render(
                         progress(p);
                     }
                 }
+                // a decode pass that ended early
+                if stop.load(Relaxed) {
+                    return Err(CANCELLED.into());
+                }
+                hid = p.concealed;
             }
             Ok(())
         });
@@ -1564,12 +1799,32 @@ struct Entry {
     id: u64,
     state: State,
     stop: Arc<AtomicBool>,
+    /// its `.part` and who it is, once known: handed in, or made when it starts
+    part: Option<(PathBuf, part::Id)>,
+    /// dropped once finished (`Queue::forget`)
+    forgot: bool,
+}
+
+impl Entry {
+    fn ended(&self) -> bool {
+        !matches!(self.state, State::Queued | State::Running(_))
+    }
+}
+
+/// What a queue's thread is sent.
+enum Msg {
+    Job(u64, Box<Job>, Dest),
+    Trim,
 }
 
 #[derive(Default)]
 struct Sh {
     jobs: Mutex<Vec<Entry>>,
     next: AtomicU64,
+    /// what was sent to the thread (jobs, trims) and is not done with: the thread may be in the driver for it
+    busy: AtomicU64,
+    /// the device poll after a job failed: its error
+    lost: Mutex<Option<String>>,
 }
 
 impl Sh {
@@ -1578,75 +1833,190 @@ impl Sh {
     }
 
     fn set(&self, id: u64, s: State) {
-        if let Some(e) = self.jobs().iter_mut().find(|e| e.id == id) {
-            e.state = s;
+        let mut j = self.jobs();
+        if let Some(i) = j.iter().position(|e| e.id == id) {
+            j[i].state = s;
+            if j[i].forgot && j[i].ended() {
+                j.remove(i);
+            }
         }
     }
 }
 
+const GONE: &str = "the export queue's thread ended";
+
+/// `<path>.part`, made new.
+fn reserve(path: &Path) -> Result<Part, String> {
+    let pp = part::of(path);
+    part::create(path).map_err(|e| match e.kind() {
+        io::ErrorKind::AlreadyExists => {
+            format!("{}: being written by another export", pp.display())
+        }
+        _ => format!("{}: {e}", pp.display()),
+    })
+}
+
+/// One job on a queue's thread: started unless it was cancelled meanwhile, its `.part` known before it runs, a panic
+/// past the job's own catching failing it alone; then a look at the device.
+fn one(g: &Gpu, cx: &Ctx, raft: &mut Option<Raft>, s: &Sh, id: u64, job: Job, mut d: Dest) {
+    // the stop check and Running in one go: a cancel never shows Cancelled, then Running
+    let stop = {
+        let mut j = s.jobs();
+        match j.iter_mut().find(|e| e.id == id) {
+            Some(e) if e.state == State::Queued && e.stop.load(Relaxed) => {
+                e.state = State::Cancelled;
+                if let Some((p, id)) = e.part.take() {
+                    part::remove_if(&p, &id);
+                }
+                None
+            }
+            Some(e) if e.state == State::Queued => {
+                e.state = State::Running(Progress::default());
+                Some(e.stop.clone())
+            }
+            _ => None,
+        }
+    };
+    let Some(stop) = stop else {
+        // not run: its hooks dropped where a panic as they drop cannot end the lane
+        let _ = catch_unwind(AssertUnwindSafe(move || drop((job, d))));
+        return;
+    };
+    let pp = part::of(&job.path);
+    let p = match d.part.take().map_or_else(|| reserve(&job.path), Ok) {
+        Ok(p) => p,
+        Err(e) => return s.set(id, State::Failed(e)),
+    };
+    let pid = p.id;
+    if let Some(e) = s.jobs().iter_mut().find(|e| e.id == id) {
+        e.part = Some((pp.clone(), pid));
+    }
+    // the file as the panic leaves it: its identity then (the writes may have changed it: macOS FAT and exFAT)
+    let held = p.f.try_clone().ok();
+    d.part = Some(p);
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        run_into(g, cx, raft, job, d, &stop, &mut |p| {
+            s.set(id, State::Running(p))
+        })
+    }))
+    .unwrap_or_else(|x| {
+        let now = held.as_ref().and_then(|f| part::id_of(f).ok());
+        part::remove_if(&pp, &now.unwrap_or(pid));
+        Err(panicked(x))
+    });
+    drop(held);
+    let st = match r {
+        Ok(p) => State::Done(p),
+        Err(_) if stop.load(Relaxed) => State::Cancelled,
+        Err(e) => State::Failed(e),
+    };
+    // a lost device shows here first (wgpu reports it to no handler, and its poll panics on one: the thread goes on)
+    let poll = catch_unwind(AssertUnwindSafe(|| g.device.poll(wgpu::PollType::Poll)));
+    let lost = match poll {
+        Ok(Ok(_)) => None,
+        Ok(Err(e)) => Some(format!("wgpu: {e}")),
+        Err(x) => Some(panicked(x)),
+    };
+    if lost.is_some() {
+        *s.lost.lock().unwrap_or_else(|e| e.into_inner()) = lost;
+    }
+    s.set(id, st);
+}
+
 /// Export jobs, one after another on a background thread ("export"), which keeps the RAFT model between jobs.
 pub struct Queue {
-    tx: Option<mpsc::Sender<(u64, Job)>>,
+    tx: Option<mpsc::Sender<Msg>>,
     sh: Arc<Sh>,
     th: Option<thread::JoinHandle<()>>,
 }
 
 impl Queue {
+    /// `with` its thread named "export"; panics if the OS refuses a thread.
     pub fn new(g: Arc<Gpu>, cx: Ctx) -> Queue {
-        let (tx, rx) = mpsc::channel::<(u64, Job)>();
+        Queue::with(g, cx, "export").expect("export thread")
+    }
+
+    /// A queue whose thread is named `name`. Queues on one device run their jobs side by side.
+    pub fn with(g: Arc<Gpu>, cx: Ctx, name: &'static str) -> io::Result<Queue> {
+        let (tx, rx) = mpsc::channel::<Msg>();
         let sh = Arc::new(Sh::default());
         let s = sh.clone();
-        let th = thread::Builder::new()
-            .name("export".into())
-            .spawn(move || {
-                let mut raft = None;
-                for (id, job) in rx {
-                    let Some(stop) = s.jobs().iter().find(|e| e.id == id).map(|e| e.stop.clone())
-                    else {
-                        continue;
-                    };
-                    if stop.load(Relaxed) {
-                        s.set(id, State::Cancelled);
-                        continue;
-                    }
-                    s.set(id, State::Running(Progress::default()));
-                    let r = run(&g, &cx, &mut raft, job, &stop, &mut |p| {
-                        s.set(id, State::Running(p))
-                    });
-                    let st = match r {
-                        Ok(p) => State::Done(p),
-                        Err(_) if stop.load(Relaxed) => State::Cancelled,
-                        Err(e) => State::Failed(e),
-                    };
-                    s.set(id, st);
+        let th = thread::Builder::new().name(name.into()).spawn(move || {
+            let mut raft = None;
+            for m in rx {
+                match m {
+                    Msg::Job(id, job, d) => one(&g, &cx, &mut raft, &s, id, *job, d),
+                    Msg::Trim => raft = None,
                 }
-            })
-            .expect("export thread");
-        Queue {
+                s.busy.fetch_sub(1, Release);
+            }
+        })?;
+        Ok(Queue {
             tx: Some(tx),
             sh,
             th: Some(th),
-        }
+        })
     }
 
     /// Queues `job`; returns its id.
     pub fn push(&self, job: Job) -> u64 {
+        self.put(job, Dest::default()).0
+    }
+
+    /// Queues `job`, which writes into `d.part` (reserved by the caller) as strictly as `d` says; returns its id.
+    /// Err: the thread is gone (the `.part` removed).
+    pub fn push_into(&self, job: Job, d: Dest) -> io::Result<u64> {
+        let (id, r) = self.put(job, d);
+        if r.is_err() {
+            self.forget(id);
+        }
+        r.map(|_| id)
+    }
+
+    fn put(&self, job: Job, d: Dest) -> (u64, io::Result<()>) {
         let id = self.sh.next.fetch_add(1, Relaxed);
         self.sh.jobs().push(Entry {
             id,
             state: State::Queued,
             stop: Arc::new(AtomicBool::new(false)),
+            part: d.part.as_ref().map(|p| (part::of(&job.path), p.id)),
+            forgot: false,
         });
-        if let Some(tx) = &self.tx {
-            let _ = tx.send((id, job));
+        let tx = self
+            .tx
+            .as_ref()
+            .expect("a queue's sender lives as long as it");
+        self.sh.busy.fetch_add(1, Relaxed);
+        let Err(mpsc::SendError(m)) = tx.send(Msg::Job(id, Box::new(job), d)) else {
+            return (id, Ok(()));
+        };
+        self.sh.busy.fetch_sub(1, Relaxed);
+        if let Msg::Job(_, j, Dest { part: Some(p), .. }) = m {
+            part::remove_if(&part::of(&j.path), &p.id);
         }
-        id
+        self.sh.set(id, State::Failed(GONE.into()));
+        (id, Err(io::Error::new(io::ErrorKind::BrokenPipe, GONE)))
     }
 
-    /// Cancels a queued or running job; a running one stops within a frame and leaves no output.
+    /// Cancels a job: a queued one is `Cancelled` at once and never starts (its `.part` removed); a running one stops
+    /// within a frame and leaves no output.
     pub fn cancel(&self, id: u64) {
-        if let Some(e) = self.sh.jobs().iter().find(|e| e.id == id) {
-            e.stop.store(true, Relaxed);
+        let mut j = self.sh.jobs();
+        let Some(i) = j.iter().position(|e| e.id == id) else {
+            return;
+        };
+        j[i].stop.store(true, Relaxed);
+        if j[i].state != State::Queued {
+            return;
+        }
+        j[i].state = State::Cancelled;
+        let p = j[i].part.take();
+        if j[i].forgot {
+            j.remove(i);
+        }
+        drop(j);
+        if let Some((p, id)) = p {
+            part::remove_if(&p, &id);
         }
     }
 
@@ -1673,17 +2043,72 @@ impl Queue {
             .jobs()
             .retain(|e| matches!(e.state, State::Queued | State::Running(_)));
     }
+
+    /// Forgets `id` once it is finished (at once if it is).
+    pub fn forget(&self, id: u64) {
+        let mut j = self.sh.jobs();
+        if let Some(i) = j.iter().position(|e| e.id == id) {
+            j[i].forgot = true;
+            if j[i].ended() {
+                j.remove(i);
+            }
+        }
+    }
+
+    /// The thread has work: a job or a trim queued (from the send on) or on it.
+    pub fn busy(&self) -> bool {
+        self.sh.busy.load(Acquire) > 0
+    }
+
+    /// The thread runs.
+    pub fn alive(&self) -> bool {
+        self.th.as_ref().is_some_and(|t| !t.is_finished())
+    }
+
+    /// The thread drops its RAFT model once the jobs queued before are done (the next RAFT job loads it again, about
+    /// 150 ms).
+    pub fn trim(&self) {
+        if let Some(tx) = &self.tx {
+            self.sh.busy.fetch_add(1, Relaxed);
+            if tx.send(Msg::Trim).is_err() {
+                self.sh.busy.fetch_sub(1, Relaxed);
+            }
+        }
+    }
+
+    /// The device poll after a job failed (a lost device): its error, the latest.
+    pub fn lost(&self) -> Option<String> {
+        self.sh
+            .lost
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Lets go without waiting: the queued jobs are cancelled, a running one goes on, and the thread ends after it.
+    pub fn detach(mut self) {
+        let q: Vec<u64> = (self.sh.jobs().iter())
+            .filter(|e| e.state == State::Queued)
+            .map(|e| e.id)
+            .collect();
+        for id in q {
+            self.cancel(id);
+        }
+        self.tx = None;
+        // dropped: no join
+        self.th = None;
+    }
 }
 
 impl Drop for Queue {
-    /// Cancels everything and waits for the running job to stop.
+    /// Cancels everything and waits for the running job to stop (not after `detach`).
     fn drop(&mut self) {
-        for e in self.sh.jobs().iter() {
-            e.stop.store(true, Relaxed);
+        let Some(t) = self.th.take() else { return };
+        let ids: Vec<u64> = self.sh.jobs().iter().map(|e| e.id).collect();
+        for id in ids {
+            self.cancel(id);
         }
         self.tx = None;
-        if let Some(t) = self.th.take() {
-            let _ = t.join();
-        }
+        let _ = t.join();
     }
 }

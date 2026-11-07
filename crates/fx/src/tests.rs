@@ -2202,7 +2202,10 @@ fn blend() {
             k[0] * 255.0,
             &c[..3]
         );
-        assert!(m <= 1.0, "{fmt:?}: {m}");
+        // wgpu's Metal backend leaves MTLCompileOptions at fast math, whose pow is approximate: 1.0 8-bit and 3.8
+        // 10-bit levels there (M4); the float readback can also land a hair above a whole level
+        let tol = if cfg!(target_os = "macos") { 4.0 } else { 1.0 };
+        assert!(m <= tol + 1e-4, "{fmt:?}: {m}");
         assert!((k[0] * 255.0 - 188.0).abs() <= 1.0);
     }
 }

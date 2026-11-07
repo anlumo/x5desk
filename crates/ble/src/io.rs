@@ -7,23 +7,26 @@ use crate::{
     wire,
 };
 #[cfg(not(target_os = "linux"))]
-use btleplug::api::ScanFilter;
+use btleplug::api::{CentralState, ScanFilter};
+#[cfg(target_os = "macos")]
+use btleplug::{api::RetrievePeripheralsOptions, platform::PeripheralId};
 use btleplug::{
     api::{
         Central, CentralEvent, CharPropFlags, Characteristic, Manager as _, Peripheral as _,
-        Service, WriteType,
+        Service, ValueNotification, WriteType,
     },
-    platform::{Adapter, Manager},
+    platform::{Adapter, Manager, Peripheral},
 };
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use std::{
     cell::Cell,
     collections::{BTreeSet, HashMap},
+    pin::Pin,
     sync::mpsc::{Sender, SyncSender},
     time::Duration,
 };
 use tokio::{
-    sync::mpsc::{UnboundedReceiver, unbounded_channel},
+    sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     task::JoinSet,
     time::{self, Instant},
 };
@@ -41,6 +44,8 @@ const CONNECT: Duration = Duration::from_secs(20);
 const FIRST: Duration = Duration::from_secs(5);
 /// Spacing between frames (the app's send throttle, PROTOCOL.md §2.3).
 const GAP: Duration = Duration::from_millis(4);
+/// How often a link asks whether it is still up where a lost event could hide its end (btleplug's own backends).
+const LIVE: Duration = Duration::from_secs(2);
 
 thread_local! {
     /// Set on the BLE thread, where dropping a [`Camera`] must not wait for its own link task.
@@ -76,7 +81,12 @@ pub(crate) fn run(
     BLE.set(true);
     rt.block_on(async move {
         let r = async {
-            let a = Manager::new().await.map_err(os)?.adapters().await.map_err(os)?;
+            let a = Manager::new()
+                .await
+                .map_err(bt)?
+                .adapters()
+                .await
+                .map_err(bt)?;
             let a = a.into_iter().next().ok_or(Error::NoAdapter)?;
             let es = a.events().await.map_err(os)?;
             Ok((a, es))
@@ -108,13 +118,26 @@ pub(crate) fn run(
                     Some(Cmd::Connect(d, tx)) => drop(js.spawn(conn(a.clone(), d, ev.clone(), tx))),
                     None => break,
                 },
-                Some(e) = es.next() => if sc.is_some() && let Some(v) = seen(&a, e, &mut ids).await {
-                    for f in finds.extract_if(.., |f| v.is(&f.0)) {
-                        let _ = f.2.send(Ok(v.clone()));
+                Some(e) = es.next() => match e {
+                    // CoreBluetooth ends a scan when Bluetooth goes off and never takes it up again. Any update
+                    // forgets the scan: btleplug drops events that overflow its channel, an "off" among them.
+                    #[cfg(not(target_os = "linux"))]
+                    CentralEvent::StateUpdate(s) => {
+                        sc = None;
+                        let r = match up(s) {
+                            Ok(()) => radio(&a, &mut sc, on || !finds.is_empty(), &mut ids).await,
+                            e => e,
+                        };
+                        let _ = ev.send(Event::Adapter(r.err()));
                     }
-                    if on {
-                        let _ = ev.send(Event::Seen(v));
-                    }
+                    e => if sc.is_some() && let Some(v) = seen(&a, e, &mut ids).await {
+                        for f in finds.extract_if(.., |f| v.is(&f.0)) {
+                            let _ = f.2.send(Ok(v.clone()));
+                        }
+                        if on {
+                            let _ = ev.send(Event::Seen(v));
+                        }
+                    },
                 },
                 _ = async {
                     match dl {
@@ -163,10 +186,31 @@ async fn radio(a: &Adapter, r: &mut Radio, s: bool, ids: &mut Ids) -> Result<()>
     }
     #[cfg(not(target_os = "linux"))]
     {
+        // CoreBluetooth takes a scan in any state and scans only while Bluetooth is on and allowed
+        a.adapter_state().await.map_err(os).and_then(up)?;
         a.start_scan(ScanFilter::default()).await.map_err(os)?;
         *r = Some(());
     }
     Ok(())
+}
+
+/// btleplug's error; a refused Bluetooth permission (macOS) as [`Error::Denied`].
+fn bt(e: btleplug::Error) -> Error {
+    match e {
+        btleplug::Error::PermissionDenied => Error::Denied,
+        e => os(e),
+    }
+}
+
+/// The adapter's state as a result. btleplug reports CoreBluetooth's unauthorized, unsupported and resetting alike;
+/// once the first state came (`Ble::open` waits for it), that is nearly always Bluetooth not allowed for the app.
+#[cfg(not(target_os = "linux"))]
+fn up(s: CentralState) -> Result<()> {
+    match s {
+        CentralState::PoweredOn => Ok(()),
+        CentralState::PoweredOff => Err(Error::Off),
+        CentralState::Unknown => Err(Error::Denied),
+    }
 }
 
 /// Starts an LE-only discovery on btleplug's adapter.
@@ -232,6 +276,47 @@ fn pick(ss: &BTreeSet<Service>) -> Option<(&Service, &Characteristic, &Character
     Some((s, tx, rx?))
 }
 
+/// The peripheral CoreBluetooth knows by this UUID (`retrievePeripheralsWithIdentifiers`), back in btleplug's list.
+#[cfg(target_os = "macos")]
+async fn known(a: &Adapter, d: &Dev) -> Option<Peripheral> {
+    let o = RetrievePeripheralsOptions {
+        identifiers: Some(vec![PeripheralId::from(crate::Uuid::parse_str(&d.0).ok()?)]),
+        services: None,
+    };
+    let ps = a.retrieve_peripherals(o).await.ok()?;
+    ps.into_iter().find(|p| p.id().to_string() == d.0)
+}
+
+/// Hands the link's notifications on as they come, also while its task waits for a write: btleplug's own backends
+/// (macOS) pass them through a broadcast channel of 16 that drops what overflows. Ends with the stream; there also
+/// when a check every [`LIVE`] finds the link down, as the adapter's events take such a channel too and a lost
+/// `DeviceDisconnected` would leave the link up with every request timing out.
+async fn pump(
+    p: Peripheral,
+    mut ns: Pin<Box<dyn Stream<Item = ValueNotification> + Send>>,
+    tx: UnboundedSender<ValueNotification>,
+) {
+    let mut t =
+        cfg!(not(target_os = "linux")).then(|| time::interval_at(Instant::now() + LIVE, LIVE));
+    loop {
+        tokio::select! {
+            n = ns.next() => if n.is_none_or(|n| tx.send(n).is_err()) {
+                return;
+            },
+            _ = async {
+                match &mut t {
+                    Some(t) => {
+                        t.tick().await;
+                    }
+                    None => std::future::pending().await,
+                }
+            } => if !p.is_connected().await.unwrap_or(false) {
+                return;
+            },
+        }
+    }
+}
+
 async fn conn(a: Adapter, d: Dev, ev: Sender<Event>, done: SyncSender<Result<Camera>>) {
     #[cfg(target_os = "linux")]
     {
@@ -244,11 +329,23 @@ async fn conn(a: Adapter, d: Dev, ev: Sender<Event>, done: SyncSender<Result<Cam
             return drop(done.send(Err(e)));
         }
     }
+    // CoreBluetooth takes a connect in any state too; with Bluetooth off btleplug has forgotten every device
+    #[cfg(not(target_os = "linux"))]
+    if let Err(e) = a.adapter_state().await.map_err(os).and_then(up) {
+        return drop(done.send(Err(e)));
+    }
     let ps = match a.peripherals().await {
         Ok(ps) => ps,
         Err(e) => return drop(done.send(Err(os(e)))),
     };
-    let Some(p) = ps.into_iter().find(|p| p.id().to_string() == d.0) else {
+    let p = ps.into_iter().find(|p| p.id().to_string() == d.0);
+    // btleplug's CoreBluetooth backend forgets a peripheral at every disconnect; CoreBluetooth still knows it
+    #[cfg(target_os = "macos")]
+    let p = match p {
+        None => known(&a, &d).await,
+        p => p,
+    };
+    let Some(p) = p else {
         return drop(done.send(Err(Error::NoDevice)));
     };
     let r = async {
@@ -260,13 +357,16 @@ async fn conn(a: Adapter, d: Dev, ev: Sender<Event>, done: SyncSender<Result<Cam
         p.discover_services().await.map_err(os)?;
         let ss = p.services();
         let (s, tx, rx) = pick(&ss).ok_or(Error::NoService)?;
-        let mut ns = p.notifications().await.map_err(os)?;
+        let (ntx, mut ns) = unbounded_channel();
+        // dropped with the link, which ends the pump
+        let mut aux = JoinSet::new();
+        aux.spawn(pump(p.clone(), p.notifications().await.map_err(os)?, ntx));
         // The app waits 200 ms after the MTU exchange before it subscribes (ble.md §4.5).
         time::sleep(Duration::from_millis(200)).await;
         p.subscribe(rx).await.map_err(os)?;
         let t0 = Instant::now();
         let first = time::timeout(FIRST, async {
-            while let Some(n) = ns.next().await {
+            while let Some(n) = ns.recv().await {
                 if n.uuid == rx.uuid {
                     return Some((t0.elapsed(), n.value));
                 }
@@ -287,9 +387,9 @@ async fn conn(a: Adapter, d: Dev, ev: Sender<Event>, done: SyncSender<Result<Cam
                 .is_some_and(|f| f.1.starts_with(&[0xFF, 6, 0x41])),
             first,
         };
-        Ok((es, ns, tx.clone(), l))
+        Ok((es, ns, aux, tx.clone(), l))
     };
-    let (mut es, mut ns, tx, l) = match r.await {
+    let (mut es, mut ns, _aux, tx, l) = match r.await {
         Ok(x) => x,
         Err(e) => {
             let _ = p.disconnect().await;
@@ -330,7 +430,7 @@ async fn conn(a: Adapter, d: Dev, ev: Sender<Event>, done: SyncSender<Result<Cam
                 Some(o) => s.op(o, std::time::Instant::now()),
                 None => break None,
             },
-            m = ns.next() => match m {
+            m = ns.recv() => match m {
                 Some(m) if m.uuid == rx => e = s.feed(&m.value).err(),
                 Some(_) => {}
                 None => break Some(Error::Closed),

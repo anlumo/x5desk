@@ -1,11 +1,12 @@
-//! Mount detection against a fake mount table and sysfs; a fake card (a DCIM tree in the fixtures directory, with the
-//! samples of `X5_SAMPLES` as its recordings when set); the import copy's resume rules, and imports through the
-//! download queue.
+//! Mount detection against a fake mount table and sysfs, and a fake macOS mount table; a fake card (a DCIM tree in
+//! the fixtures directory, with the samples of `X5_SAMPLES` symlinked in as its recordings when set, on unix); the
+//! import copy's resume rules, and imports through the download queue.
 
 use super::*;
 use crate::dl::{self, St};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::{
-    os::unix::fs::symlink,
     sync::{Arc, Mutex},
     time::{Duration, Instant, UNIX_EPOCH},
 };
@@ -21,6 +22,7 @@ fn dir(n: &str) -> PathBuf {
 
 /// The camera's disk by its USB product string (wherever it is mounted, a space in the path), a card under a
 /// removable-media place; not: a USB stick elsewhere, a volume without DCIM, a non-device source, a second mount.
+#[cfg(unix)] // symlinks
 #[test]
 fn mounts() {
     let d = dir("mounts");
@@ -103,6 +105,71 @@ fn mounts() {
     fs::remove_dir_all(&d).unwrap();
 }
 
+/// macOS's mount table: block devices under `/Volumes` with a DCIM tree, the camera's named by its USB device (the
+/// registry lookup stands in, asked about block devices only); not: a network share, a volume Finder hides (the
+/// system's), a disk mounted elsewhere, a volume without DCIM, a second mount. The test hook's watch lists its
+/// directories and nothing mounted.
+#[test]
+fn mac_mounts() {
+    let d = dir("mac-mounts");
+    let vs = d.join("Volumes");
+    let (x5, sd, share, rec, empty, other) = (
+        vs.join("Insta360 X5"),
+        vs.join("SD"),
+        vs.join("share"),
+        vs.join("Recovery"),
+        vs.join("EMPTY"),
+        d.join("elsewhere"),
+    );
+    for p in [&x5, &sd, &share, &rec, &other] {
+        fs::create_dir_all(p.join("DCIM/Camera01")).unwrap()
+    }
+    fs::create_dir_all(&empty).unwrap();
+    let t = [
+        ("/dev/disk4s1", &x5, true),
+        ("/dev/disk5s1", &sd, true),
+        ("//me@nas._smb._tcp.local/share", &share, true),
+        ("/dev/disk3s3", &rec, false),
+        ("/dev/disk6s1", &empty, true),
+        ("/dev/disk7s1", &other, true),
+        ("/dev/disk4s1", &x5, true),
+    ]
+    .map(|(s, p, b)| (s.to_string(), p.clone(), b));
+    let cam = |s: &str| {
+        assert!(s.starts_with("/dev/"), "{s} looked up");
+        (s == "/dev/disk4s1").then(|| "Insta360 X5".to_string())
+    };
+    let v = volumes(&t, std::slice::from_ref(&vs), cam);
+    assert_eq!(
+        v,
+        [
+            Vol {
+                root: x5,
+                dev: "/dev/disk4s1".into(),
+                cam: Some("Insta360 X5".into()),
+            },
+            Vol {
+                root: sd.clone(),
+                dev: "/dev/disk5s1".into(),
+                cam: None,
+            },
+        ]
+    );
+    assert_eq!(
+        (v[0].name(), v[1].name()),
+        ("Insta360 X5".into(), "Card SD".into())
+    );
+    assert_eq!(
+        Watch::hook(vec![sd.clone()]).vols(),
+        [Vol {
+            root: sd,
+            dev: "fake".into(),
+            cam: Some("Insta360 X5, simulated".into()),
+        }]
+    );
+    fs::remove_dir_all(&d).unwrap();
+}
+
 /// A card's DCIM as the album shows it: the camera's grouping, metadata and thumbnails from the trailers (one per
 /// item: its first file's), the favourites file; files the app would not collect and empty ones left out (an
 /// interrupted recording: a 0-byte main file beside its proxy).
@@ -113,16 +180,20 @@ fn card() {
     for p in ["DCIM/Camera01", "DCIM/Camera02", "DCIM/.trash"] {
         fs::create_dir_all(r.join(p)).unwrap();
     }
-    let s = std::env::var_os("X5_SAMPLES").map(PathBuf::from);
+    // the samples are linked in, so only where there are symlinks
+    let s = std::env::var_os("X5_SAMPLES")
+        .filter(|_| cfg!(unix))
+        .map(PathBuf::from);
     for (n, f) in [
         ("VID_20260117_141148_00_635.insv", "v635.insv"),
         ("LRV_20260117_141148_01_635.lrv", "v635.lrv"),
         ("VID_20260116_152935_00_606.insv", "v606.insv"),
         ("LRV_20260503_190639_01_708.lrv", "v635.lrv"),
     ] {
-        match &s {
-            Some(s) => symlink(s.join(f), c.join(n)).unwrap(),
-            None => fs::write(c.join(n), b"no trailer").unwrap(),
+        match s.as_ref().map(|s| s.join(f)) {
+            #[cfg(unix)]
+            Some(f) => symlink(f, c.join(n)).unwrap(),
+            _ => fs::write(c.join(n), b"no trailer").unwrap(),
         }
     }
     for n in [
@@ -198,7 +269,7 @@ fn card() {
     );
     assert!(list(&d).is_err(), "no DCIM");
     let Some(s) = s else {
-        eprintln!("X5_SAMPLES not set: no trailer metadata or thumbnails checked");
+        eprintln!("X5_SAMPLES not set (or not unix): no trailer metadata or thumbnails checked");
         return fs::remove_dir_all(&d).unwrap();
     };
     println!(

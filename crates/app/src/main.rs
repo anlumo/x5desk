@@ -1,5 +1,8 @@
 //! x5desk: desktop app for the Insta360 X5. One eframe window on the shared Vulkan device (`video::Gpu`); a side
-//! panel switches screens. `x5desk [file]` opens a file.
+//! panel switches screens. `x5desk [file]` opens a file; on macOS so do Finder, the Dock and `open` (`finder.rs`), as
+//! a drop on the window would. `x5desk mcp …` is the MCP server instead (crate `mcp`), with no window; its GPU tools
+//! run on this app's engine (`export::agent`; `X5DESK_TEST=mcp-noattach` keeps burn off its device). One GPU setup for
+//! both (`gpu.rs`).
 //!
 //! Test hooks: `X5DESK_SHOT=<file.png>` (with `X5DESK_SHOT_AFTER=<s>`, default 1) saves a screenshot once that time has
 //! passed and the player has nothing pending, then exits. `X5DESK_TEST=<tokens>` (comma separated) sets up the first
@@ -60,17 +63,16 @@
 //! and for the subject effects the `box=` run, is there; the run ends with the queue).
 
 mod ai;
-mod album;
 mod bt;
 mod camera;
 mod capture;
 mod clip;
-mod conf;
-mod disk;
-mod dl;
 mod editor;
 mod export;
 mod feed;
+#[cfg(target_os = "macos")]
+mod finder;
+mod gpu;
 mod gyro;
 mod help;
 mod lab;
@@ -84,10 +86,14 @@ mod replay;
 mod settings;
 mod webcam;
 
+// the camera code without its UI (`cam`): the screens use these as modules of the app's own
+use cam::dirs::mine;
+pub use cam::dirs::{private, videos, xdg};
+use cam::{album, awake, conf, disk, dl};
 use eframe::{egui, egui_wgpu};
 use std::{
     cell::RefCell,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard,
         atomic::{AtomicBool, Ordering::Relaxed},
@@ -262,39 +268,6 @@ impl Test {
     }
 }
 
-/// `$<var>` if absolute, else `~/<home>` (XDG base directories; the other platforms' come with their ports).
-pub fn xdg(var: &str, home: &str) -> Option<PathBuf> {
-    std::env::var_os(var)
-        .map(PathBuf::from)
-        .filter(|d| d.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(home)))
-}
-
-/// `d`, made owner-only if missing, if it is a dir of this user's that no other can write to: in a shared tmp another
-/// user may have made it first, or put a symlink there.
-fn mine(d: PathBuf) -> Option<PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-    let _ = std::fs::DirBuilder::new().mode(0o700).create(&d);
-    let m = d.symlink_metadata().ok()?;
-    // SAFETY: geteuid has no preconditions.
-    let me = unsafe { libc::geteuid() };
-    (m.is_dir() && m.uid() == me && m.mode() & 0o022 == 0).then_some(d)
-}
-
-/// Makes the app's config dir `d` before a save there: created if missing, owner-only also when it exists already
-/// (it holds the stream key, the client id, the recent files). Its parents keep their modes.
-pub fn private(d: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    if let Some(p) = d.parent() {
-        std::fs::create_dir_all(p)?
-    }
-    match std::fs::DirBuilder::new().mode(0o700).create(d) {
-        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
-        _ => {}
-    }
-    std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))
-}
-
 /// wgpu-core's `Surface::configure` waits for the queue to go idle and fails (`GpuWaitTimeout`) when another thread
 /// submits meanwhile. egui-wgpu then draws the new window size into the old swapchain, and on native Wayland nothing
 /// reports that swapchain `Outdated`. So the app retries it: the threads of its own that submit on their own hold
@@ -303,7 +276,8 @@ pub fn private(d: &Path) -> std::io::Result<()> {
 /// configure the UI thread holds it and [`BURN`] exclusively from the end of its next frame's UI until egui has
 /// configured the surface again and acquired that frame ([`Retry`]). The player's decoders' empty flush submits stay
 /// outside: a decoder waiting for a slot would wait for the UI's next submit (the export's renderer releases its
-/// decoders' slots without the lock).
+/// decoders' slots without the lock). On macOS each decoded picture is a copy on wgpu's queue: `clip::Video`'s and
+/// the live preview's decoders take this around those copies themselves (`Decoder::gated`), not around the decode.
 pub static GATE: RwLock<()> = RwLock::new(());
 /// Held for a whole job by the threads whose GPU work runs through burn (the RAFT worker): burn submits throughout
 /// it. Apart from [`GATE`], because a waiting writer closes GATE to new readers: a retry waits for the job here first
@@ -497,11 +471,11 @@ impl App {
         let (mount, ble) = test
             .as_ref()
             .map_or((vec![], None), |t| (t.mount.clone(), t.ble));
-        let mut disks = disk::Watch::new(mount.clone());
-        if test.is_some() {
+        let disks = match test.is_some() {
             // the hook's directories only
-            disks.info = PathBuf::new();
-        }
+            true => disk::Watch::hook(mount.clone()),
+            false => disk::Watch::new(mount.clone()),
+        };
         let mut first = vec![
             bt::Cmd::Scan(true),
             bt::Cmd::Connect(::ble::Dev("sim/X5 SIM001".into())),
@@ -581,6 +555,9 @@ impl App {
         if let Some(f) = file {
             lib.open(&f);
         }
+        // the launch's files from Finder are queued already: the first frame takes them
+        #[cfg(target_os = "macos")]
+        finder::wake(&cc.egui_ctx);
         let shot = std::env::var_os("X5DESK_SHOT").map(|p| Shot {
             path: p.into(),
             after: Duration::from_secs_f64(
@@ -625,6 +602,9 @@ impl eframe::App for App {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
+        // what Finder, the Dock or `open` asked to open counts as dropped
+        #[cfg(target_os = "macos")]
+        let dropped = [dropped, finder::take()].concat();
         if let Some(p) = dropped.first() {
             match self.tab {
                 Tab::Editor => {
@@ -897,13 +877,41 @@ impl eframe::App for App {
     }
 }
 
+/// The window's icon (`icon/`), which on macOS is the Dock's: eframe would put egui's logo there without one. A bundle
+/// keeps its own (Assets.car, as Finder shows it): eframe leaves the Dock alone given the empty default.
+fn icon() -> egui::IconData {
+    #[cfg(target_os = "macos")]
+    if objc2_foundation::NSBundle::mainBundle()
+        .bundleIdentifier()
+        .is_some()
+    {
+        return egui::IconData::default();
+    }
+    eframe::icon_data::from_png_bytes(include_bytes!("../icon/x5desk.png")).expect("x5desk.png")
+}
+
 fn main() -> eframe::Result {
+    // `x5desk mcp …`: the MCP server, before anything here runs or prints (its stdout is the protocol's)
+    if std::env::args_os().nth(1).is_some_and(|a| a == "mcp") {
+        let r: Arc<dyn mcp::render::Render> = export::agent::Agent::headless();
+        let b = mcp::render::Backend { render: Some(r) };
+        let code = mcp::main(std::env::args_os().skip(2).collect(), b);
+        // a lane still in the driver: no atexit, no driver teardown (the stdout writer is done by now)
+        if export::agent::busy() {
+            eprintln!("x5desk mcp: ending with a GPU thread in the driver: without its teardown");
+            // SAFETY: _exit(2) only ends the process; stderr is unbuffered, the log written line by line
+            unsafe { libc::_exit(code) }
+        }
+        std::process::exit(code)
+    }
+    // before AppKit starts: the launch's files come as it does
+    #[cfg(target_os = "macos")]
+    finder::watch();
     let file = std::env::args_os().nth(1).map(PathBuf::from);
+    // an old macOS launching the bundle passes its process serial number
+    #[cfg(target_os = "macos")]
+    let file = file.filter(|f| !f.as_os_str().as_encoded_bytes().starts_with(b"-psn_"));
     let test = std::env::var("X5DESK_TEST").ok().map(|s| Test::parse(&s));
-    let g = Arc::new(video::Gpu::new().unwrap_or_else(|e| {
-        eprintln!("x5desk: {e}");
-        std::process::exit(1)
-    }));
     // burn's device measurements and autotune results; the test hook's runs share a dir of their own (warm too)
     let cc = match test {
         Some(_) => mine(
@@ -913,14 +921,15 @@ fn main() -> eframe::Result {
         ),
         None => xdg("XDG_CACHE_HOME", ".cache").map(|d| d.join("x5desk/cubecl")),
     };
-    stitch::cache(cc.as_deref());
-    // cubecl's handler panics on the surface race: attach first, so ours replaces it for good (RAFT and the
+    // cubecl's handler panics on the surface race: burn attaches first, so ours replaces it for good (RAFT and the
     // trackers reuse the attachment)
-    if let Err(e) = stitch::attach(&g.instance, &g.adapter, &g.device, &g.queue) {
+    let (g, a) = gpu::open(cc.as_deref(), gpu::Policy::Panic, true).unwrap_or_else(|e| {
+        eprintln!("x5desk: {e}");
+        std::process::exit(1)
+    });
+    if let Err(e) = a {
         eprintln!("x5desk: {e}");
     }
-    errors(&g.device);
-    ::export::locks(&GATE, &BURN);
     let setup = egui_wgpu::WgpuSetupExisting {
         instance: g.instance.clone(),
         adapter: g.adapter.clone(),
@@ -944,6 +953,7 @@ fn main() -> eframe::Result {
             .with_inner_size([1600.0, 900.0])
             .with_title("x5desk")
             .with_app_id("x5desk")
+            .with_icon(icon())
             .with_drag_and_drop(true),
         // video pixels as decoded
         dithering: false,
@@ -996,34 +1006,6 @@ mod tests {
             (ble("ble=sim"), ble("ble=sta"), ble("ble=x")),
             (Some(false), Some(true), None)
         );
-    }
-
-    /// The hook's cubecl dir: made owner-only; refused when another user owns it (here root), when it is a symlink (to
-    /// a dir of ours too) or when others can write to it.
-    #[test]
-    fn cubecl_dir() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-        struct Rm(std::path::PathBuf);
-        impl Drop for Rm {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let run = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, Into::into);
-        let b = Rm(run.join(format!("x5desk-mine-{}", std::process::id())));
-        std::fs::create_dir(&b.0).unwrap();
-        let mode = |d: &std::path::Path| std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
-        let d = b.0.join("x5desk-cubecl");
-        assert_eq!(super::mine(d.clone()), Some(d.clone()));
-        assert_eq!(mode(&d), 0o700);
-        assert_eq!(super::mine("/".into()), None);
-        let l = b.0.join("link");
-        symlink(&d, &l).unwrap();
-        assert_eq!(super::mine(l), None);
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert_eq!(super::mine(d.clone()), None);
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(super::mine(d.clone()), Some(d));
     }
 
     /// The error wgpu 30 reports for `Surface::configure` when another thread submitted during its idle wait, and

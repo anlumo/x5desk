@@ -2,7 +2,7 @@
 //! files and proxy, a photo and its raw; PROTOCOL.md §9.2 fileKey), their metadata and favourite flags, and
 //! thumbnails: the trailer's NV12 picture scaled down and cached on disk.
 
-use crate::library::key;
+use crate::work::key;
 use link::pb;
 use std::{
     collections::HashMap,
@@ -52,6 +52,40 @@ pub fn name(u: &str) -> &str {
     u.rsplit('/').next().unwrap_or(u)
 }
 
+/// Whether a file name the camera lists is safe to join to a folder, on every system alike: one plain component (not
+/// empty, `.` or `..`; no `/`, `\` or `:`, which on Windows lead elsewhere), no control characters, no trailing dot
+/// or space (Windows drops them) and no device name (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM` and `LPT`
+/// with a digit or ¹²³; also with an extension, any case). A listing leaves the others out.
+pub fn safe(name: &str) -> bool {
+    // the part Windows takes for a device: before the first dot, without trailing spaces
+    let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ');
+    let is = |d: &str| stem.eq_ignore_ascii_case(d);
+    let numbered = |p: &str| {
+        stem.get(..3).is_some_and(|s| s.eq_ignore_ascii_case(p))
+            && stem.get(3..).is_some_and(|n| {
+                (n.len() == 1 && n.as_bytes()[0].is_ascii_digit()) || ["¹", "²", "³"].contains(&n)
+            })
+    };
+    let dev = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
+        .into_iter()
+        .any(is)
+        || numbered("COM")
+        || numbered("LPT");
+    let mut c = Path::new(name).components();
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name
+            .chars()
+            .any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
+        && !name.ends_with(['.', ' '])
+        && !dev
+        && matches!(
+            (c.next(), c.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        )
+}
+
 /// Directory and name: what a path keeps under another mount prefix.
 fn tail(u: &str) -> &str {
     u.rmatch_indices('/').nth(1).map_or(u, |(i, _)| &u[i + 1..])
@@ -88,6 +122,12 @@ fn name_date(n: &str) -> u64 {
     d(8).map_or(0, |a| a * 1_000_000 + d(6).unwrap_or(0))
 }
 
+/// The key of the item a camera URI belongs to: its directory and its recording key (`work::key`).
+pub fn key_of(u: &str) -> String {
+    let d = u.rsplit_once('/').map_or("", |d| d.0);
+    format!("{d}/{}", key(name(u)))
+}
+
 /// Items of the listed `uris` in listing order, with the metadata of `infos` and the favourite flags of `ed`
 /// (matched by directory and name, the edit list's paths need not carry the listing's prefix; else by name alone).
 pub fn group(
@@ -98,8 +138,7 @@ pub fn group(
     let mut v: Vec<Item> = vec![];
     let mut at = HashMap::new();
     for u in uris {
-        let d = u.rsplit_once('/').map_or("", |d| d.0);
-        let k = format!("{d}/{}", key(name(u)));
+        let k = key_of(u);
         let i = *at.entry(k.clone()).or_insert_with(|| {
             v.push(Item {
                 key: k,
@@ -280,8 +319,11 @@ pub const CAP: u64 = 1_000_000_000;
 
 impl Cache {
     /// `<cache dir>/x5desk/thumbs`.
+    #[allow(clippy::new_without_default)] // the user's cache dir, from the environment: no default
     pub fn new() -> Cache {
-        Cache::at(crate::xdg("XDG_CACHE_HOME", ".cache").map(|d| d.join("x5desk").join("thumbs")))
+        Cache::at(
+            crate::dirs::xdg("XDG_CACHE_HOME", ".cache").map(|d| d.join("x5desk").join("thumbs")),
+        )
     }
 
     pub fn at(dir: Option<PathBuf>) -> Cache {
@@ -316,7 +358,12 @@ impl Cache {
     /// `None` unless the file is a whole entry of a size [`thumb`] makes: a short or damaged one (a crash between
     /// write and rename) is fetched again and rewritten.
     pub fn get(p: &Path) -> Option<(u32, u32, Vec<u8>)> {
-        let mut f = std::fs::File::open(p).ok()?;
+        let mut o = std::fs::File::options();
+        o.read(true);
+        // the touch below needs FILE_WRITE_ATTRIBUTES on the handle there (GENERIC_READ alone fails it)
+        #[cfg(windows)]
+        std::os::windows::fs::OpenOptionsExt::access_mode(&mut o, 0x8000_0000 | 0x100);
+        let mut f = o.open(p).ok()?;
         let mut b = vec![];
         f.read_to_end(&mut b).ok()?;
         let u = |o: usize| Some(u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?));
@@ -325,6 +372,7 @@ impl Cache {
         if !ok || b.len() != 8 + (w * h * 4) as usize {
             return None;
         }
+        // a hit counts as a use: `trim` drops the least recently used first
         let _ = f.set_modified(SystemTime::now());
         Some((w, h, b.split_off(8)))
     }
@@ -503,6 +551,57 @@ mod tests {
         w.apply(&v, &mut o);
         assert_eq!(o.len(), 1);
         assert_eq!(date(20260116152936), "2026-01-16 15:29:36");
+    }
+
+    #[test]
+    fn safe_names() {
+        for n in [
+            "VID_20260116_152935_00_603.insv",
+            "LRV_20260116_152935_01_603.lrv",
+            ".hidden",
+            "a b.jpg",
+            "CONSOLE.insv",
+            "COM10.lrv",
+            "LPT.dng",
+            "NULL",
+            "x..y",
+        ] {
+            assert!(safe(n), "{n:?}");
+        }
+        for n in [
+            "",
+            ".",
+            "..",
+            "...",
+            "a/b",
+            r"a\b",
+            r"..\..\AppData\Roaming\x.bat",
+            r"C:\Users\Public\x.exe",
+            r"\x",
+            "C:x",
+            "a:b.insv",
+            "a\0b",
+            "a\nb",
+            "a\u{7f}b",
+            "a\u{85}b",
+            "x.",
+            "x.insv.",
+            "x ",
+            "CON",
+            "con.insv",
+            "Nul.txt",
+            "AUX .lrv",
+            "prn.tar.gz",
+            "COM1",
+            "com9.insv",
+            "LPT0",
+            "lpt5.dng",
+            "COM¹.jpg",
+            "CONIN$",
+            "conout$.x",
+        ] {
+            assert!(!safe(n), "{n:?}");
+        }
     }
 
     /// A 1280 × 640 picture of flat colours scales to 320 × 160 with the colours kept; a cached copy reads back

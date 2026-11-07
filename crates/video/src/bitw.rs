@@ -1,4 +1,5 @@
-//! Bit writer for the parameter sets written here: RBSP bits in, a NAL unit with emulation prevention bytes out.
+//! Bit writer for the parameter sets and test streams written here: RBSP bits in, a NAL unit with emulation
+//! prevention bytes out.
 
 #[derive(Default)]
 pub struct W {
@@ -29,12 +30,22 @@ impl W {
         self.u(z, 0).u(z + 1, v + 1)
     }
 
+    /// Signed Exp-Golomb, |`v`| < 2^30.
+    pub fn se(&mut self, v: i32) -> &mut Self {
+        self.ue(match v > 0 {
+            true => 2 * v as u32 - 1,
+            false => 2 * v.unsigned_abs(),
+        })
+    }
+
+    /// Zero bits up to the next byte boundary.
+    pub fn align(&mut self) -> &mut Self {
+        self.u((8 - self.n) % 8, 0)
+    }
+
     /// rbsp_trailing_bits, then the bytes with an emulation prevention byte after each 00 00 that a byte ≤ 3 follows.
     pub fn nal(&mut self) -> Vec<u8> {
-        self.u(1, 1);
-        if self.n > 0 {
-            self.u(8 - self.n, 0);
-        }
+        self.u(1, 1).align();
         let (mut o, mut z) = (Vec::with_capacity(self.b.len() + 4), 0);
         for &x in &self.b {
             if z >= 2 && x <= 3 {
@@ -64,7 +75,11 @@ mod tests {
             .u(32, 0)
             .u(32, 0)
             .ue(7)
-            .u(3, 5);
+            .se(-3)
+            .se(2)
+            .u(3, 5)
+            .align()
+            .u(8, 0x41);
         let b = w.nal();
         // 32 zero bits in a row need emulation prevention
         assert!(b.windows(3).all(|x| x[..2] != [0, 0] || x[2] >= 3) && b.contains(&3));
@@ -78,9 +93,12 @@ mod tests {
             r.u(32),
             r.u(32),
             r.ue(),
-            r.u(3),
         ];
-        assert_eq!(v, [0x67, 0, 1, 254, 1, 0, 0, 7, 5]);
+        assert_eq!(v, [0x67, 0, 1, 254, 1, 0, 0, 7]);
+        assert_eq!([r.se(), r.se(), r.u(3) as i32], [-3, 2, 5]);
+        // zeros up to the byte boundary
+        assert_eq!(r.u((8 - r.p as u32 % 8) % 8), 0);
+        assert_eq!(r.u(8), 0x41);
         assert!(!r.more() && !r.end());
     }
 }

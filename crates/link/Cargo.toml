@@ -13,3 +13,7 @@ prost.workspace = true
 nusb.workspace = true
 # Already in the tree through nusb: its hotplug watch is a `Stream`.
 futures-core = "0.3"
+
+[target.'cfg(unix)'.dependencies]
+# fstatfs: whether a download's part file can hold holes
+libc.workspace = true

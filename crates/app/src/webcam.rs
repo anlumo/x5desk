@@ -72,7 +72,7 @@ fn lock(sh: &Mutex<Sh>) -> std::sync::MutexGuard<'_, Sh> {
 /// `sh`, which drops its oldest beyond 3.
 fn run(src: Input, sh: Arc<Mutex<Sh>>, quit: Arc<AtomicBool>, wake: impl Fn()) {
     let fail = |m: String| lock(&sh).err = Some(m);
-    let (mut m, mut px, mut j) = (Mjpeg::default(), vec![], vec![]);
+    let (mut m, mut px) = (Mjpeg::default(), vec![]);
     let mut dec = |j: &[u8]| {
         let (t, got) = (Instant::now(), mono());
         let r = m.rgba(j, &mut px);
@@ -102,7 +102,12 @@ fn run(src: Input, sh: Arc<Mutex<Sh>>, quit: Arc<AtomicBool>, wake: impl Fn()) {
         wake();
     };
     match src {
+        // V4L2 only: macOS keeps a UVC camera for AVFoundation
+        #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+        Input::Uvc(..) => fail("Webcam Mode: UVC capture is Linux only".into()),
+        #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
         Input::Uvc(w, h) => {
+            let mut j = vec![];
             let mut u = match media::uvc::Uvc::find().and_then(|p| media::uvc::Uvc::open(p, w, h)) {
                 Ok(u) => u,
                 Err(e) => return fail(format!("Webcam Mode: {e}")),

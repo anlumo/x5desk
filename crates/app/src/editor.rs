@@ -1551,7 +1551,9 @@ impl Editor {
                 (
                     i.key_pressed(egui::Key::Space),
                     i.key_pressed(egui::Key::S) && !c,
-                    i.key_pressed(egui::Key::Delete),
+                    // the key Mac keyboards label delete is Backspace (fn+delete is Delete)
+                    i.key_pressed(egui::Key::Delete)
+                        || cfg!(target_os = "macos") && i.key_pressed(egui::Key::Backspace),
                     i.key_pressed(egui::Key::K),
                     c && i.key_pressed(egui::Key::Z),
                     c && i.key_pressed(egui::Key::Y),
@@ -1639,14 +1641,21 @@ impl Editor {
             let (u, r) = self.history();
             if ui
                 .add_enabled(u > 0, egui::Button::new("Undo"))
-                .on_hover_text("Ctrl+Z")
+                .on_hover_text(if cfg!(target_os = "macos") {
+                    "Cmd+Z"
+                } else {
+                    "Ctrl+Z"
+                })
                 .clicked()
             {
                 self.undo();
             }
             if ui
                 .add_enabled(r > 0, egui::Button::new("Redo"))
-                .on_hover_text("Ctrl+Shift+Z")
+                .on_hover_text(match cfg!(target_os = "macos") {
+                    true => "Cmd+Shift+Z",
+                    false => "Ctrl+Shift+Z",
+                })
                 .clicked()
             {
                 self.redo();

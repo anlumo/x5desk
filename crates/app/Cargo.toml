@@ -8,8 +8,36 @@ license.workspace = true
 name = "x5desk"
 path = "src/main.rs"
 
+# macOS: x5desk.app and a disk image with it in target/release, `cargo packager --release` (cargo-packager 0.11:
+# `cargo install cargo-packager --locked`; ARCHITECTURE.md, macOS). `macos.signing-identity` is the maintainer's Apple
+# Development certificate, which runs on Macs of that team and keeps macOS's privacy grants across rebuilds (an ad hoc
+# signature, "-", changes with every build); someone else puts their own there, or "-". A Developer ID Application
+# identity plus Apple credentials in the environment (APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID, or APPLE_API_KEY,
+# APPLE_API_ISSUER, APPLE_API_KEY_PATH) sign it for anyone and notarize it.
+[package.metadata.packager]
+product-name = "x5desk"
+identifier = "io.github.anlumo.x5desk"
+description = "Desktop app for the Insta360 X5: player, camera control, live output, export"
+category = "Video"
+binaries = [{ path = "x5desk", main = true }]
+# rendered by icon/icon.swift: the catalog (Info.plist's CFBundleIconName), and an icns for what reads none
+icons = ["icon/AppIcon.icns"]
+resources = ["icon/Assets.car"]
+before-packaging-command = "cargo build --release --locked -p app"
+formats = ["app", "dmg"]
+
+[package.metadata.packager.macos]
+# the face detector's Core ML package (crate track) targets macOS 15
+minimum-system-version = "15.0"
+info-plist-path = "macos/Info.plist"
+signing-identity = "Apple Development: Andreas Monitzer (SEVVD2J45G)"
+
 [dependencies]
 proto.workspace = true
+# the camera and capture workers, album, downloads, cards, `/CONF`, folders, App Nap: shared with a headless host
+cam.workspace = true
+# `x5desk mcp`: the MCP server, dispatched first thing in `main`
+mcp.workspace = true
 # `sim`: the simulated camera that replays a recorded live preview (the `replay=` hook, the capture tests)
 link = { workspace = true, features = ["sim"] }
 prost.workspace = true
@@ -31,7 +59,6 @@ eframe.workspace = true
 # egui 0.37 keeps the symbol fonts (★ ☆ ✔ in the camera screen) behind this feature
 egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
 wgpu.workspace = true
-pollster.workspace = true
 rfd.workspace = true
 libc.workspace = true
 # the editor's preview mix plays on its own output stream (already in the tree through media)
@@ -40,7 +67,23 @@ cpal.workspace = true
 ble = { workspace = true, features = ["sim"] }
 # the Settings screen names the video queues' codec operations
 ash.workspace = true
+# the agents' engine (`export::agent`): its plans' settings as JSON (`tests/mcp.rs` reads the server's lines with it);
+# a headless host's logger, which hears cubecl report a lost device (both already in the tree)
+serde_json = "1"
+log = "0.4"
+
+# macOS, already in the tree through wgpu, cubecl and eframe (winit has the versions before): the files Finder asks
+# the app to open (`finder.rs`), whether it runs from a bundle (main.rs `icon`); App Nap and the IOKit registry are
+# cam's
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSAppleEventManager", "NSBundle", "NSNotification", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication"] }
 
 [dev-dependencies]
+# `sim`: the simulated camera with a fake card the Camera screen's tests run the worker on
+cam = { workspace = true, features = ["sim"] }
 # Already in the tree through eframe: the UI test runs its event loop off the main thread.
 winit = { version = "0.30", default-features = false }
+# `synth`: the synthetic X5 recording the MCP server's GPU tools render in the process tests (`tests/mcp.rs`)
+export = { workspace = true, features = ["synth"] }

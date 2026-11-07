@@ -33,7 +33,8 @@ struct Gpu {
     q: wgpu::Queue,
 }
 
-/// One device per test binary (NV12 sampling needs `TEXTURE_FORMAT_NV12`); the lock serialises GPU tests.
+/// One device per test binary (NV12 sampling needs `TEXTURE_FORMAT_NV12`, macOS's R8 / RG8 planes nothing); the lock
+/// serialises GPU tests.
 fn gpu() -> MutexGuard<'static, Gpu> {
     static G: OnceLock<Mutex<Gpu>> = OnceLock::new();
     G.get_or_init(|| {
@@ -44,7 +45,10 @@ fn gpu() -> MutexGuard<'static, Gpu> {
         }))
         .expect("adapter");
         let (dev, q) = pollster::block_on(ad.request_device(&wgpu::DeviceDescriptor {
-            required_features: wgpu::Features::TEXTURE_FORMAT_NV12,
+            required_features: match cfg!(target_os = "macos") {
+                true => wgpu::Features::empty(),
+                false => wgpu::Features::TEXTURE_FORMAT_NV12,
+            },
             required_limits: ad.limits(),
             ..Default::default()
         }))
@@ -141,6 +145,13 @@ impl Clip {
     }
 }
 
+/// ffmpeg's hardware decoder: Vulkan Video, as crate video on Linux; VideoToolbox on macOS.
+const HWACCEL: &str = if cfg!(target_os = "macos") {
+    "videotoolbox"
+} else {
+    "vulkan"
+};
+
 /// Both lens streams as NV12 at S × S, frame by frame (two ffmpeg processes).
 struct Dec {
     kids: Vec<Child>,
@@ -154,7 +165,7 @@ impl Dec {
         let kids = tracks
             .map(|t| {
                 Command::new("ffmpeg")
-                    .args(["-v", "error", "-hwaccel", "vulkan", "-i"])
+                    .args(["-v", "error", "-hwaccel", HWACCEL, "-i"])
                     .arg(&c.path)
                     .args([
                         "-map",
@@ -205,10 +216,11 @@ impl Drop for Dec {
     }
 }
 
-/// Two NV12 lens textures and a stitcher.
+/// Two lens pictures and a stitcher. A lens is one NV12 texture, written and sampled through its plane aspects as
+/// crate video decodes on Linux, or an R8 and an RG8 texture as on macOS (Metal has no NV12 textures).
 struct Rig {
     cx: Ctx,
-    tex: [wgpu::Texture; 2],
+    tex: [[(wgpu::Texture, wgpu::TextureAspect); 2]; 2],
     src: [Src; 2],
     st: Stitcher,
 }
@@ -216,29 +228,45 @@ struct Rig {
 impl Rig {
     fn new(g: &Gpu, c: &Clip, w: u32, h: u32) -> Rig {
         let cx = Ctx::new(&g.dev, &g.q);
-        let tex = [0, 1].map(|_| {
+        use wgpu::{TextureAspect as A, TextureFormat as F};
+        let t = |s: u32, format| {
             g.dev.create_texture(&wgpu::TextureDescriptor {
-                label: Some("nv12"),
+                label: Some("lens"),
                 size: wgpu::Extent3d {
-                    width: S,
-                    height: S,
+                    width: S / s,
+                    height: S / s,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::NV12,
+                format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             })
+        };
+        let tex = [0, 1].map(|_| match cfg!(target_os = "macos") {
+            true => [(t(1, F::R8Unorm), A::All), (t(2, F::Rg8Unorm), A::All)],
+            false => {
+                let nv = t(1, F::NV12);
+                [(nv.clone(), A::Plane0), (nv, A::Plane1)]
+            }
         });
+        let planes = |l: &[(wgpu::Texture, A); 2]| {
+            l.each_ref().map(|(t, aspect)| {
+                t.create_view(&wgpu::TextureViewDescriptor {
+                    aspect: *aspect,
+                    ..Default::default()
+                })
+            })
+        };
         let o = stitch::Opts {
             blend: c.m.blend.unwrap_or(6.0),
             colour: None,
             ..Default::default()
         };
         Rig {
-            src: [cx.src(&tex[0]), cx.src(&tex[1])],
+            src: [0, 1].map(|l| cx.rect(&planes(&tex[l]), [0, 0, S, S])),
             st: Stitcher::new(&cx, &c.cal, c.fr, w, h, o).unwrap(),
             tex,
             cx,
@@ -247,17 +275,16 @@ impl Rig {
 
     fn upload(&self, g: &Gpu, nv: &[Vec<u8>; 2]) {
         let n = (S * S) as usize;
-        for (t, nv) in self.tex.iter().zip(nv) {
-            for (aspect, data, w, bpp) in [
-                (wgpu::TextureAspect::Plane0, &nv[..n], S, 1),
-                (wgpu::TextureAspect::Plane1, &nv[n..], S / 2, 2),
-            ] {
+        for (l, nv) in self.tex.iter().zip(nv) {
+            for ((t, aspect), data, w, bpp) in
+                [(&l[0], &nv[..n], S, 1), (&l[1], &nv[n..], S / 2, 2)]
+            {
                 g.q.write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture: t,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
-                        aspect,
+                        aspect: *aspect,
                     },
                     data,
                     wgpu::TexelCopyBufferLayout {

@@ -726,6 +726,53 @@ fn move_escape() {
     assert_eq!(files(&e), [1, 2, 0], "the drop moved nothing");
 }
 
+/// The selected clip goes with Delete, on macOS with Backspace too: the key Mac keyboards label delete (egui input
+/// through the whole screen, no samples needed). Elsewhere Backspace leaves it.
+#[test]
+fn delete_key() {
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = stitch::Ctx::new(&g.device, &g.queue);
+    let (ctx, rs) = (egui::Context::default(), rs(&g));
+    let mut e = Editor::new(&g, &cx, &ctx, player::still(&g, &cx), None);
+    for i in 0..3 {
+        let f = e.pj.file(&format!("/nowhere/{i}.insv"), 20.0).unwrap();
+        e.ed(|p| p.insert(i, Clip::new(f, 0.0, 4.0)));
+    }
+    let mut t = 0.0;
+    let mut press = |e: &mut Editor, key| {
+        for pressed in [true, false] {
+            t += 1.0 / 60.0;
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 900.0),
+                )),
+                time: Some(t),
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }],
+                ..Default::default()
+            };
+            (ctx.run_ui(raw, |ui| e.ui(ui, &rs, &[])).textures_delta).clear();
+        }
+    };
+    let files = |e: &Editor| e.pj.tl().clips.iter().map(|c| c.file).collect::<Vec<_>>();
+    e.sel = Some(1);
+    press(&mut e, egui::Key::Backspace);
+    let left = match cfg!(target_os = "macos") {
+        true => vec![0, 2],
+        false => vec![0, 1, 2],
+    };
+    assert_eq!(files(&e), left, "Backspace");
+    e.sel = Some(0);
+    press(&mut e, egui::Key::Delete);
+    assert_eq!(files(&e), left[1..], "Delete");
+}
+
 /// Index-based drags end when the timeline changes under them (egui input, no samples needed): a trim handle, a speed
 /// key, a volume point and a view key of clip 1 of 3, each dragged while clip 1 is deleted (Delete) or split at the
 /// playhead (S) halfway. The drag ends before the edit as an undo step of its own, the edit is one too, and the rest

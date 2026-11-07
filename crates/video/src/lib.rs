@@ -1,16 +1,33 @@
-//! The shared Vulkan device (`Gpu`), H.265 / H.264 parsers, Vulkan Video decode into NV12 / P010 wgpu textures and
-//! encode from NV12 / P010 wgpu textures.
+//! The shared device (`Gpu`), H.265 / H.264 parsers, hardware decode into NV12 / P010 pictures that wgpu samples and
+//! encode from NV12 / P010 pictures that wgpu fills: Vulkan Video on Linux, VideoToolbox on macOS (`mac`), with the
+//! same API. A decoded frame's planes come from `Ring::planes` on both.
 mod bits;
+// the Vulkan encoder writes its parameter sets; `check` and the parser tests write test streams
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 mod bitw;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod check;
+#[cfg(target_os = "linux")]
 pub mod decode;
+#[cfg(target_os = "linux")]
 pub mod encode;
+#[cfg(target_os = "linux")]
 pub mod gpu;
 pub mod h264;
 pub mod h265;
+#[cfg(target_os = "macos")]
+mod mac;
+mod pic;
+mod stream;
+
+#[cfg(target_os = "macos")]
+pub use mac::{decode, encode, gpu};
 
 pub use decode::{Codec, Decoder, Ring};
 pub use encode::{Cfg, Encoder, Input, Packet, Rate};
-pub use gpu::{Gpu, VideoQueue};
+pub use gpu::Gpu;
+#[cfg(target_os = "linux")]
+pub use gpu::VideoQueue;
 
 #[derive(Debug)]
 pub enum Error {
@@ -19,6 +36,8 @@ pub enum Error {
     Bad(&'static str),
     /// Device setup failed.
     Gpu(String),
+    /// A macOS framework call failed with this OSStatus / CVReturn.
+    Os(&'static str, i32),
     /// `Decoder::decode`: the output slot is still held by its consumer; nothing was decoded, retry.
     /// `Input::acquire`: the encoder has not finished the slot's last frame; `Encoder::encode`: `encode::SLOTS`
     /// frames are in flight, collect a packet first.
@@ -44,6 +63,7 @@ impl std::fmt::Display for Error {
             Error::Vk(r) => write!(f, "Vulkan: {r}"),
             Error::Bad(s) => write!(f, "stream: {s}"),
             Error::Gpu(s) => write!(f, "GPU setup: {s}"),
+            Error::Os(c, s) => write!(f, "{c}: OSStatus {s}"),
             Error::Full => write!(f, "output ring full"),
             Error::Skip => write!(f, "leading picture skipped"),
         }

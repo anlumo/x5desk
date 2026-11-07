@@ -3,8 +3,10 @@
 //! the values of the settings it depends on (`depend_on` joined by `|`, else `default`). And how a setting reaches
 //! the camera: `SET_PHOTOGRAPHY_OPTIONS` with the mode's function mode, or `SET_OPTIONS`. The app maps the JSON's
 //! strings to protobuf values through an asset of its own (`proto.json`); here they come from the enum names in
-//! `proto/`, plus the few the names do not give. The writes in `capture::CHECKED` ran on an X5 and read back; the
-//! others go out the same way.
+//! `proto/`, plus the few the names do not give. The writes in [`CHECKED`] ran on an X5 and read back, so did the
+//! switches to the modes in [`SWITCHED`] and the shutter in those of [`SHOT`] (360, fw v1.13.21: the app's
+//! `capture::tests::real_writes` / `real_ilog`); the others go out the same way. The capture worker sends only values
+//! a mode's lists allow (`Key::allowed`).
 
 use link::{Mode as Sub, pb};
 use pb::PhotographyOptionType as T;
@@ -343,6 +345,67 @@ pub const KEYS: [(&str, Slot, &str); 25] = [
     ("photo_size_id", Slot::Size, "Aspect ratio"),
 ];
 
+/// The settings (mode, key) whose writes ran on an X5 (360) and read back.
+pub const CHECKED: [(&str, &str); 8] = [
+    ("PHOTO_SINGLE", "white_balance"),
+    ("VIDEO_NORMAL", "record_resolution"),
+    ("VIDEO_NORMAL", "p3_switch"),
+    ("VIDEO_NORMAL", "exposure_program"),
+    ("VIDEO_NORMAL", "exposure_iso"),
+    ("VIDEO_NORMAL", "exposure_shutter_speed"),
+    ("VIDEO_NORMAL", "white_balance"),
+    ("VIDEO_NORMAL", "i_log_switch"),
+];
+
+/// The modes a switch to ran on an X5 (360) and read back.
+pub const SWITCHED: [&str; 2] = ["PHOTO_SINGLE", "VIDEO_NORMAL"];
+
+/// The modes whose shutter ran on an X5 (360): the photo, the normal recording (with highlight marks). By mode name:
+/// [`shot`] gives unknown modes the normal recording too.
+pub const SHOT: [&str; 2] = ["PHOTO_SINGLE", "VIDEO_NORMAL"];
+
+/// Whether the camera's sub-mode values are ones the protocol knows, so [`current`]'s name is the camera's mode: a
+/// value it does not know reads as the enum's first (VIDEO_NORMAL, PHOTO_SINGLE), a mode it may well not be in.
+pub fn known(o: &pb::Options) -> bool {
+    use pb::{PhotoSubMode as P, VideoSubMode as V};
+    match V::try_from(o.video_sub_mode) {
+        Ok(V::VideoNone) => P::try_from(o.photo_sub_mode).is_ok(),
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+/// A `/CONF` value as people read it: `0` as Auto or Off where it means that, units, a resolution's parts.
+pub fn show(s: Slot, v: &str) -> String {
+    let p: Vec<&str> = v.split('_').collect();
+    match (s, v) {
+        (Slot::Iso | Slot::Shutter | Slot::Wb | Slot::IsoTop, "0") => "Auto".into(),
+        (Slot::Timer | Slot::Accel, "0") => "Off".into(),
+        (Slot::Wb, v) => format!("{v} K"),
+        (Slot::Timer, v) => format!("{v} s"),
+        (Slot::Accel, v) => format!("{v}×"),
+        (Slot::Shutter, v) => format!("{v} s"),
+        (Slot::Ev, v) if !v.starts_with('-') && v != "0" => format!("+{v}"),
+        (Slot::Res, _) if p.len() >= 3 => format!(
+            "{} × {}, {} fps{}",
+            p[0],
+            p[1],
+            p[2],
+            if p.len() > 3 { " +" } else { "" }
+        ),
+        (Slot::PhotoRes, _) if p.len() == 2 => format!("{} × {}", p[0], p[1]),
+        (Slot::Dur, v) => v.parse::<u32>().map_or(v.into(), |x| match x {
+            0 => "Unlimited".into(),
+            x if x % 3600 == 0 => format!("{} h", x / 3600),
+            x => format!("{} min", x / 60),
+        }),
+        (Slot::Burst, v) => v
+            .split_once('/')
+            .map_or(v.into(), |(n, t)| format!("{n} in {t} s")),
+        _ => v.replace('_', " ").to_lowercase(),
+    }
+}
+
 pub fn slot(key: &str) -> Option<Slot> {
     KEYS.iter().find(|k| k.0 == key).map(|k| k.1)
 }
@@ -520,8 +583,9 @@ pub enum Write {
 }
 
 /// The message that sets slot `s` to `/CONF` value `v` in function mode `fm`, from `cur` (the camera's values of the
-/// mode: the exposure options go whole, with the other two values as they are). None for a read-only slot or an
-/// unknown value.
+/// mode: the exposure options go whole, with the other two values as they are). None for a read-only slot, an
+/// unknown value, or an exposure value without the camera's exposure options (a default one would reset the
+/// program and shutter).
 pub fn write(
     s: Slot,
     v: &str,
@@ -549,7 +613,7 @@ pub fn write(
             } else {
                 &cur.video_exposure
             };
-            let mut e = src.unwrap_or_default();
+            let mut e = (*src)?;
             match s {
                 Slot::Prog => e.program = i,
                 Slot::Iso => e.iso = u,
@@ -825,11 +889,26 @@ mod tests {
         e.extend(0.01f64.to_le_bytes());
         e.extend(hex("18 07"));
         assert_eq!(w(Slot::Iso, "800", false), e);
-        // a photo mode writes the still exposure too, starting from the still values (none here), types [21, 20]
-        assert_eq!(
-            w(Slot::Iso, "200", true),
-            hex("08 15 08 14 12 0c a2 01 03 10 c8 01 aa 01 03 10 c8 01 18 06")
-        );
+        // a photo mode writes the still exposure too, starting from the still values, types [21, 20]; without the
+        // camera's still values nothing (a default would reset the program and shutter)
+        assert!(write(Slot::Iso, "200", &cur, pb::FunctionMode::NormalImage, true).is_none());
+        let still = pb::PhotographyOptions {
+            still_exposure: Some(Default::default()),
+            ..cur.clone()
+        };
+        match write(
+            Slot::Iso,
+            "200",
+            &still,
+            pb::FunctionMode::NormalImage,
+            true,
+        ) {
+            Some(Write::Photo(m)) => assert_eq!(
+                m.encode_to_vec(),
+                hex("08 15 08 14 12 0c a2 01 03 10 c8 01 aa 01 03 10 c8 01 18 06")
+            ),
+            x => panic!("{x:?}"),
+        }
         // types [77], value {hdr_mode 2}, function mode 6
         assert_eq!(
             w(Slot::PhotoHdr, "AEB", true),

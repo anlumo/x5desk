@@ -1,0 +1,40 @@
+[package]
+name = "mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# `sim`: the simulated X5 and its fake card behind `x5desk mcp --sim` and the tests
+cam = { workspace = true, features = ["sim"] }
+link = { workspace = true, features = ["sim"] }
+# thumbnails as JPEG, the trailer and MP4 metadata of `file_info`
+media.workspace = true
+# stdio and socket transports are built from a reader and a writer (`transport-async-rw`, part of `server`); no
+# macros (the tools are a table of our own, filtered by tier), no base64 (prompts only)
+rmcp = { version = "3.8", default-features = false, features = ["server", "transport-io"] }
+# `rt-multi-thread`: `x5desk mcp`'s runtime; `signal`: SIGTERM, SIGINT, SIGHUP and the console events end a host cleanly
+tokio = { version = "1", features = [
+    "rt", "rt-multi-thread", "net", "io-util", "io-std", "time", "sync", "macros", "signal",
+] }
+# the cancellation token rmcp's services take (already in the tree through rmcp)
+tokio-util = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# the stdout guard (SetStdHandle) and the endpoint's named pipe: its DACL, the user's SID, the server's owner (the
+# version tokio and nusb use)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Console", "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+# the tests decode what reached the simulated camera
+prost.workspace = true
+rmcp = { version = "3.8", default-features = false, features = ["server", "client", "transport-io"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util"] }

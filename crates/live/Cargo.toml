@@ -9,3 +9,12 @@ video.workspace = true
 wgpu.workspace = true
 wgpu-hal.workspace = true
 ash.workspace = true
+
+# the stand-ins for DMA-BUF, OBS and PipeWire elsewhere (`stub.rs`) name the device and its textures
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+video.workspace = true
+wgpu.workspace = true
+
+# tests/rtmp.rs: the listener guard's signals
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true

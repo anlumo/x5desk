@@ -16,3 +16,11 @@ fx.workspace = true
 wgpu.workspace = true
 glam.workspace = true
 pollster.workspace = true
+
+[features]
+# `synth`: a synthetic X5 recording (`synth::insv`), CPU only, for the tests of this crate and those above it
+synth = []
+
+[dev-dependencies]
+# the tests' synthetic recording
+export = { path = ".", features = ["synth"] }

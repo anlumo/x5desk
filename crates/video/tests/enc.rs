@@ -1,6 +1,9 @@
 //! Vulkan Video encode on the X5's own footage (`X5_SAMPLES`, the live preview capture in `X5_LIVE`) and on synthetic
 //! pictures, checked with the `ffprobe` / `ffmpeg` CLIs (test tools only) and with our own decoder. Streams go to
 //! `X5_ENC_OUT` (default: Cargo's test tmp directory). GPU timings are noisy when other work shares the GPU.
+// Vulkan Video's input ring and copies; the macOS encoder has its own round trip (`mac.rs`)
+#![cfg(target_os = "linux")]
+
 mod mp4;
 
 use std::{

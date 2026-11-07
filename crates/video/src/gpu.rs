@@ -41,14 +41,13 @@ pub struct Gpu {
     pub veq: khr::video_encode_queue::Device,
     pub mem_fd: Option<khr::external_memory_fd::Device>,
     pub sem_fd: Option<khr::external_semaphore_fd::Device>,
-    /// decoder memory parked for reuse, freed with the `Gpu`
+    /// decoder memory parked for reuse, freed with the `Gpu` (or by `trim`)
     pub(crate) bin: Arc<Mutex<crate::decode::Bin>>,
 }
 
 impl Drop for Gpu {
     fn drop(&mut self) {
-        let b = std::mem::take(&mut *self.bin.lock().unwrap_or_else(|e| e.into_inner()));
-        unsafe { b.free(&self.dev, &self.vq) };
+        self.trim()
     }
 }
 
@@ -236,6 +235,13 @@ impl Gpu {
             pd,
             gfx,
         })
+    }
+
+    /// What an idle host gives back: the decoder memory parked in the bin (two per shape), which the next decoders
+    /// allocate again. Parked memory is no decoder's: running ones keep theirs.
+    pub fn trim(&self) {
+        let b = std::mem::take(&mut *self.bin.lock().unwrap_or_else(|e| e.into_inner()));
+        unsafe { b.free(&self.dev, &self.vq) };
     }
 
     /// Device memory for `req` from the first allowed type that has `want`.

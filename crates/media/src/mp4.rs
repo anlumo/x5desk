@@ -111,7 +111,11 @@ pub struct Mp4 {
 
 impl Mp4 {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Mp4> {
-        let file = File::open(path)?;
+        Mp4::from_file(File::open(path)?)
+    }
+
+    /// [`Mp4::open`] of a file already open for reading (a `.part` known by its identity, not by its name).
+    pub fn from_file(file: File) -> io::Result<Mp4> {
         let end = file.metadata()?.len();
         let mut m = Mp4 {
             file,

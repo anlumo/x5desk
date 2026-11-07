@@ -14,6 +14,8 @@
 //! onto the subject.
 
 mod blur;
+#[cfg(target_os = "macos")]
+mod coreml;
 mod det;
 mod frame;
 mod high;
@@ -318,6 +320,10 @@ pub struct Ai {
     /// Wait for each crop pass and sum the times into `times` (a GPU sync per crop).
     pub timing: bool,
     pub times: Times,
+    /// macOS: faces through Core ML on the Neural Engine (`coreml.rs`; on by default), else burn's YuNet on the GPU.
+    /// A model that won't load leaves burn's.
+    #[cfg(target_os = "macos")]
+    pub coreml: bool,
 }
 
 impl Ai {
@@ -398,7 +404,19 @@ impl Ai {
             }),
             timing: false,
             times: Times::default(),
+            #[cfg(target_os = "macos")]
+            coreml: true,
         })
+    }
+
+    /// macOS: whether faces run through Core ML (`coreml` on and its model loaded; known after the first `faces`).
+    #[cfg(target_os = "macos")]
+    pub fn coreml_used(&self) -> bool {
+        self.coreml
+            && self
+                .pv
+                .as_ref()
+                .is_some_and(|n| matches!(n.ml, Some(Some(_))))
     }
 
     /// Binds an equirect for crops; keep it while the texture stays the same.

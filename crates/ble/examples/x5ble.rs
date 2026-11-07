@@ -218,6 +218,7 @@ fn wake(s: &str, uuid: String, hold: Duration, pause: Duration, standby: bool) -
                 }
                 Event::Note(_, n) => println!("{:.2} s: note {n:?}", at()),
                 Event::Closed(_, e) => println!("{:.2} s: link lost: {e}", at()),
+                Event::Adapter(e) => println!("{:.2} s: adapter: {e:?}", at()),
                 Event::Seen(_) => {}
             }
         }
@@ -316,6 +317,7 @@ fn connect(s: &str, auth: Option<(String, bool)>) -> R {
                 Event::Note(_, Note::Other(c, d)) => println!("note {c} [{}]", hex(&d)),
                 Event::Note(_, n) => println!("note {n:?}"),
                 Event::Closed(_, e) => println!("link lost: {e}"),
+                Event::Adapter(e) => println!("adapter: {e:?}"),
                 Event::Seen(_) => {}
             }
         }

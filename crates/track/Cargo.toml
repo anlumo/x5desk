@@ -20,6 +20,14 @@ edit.workspace = true
 stab.workspace = true
 media.workspace = true
 
+# macOS: YuNet through Core ML on the Neural Engine (`coreml.rs`); objc2 as wgpu's Metal backend has it
+[target.'cfg(target_os = "macos")'.dependencies]
+# the compiled model's dir is checked to be this user's (geteuid)
+libc.workspace = true
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSString", "NSURL", "NSValue"] }
+objc2-core-ml = { version = "0.3", default-features = false, features = ["std", "MLModel", "MLModelConfiguration", "MLMultiArray", "MLFeatureProvider", "MLDictionaryFeatureProvider", "MLFeatureValue", "MLModel_MLModelCompilation", "MLMultiArrayConstraint", "block2"] }
+
 [build-dependencies]
 burn-onnx.workspace = true
 

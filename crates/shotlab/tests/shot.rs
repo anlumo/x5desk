@@ -44,7 +44,10 @@ fn out(name: &str) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(env!("CARGO_TARGET_TMPDIR")).join("../out"));
     std::fs::create_dir_all(&d).unwrap();
-    d.join(name)
+    // an export never replaces a file: an earlier run's go
+    let p = d.join(name);
+    let _ = std::fs::remove_file(&p);
+    p
 }
 
 /// A frame texture: sampled, storage, copied both ways.

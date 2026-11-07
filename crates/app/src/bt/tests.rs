@@ -196,6 +196,55 @@ fn cancel_and_loss() {
     );
 }
 
+/// Bluetooth switched off while scanning and on again (macOS's `Event::Adapter`, sent here beside the simulation's
+/// events): the scan row says so instead of looking on, the scan stays asked for, and the row clears once it is back.
+/// An app that may not use Bluetooth, found when the adapter opens or later, is pointed at the setting.
+#[test]
+fn adapter_off() {
+    let (tx, rx) = mpsc::channel();
+    let put = tx.clone();
+    let mut rx = Some(rx);
+    let open: Open = Box::new(move || {
+        let mut w = Net::default();
+        let (b, ev, _) = Ble::sim(vec![adv()], move |c, q, s| answer(c, q, s, &mut w))?;
+        let tx = tx.clone();
+        thread::spawn(move || {
+            for e in ev {
+                if tx.send(e).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok((b, rx.take().ok_or(Error::NoAdapter)?))
+    });
+    let mut b = Bt::new(&egui::Context::default(), open, "client-id".into(), vec![]);
+    b.tx.send(Cmd::Scan(true)).unwrap();
+    until(&mut b, 3.0, |s| !s.seen.is_empty());
+    put.send(Event::Adapter(Some(Error::Off))).unwrap();
+    until(&mut b, 3.0, |s| s.err.is_some());
+    assert_eq!(
+        (b.st.err.as_deref(), b.st.scan),
+        (Some("Bluetooth is off."), true)
+    );
+    put.send(Event::Adapter(None)).unwrap();
+    until(&mut b, 3.0, |s| s.err.is_none() && s.scan);
+    let setting = "System Settings > Privacy & Security > Bluetooth";
+    put.send(Event::Adapter(Some(Error::Denied))).unwrap();
+    until(&mut b, 3.0, |s| {
+        s.err.as_ref().is_some_and(|e| e.contains(setting))
+    });
+
+    let mut b = Bt::new(
+        &egui::Context::default(),
+        Box::new(|| Err(Error::Denied)),
+        "client-id".into(),
+        vec![Cmd::Scan(true)],
+    );
+    until(&mut b, 3.0, |s| s.err.is_some());
+    assert!(b.st.err.as_ref().unwrap().contains(setting) && !b.st.scan);
+    assert_eq!(down(&Error::NoAdapter), "Bluetooth: no Bluetooth adapter");
+}
+
 /// A camera attached by USB takes the connection and sends nothing: the pane says why.
 #[test]
 fn usb_attached() {

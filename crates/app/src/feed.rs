@@ -143,7 +143,7 @@ struct Hold {
     /// body → world per IMU sample, camera ms
     att: VecDeque<(u64, DQuat)>,
     c: Counts,
-    /// decode time per picture, submit → done; time between two video packets' arrivals
+    /// decode time per picture, submit → done (macOS: `Decoder::took`); time between two video packets' arrivals
     dec: Samples,
     iv: Samples,
     /// pacing the viewer: on; arrival + decode − camera time (ns) of the last 32 pictures
@@ -334,7 +334,11 @@ fn run(
                         lock().c.wait += 1;
                         continue;
                     }
-                    match Decoder::new(&g, video::Codec::H264, &ps, 2, 2) {
+                    let d = Decoder::new(&g, video::Codec::H264, &ps, 2, 2);
+                    // its copies go on wgpu's queue: under GATE, as the app's other submits
+                    #[cfg(target_os = "macos")]
+                    let d = d.map(|d| d.gated(&crate::GATE));
+                    match d {
                         Ok(d) => dec = Some(d),
                         Err(e) => {
                             fail(format!("decoder: {e}"));
@@ -347,6 +351,8 @@ fn run(
                     lock().c.gaps += ((fr.ts - last) as f64 / 33.37).round() as u64 - 1;
                 }
                 last = if fr.ts > 0 { fr.ts } else { last };
+                #[cfg(target_os = "macos")]
+                let failed = d.failed;
                 let f = loop {
                     match d.decode(&g, au) {
                         Ok(f) => break Some(f),
@@ -364,24 +370,36 @@ fn run(
                     }
                 };
                 let Some(f) = f else { continue };
+                let r = d.ring.clone();
                 // the decode queue's own time, from the submit (after any wait for a slot): the done timeline passes f
-                let (r, t0) = (d.ring.clone(), mono());
-                while r.ready() <= f && mono() - t0 < 200_000_000 {
-                    thread::sleep(Duration::from_micros(200));
-                }
-                let t = mono();
+                #[cfg(not(target_os = "macos"))]
+                let (t, dt) = {
+                    let t0 = mono();
+                    while r.ready() <= f && mono() - t0 < 200_000_000 {
+                        thread::sleep(Duration::from_micros(200));
+                    }
+                    let t = mono();
+                    (t, t - t0)
+                };
+                // VideoToolbox decodes synchronously, timed by the decoder from its slot on; a picture it failed on
+                // shows the one before (`Decoder::failed`): refused, not decoded
+                #[cfg(target_os = "macos")]
+                let (t, dt, bad) = (mono(), d.took.as_nanos() as u64, d.failed > failed);
+                #[cfg(not(target_os = "macos"))]
+                let bad = false;
                 let mut h = lock();
                 if h.ring.is_none() {
                     h.ring = Some((r, d.view));
                 }
-                h.c.dec += 1;
-                h.dec.push((t - t0) as f32 * 1e-6);
+                h.c.dec += !bad as u64;
+                h.c.bad += bad as u64;
+                h.dec.push(dt as f32 * 1e-6);
                 // when it could be shown: arrival and decode, not a wait for a slot the consumer holds (which would
                 // pace it later and hold the slots longer)
                 if fr.ts > 0 {
                     let n = h.nl;
                     let c = fr.ts as i64 * 1_000_000;
-                    let x = (got + t - t0) as i64 - c;
+                    let x = (got + dt) as i64 - c;
                     // a stall: ready (behind any packets this thread had not got to) well after it was due
                     if h.lag().is_some_and(|l| t as i64 - c > l[1] + 10_000_000) {
                         h.c.late += 1;
@@ -641,10 +659,10 @@ impl Feed {
             let w2 = w / 2;
             self.bg = (0..OUT as u64)
                 .map(|s| {
-                    let t = r.texture(s);
+                    let t = r.planes(s);
                     [
-                        self.cx.rect(t, [*x, *y, w2, *hh]),
-                        self.cx.rect(t, [x + w2, *y, w2, *hh]),
+                        self.cx.rect(&t, [*x, *y, w2, *hh]),
+                        self.cx.rect(&t, [x + w2, *y, w2, *hh]),
                     ]
                 })
                 .collect();

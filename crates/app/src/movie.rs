@@ -109,34 +109,24 @@ impl Movie {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let deep = v.rings[0].texture(0).format() == wgpu::TextureFormat::P010;
+        let deep = v.rings[0].deep();
         g.queue
             .write_buffer(&o, 0, bytemuck::cast_slice(&[x, y, deep as u32, 0]));
         let bg = (0..v.rings[0].slots() as u64)
             .map(|s| {
-                let t = v.rings[0].texture(s);
                 // the plane's own format: R8 / RG8, or R16 / RG16 for P010
-                let pl = |aspect| {
-                    t.create_view(&wgpu::TextureViewDescriptor {
-                        aspect,
-                        ..Default::default()
-                    })
-                };
+                let [y, uv] = v.rings[0].planes(s);
                 d.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("movie"),
                     layout: &pipe.get_bind_group_layout(0),
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&pl(
-                                wgpu::TextureAspect::Plane0,
-                            )),
+                            resource: wgpu::BindingResource::TextureView(&y),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&pl(
-                                wgpu::TextureAspect::Plane1,
-                            )),
+                            resource: wgpu::BindingResource::TextureView(&uv),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
@@ -486,12 +476,9 @@ mod tests {
         for (f, deep) in [("v635_360_1920.mp4", true), ("v635_360_1920-2.mp4", false)] {
             let p = dir.join(f);
             let mut m = Movie::open(&g, &cx, &p, &ctx, None).unwrap();
-            let fmt = m.v.rings[0].texture(0).format();
+            let fmt = m.v.rings[0].deep();
             let [w, h] = [m.rgba.width(), m.rgba.height()].map(|x| x as usize);
-            assert_eq!(
-                (fmt == wgpu::TextureFormat::P010, m.sphere(), w),
-                (deep, true, 1920)
-            );
+            assert_eq!((fmt, m.sphere(), w), (deep, true, 1920));
             m.seek(k);
             let t0 = Instant::now();
             while m.held.is_none_or(|p| p.k != k) {

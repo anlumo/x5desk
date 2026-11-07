@@ -8,11 +8,14 @@ use super::*;
 use crate::{
     album::{Cache, Item},
     camera::{Cmd as Cc, Up, Worker},
+    conf::{Slot, Write},
     dl,
+    feed::mono,
     replay::{self, Replay},
 };
+use link::{Camera, code};
 use prost::Message;
-use std::{collections::HashSet, path::Path, sync::atomic::AtomicBool};
+use std::{collections::HashSet, path::Path, sync::atomic::AtomicBool, thread};
 
 fn recording() -> Option<Arc<Replay>> {
     let (Some(l), Some(s)) = (std::env::var_os("X5_LIVE"), std::env::var_os("X5_SAMPLES")) else {
@@ -45,7 +48,7 @@ fn rig(r: &Arc<Replay>, on: bool) -> (Arc<Gpu>, Worker, Capture) {
         tap.clone(),
         || {},
     );
-    w.tx.send(Cc::Connect).unwrap();
+    w.tx.send(Cc::Connect { clock: true }).unwrap();
     let h = Hook {
         on,
         ..Default::default()
@@ -252,8 +255,9 @@ fn replay_output() {
     );
 }
 
-/// The commands the screen sends, as the camera gets them: a setting (from the camera's values), a mode switch, the
-/// shutter in the video mode, a highlight mark.
+/// The commands the screen sends, as the camera gets them: settings (EV and ISO, each to the first value the camera's
+/// `/CONF` allows besides the current one, as the screen offers them; at least one of them allows one; a value its
+/// list lacks sends nothing), a mode switch, the shutter's start in the video mode, a highlight mark.
 #[test]
 fn commands() {
     let Some(r) = recording() else { return };
@@ -265,14 +269,36 @@ fn commands() {
     until(&mut c, 10.0, |c| c.st.conf.is_some() && c.st.mode.is_some());
     let n0 = r.log.lock().unwrap().len();
     let po = c.st.po.clone();
-    for x in [
-        Cmd::Set("exposure_bias".into(), "-0.3".into()),
-        Cmd::Set("exposure_iso".into(), "400".into()),
-        Cmd::Mode("VIDEO_PURE".into()),
-        Cmd::Shoot,
-        Cmd::Mark,
-    ] {
-        c.tx.send(x).unwrap();
+    let sets: Vec<(&str, Slot, String)> = {
+        let s = &c.st;
+        let md = (s.conf.as_ref().and_then(|x| x.block(s.both)))
+            .and_then(|b| b.mode(s.mode.as_deref()?))
+            .expect("the camera's mode in its /CONF");
+        let pick = |k| {
+            let now = s.cur(md, k);
+            let v = s.allowed(k).into_iter().find(|v| now.as_ref() != Some(v))?;
+            Some((k, conf::slot(k)?, v))
+        };
+        ["exposure_bias", "exposure_iso"]
+            .into_iter()
+            .filter_map(pick)
+            .collect()
+    };
+    println!("allowed now, set: {sets:?}");
+    assert!(!sets.is_empty(), "/CONF allows no other EV or ISO");
+    // not in the list: refused, nothing sent
+    c.w.tx
+        .send(Cmd::Set("exposure_bias".into(), "9.9".into()))
+        .unwrap();
+    until(&mut c, 10.0, |c| {
+        (c.st.note.as_ref()).is_some_and(|n| n.1 && n.0.contains("not allowed"))
+    });
+    let set = sets
+        .iter()
+        .map(|(k, _, v)| Cmd::Set(k.to_string(), v.clone()));
+    let rest = [Cmd::Mode("VIDEO_PURE".into()), Cmd::Start, Cmd::Mark];
+    for x in set.chain(rest) {
+        c.w.tx.send(x).unwrap();
     }
     let want = |k: u16| {
         move |r: &Replay| {
@@ -295,18 +321,22 @@ fn commands() {
         .filter(|&k| matches!(k, 4 | 7 | 9 | 60))
         .collect();
     println!("sent {sent:?}");
-    assert_eq!(sent, [9, 9, 7, 4, 60]);
+    assert_eq!(sent, [&vec![9; sets.len()][..], &[7, 4, 60]].concat());
     let body = |k: u16, i: usize| log.iter().filter(|l| l.0 == k).nth(i).unwrap().1.clone();
     let fm = pb::FunctionMode::NormalVideo;
     let e = |s, v| match conf::write(s, v, &po, fm, false).unwrap() {
         Write::Photo(m) => m.encode_to_vec(),
         Write::Opts(m) => m.encode_to_vec(),
     };
-    assert_eq!(body(9, 0), e(Slot::Ev, "-0.3"));
-    // the camera's FULL_AUTO and shutter go along with the ISO
-    let q = pb::SetPhotographyOptions::decode(&body(9, 1)[..]).unwrap();
-    let x = q.value.unwrap().video_exposure.unwrap();
-    assert_eq!((x.program, x.iso), (5, 400));
+    for (i, (k, s, v)) in sets.iter().enumerate() {
+        assert_eq!(body(9, i), e(*s, v), "{k} {v}");
+        if *s == Slot::Iso {
+            // the camera's program (the replay's FULL_AUTO) and shutter go along with the ISO
+            let q = pb::SetPhotographyOptions::decode(&body(9, i)[..]).unwrap();
+            let x = q.value.unwrap().video_exposure.unwrap();
+            assert_eq!((x.program, x.iso), (5, conf::val(*s, v).unwrap() as u32));
+        }
+    }
     // SET_OPTIONS {VIDEO_SUB_MODE: VIDEO_PURE (11)}
     assert_eq!(body(7, 0), [0x08, 0x29, 0x12, 0x03, 0xc8, 0x02, 0x0b]);
     // START_CAPTURE {NORMAL}: the simulated camera stays in VIDEO_NORMAL
@@ -345,7 +375,7 @@ fn real_camera() {
         || {},
     );
     let t0 = Instant::now();
-    w.tx.send(Cc::Connect).unwrap();
+    w.tx.send(Cc::Connect { clock: true }).unwrap();
     let h = Hook {
         on: true,
         ..Default::default()
@@ -494,7 +524,7 @@ fn stale_report() {
     let (a, _ea, _sa) = sim(200);
     set(&a, 1);
     until(&mut c, 10.0, |c| c.st.on);
-    c.tx.send(Cmd::Note(Note::StorageFull)).unwrap();
+    c.w.tx.send(Cmd::Note(Note::StorageFull)).unwrap();
     thread::sleep(Duration::from_millis(300));
     let (b, _eb, _sb) = sim(0);
     set(&b, 2);
@@ -503,53 +533,6 @@ fn stale_report() {
     // the new session's requests end with its session, so the screen's worker can quit
     b.close().wait().unwrap();
     assert!(!on && note.is_none() && !idle, "{on} {note:?} {idle}");
-}
-
-/// The notifications the status shows: capture state and time, battery (low), temperature, a stopped capture.
-#[test]
-fn notes() {
-    use pb::CameraCaptureState as C;
-    let (tx, _rx) = mpsc::channel();
-    let mut w = W {
-        cam: None,
-        sid: 0,
-        st: St::default(),
-        up: tx,
-        wake: Box::new(|| {}),
-    };
-    let cap = |s: C, t| {
-        Note::CaptureStatus(pb::CaptureStatus {
-            state: s as i32,
-            capture_time: t,
-            ..Default::default()
-        })
-    };
-    w.on(cap(C::NormalCapture, 12));
-    let s = w.st.since.unwrap().elapsed().as_secs_f64();
-    assert!(running(w.st.cap) && (12.0..12.5).contains(&s), "{s}");
-    w.on(Note::Battery(pb::BatteryInfo {
-        battery_level: 9,
-        ..Default::default()
-    }));
-    assert!(camera::low(w.st.o.battery_info.as_ref().unwrap()));
-    let t = pb::TempState {
-        temp_state: pb::TemperatureState::TempHigh as i32,
-        temp_value: 61,
-        ..Default::default()
-    };
-    w.on(Note::Temp(t));
-    assert_eq!(w.st.temp, Some(t));
-    w.on(cap(C::NotCapture, 0));
-    assert!(!running(w.st.cap) && w.st.since.is_none());
-    w.on(Note::CaptureStopped(pb::NotificationCaptureStopped {
-        err_code: pb::notification_capture_stopped::ErrorCode::LowBattery as i32,
-        ..Default::default()
-    }));
-    let (n, e) = w.st.note.clone().unwrap();
-    assert!(e && n.contains("LowBattery"), "{n}");
-    assert_eq!(w.st.notes, 5);
-    // photos and the self-timer leave the files alone; timelapses run until stopped
-    assert!(!running(C::SingleShooting as i32) && running(C::TimelapseCapture as i32));
 }
 
 /// A Capture screen and a camera worker on the real X5 (no window), what the worker reported, every notification
@@ -587,10 +570,10 @@ impl Real {
             tap.clone(),
             || {},
         );
-        w.tx.send(Cc::Connect).unwrap();
+        w.tx.send(Cc::Connect { clock: true }).unwrap();
         let mut c = Capture::new(&g, &cx, &egui::Context::default(), tap.clone(), None);
         let notes = Arc::new(Mutex::new(vec![]));
-        let (t2, n2) = (c.tx.clone(), notes.clone());
+        let (t2, n2) = (c.w.tx.clone(), notes.clone());
         tap.lock().unwrap().notes = Some(Box::new(move |n: &Note| {
             n2.lock().unwrap().push((Instant::now(), n.clone()));
             drop(t2.send(Cmd::Note(n.clone())))
@@ -717,7 +700,7 @@ impl Real {
             self.undo.push((m.clone(), k.into(), old.clone()))
         }
         let t = Instant::now();
-        self.c.tx.send(Cmd::Set(k.into(), v.into())).unwrap();
+        self.c.w.tx.send(Cmd::Set(k.into(), v.into())).unwrap();
         if !self.pump(10.0, |r| r.cur(k).as_deref() == Some(v)) {
             return Err(format!(
                 "{k} {old} → {v}: the screen shows {:?} after 10 s",
@@ -753,7 +736,7 @@ impl Real {
 
     fn mode(&mut self, m: &str) -> Result<(), String> {
         let (t, was) = (Instant::now(), self.c.st.mode.clone());
-        self.c.tx.send(Cmd::Mode(m.into())).unwrap();
+        self.c.w.tx.send(Cmd::Mode(m.into())).unwrap();
         if !self.pump(15.0, |r| r.c.st.mode.as_deref() == Some(m)) {
             return Err(format!(
                 "mode {m}: the screen shows {:?} after 15 s",
@@ -781,7 +764,7 @@ impl Real {
     /// The shutter in a photo mode: the new photo's URI (the screen's note).
     fn photo(&mut self) -> Result<String, String> {
         let (t, prev) = (Instant::now(), self.c.st.note.clone());
-        self.c.tx.send(Cmd::Shoot).unwrap();
+        self.c.w.tx.send(Cmd::Shoot).unwrap();
         let got = |r: &Real| r.c.st.note != prev && r.c.st.note.is_some();
         if !self.pump(40.0, got) || self.c.st.note.as_ref().unwrap().1 {
             return Err(format!("photo: {:?}", self.c.st.note));
@@ -804,7 +787,7 @@ impl Real {
     /// when the screen showed the recording.
     fn record(&mut self, secs: f64, mark: Option<f64>) -> Result<(String, f64), String> {
         let t = Instant::now();
-        self.c.tx.send(Cmd::Shoot).unwrap();
+        self.c.w.tx.send(Cmd::Start).unwrap();
         // the screen knows it records from the camera's capture status
         if !self.pump(5.0, |r| running(r.c.st.cap)) {
             return Err(format!(
@@ -819,7 +802,7 @@ impl Real {
         );
         if let Some(m) = mark {
             self.pump(m - t.elapsed().as_secs_f64(), |_| false);
-            self.c.tx.send(Cmd::Mark).unwrap();
+            self.c.w.tx.send(Cmd::Mark).unwrap();
             let m = |r: &Real| {
                 r.c.st
                     .note
@@ -832,7 +815,7 @@ impl Real {
         }
         self.pump(secs - t.elapsed().as_secs_f64(), |_| false);
         let prev = self.c.st.note.clone();
-        self.c.tx.send(Cmd::Shoot).unwrap();
+        self.c.w.tx.send(Cmd::Stop).unwrap();
         let got = |r: &Real| r.c.st.note != prev && r.c.st.note.is_some();
         if !self.pump(30.0, got) || !self.c.st.note.as_ref().unwrap().0.starts_with("recorded") {
             return Err(format!("stop: {:?}", self.c.st.note));
@@ -991,6 +974,31 @@ fn ours_only() {
 fn modes_marked() {
     let l = ["PHOTO_SINGLE", "PHOTO_BURST", "VIDEO_NORMAL", "VIDEO_PURE"].map(mlabel);
     assert_eq!(l, ["Photo", "Burst ⚠", "Video", "PureVideo ⚠"]);
+}
+
+/// The shutter sends what its button says: a photo in a photo mode, a start while the screen shows no capture, a stop
+/// while it shows one (the worker sends nothing when the camera is otherwise), nothing in a live mode; the self-timer
+/// of an interval mode starts it.
+#[test]
+fn shutter_cmds() {
+    let name = |c: Option<Cmd>| match c {
+        Some(Cmd::Shoot) => "photo",
+        Some(Cmd::Start) => "start",
+        Some(Cmd::Stop) => "stop",
+        Some(_) => "other",
+        None => "none",
+    };
+    for (m, run, want) in [
+        ("PHOTO_SINGLE", false, "photo"),
+        ("PHOTO_BURST", true, "photo"),
+        ("VIDEO_NORMAL", false, "start"),
+        ("VIDEO_NORMAL", true, "stop"),
+        ("VIDEO_TIMELAPSE", true, "stop"),
+        ("PHOTO_INTERVAL", false, "start"),
+        ("VIDEO_LIVING_MODE_PANO", false, "none"),
+    ] {
+        assert_eq!(name(press(conf::shot(m), run)), want, "{m} {run}");
+    }
 }
 
 /// The camera's wall clock in a file name (`IMG_20261025_034512_00_123.jpg`) read in this computer's zone, unix s.
