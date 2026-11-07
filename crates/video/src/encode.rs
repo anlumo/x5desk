@@ -766,11 +766,15 @@ impl Encoder {
                 input.views.push(iv(img, vk::ImageViewType::TYPE_2D, 1)?);
             }
 
-            let slot = (cw * ch * 3 / 4).max(1 << 20).next_multiple_of(
-                caps.min_bitstream_buffer_offset_alignment
-                    .max(caps.min_bitstream_buffer_size_alignment)
-                    .max(4096),
-            ) as usize;
+            // the uncompressed 4:2:0 picture (12 or 15 bits a pixel): RADV puts an incompressible key picture at
+            // 0.85 bytes a pixel and reports a picture past the slot as complete
+            let slot = (cw * ch * [12, 15][c.deep as usize] / 8)
+                .max(1 << 20)
+                .next_multiple_of(
+                    caps.min_bitstream_buffer_offset_alignment
+                        .max(caps.min_bitstream_buffer_size_alignment)
+                        .max(4096),
+                ) as usize;
             let mut e = Encoder {
                 input: Arc::new(input),
                 params: vec![],
