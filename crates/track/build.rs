@@ -6,7 +6,7 @@ fn main() {
         "object_tracking_vittrack_2023sep",
         "yolox_nano",
         "face_detection_yunet_2023mar",
-        "yolo-v9-t-256-license-plates",
+        "plates-yolox-nano-256",
     ] {
         println!("cargo::rerun-if-changed=models/{m}.onnx");
         burn_onnx::ModelGen::new()
@@ -20,9 +20,7 @@ fn main() {
             "face_detection_yunet_2023mar" => {
                 &[("1, -1, 1]", 6), ("1, -1, 4]", 3), ("1, -1, 10]", 3)]
             }
-            "yolo-v9-t-256-license-plates" => {
-                &[("1, 65, -1]", 3), ("1, 4, 16,", 1), ("1, 4, 1344]", 1)]
-            }
+            "plates-yolox-nano-256" => &[("1, 6, -1]", 3)],
             _ => continue,
         };
         let p =

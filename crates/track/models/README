@@ -67,7 +67,47 @@ yunet_b8.mlpackage (macOS)
           Data/com.apple.CoreML/weights/weight.bin d6296bc3ae3048bf3815ef7df8ee934fde48018276c0b2278f93ba359556103b
           Manifest.json eb729aa53ae2a728111b925ab0e4b56ecf09d5da7034d04b5abfc584e96f1cbe
 
+plates-yolox-nano-256.onnx
+  What: YOLOX-nano licence plate detector (one class), 1x3x256x256 BGR 0..255 without normalisation -> 1x1344x6 (x, y
+        offsets and log width, height in grid cells, objectness and plate probability after sigmoid; anchors of strides
+        8 / 16 / 32, row-major; decoded and suppressed in src/plates.rs). Plates are searched on square crops around
+        YOLOX's vehicles (src/plates.rs `plate_crops`). Exported with torch.onnx.export (dynamo=False, opset 11, static,
+        no decode), slimmed by onnxslim.
+  Source: trained for this project, nothing to download. YOLOX 6ddff48 (Megvii-BaseDetection/YOLOX; patched: NMS without
+          torchvision, torch.load weights_only=False, the export above) on torch 2.15, from Megvii's COCO checkpoint
+          yolox_nano.pth: 150 epochs on the public crops with random down/up-scaling, blur and JPEG like the X5's; 40
+          epochs with the first own tiles added, from its best checkpoint; 40 with the bike rides' added, from that
+          one's best (AP 49.72, AP50 ~0.835, on a public validation slice of 1,149 crops). Scripts, data and checkpoints
+          are in target/plates-train, not in git.
+          sha256 4408c8e97fc57695173d78a90b2db3542729c63e67169c73910680cebaf7a612.
+  Licence: YOLOX and its base weights Apache-2.0, Copyright (c) 2021-2022 Megvii Inc. -> LICENSE-yolox. No YOLOv9 code
+           or weights in its line.
+  Training data: 29,580 crops as `plate_crops` builds them, 23,955 boxes. Public, 22,660 crops: Open Images V7 "Vehicle
+           registration plate" (8,157 images, 9,851 boxes; images CC BY 2.0, per-image attribution kept with the data),
+           UC3M-LP (1,975 images; Zenodo record 17152029, CC BY 4.0), the Romanian licence plate dataset (534 images;
+           RobertLucian/license-plate-dataset, MIT). Base weights: COCO 2017. Own X5 footage, 692 tiles repeated 10
+           times: 392 with plates (445 boxes), 300 without, from 5 clips and 4 of the 5 bike rides, every tile reviewed
+           by the user (17 rejected). Their boxes were judged by eye among candidates from the detectors at hand, the
+           previous yolo-v9-t-256 included, or drawn by hand. The tiles are never in git.
+  Chosen 2026-11-08 at score 0.1, previous model / fine-tune without the rides / this file:
+    Night ride of 2026-03-04, never trained on, labelled by eye without scores, per frame (the app's rule, no tracking):
+      partly readable plates of 4 (none fully readable) 3 / 4 / 4; unreadable of 26 19 / 26 / 26; false boxes on 124
+      plate-free tiles 111 / 75 / 23.
+    Clips 619 and 910, no vehicles, 625 tiles: false boxes 615 / 144 / 63.
+    tests/footage.rs `plates`, clips not trained on, plates all under 30 px: uncovered of 100, in <10 / 10-20 / 20-40 px,
+      18 at the previous model's 0.2 (11 / 7 / 0) / 32 (11 / 16 / 5) / 33 (14 / 14 / 5); area of regions holding no
+      labelled plate, v635 / v606 / v627, 9.1 / 24.1 / 31.3 / 5.4 / 4.1 / 20.7 / 2.65 / 2.52 / 8.59 deg^2 per labelled
+      frame. The 5 at 20-40 px are one van at night in v627 (20-27 px, no characters). This file at 0.2: 38 uncovered,
+      2.65 / 1.55 / 6.42. Privacy first: 0.1 (export.rs PMIN).
+    Tiles where an older model had a box >= 0.5 and >= 40 px and this file none: of 64 viewed, most were right to go
+      (bag logos, posters, signs, lights); 8 were real plates on cars behind the main one, 7 of them still covered by
+      another tile of the frame, 1 a blown-out patch, unreadable.
+    Limits: only 4 readable plates held out, none fully readable, no two-line plate; the day rides went into training,
+      so no clean daytime test of this file on readable plates. All labels are judgement by eye.
+
 yolo-v9-t-256-license-plates.onnx
+  Status: since 2026-11-09 not built into the app or on its About page (plates-yolox-nano-256.onnx replaced it). All
+        below is as it stood; the file and LICENSE-yolov9-plates stay in the tree for comparisons.
   What: YOLOv9-t licence plate detector (one class, 1.9 M parameters), 1x3x256x256 RGB 0..1 -> 1x5x1344 (centre x, y,
         width, height in input pixels, score after sigmoid; anchors of strides 8 / 16 / 32, row-major). It is the
         published yolo-v9-t-256-license-plates-end2end.onnx cut before its NMS by onnx.utils.Extractor at

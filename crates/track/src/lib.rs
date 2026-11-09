@@ -1,11 +1,10 @@
 //! AI tracking and framing for 360 video with open models on the app's shared wgpu device (PLAN.md group 11):
 //! VitTrack (OpenCV zoo) follows one subject, YOLOX-nano (Megvii) detects people and objects; for the privacy blur
-//! ([`Hide`], [`Blur`]) YuNet (OpenCV zoo) finds faces and a YOLOv9-t plate detector (open-image-models) finds licence
-//! plates on crops around YOLOX's vehicles; people are told apart by LOMO (Liao et al.), a hand-made appearance
-//! feature with no model, so the tracker finds its subject again; [`Scorer`] picks highlights and [`timeline`] cuts
-//! them into an editor timeline. The networks are Apache-2.0 or MIT (`models/README`), but for the plate detector: its
-//! repository is MIT, its weights have no licence of their own and were trained with GPL-3.0 code
-//! (`models/plate-detector-licensing.md`). They are compiled in by burn-onnx (`build.rs`) and run by burn.
+//! ([`Hide`], [`Blur`]) YuNet (OpenCV zoo) finds faces and our fine-tune of YOLOX-nano finds licence plates on crops
+//! around YOLOX's vehicles; people are told apart by LOMO (Liao et al.), a hand-made appearance feature with no model,
+//! so the tracker finds its subject again; [`Scorer`] picks highlights and [`timeline`] cuts them into an editor
+//! timeline. The networks are Apache-2.0 or MIT (`models/README`). They are compiled in by burn-onnx (`build.rs`) and
+//! run by burn.
 //!
 //! Everything happens on the sphere: a network only ever sees a perspective crop of the stitched equirect, centred
 //! where it should look and written straight into its input tensor by `crop.wgsl`, so seams and poles never reach it.

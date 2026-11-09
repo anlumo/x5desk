@@ -297,9 +297,9 @@ fn vs_onnxruntime() {
     for ch in grid.chunks(8) {
         let v = read(nets.net.forward(run(&ai, ch)));
         for (i, c) in ch.iter().enumerate() {
-            let m = v[i * 5 * a + 4 * a..][..a]
-                .iter()
-                .fold(0f32, |m, &x| m.max(x));
+            let m = v[i * 6 * a..][..6 * a]
+                .chunks(6)
+                .fold(0f32, |m, r| m.max(r[4] * r[5]));
             if m > best.0 {
                 best = (m, *c);
             }
@@ -317,15 +317,20 @@ fn vs_onnxruntime() {
     for t in 0..2 {
         let r = ort(
             &py,
-            "yolo-v9-t-256-license-plates.onnx",
+            "plates-yolox-nano-256.onnx",
             &d,
             &[("images", &xi[t * 3 * s * s..][..3 * s * s], &[1, 3, s, s])],
         );
-        // boxes (pixels) and scores (0..1) apart: the boxes' scale would hide a score's error
-        let (e, m) = diff(&o[t * 5 * a..][..4 * a], &r[0][..4 * a]);
-        let (es, ms) = diff(&o[t * 5 * a + 4 * a..][..a], &r[0][4 * a..]);
+        // box terms (grid cells, log sizes) and probabilities (0..1) apart: the boxes' scale would hide an error
+        let o = &o[t * 6 * a..][..6 * a];
+        let part = |v: &[f32], c: std::ops::Range<usize>| -> Vec<f32> {
+            v.chunks(6).flat_map(|r| r[c.clone()].to_vec()).collect()
+        };
+        let (e, m) = diff(&part(o, 0..4), &part(&r[0], 0..4));
+        let (es, ms) = diff(&part(o, 4..6), &part(&r[0], 4..6));
         eprintln!(
-            "Plates crop {t}: max |burn − ort| boxes {e:.2e} (max |ort| {m:.1}), scores {es:.2e} (max {ms:.3})"
+            "Plates crop {t}: max |burn − ort| box terms {e:.2e} (max |ort| {m:.1}), probabilities {es:.2e} (max \
+             {ms:.3})"
         );
         assert!(e < 1e-3 * m.max(1.0) && es < 1e-4, "plates crop {t}");
     }
@@ -664,28 +669,38 @@ fn hide() {
     }
 }
 
-/// Plate decoding: rows centre x, y, width, height, score per anchor; boxes over the threshold, non-maximum suppression
-/// at IoU 0.45 (two boxes of one plate are one, a box beside it stays), and a box's place on the sphere through its
-/// crop.
+/// Plate decoding: per anchor x, y offsets and log width, height in grid cells, objectness and plate probability, the
+/// grids of strides 8, 16, 32 in turn; boxes whose product is over the threshold, non-maximum suppression at IoU 0.45
+/// (two boxes of one plate are one, a box beside it stays), and a box's place on the sphere through its crop.
 #[test]
 fn plate_decode() {
-    let n = 6;
-    // (cx, cy, w, h, score): a plate, the same plate shifted 4 px, another one, one under the threshold
+    let s = plates::PS as usize;
+    let first = [0, (s / 8).pow(2), (s / 8).pow(2) + (s / 16).pow(2)];
+    // (stride, cell x, y, offset x, y, w, h in pixels, objectness, probability): a plate at (100, 200), the same plate
+    // 4 px right and 1 px down, another one at (200, 120), one at (50, 50) under the threshold
     let rows = [
-        (100.0, 200.0, 60.0, 14.0, 0.9),
-        (104.0, 201.0, 60.0, 14.0, 0.6),
-        (300.0, 120.0, 40.0, 10.0, 0.3),
-        (50.0, 50.0, 30.0, 8.0, 0.1),
+        (8usize, 12, 25, 0.5, 0.0, 60.0, 14.0, 1.0, 0.9),
+        (8, 13, 25, 0.0, 0.125, 60.0, 14.0, 0.75, 0.8),
+        (16, 12, 7, 0.5, 0.5, 40.0, 10.0, 0.5, 0.6),
+        (32, 1, 1, 0.5625, 0.5625, 30.0, 8.0, 0.5, 0.2),
     ];
-    let mut v = vec![0f32; 5 * n];
-    for (a, r) in rows.iter().enumerate() {
-        for (i, x) in [r.0, r.1, r.2, r.3, r.4].into_iter().enumerate() {
-            v[i * n + a] = x;
-        }
+    let mut v = vec![0f32; 6 * (first[2] + (s / 32).pow(2))];
+    for (st, x, y, dx, dy, w, h, o, p) in rows {
+        let a = first[st.trailing_zeros() as usize - 3] + y * (s / st) + x;
+        let st = st as f32;
+        v[a * 6..][..6].copy_from_slice(&[dx, dy, (w / st).ln(), (h / st).ln(), o, p]);
     }
-    let b = plates::boxes(&v, n, 0.25);
+    let b = plates::boxes(&v, s, 0.25);
+    let off = |x: [f32; 4], y: [f32; 4]| (0..4).fold(0f32, |m, i| m.max((x[i] - y[i]).abs()));
     assert_eq!(b.len(), 3, "{b:?}");
-    assert_eq!(b[0], ([70.0, 193.0, 130.0, 207.0], 0.9));
+    assert!(
+        off(b[0].0, [70.0, 193.0, 130.0, 207.0]) < 1e-3 && b[0].1 == 0.9,
+        "{b:?}"
+    );
+    assert!(
+        off(b[2].0, [180.0, 115.0, 220.0, 125.0]) < 1e-3 && b[2].1 == 0.3,
+        "{b:?}"
+    );
     let k = privacy::nms(b, 0.45);
     assert_eq!(
         k.iter().map(|x| x.1).collect::<Vec<_>>(),
