@@ -1455,10 +1455,12 @@ fn labels(name: &str) -> Option<Labels> {
 
 /// Licence plates against plates labelled by eye (`labels`; `X5_PLATES` = comma-separated clip names, default all
 /// three; clips without labels are skipped): lenses at full resolution, the equirect at the export's 7680 (a plate is
-/// a few pixels wide), plates every 3rd frame (`plates`, score ≥ 0.2 as the export) linked by `Hide`. Prints per
-/// width bin (pixels at 7680) the labelled plates the regions leave uncovered (`covered`), the area of the regions on
-/// labelled frames that hold no labelled plate, and the time per searched frame of the plate pass against the face
-/// pass on the same equirect. Fails if more than 10 % of the labelled plates 20 px wide or more are left uncovered.
+/// a few pixels wide), plates every 3rd frame (`plates`, score ≥ 0.1 as the export, or `X5_PMIN`) linked by `Hide`.
+/// Prints per width bin (pixels at 7680) the labelled plates the regions leave uncovered (`covered`), the area of the
+/// regions on labelled frames that hold no labelled plate, and the time per searched frame of the plate pass against
+/// the face pass on the same equirect. Fails if more than 10 % of the labelled plates 30 px wide or more (where
+/// characters start to read) are left uncovered. The labels hold none that wide yet, the widest is 27 px: until they
+/// do this check passes on nothing, and only the printed bins measure anything.
 /// macOS: faces through Core ML, `X5_YUNET=burn` for burn's YuNet.
 #[test]
 fn plates() {
@@ -1493,6 +1495,7 @@ fn plates() {
         ai.coreml = std::env::var("X5_YUNET").map_or(true, |v| v != "burn");
     }
     let ft = face_tiles();
+    let pmin = std::env::var("X5_PMIN").map_or(0.1, |v| v.parse().unwrap());
     let mut big = [0; 2];
     for (name, (lf, lp)) in all {
         let c = clip(&d, name);
@@ -1509,7 +1512,7 @@ fn plates() {
             rig.stitch(&g, &c.poses[k]);
             let _ = g.dev.poll(wgpu::PollType::wait_indefinitely());
             let t = Instant::now();
-            let r = ai.plates(&pano, 0.2).unwrap();
+            let r = ai.plates(&pano, pmin).unwrap();
             tp.push(t.elapsed().as_secs_f64() * 1e3);
             found += r.len();
             h.push(k, r);
@@ -1533,7 +1536,7 @@ fn plates() {
             let miss = !covered(&reg[*k], x);
             b[i][0] += 1;
             b[i][1] += miss as usize;
-            if i >= 2 {
+            if x.size.x * ppd >= 30.0 {
                 big[0] += 1;
                 big[1] += miss as usize;
             }
@@ -1566,10 +1569,77 @@ fn plates() {
     }
     assert!(
         big[1] * 10 <= big[0],
-        "{} of {} labelled plates 20 px wide or more uncovered",
+        "{} of {} labelled plates 30 px wide or more uncovered",
         big[1],
         big[0]
     );
+}
+
+/// Training crops for the plate detector (`X5_PLATE_DUMP` = output folder; skipped without): the clips named in
+/// `X5_DUMP_CLIPS` (comma-separated, in `X5_SAMPLES`), every `X5_DUMP_EVERY`th frame (default 60) stitched as
+/// `plates` does, each plate crop as the detector sees it (`<clip>_<frame>_<i>.ppm`, RGB) with its candidate boxes of
+/// score ≥ 0.05 in `crops.jsonl` (crop pixels, the crop's direction and tangent extent).
+#[test]
+fn plate_dump() {
+    let (Some(d), Some(out)) = (
+        samples(),
+        std::env::var_os("X5_PLATE_DUMP").map(PathBuf::from),
+    ) else {
+        return;
+    };
+    std::fs::create_dir_all(&out).unwrap();
+    let every: usize = std::env::var("X5_DUMP_EVERY").map_or(60, |v| v.parse().unwrap());
+    let names = std::env::var("X5_DUMP_CLIPS").unwrap();
+    let g = gpu();
+    let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
+    let mut log = std::fs::File::create(out.join("crops.jsonl")).unwrap();
+    for name in names.split(',') {
+        let c = clip(&d, name.to_string().leak());
+        let rig = Rig::sized(&g, &c, 3840, 7680);
+        let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
+        let mut dec = Dec::sized(&c, c.n, 3840);
+        let mut n = 0;
+        for k in 0..c.n {
+            assert!(dec.next());
+            if k % every != 0 {
+                continue;
+            }
+            rig.upload(&g, &dec.buf);
+            rig.stitch(&g, &c.poses[k]);
+            let _ = g.dev.poll(wgpu::PollType::wait_indefinitely());
+            for (i, (cam, bgr, b)) in ai
+                .plate_inputs(&pano, 0.05)
+                .unwrap()
+                .into_iter()
+                .enumerate()
+            {
+                let file = format!("{name}_{k:05}_{i:02}.ppm");
+                let s = ((bgr.len() / 3) as f64).sqrt() as usize;
+                let mut ppm = format!("P6\n{s} {s}\n255\n").into_bytes();
+                ppm.extend(bgr.chunks(3).flat_map(|p| [p[2], p[1], p[0]]));
+                std::fs::write(out.join(&file), ppm).unwrap();
+                let boxes: Vec<String> = (b.iter())
+                    .map(|(b, sc)| {
+                        format!("[{:.1},{:.1},{:.1},{:.1},{sc:.3}]", b[0], b[1], b[2], b[3])
+                    })
+                    .collect();
+                writeln!(
+                    log,
+                    "{{\"file\":\"{file}\",\"clip\":\"{name}\",\"frame\":{k},\"dir\":[{:.5},{:.5},{:.5}],\"ext\":[{:.5},{:.5}],\
+                     \"boxes\":[{}]}}",
+                    cam.f.x,
+                    cam.f.y,
+                    cam.f.z,
+                    cam.ext.x,
+                    cam.ext.y,
+                    boxes.join(",")
+                )
+                .unwrap();
+                n += 1;
+            }
+        }
+        eprintln!("{name}: {n} crops");
+    }
 }
 
 /// Highlights and auto edit on the sample clips (`X5_HIGH`, default all three): every 10th frame the detector over

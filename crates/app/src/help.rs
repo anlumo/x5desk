@@ -271,18 +271,15 @@ const MODELS: [Model; 8] = [
         include_str!("../../track/models/LICENSE-yunet"),
     ),
     Model(
-        "YOLOv9-t license plates",
+        "YOLOX-nano license plates",
         "license plate detection for the privacy blur (track)",
-        "MIT (the repository)",
-        "ankandrew/open-image-models release assets, yolo-v9-t-256-license-plates-end2end (cut before its NMS); \
-         Copyright (c) 2024 ankandrew",
-        "⚠ Its author trained it with his fork of WongKinYiu/yolov9 (GPL-3.0) on about 11,000 images collected from \
-         the web, mostly from free and open datasets, in large part those of his earlier plate detector: Open Images, \
-         a Romanian licence plate dataset (MIT) and the OpenALPR benchmark (AGPL-3.0). He calls the weights MIT from \
-         his side (no licence file names them) and leaves open whether YOLOv9's GPL-3.0 reaches them; the open \
-         questions with their sources: crates/track/models/plate-detector-licensing.md. Check before any commercial \
-         use.",
-        include_str!("../../track/models/LICENSE-yolov9-plates"),
+        "Apache-2.0 (YOLOX)",
+        "This project's fine-tune of Megvii-BaseDetection/YOLOX's yolox_nano.pth; Copyright (c) 2021-2022 Megvii Inc.",
+        "The base weights were trained on COCO 2017. The fine-tune added Open Images V7 (images under CC BY 2.0), \
+         UC3M-LP (CC BY 4.0), a Romanian licence plate dataset (MIT) and our own X5 footage, whose boxes were judged \
+         by eye among candidates from several detectors, the earlier YOLOv9-t one (trained with GPL-3.0 code) \
+         included. Details: crates/track/models/README. Check the datasets' terms before any commercial use.",
+        include_str!("../../track/models/LICENSE-yolox"),
     ),
     Model(
         "PP-HumanSeg v1 (mobile)",

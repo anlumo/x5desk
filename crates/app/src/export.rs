@@ -44,7 +44,7 @@ const STEP: usize = 3;
 const FACES_W: u32 = 3072;
 /// Plate detection: the plate detector's score, on an equirect this wide (the lenses' own resolution: a plate is a few
 /// pixels wide), faces then on it too.
-pub(crate) const PMIN: f32 = 0.2;
+pub(crate) const PMIN: f32 = 0.1;
 pub(crate) const PLATES_W: u32 = 7680;
 
 /// What a job is made from: the player's or the library's file and how it shows it.
@@ -873,8 +873,8 @@ impl Exp {
                     ui.checkbox(&mut x.faces, "Blur faces")
                         .on_hover_text("Find faces first (YuNet), then blur them in every frame");
                     ui.checkbox(&mut x.plates, "Blur license plates").on_hover_text(
-                        "Find license plates first (YOLOv9 on the vehicles YOLOX finds), then blur them in every \
-                         frame",
+                        "Find license plates first (a plate detector on the vehicles YOLOX finds), then blur them \
+                         in every frame",
                     );
                 });
                 ui.end_row();

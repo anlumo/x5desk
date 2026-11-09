@@ -1,5 +1,9 @@
 # Licence plate detector: licensing
 
+**Superseded on 2026-11-09:** the "Blur license plates" option now uses `plates-yolox-nano-256.onnx` (see `README`).
+`yolo-v9-t-256-license-plates.onnx` is no longer compiled in or on the About page, so "the app uses it" below is the
+past. This note stays as the record of that model's open questions.
+
 `yolo-v9-t-256-license-plates.onnx` in this directory is the licence plate detector behind the "Blur license plates"
 option (`src/plates.rs`). It comes from [ankandrew/open-image-models][oim], release `assets`, as
 `yolo-v9-t-256-license-plates-end2end.onnx`, and is cut before its NMS. Everything below was checked on the primary
