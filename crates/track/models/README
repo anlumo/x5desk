@@ -77,19 +77,35 @@ plates-yolox-nano-256.onnx
           torchvision, torch.load weights_only=False, the export above) on torch 2.15, from Megvii's COCO checkpoint
           yolox_nano.pth: 150 epochs on the public crops with random down/up-scaling, blur and JPEG like the X5's; 40
           epochs with the first own tiles added, from its best checkpoint; 40 with the bike rides' added, from that
-          one's best (AP 49.72, AP50 ~0.835, on a public validation slice of 1,149 crops). Scripts, data and checkpoints
-          are in target/plates-train, not in git.
-          sha256 4408c8e97fc57695173d78a90b2db3542729c63e67169c73910680cebaf7a612.
+          one's best (AP 49.72, AP50 ~0.835, on a public validation slice of 1,149 crops; sha256 4408c8e9...); 40 with
+          Vietnamese street photos added for two-line plates, from that one's best (AP 49.03 on the same slice).
+          Scripts, data and checkpoints are in target/plates-train, not in git.
+          sha256 57a8627eb0377135d280e423b16551601e08af220923c74ae452da61f5c1fe3e.
   Licence: YOLOX and its base weights Apache-2.0, Copyright (c) 2021-2022 Megvii Inc. -> LICENSE-yolox. No YOLOv9 code
            or weights in its line.
-  Training data: 29,580 crops as `plate_crops` builds them, 23,955 boxes. Public, 22,660 crops: Open Images V7 "Vehicle
+  Training data: 32,340 crops as `plate_crops` builds them, 27,620 boxes. Public, 22,660 crops: Open Images V7 "Vehicle
            registration plate" (8,157 images, 9,851 boxes; images CC BY 2.0, per-image attribution kept with the data),
            UC3M-LP (1,975 images; Zenodo record 17152029, CC BY 4.0), the Romanian licence plate dataset (534 images;
            RobertLucian/license-plate-dataset, MIT). Base weights: COCO 2017. Own X5 footage, 692 tiles repeated 10
            times: 392 with plates (445 boxes), 300 without, from 5 clips and 4 of the 5 bike rides, every tile reviewed
            by the user (17 rejected). Their boxes were judged by eye among candidates from the detectors at hand, the
-           previous yolo-v9-t-256 included, or drawn by hand. The tiles are never in git.
-  Chosen 2026-11-08 at score 0.1, previous model / fine-tune without the rides / this file:
+           previous yolo-v9-t-256 included, or drawn by hand. The tiles are never in git. Two-line plates: 552 vehicle
+           crops (733 plates) of 361 street photos of hoanglvuit/Vietnam_License_Plate_Segment_Datasets on Hugging Face
+           (Vietnam; plate polygons, one-line and square two-line plates), repeated 5 times. **That dataset states no
+           licence**, so its terms are unknown; the user chose to ship on 2026-11-09. Crops holding a confident box off
+           the labelled plates were left out, as possibly unlabelled plates. The set's other half stays a test.
+  Two-line fine-tune, chosen 2026-11-09 at score 0.1 (this file). Rides fine-tune (sha256 4408c8e9...) / this file:
+    Held-out half of the Vietnamese street photos (450 photos; split in runs of 25 neighbouring photos, the ends of each
+      training run dropped, hashes checked), two-line plates inside a vehicle crop with no box centred on them, of 668:
+      21 / 9 (yolo-v9-t-256 at 0.2: 14). One-line 53, and close-ups of another source (825 two-line, 1,040 one-line,
+      never trained on): 0-1 for all. Boxes off the labelled plates on the held-out photos: 322 / 460; of 36 of the
+      extra ones viewed, 12 looked like plates the labels miss, 15 were wrong, 9 unclear.
+    tests/footage.rs `plates`: 33 / 33 uncovered of 100; area of regions holding no labelled plate, v635 / v606 / v627,
+      2.65 / 2.52 / 8.59 against 5.20 / 5.84 / 7.19 deg^2 per labelled frame. `plates_rides`: 85 / 85 of 85 covered.
+    False boxes on the 124 plate-free tiles of the 2026-03-04 ride 23 / 20, on the 625 tiles of clips 619 and 910
+      63 / 56. Labelled plates of the 2026-03-04 ride per frame: the same (4 partly readable, 26 unreadable, all).
+  Chosen 2026-11-08 at score 0.1, previous model / fine-tune without the rides / rides fine-tune (the file before this
+  one):
     Night ride of 2026-03-04, never trained on, labelled by eye without scores, per frame (the app's rule, no tracking):
       partly readable plates of 4 (none fully readable) 3 / 4 / 4; unreadable of 26 19 / 26 / 26; false boxes on 124
       plate-free tiles 111 / 75 / 23.
@@ -97,9 +113,9 @@ plates-yolox-nano-256.onnx
     tests/footage.rs `plates`, clips not trained on, plates all under 30 px: uncovered of 100, in <10 / 10-20 / 20-40 px,
       18 at the previous model's 0.2 (11 / 7 / 0) / 32 (11 / 16 / 5) / 33 (14 / 14 / 5); area of regions holding no
       labelled plate, v635 / v606 / v627, 9.1 / 24.1 / 31.3 / 5.4 / 4.1 / 20.7 / 2.65 / 2.52 / 8.59 deg^2 per labelled
-      frame. The 5 at 20-40 px are one van at night in v627 (20-27 px, no characters). This file at 0.2: 38 uncovered,
+      frame. The 5 at 20-40 px are one van at night in v627 (20-27 px, no characters). The rides fine-tune at 0.2: 38,
       2.65 / 1.55 / 6.42. Privacy first: 0.1 (export.rs PMIN).
-    Tiles where an older model had a box >= 0.5 and >= 40 px and this file none: of 64 viewed, most were right to go
+    Tiles where an older model had a box >= 0.5 and >= 40 px and the rides fine-tune none: of 64 viewed, most went right
       (bag logos, posters, signs, lights); 8 were real plates on cars behind the main one, 7 of them still covered by
       another tile of the frame, 1 a blown-out patch, unreadable.
     tests/footage.rs `plates_rides` (2026-11-09), through `plates` and `Hide`: 85 plates 30 px wide or more on 27
@@ -108,7 +124,8 @@ plates-yolox-nano-256.onnx
       Labels are under the fixtures dir as rides_plates.txt, never in git. Per frame without `Hide`, the 64 plates newly
       labelled for it, any width: 61 / 63 / 63 covered, all 28 readable ones by all three.
     Limits: only 4 readable plates on the held-out ride, none fully readable; the 28 others come from rides trained on,
-      on other stretches, so not fully clean. No two-line plate among these labels. All labels are judgement by eye.
+      on other stretches, so not fully clean. No two-line plate among these labels (the two-line fine-tune above tests
+      those on still photos). All labels are judgement by eye.
 
 yolo-v9-t-256-license-plates.onnx
   Status: since 2026-11-09 not built into the app or on its About page (plates-yolox-nano-256.onnx replaced it). All

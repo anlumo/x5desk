@@ -275,10 +275,12 @@ const MODELS: [Model; 8] = [
         "license plate detection for the privacy blur (track)",
         "Apache-2.0 (YOLOX)",
         "This project's fine-tune of Megvii-BaseDetection/YOLOX's yolox_nano.pth; Copyright (c) 2021-2022 Megvii Inc.",
-        "The base weights were trained on COCO 2017. The fine-tune added Open Images V7 (images under CC BY 2.0), \
-         UC3M-LP (CC BY 4.0), a Romanian licence plate dataset (MIT) and our own X5 footage, whose boxes were judged \
-         by eye among candidates from several detectors, the earlier YOLOv9-t one (trained with GPL-3.0 code) \
-         included. Details: crates/track/models/README. Check the datasets' terms before any commercial use.",
+        "⚠ The base weights were trained on COCO 2017. The fine-tune added Open Images V7 (images under CC BY 2.0), \
+         UC3M-LP (CC BY 4.0), a Romanian licence plate dataset (MIT), our own X5 footage, whose boxes were judged by \
+         eye among candidates from several detectors, the earlier YOLOv9-t one (trained with GPL-3.0 code) \
+         included, and street photos of a Vietnamese plate dataset on Hugging Face \
+         (hoanglvuit/Vietnam_License_Plate_Segment_Datasets) that states no licence, so its terms are unknown. \
+         Details: crates/track/models/README. Check the datasets' terms before any commercial use.",
         include_str!("../../track/models/LICENSE-yolox"),
     ),
     Model(
