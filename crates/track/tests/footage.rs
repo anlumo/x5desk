@@ -7,7 +7,7 @@
 use glam::{Vec2, Vec3};
 use media::insv::{self, Meta, Trailer};
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -1459,8 +1459,8 @@ fn labels(name: &str) -> Option<Labels> {
 /// Prints per width bin (pixels at 7680) the labelled plates the regions leave uncovered (`covered`), the area of the
 /// regions on labelled frames that hold no labelled plate, and the time per searched frame of the plate pass against
 /// the face pass on the same equirect. Fails if more than 10 % of the labelled plates 30 px wide or more (where
-/// characters start to read) are left uncovered. The labels hold none that wide yet, the widest is 27 px: until they
-/// do this check passes on nothing, and only the printed bins measure anything.
+/// characters start to read) are left uncovered. These labels hold none that wide, the widest is 27 px, so this check
+/// passes on nothing and only the printed bins measure anything: `plates_rides` tests the plates that wide.
 /// macOS: faces through Core ML, `X5_YUNET=burn` for burn's YuNet.
 #[test]
 fn plates() {
@@ -1572,6 +1572,108 @@ fn plates() {
         "{} of {} labelled plates 30 px wide or more uncovered",
         big[1],
         big[0]
+    );
+}
+
+/// Licence plates 30 px wide or more, which the clips of `plates` lack, against plates labelled by eye on bike rides
+/// (`X5_RIDES` = their folder; `rides_plates.txt` in `X5_FIXTURES`, never in git; skipped without either). A line a
+/// plate: clip, frame, direction, width and height in degrees, tier (A all characters legible, B some, C a bar), set
+/// (`held`: a ride the detector never trained on; `ride`: a ride it trained on, away from its training tiles). Searched
+/// as in `plates`, but only within half a second of a labelled frame, as the rides are long. Prints the plates the
+/// regions leave uncovered per set, tier and width; fails if there are no plates, or more than 10 % of all of them or
+/// of the readable ones (A, B) are left uncovered.
+#[test]
+fn plates_rides() {
+    let Some(d) = std::env::var_os("X5_RIDES").map(PathBuf::from) else {
+        eprintln!("X5_RIDES unset: skipped");
+        return;
+    };
+    let Ok(s) = std::fs::read_to_string(fixtures().join("rides_plates.txt")) else {
+        eprintln!("no rides_plates.txt in X5_FIXTURES: skipped");
+        return;
+    };
+    let mut clips = BTreeMap::<&str, Vec<(usize, Region, &str, &str)>>::new();
+    for l in s.lines() {
+        let v: Vec<&str> = l.split_whitespace().collect();
+        let x = |i: usize| v[i].parse::<f32>().unwrap();
+        clips.entry(v[0]).or_default().push((
+            v[1].parse().unwrap(),
+            Region {
+                dir: Vec3::new(x(2), x(3), x(4)).normalize(),
+                size: Vec2::new(x(5), x(6)),
+                score: 1.0,
+            },
+            v[7],
+            v[8],
+        ));
+    }
+    const W: u32 = 7680;
+    let ppd = W as f32 / 360.0;
+    let pmin = std::env::var("X5_PMIN").map_or(0.1, |v| v.parse().unwrap());
+    let g = gpu();
+    let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
+    let mut by = BTreeMap::<String, [usize; 2]>::new();
+    let (mut all, mut read) = ([0; 2], [0; 2]);
+    for (name, ps) in clips {
+        let c = clip(&d, name.to_string().leak());
+        let near = (c.fps / 2.0) as usize;
+        let last = (ps.iter().map(|p| p.0 + near).max().unwrap()).min(c.n - 1);
+        let rig = Rig::sized(&g, &c, 3840, W);
+        let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
+        let mut dec = Dec::sized(&c, last + 1, 3840);
+        let mut h = Hide::new();
+        for k in 0..=last {
+            assert!(dec.next());
+            if k % 3 != 0 || !ps.iter().any(|p| p.0.abs_diff(k) <= near) {
+                continue;
+            }
+            rig.upload(&g, &dec.buf);
+            rig.stitch(&g, &c.poses[k]);
+            let _ = g.dev.poll(wgpu::PollType::wait_indefinitely());
+            h.push(k, ai.plates(&pano, pmin).unwrap());
+        }
+        drop(dec);
+        let reg = h.regions(c.n, c.fps);
+        for (k, x, tier, set) in &ps {
+            let (miss, w) = (!covered(&reg[*k], x) as usize, x.size.x * ppd);
+            let bin = match w {
+                ..50.0 => "30-50 px",
+                ..80.0 => "50-80 px",
+                _ => "80+ px",
+            };
+            for key in [format!("{set} {tier}"), format!("{set} {bin}")] {
+                let e = by.entry(key).or_default();
+                e[0] += 1;
+                e[1] += miss;
+            }
+            all[0] += 1;
+            all[1] += miss;
+            if *tier != "C" {
+                read[0] += 1;
+                read[1] += miss;
+            }
+            if miss == 1 {
+                let [y, p] = yaw_pitch(x.dir);
+                eprintln!(
+                    "  {name} frame {k}: {set} {tier} plate at yaw {y:.1} pitch {p:.1}, {w:.0} px wide, uncovered"
+                );
+            }
+        }
+    }
+    for (k, [n, m]) in &by {
+        eprintln!("{k}: {m} of {n} uncovered");
+    }
+    eprintln!(
+        "all: {} of {} uncovered; readable: {} of {}",
+        all[1], all[0], read[1], read[0]
+    );
+    assert!(
+        all[0] > 0 && all[1] * 10 <= all[0] && read[1] * 10 <= read[0],
+        "{} of {} labelled plates 30 px wide or more uncovered, {} of {} readable ones",
+        all[1],
+        all[0],
+        read[1],
+        read[0]
     );
 }
 

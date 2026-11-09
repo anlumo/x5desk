@@ -102,8 +102,13 @@ plates-yolox-nano-256.onnx
     Tiles where an older model had a box >= 0.5 and >= 40 px and this file none: of 64 viewed, most were right to go
       (bag logos, posters, signs, lights); 8 were real plates on cars behind the main one, 7 of them still covered by
       another tile of the frame, 1 a blown-out patch, unreadable.
-    Limits: only 4 readable plates held out, none fully readable, no two-line plate; the day rides went into training,
-      so no clean daytime test of this file on readable plates. All labels are judgement by eye.
+    tests/footage.rs `plates_rides` (2026-11-09), through `plates` and `Hide`: 83 plates 30 px wide or more on 27
+      segments of the bike rides, labelled without scores, 0 uncovered: 28 on the held-out ride (4 partly readable), 55
+      on the other rides away from the tiles trained on (6 fully, 21 partly readable). Labels are under the fixtures
+      dir as rides_plates.txt, never in git. Per frame without `Hide`, the 62 plates newly labelled for it, any width:
+      59 / 61 / 61 covered, all 27 readable ones by all three.
+    Limits: only 4 readable plates on the held-out ride, none fully readable; the 27 others come from rides trained on,
+      on other stretches, so not fully clean. No two-line plate among these labels. All labels are judgement by eye.
 
 yolo-v9-t-256-license-plates.onnx
   Status: since 2026-11-09 not built into the app or on its About page (plates-yolox-nano-256.onnx replaced it). All
