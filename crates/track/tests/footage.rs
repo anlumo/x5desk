@@ -1575,6 +1575,73 @@ fn plates() {
     );
 }
 
+/// Training crops for the plate detector (`X5_PLATE_DUMP` = output folder; skipped without): the clips named in
+/// `X5_DUMP_CLIPS` (comma-separated, in `X5_SAMPLES`), every `X5_DUMP_EVERY`th frame (default 60) stitched as
+/// `plates` does, each plate crop as the detector sees it (`<clip>_<frame>_<i>.ppm`, RGB) with its candidate boxes of
+/// score ≥ 0.05 in `crops.jsonl` (crop pixels, the crop's direction and tangent extent).
+#[test]
+fn plate_dump() {
+    let (Some(d), Some(out)) = (
+        samples(),
+        std::env::var_os("X5_PLATE_DUMP").map(PathBuf::from),
+    ) else {
+        return;
+    };
+    std::fs::create_dir_all(&out).unwrap();
+    let every: usize = std::env::var("X5_DUMP_EVERY").map_or(60, |v| v.parse().unwrap());
+    let names = std::env::var("X5_DUMP_CLIPS").unwrap();
+    let g = gpu();
+    let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
+    let mut log = std::fs::File::create(out.join("crops.jsonl")).unwrap();
+    for name in names.split(',') {
+        let c = clip(&d, name.to_string().leak());
+        let rig = Rig::sized(&g, &c, 3840, 7680);
+        let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
+        let mut dec = Dec::sized(&c, c.n, 3840);
+        let mut n = 0;
+        for k in 0..c.n {
+            assert!(dec.next());
+            if k % every != 0 {
+                continue;
+            }
+            rig.upload(&g, &dec.buf);
+            rig.stitch(&g, &c.poses[k]);
+            let _ = g.dev.poll(wgpu::PollType::wait_indefinitely());
+            for (i, (cam, bgr, b)) in ai
+                .plate_inputs(&pano, 0.05)
+                .unwrap()
+                .into_iter()
+                .enumerate()
+            {
+                let file = format!("{name}_{k:05}_{i:02}.ppm");
+                let s = ((bgr.len() / 3) as f64).sqrt() as usize;
+                let mut ppm = format!("P6\n{s} {s}\n255\n").into_bytes();
+                ppm.extend(bgr.chunks(3).flat_map(|p| [p[2], p[1], p[0]]));
+                std::fs::write(out.join(&file), ppm).unwrap();
+                let boxes: Vec<String> = (b.iter())
+                    .map(|(b, sc)| {
+                        format!("[{:.1},{:.1},{:.1},{:.1},{sc:.3}]", b[0], b[1], b[2], b[3])
+                    })
+                    .collect();
+                writeln!(
+                    log,
+                    "{{\"file\":\"{file}\",\"clip\":\"{name}\",\"frame\":{k},\"dir\":[{:.5},{:.5},{:.5}],\"ext\":[{:.5},{:.5}],\
+                     \"boxes\":[{}]}}",
+                    cam.f.x,
+                    cam.f.y,
+                    cam.f.z,
+                    cam.ext.x,
+                    cam.ext.y,
+                    boxes.join(",")
+                )
+                .unwrap();
+                n += 1;
+            }
+        }
+        eprintln!("{name}: {n} crops");
+    }
+}
+
 /// Highlights and auto edit on the sample clips (`X5_HIGH`, default all three): every 10th frame the detector over
 /// `sphere()` (auto framing and people), faces and a thumbnail (visual change); camera motion from the gyro, audio
 /// from the AAC track. Prints the signals of each pick, checks the timeline with crate edit (`Timeline::check`, a

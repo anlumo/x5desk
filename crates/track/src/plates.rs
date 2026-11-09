@@ -139,4 +139,39 @@ impl Ai {
         let v = self.detect(p, &sphere(), VMIN);
         self.plates_on(p, &plate_crops(&v), min)
     }
+
+    /// The crops `plates` searches on `p` as the detector sees them (`PS`² pixels, BGR, row-major), each with its
+    /// boxes of score ≥ `min` in crop pixels after per-crop suppression. Tooling: training crops from the footage.
+    pub fn plate_inputs(
+        &mut self,
+        p: &Pano,
+        min: f32,
+    ) -> Result<Vec<(Cam, Vec<u8>, Vec<([f32; 4], f32)>)>, String> {
+        let crops = plate_crops(&self.detect(p, &sphere(), VMIN));
+        let n = self.plate_nets()?;
+        let s = PS as usize;
+        let a = (s / 8).pow(2) + (s / 16).pow(2) + (s / 32).pow(2);
+        let mut out = vec![];
+        for ch in crops.chunks(MAX) {
+            let jobs: Vec<Job> = (ch.iter().enumerate())
+                .map(|(i, c)| Job::new(c, [PS; 2], i * 3 * s * s, &NORM, p.w))
+                .collect();
+            let _ = self.crop(&n.pc, p, &jobs, &n.pi);
+            let x = n.pi.t.clone().narrow(0, 0, ch.len());
+            let (px, v) = (read(x.clone()), read(n.net.forward(x)));
+            for (i, cam) in ch.iter().enumerate() {
+                let im = &px[i * 3 * s * s..][..3 * s * s];
+                let bgr = (0..s * s).flat_map(|k| {
+                    (0..3).map(move |c| im[c * s * s + k].round().clamp(0.0, 255.0) as u8)
+                });
+                out.push((
+                    *cam,
+                    bgr.collect(),
+                    nms(boxes(&v[i * 6 * a..][..6 * a], s, min), 0.45),
+                ));
+            }
+        }
+        self.pl = Some(n);
+        Ok(out)
+    }
 }
