@@ -34,7 +34,7 @@ comparison page <https://claude.ai/artifact/WzKEEXqGvqmLj1ojXMq9p8>). Their figu
 Training and evaluation tools in `target/plates-train` (`PLAN.md` there). Held out for good: the 2026-03-04 night
 ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627.
 
-- [x] **`Hide`'s timing** (uncommitted in `plates-wt`). Most "wrong blur" flags weren't detector mistakes: a plate passed within
+- [x] **`Hide`'s timing** (c856743). Most "wrong blur" flags weren't detector mistakes: a plate passed within
   metres sweeps about 4° a searched frame, beyond the linking reach, so each detection became a track of its own,
   held still for 0.25 s on both sides (a row of blurs beside the plate, 722 frame 2829). Fixed in `privacy.rs`
   (`SWEEP` 30°/s for a track's second detection within `SOON` 0.25 s, `CARRY` 0.15 s, `BRIDGE` 0.5 s; plates only).
