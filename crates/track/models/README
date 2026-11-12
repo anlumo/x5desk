@@ -94,6 +94,19 @@ plates-yolox-nano-256.onnx
            (Vietnam; plate polygons, one-line and square two-line plates), repeated 5 times. **That dataset states no
            licence**, so its terms are unknown; the user chose to ship on 2026-11-09. Crops holding a confident box off
            the labelled plates were left out, as possibly unlabelled plates. The set's other half stays a test.
+  When it is hidden (2026-11-11; src/privacy.rs `SWEEP`, `SOON`, `CARRY`, `BRIDGE`): most of what the user still flagged
+  was timing, not the model. A plate passed within metres moves past the linking reach between searched frames, so each
+  detection was a track of its own, held still for 0.25 s on both sides: a row of blurs beside the plate. Now a plate
+  track of one detection takes its second up to 30 degrees a second farther off if it comes within 0.25 s (over longer
+  gaps that joined stray detections to unrelated plates); plate tracks are carried 0.15 s past their ends (was 0.25)
+  and bridged across gaps of 0.5 s at most (was 1). Checked in two more galleries of the views this moved; blurs over
+  a plate hidden for a few frames are wanted (the user).
+    tests/footage.rs `plates_flags` before / after: regions without a plate still blurred 89 / 71 of 1,003; plates 30
+      px wide or more still blurred 266 / 265 of 280; marked plates uncovered 0 / 0. `plates_rides`: 2 of 85 uncovered
+      (was 4), both unreadable (32, 49 px), of the 32 readable ones none. `plates`: unchanged. On the galleries' flags
+      (scripts/rule_eval.py): blurs on nothing 23 / 14, on plates too small to read 26 / 19, plates covered 239 / 241.
+    Limits: the carry runs on past a car that turns its plate away, and back from a plate coming out from behind
+      something onto what was in front of it. Faces keep the old timing.
   What is hidden (2026-11-10; src/privacy.rs `Hide::plates`, src/plates.rs `sure`): not every detection. The user flagged
   by eye what the export blurred at score 0.1 on 177 frames of 43 clips (1,414 views): of 1,756 regions 1,003 held no
   plate (ground, fences, car parts, anything rectangular), and most of the others a plate far too small to read. Now a

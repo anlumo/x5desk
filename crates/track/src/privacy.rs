@@ -233,6 +233,20 @@ const MARGIN: f32 = 1.0;
 /// weakly throughout, is ground or a fence, or a plate too small to read).
 const REACH: f32 = 2.0;
 const TWICE: usize = 2;
+/// Plates, over time: a track of one detection has no motion to predict, so its second may lie this many degrees a
+/// second farther off if within `SOON` s (a plate passed within metres sweeps 4° a searched frame, beyond `REACH` of a
+/// 1.2° plate: each detection was a track of its own, held still over `PAD` on both sides, a row of blurs beside the
+/// plate; over longer gaps the reach joined a stray detection to a plate 0.3 to 0.8 s away, blurring the path between
+/// them); a track is carried `CARRY` s past its ends and bridged across gaps of `BRIDGE` s at most (beyond, the
+/// straight path between two detections leaves a passing plate). Against the first two galleries' flags
+/// (scripts/rule_eval.py), at the frames shown: blurs on nothing 23 to 14, on plates too small to read 26 to 19, plates
+/// covered 239 to 241, marked missed plates uncovered 8 to 7, every plate of the second gallery still covered (without
+/// the 30 px gate: 60 to 36, 81 to 67); the third gallery's (the views `SWEEP` without `SOON` changed): of its 14 blurs
+/// flagged, 10 left, none lost of the 74 left unflagged.
+const SWEEP: f32 = 30.0;
+const SOON: f32 = 0.25;
+const CARRY: f32 = 0.15;
+const BRIDGE: f32 = 0.5;
 
 /// Privacy regions of a clip: detections per frame (every frame, or every few: the tracks bridge them), linked over
 /// frames; faces and plates each in a `Hide` of their own. Directions are in the frame of the equirect they were found
@@ -262,9 +276,14 @@ impl Hide {
 
     /// Tracks: each detection joins the nearest track whose last detection is at most `GAP` old and
     /// within reach of where its last motion puts it (its size, `REACH` times for plates, at least 2°, more by the time
-    /// since), the best scores first; of plates, the tracks with `TWICE` sure detections.
+    /// since; plates: `SWEEP` more from a track of one detection, within `SOON` s), the best scores first; of plates,
+    /// the tracks with `TWICE` sure detections.
     pub fn tracks(&self, fps: f32) -> Vec<Vec<(usize, Region)>> {
-        let reach = if self.w > 0 { REACH } else { 1.0 };
+        let (reach, sweep) = if self.w > 0 {
+            (REACH, SWEEP)
+        } else {
+            (1.0, 0.0)
+        };
         let mut tl: Vec<Vec<(usize, Region)>> = vec![];
         for (k, ds) in &self.keys {
             let mut ds = ds.clone();
@@ -284,7 +303,12 @@ impl Hide {
                             .angle_between(d.dir)
                             .to_degrees()
                             / (1.0 + g);
-                        let r = (d.size.max_element() * reach).max(2.0);
+                        let r = (d.size.max_element() * reach).max(2.0)
+                            + if t.len() == 1 && g <= SOON {
+                                sweep * g
+                            } else {
+                                0.0
+                            };
                         (a <= r).then_some((j, a))
                     })
                     .min_by(|a, b| a.1.total_cmp(&b.1));
@@ -306,17 +330,27 @@ impl Hide {
 
     /// The regions to hide in each of `n` frames: every track, interpolated between its detections (direction along
     /// the great circle, size linearly), carried on `PAD` s before its first and after its last at the speed over its
-    /// first and its last `PAD` s or more, grown by `GROW` and `MARGIN`.
+    /// first and its last `PAD` s or more, grown by `GROW` and `MARGIN` (plates: `CARRY` s, and a gap over `BRIDGE` s
+    /// ends one stretch and starts the next).
     pub fn regions(&self, n: usize, fps: f32) -> Vec<Vec<Region>> {
         let mut out = vec![vec![]; n];
-        let pad = (PAD * fps).ceil() as usize;
+        let (pad, bridge) = if self.w > 0 {
+            (CARRY, BRIDGE)
+        } else {
+            (PAD, GAP)
+        };
+        let pad = (pad * fps).ceil() as usize;
         let r = |a: usize, b: usize| a.min(n)..b.min(n);
         let g = |dir, r: Region| Region {
             dir,
             size: r.size * GROW + MARGIN,
             score: r.score,
         };
-        for t in self.tracks(fps) {
+        let tl = self.tracks(fps);
+        for t in tl
+            .iter()
+            .flat_map(|t| t.chunk_by(|a, b| (b.0 - a.0) as f32 / fps <= bridge))
+        {
             let (f0, f1, e) = (t[0].0, t[t.len() - 1].0, t.len() - 1);
             // the speed over at least the pad where the track is that long: between neighbouring detections, one
             // box's jitter (a head turning away grows it to one side) would swing it
