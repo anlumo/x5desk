@@ -42,9 +42,9 @@ const CANCELLED: &str = "cancelled";
 const MIN: f32 = 0.5;
 const STEP: usize = 3;
 const FACES_W: u32 = 3072;
-/// Plate detection: the plate detector's score, on an equirect this wide (the lenses' own resolution: a plate is a few
-/// pixels wide), faces then on it too.
-pub(crate) const PMIN: f32 = 0.1;
+/// Plate detection: the plate detector's score (what carries a track on; `Hide::plates` hides the tracks it is sure
+/// of), on an equirect this wide (the lenses' own resolution: a plate is a few pixels wide), faces then on it too.
+const PMIN: f32 = 0.1;
 pub(crate) const PLATES_W: u32 = 7680;
 
 /// What a job is made from: the player's or the library's file and how it shows it.
@@ -1369,8 +1369,12 @@ impl Keep {
         let k1 = c.times.partition_point(|&x| x < b - 1e-3).max(k0 + 1) - 1;
         let ks: Vec<usize> = (k0..=k1).step_by(STEP).collect();
         let (it, n, tiles) = (&t.it, ks.len(), track::face_tiles());
-        let (mut hide, mut pano, mut i, mut found) =
-            ([track::Hide::new(), track::Hide::new()], None, 0, [0; 2]);
+        let (mut hide, mut pano, mut i, mut found) = (
+            [track::Hide::new(), track::Hide::plates(PLATES_W)],
+            None,
+            0,
+            [0; 2],
+        );
         it.set(St::Privacy(0, n, what));
         crate::ai::MODELS.with(g, false, Some(ctx), |ai| {
             // shotlab decodes and submits each stitch on this thread between the calls: a surface configure the UI
@@ -1500,7 +1504,7 @@ impl Keep {
                     };
                     let nf = r.len();
                     if x.plates {
-                        r.extend(ai.plates(&p, PMIN)?);
+                        r.extend(ai.plates_still(&p)?);
                     }
                     Ok((r, nf))
                 })?

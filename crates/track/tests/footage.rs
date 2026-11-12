@@ -17,7 +17,7 @@ use std::{
 use stitch::{Calib, Ctx, Frame, Pose, Preview, Src, Stitcher, View};
 use track::{
     Ai, Blur, Cam, Emb, Framer, Gallery, Hide, LOW, Region, Sample, Scorer, Seen, Sig, State,
-    Subject, Tracker, face_tiles, iou, sim, sphere, yaw_pitch,
+    Subject, Tracker, VEHICLES, face_tiles, iou, plate_crops, sim, sphere, yaw_pitch,
 };
 
 /// Lens texture side the streams are scaled to, equirect for the networks, output view.
@@ -1502,7 +1502,7 @@ fn plates() {
         let rig = Rig::sized(&g, &c, 3840, W);
         let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
         let mut dec = Dec::sized(&c, c.n, 3840);
-        let (mut h, mut tp, mut tf, mut found) = (Hide::new(), vec![], vec![], 0);
+        let (mut h, mut tp, mut tf, mut found) = (Hide::plates(W), vec![], vec![], 0);
         for k in 0..c.n {
             assert!(dec.next());
             if k % 3 != 0 {
@@ -1621,7 +1621,7 @@ fn plates_rides() {
         let rig = Rig::sized(&g, &c, 3840, W);
         let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
         let mut dec = Dec::sized(&c, last + 1, 3840);
-        let mut h = Hide::new();
+        let mut h = Hide::plates(W);
         for k in 0..=last {
             assert!(dec.next());
             if k % 3 != 0 || !ps.iter().any(|p| p.0.abs_diff(k) <= near) {
@@ -1677,33 +1677,277 @@ fn plates_rides() {
     );
 }
 
+/// The plate regions against flags set by eye on 43 clips (`flags_dets.txt`, `flags_regions.txt`, `flags_marks.txt` in
+/// `X5_FIXTURES`, from plates-train's scripts/flags_fx.py, never in git; skipped without): `plate_views`' detections
+/// (score ≥ 0.1, every 3rd frame within half a second of a flagged frame) linked again as the export does; the regions
+/// the export blurred when flagged (a line each: clip, frame, direction, width in degrees, 1 if it held no plate), still
+/// blurred where a region's centre lies within 0.4 of their width; the readable plates marked as missed (clip, frame,
+/// direction, width and height). No GPU. Fails if more than 10 % of the regions without a plate are still blurred,
+/// fewer than 90 % of the others 30 px wide or more (at 7680; their box, without `Hide`'s growth of 1.5 and 1°) are, or a
+/// marked plate is uncovered.
+#[test]
+fn plates_flags() {
+    let fx = |f: &str| std::fs::read_to_string(fixtures().join(f));
+    let (Ok(d), Ok(r), Ok(m)) = (
+        fx("flags_dets.txt"),
+        fx("flags_regions.txt"),
+        fx("flags_marks.txt"),
+    ) else {
+        eprintln!("no flags_*.txt in X5_FIXTURES: skipped");
+        return;
+    };
+    const W: u32 = 7680;
+    let rows = |s: &'static str| s.lines().map(|l| l.split_whitespace().collect::<Vec<_>>());
+    let (d, r, m) = (rows(d.leak()), rows(r.leak()), rows(m.leak()));
+    let num = |v: &str| v.parse::<f32>().unwrap();
+    let at = |v: &[&str], i: usize| Vec3::new(num(v[i]), num(v[i + 1]), num(v[i + 2])).normalize();
+    let mut clips = BTreeMap::<&str, (f32, BTreeMap<usize, Vec<Region>>)>::new();
+    for v in d {
+        let c = clips.entry(v[0]).or_insert((num(v[1]), BTreeMap::new()));
+        c.1.entry(v[2].parse().unwrap()).or_default().push(Region {
+            dir: at(&v, 3),
+            size: Vec2::new(num(v[6]), num(v[7])),
+            score: num(v[8]),
+        });
+    }
+    let reg: BTreeMap<&str, Vec<Vec<Region>>> = (clips.into_iter())
+        .map(|(name, (fps, ks))| {
+            let (n, mut h) = (ks.keys().last().unwrap() + fps as usize, Hide::plates(W));
+            ks.into_iter().for_each(|(k, d)| h.push(k, d));
+            (name, h.regions(n, fps))
+        })
+        .collect();
+    let (mut wrong, mut big) = ([0; 2], [0; 2]);
+    for v in r {
+        let (k, p, w): (usize, _, _) = (v[1].parse().unwrap(), at(&v, 2), num(v[5]));
+        let on = (reg[v[0]][k].iter())
+            .any(|x| x.dir.angle_between(p).to_degrees() <= (0.4 * w).max(0.5));
+        let e = match v[6] {
+            "1" => &mut wrong,
+            _ if (w - 1.0) / 1.5 * W as f32 / 360.0 >= 30.0 => &mut big,
+            _ => continue,
+        };
+        e[0] += 1;
+        e[1] += on as usize;
+    }
+    let mut missed = 0;
+    for v in m {
+        let (k, x): (usize, _) = (
+            v[1].parse().unwrap(),
+            Region {
+                dir: at(&v, 2),
+                size: Vec2::new(num(v[5]), num(v[6])),
+                score: 1.0,
+            },
+        );
+        if !covered(&reg[v[0]][k], &x) {
+            missed += 1;
+            eprintln!("  {} frame {k}: marked plate uncovered", v[0]);
+        }
+    }
+    eprintln!(
+        "regions without a plate still blurred: {} of {}; plates 30 px wide or more still blurred: {} of {}; marked \
+         plates uncovered: {missed}",
+        wrong[1], wrong[0], big[1], big[0]
+    );
+    assert!(wrong[1] * 10 <= wrong[0] && big[1] * 10 >= big[0] * 9 && missed == 0);
+}
+
+/// Views to flag plates in by hand, the plates no detector proposes among them (`X5_VIEWS` = output folder,
+/// `X5_VIEWS_LIST` = a file of lines `<footage dir> <clip> <frame>`; skipped without either): per listed frame 8 views
+/// around the horizon (60° wide, 16:9, pitch −8°, yaw −180° to 135° every 45°) from the lenses, as
+/// `<clip>_<frame>_<yaw>.png`, and per view in `views.jsonl` the regions the export would blur there (plates searched
+/// on every 3rd frame within half a second, score ≥ 0.1 as the export, linked by `Hide`): each as its direction and
+/// size, and as outline points 0..1 of the view (y down). Views already there are kept. For telling the wrong regions
+/// from the right ones: `dets.txt`, a line per plate detection (clip, frame rate, frame, direction, width and height in
+/// degrees, score: `plates_flags`' `flags_dets.txt`), and `vehicles.jsonl`, the vehicles of each searched frame
+/// (direction, size, class, score).
+#[test]
+fn plate_views() {
+    let (Some(out), Some(list)) = (
+        std::env::var_os("X5_VIEWS").map(PathBuf::from),
+        std::env::var_os("X5_VIEWS_LIST"),
+    ) else {
+        eprintln!("X5_VIEWS or X5_VIEWS_LIST unset: skipped");
+        return;
+    };
+    std::fs::create_dir_all(&out).unwrap();
+    let s = std::fs::read_to_string(list).unwrap();
+    let mut clips = BTreeMap::<(&str, &str), BTreeSet<usize>>::new();
+    for l in s.lines() {
+        let v: Vec<&str> = l.split_whitespace().collect();
+        clips
+            .entry((v[0], v[1]))
+            .or_default()
+            .insert(v[2].parse().unwrap());
+    }
+    const W: u32 = 7680;
+    const PITCH: f32 = -8.0;
+    const FOV: f32 = 60.0;
+    let yaws = (0..8).map(|i| -180.0 + 45.0 * i as f32);
+    let g = gpu();
+    let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
+    let [mut log, mut det, mut veh] = ["views.jsonl", "dets.txt", "vehicles.jsonl"]
+        .map(|f| std::fs::File::create(out.join(f)).unwrap());
+    for ((dir, name), ks) in clips {
+        let c = clip(Path::new(dir), name.to_string().leak());
+        let near = (c.fps / 2.0) as usize;
+        let last = (ks.last().unwrap() + near).min(c.n - 1);
+        let rig = Rig::sized(&g, &c, 3840, W);
+        let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
+        let mut dec = Dec::sized(&c, last + 1, 3840);
+        let mut h = Hide::plates(W);
+        for k in 0..=last {
+            assert!(dec.next());
+            let (search, show) = (
+                k % 3 == 0 && ks.iter().any(|&f| f.abs_diff(k) <= near),
+                ks.contains(&k),
+            );
+            if !search && !show {
+                continue;
+            }
+            rig.upload(&g, &dec.buf);
+            if search {
+                rig.stitch(&g, &c.poses[k]);
+                let _ = g.dev.poll(wgpu::PollType::wait_indefinitely());
+                // `Ai::plates` in its two steps, for the vehicles (0.1: its `VMIN`)
+                let v = ai.detect(&pano, &sphere(), 0.1);
+                let vs: Vec<String> = (v.iter().filter(|d| VEHICLES.contains(&d.cls)))
+                    .map(|d| {
+                        let (p, s) = d.on();
+                        format!(
+                            "[{:.5},{:.5},{:.5},{:.3},{:.3},{},{:.3}]",
+                            p.x, p.y, p.z, s.x, s.y, d.cls, d.score
+                        )
+                    })
+                    .collect();
+                writeln!(
+                    veh,
+                    "{{\"clip\":\"{name}\",\"frame\":{k},\"v\":[{}]}}",
+                    vs.join(",")
+                )
+                .unwrap();
+                let r = ai.plates_on(&pano, &plate_crops(&v), 0.1).unwrap();
+                for x in &r {
+                    let (p, s) = x.on();
+                    writeln!(
+                        det,
+                        "{name} {:.5} {k} {:.5} {:.5} {:.5} {:.3} {:.3} {:.3}",
+                        c.fps, p.x, p.y, p.z, s.x, s.y, x.score
+                    )
+                    .unwrap();
+                }
+                h.push(k, r);
+            }
+            if show {
+                for yaw in yaws.clone() {
+                    let f = out.join(format!("{name}_{k:05}_{yaw:.0}.png"));
+                    if f.exists() {
+                        continue;
+                    }
+                    let v = View {
+                        yaw,
+                        pitch: PITCH,
+                        fov: FOV,
+                        ..Default::default()
+                    };
+                    png(&f, &rig.view(&g, &c.poses[k], &v), VW, VH);
+                }
+            }
+        }
+        drop(dec);
+        let reg = h.regions(c.n, c.fps);
+        for &k in &ks {
+            for yaw in yaws.clone() {
+                let cam = Cam::view(yaw, PITCH, 0.0, FOV, VW as f32 / VH as f32);
+                let rs: Vec<String> = (reg[k].iter())
+                    .filter_map(|r| {
+                        let t = (r.size / 2.0).to_array().map(|a| a.to_radians().tan());
+                        let e = Cam::new(r.dir, Vec3::Z, Vec2::new(t[0], t[1]));
+                        let p: Vec<Vec2> = (0..48)
+                            .filter_map(|i| {
+                                let a = i as f32 * std::f32::consts::TAU / 48.0;
+                                cam.px(e.ray(Vec2::from_angle(a)))
+                            })
+                            .map(|p| (p + 1.0) / 2.0)
+                            .collect();
+                        let seen = p.iter().any(|q| q.cmpge(Vec2::ZERO).all() && q.cmple(Vec2::ONE).all());
+                        seen.then(|| {
+                            let pts: Vec<String> =
+                                p.iter().map(|q| format!("[{:.4},{:.4}]", q.x, q.y)).collect();
+                            format!(
+                                "{{\"dir\":[{:.5},{:.5},{:.5}],\"size\":[{:.3},{:.3}],\"pts\":[{}]}}",
+                                r.dir.x,
+                                r.dir.y,
+                                r.dir.z,
+                                r.size.x,
+                                r.size.y,
+                                pts.join(",")
+                            )
+                        })
+                    })
+                    .collect();
+                writeln!(
+                    log,
+                    "{{\"file\":\"{name}_{k:05}_{yaw:.0}.png\",\"dir\":\"{dir}\",\"clip\":\"{name}\",\"frame\":{k},\"yaw\":{yaw},\
+                     \"pitch\":{PITCH},\"fov\":{FOV},\"regions\":[{}]}}",
+                    rs.join(",")
+                )
+                .unwrap();
+            }
+        }
+        eprintln!("{name}: {} frames", ks.len());
+    }
+}
+
 /// Training crops for the plate detector (`X5_PLATE_DUMP` = output folder; skipped without): the clips named in
 /// `X5_DUMP_CLIPS` (comma-separated, in `X5_SAMPLES`), every `X5_DUMP_EVERY`th frame (default 60) stitched as
 /// `plates` does, each plate crop as the detector sees it (`<clip>_<frame>_<i>.ppm`, RGB) with its candidate boxes of
-/// score ≥ 0.05 in `crops.jsonl` (crop pixels, the crop's direction and tangent extent).
+/// score ≥ 0.05 in `crops.jsonl` (crop pixels, the crop's direction and tangent extent). With `X5_DUMP_LIST`
+/// (`plate_views`' list) instead: the frames that test searches around the listed ones.
 #[test]
 fn plate_dump() {
-    let (Some(d), Some(out)) = (
-        samples(),
-        std::env::var_os("X5_PLATE_DUMP").map(PathBuf::from),
-    ) else {
+    let Some(out) = std::env::var_os("X5_PLATE_DUMP").map(PathBuf::from) else {
         return;
     };
     std::fs::create_dir_all(&out).unwrap();
     let every: usize = std::env::var("X5_DUMP_EVERY").map_or(60, |v| v.parse().unwrap());
-    let names = std::env::var("X5_DUMP_CLIPS").unwrap();
+    let names = std::env::var("X5_DUMP_CLIPS").unwrap_or_default();
+    let list = std::env::var_os("X5_DUMP_LIST").map(|l| std::fs::read_to_string(l).unwrap());
+    // the frames listed of each clip: none = every `every`th
+    let mut clips = BTreeMap::<(PathBuf, &str), BTreeSet<usize>>::new();
+    match &list {
+        Some(s) => {
+            for l in s.lines() {
+                let v: Vec<&str> = l.split_whitespace().collect();
+                clips
+                    .entry((v[0].into(), v[1]))
+                    .or_default()
+                    .insert(v[2].parse().unwrap());
+            }
+        }
+        None => {
+            let d = samples().unwrap();
+            clips.extend(names.split(',').map(|n| ((d.clone(), n), BTreeSet::new())));
+        }
+    }
     let g = gpu();
     let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
     let mut log = std::fs::File::create(out.join("crops.jsonl")).unwrap();
-    for name in names.split(',') {
-        let c = clip(&d, name.to_string().leak());
+    for ((d, name), ks) in &clips {
+        let c = clip(d, name.to_string().leak());
+        let near = (c.fps / 2.0) as usize;
+        let last = (ks.last()).map_or(c.n - 1, |k| (k + near).min(c.n - 1));
         let rig = Rig::sized(&g, &c, 3840, 7680);
         let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
-        let mut dec = Dec::sized(&c, c.n, 3840);
+        let mut dec = Dec::sized(&c, last + 1, 3840);
         let mut n = 0;
-        for k in 0..c.n {
+        for k in 0..=last {
             assert!(dec.next());
-            if k % every != 0 {
+            if match ks.is_empty() {
+                true => k % every != 0,
+                false => k % 3 != 0 || ks.iter().all(|&f| f.abs_diff(k) > near),
+            } {
                 continue;
             }
             rig.upload(&g, &dec.buf);

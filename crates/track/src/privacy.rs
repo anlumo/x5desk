@@ -3,7 +3,7 @@
 //! face the detector misses for a few frames stays hidden; [`crate::Blur`] blurs the regions in the equirect. Licence
 //! plates take the same path (`plates`).
 
-use crate::{Ai, Cam, Crops, In, Job, Norm, Pano, det::px_iou, iou, read};
+use crate::{Ai, Cam, Crops, In, Job, Norm, Pano, det::px_iou, iou, plates::sure, read};
 use burn::tensor::Tensor;
 use glam::{Quat, Vec2, Vec3};
 use std::time::Instant;
@@ -227,6 +227,12 @@ const PAD: f32 = 0.25;
 /// camera.
 const GROW: f32 = 1.5;
 const MARGIN: f32 = 1.0;
+/// Plates: a detection reaches this many times its size for its track (a plate is small against its car's motion: one
+/// 2.5° wide passing at 4° a searched frame fell into a track a detection, each padded where the plate was not), and a
+/// track is hidden with this many `sure` detections only (a plate is found again and again; what is found once, or
+/// weakly throughout, is ground or a fence, or a plate too small to read).
+const REACH: f32 = 2.0;
+const TWICE: usize = 2;
 
 /// Privacy regions of a clip: detections per frame (every frame, or every few: the tracks bridge them), linked over
 /// frames; faces and plates each in a `Hide` of their own. Directions are in the frame of the equirect they were found
@@ -235,11 +241,18 @@ const MARGIN: f32 = 1.0;
 #[derive(Default)]
 pub struct Hide {
     keys: Vec<(usize, Vec<Region>)>,
+    /// Plates: the width of the pano they were found on (faces: 0).
+    w: u32,
 }
 
 impl Hide {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// For plates found on a pano `w` pixels wide (`REACH`, `TWICE`).
+    pub fn plates(w: u32) -> Self {
+        Self { keys: vec![], w }
     }
 
     /// The faces (or plates) of frame `k`, in frame order.
@@ -248,9 +261,10 @@ impl Hide {
     }
 
     /// Tracks: each detection joins the nearest track whose last detection is at most `GAP` old and
-    /// within reach of where its last motion puts it (its size, at least 2°, more by the time since), the best scores
-    /// first.
+    /// within reach of where its last motion puts it (its size, `REACH` times for plates, at least 2°, more by the time
+    /// since), the best scores first; of plates, the tracks with `TWICE` sure detections.
     pub fn tracks(&self, fps: f32) -> Vec<Vec<(usize, Region)>> {
+        let reach = if self.w > 0 { REACH } else { 1.0 };
         let mut tl: Vec<Vec<(usize, Region)>> = vec![];
         for (k, ds) in &self.keys {
             let mut ds = ds.clone();
@@ -264,14 +278,15 @@ impl Hide {
                         let l = t[t.len() - 1].0;
                         !used[*j] && (*k - l) as f32 / fps <= GAP
                     })
-                    .map(|(j, t)| {
+                    .filter_map(|(j, t)| {
                         let g = (*k - t[t.len() - 1].0) as f32 / fps;
                         let a = at(t[t.len() - 1], t.iter().nth_back(1), *k)
                             .angle_between(d.dir)
-                            .to_degrees();
-                        (j, a / (1.0 + g))
+                            .to_degrees()
+                            / (1.0 + g);
+                        let r = (d.size.max_element() * reach).max(2.0);
+                        (a <= r).then_some((j, a))
                     })
-                    .filter(|&(_, a)| a <= d.size.max_element().max(2.0))
                     .min_by(|a, b| a.1.total_cmp(&b.1));
                 match best {
                     Some((j, _)) => {
@@ -285,6 +300,7 @@ impl Hide {
                 }
             }
         }
+        tl.retain(|t| self.w == 0 || t.iter().filter(|d| sure(&d.1, self.w)).count() >= TWICE);
         tl
     }
 

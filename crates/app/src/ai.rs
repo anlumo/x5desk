@@ -555,7 +555,7 @@ pub fn privacy(
                 };
                 let n = r.len();
                 if pl {
-                    r.extend(ai.plates(&p, crate::export::PMIN)?);
+                    r.extend(ai.plates_still(&p)?);
                 }
                 out = (r, n);
                 Ok(())

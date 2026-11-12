@@ -40,6 +40,16 @@ pub(crate) const GROW: f32 = 1.3;
 pub(crate) const FMIN: f32 = 8.0;
 pub(crate) const FMAX: f32 = 90.0;
 pub(crate) const CMAX: usize = 32;
+/// A plate to hide by itself: the detector is sure of it and it is wide enough to be read. Under the score lie fences,
+/// patches of ground, anything rectangular: at 0.1 alone, 57 % of the regions blurred on 43 clips held no plate (flagged
+/// by eye, tests/footage.rs `plates_flags`). The width is in pixels of the pano it was found on: of the plates labelled
+/// on rides none under 30 px is legible even in part (`plates_rides`).
+pub(crate) const SURE: f32 = 0.5;
+pub(crate) const WIDE: f32 = 30.0;
+
+pub(crate) fn sure(d: &Region, w: u32) -> bool {
+    d.score >= SURE && d.size.x * w as f32 / 360.0 >= WIDE
+}
 
 /// The crops around vehicles `v` (YOLOX detections; other classes left out): square, upright, centred on each, one per
 /// object (a van found as car and truck is one).
@@ -138,6 +148,14 @@ impl Ai {
     pub fn plates(&mut self, p: &Pano, min: f32) -> Result<Vec<Region>, String> {
         let v = self.detect(p, &sphere(), VMIN);
         self.plates_on(p, &plate_crops(&v), min)
+    }
+
+    /// The plates to hide on a frame by itself (a photo): the `sure` ones. A clip's go through `Hide::plates`, where
+    /// weaker ones carry a track on.
+    pub fn plates_still(&mut self, p: &Pano) -> Result<Vec<Region>, String> {
+        let mut r = self.plates(p, SURE)?;
+        r.retain(|d| sure(d, p.w));
+        Ok(r)
     }
 
     /// The crops `plates` searches on `p` as the detector sees them (`PS`² pixels, BGR, row-major), each with its

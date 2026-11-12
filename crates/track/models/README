@@ -94,6 +94,21 @@ plates-yolox-nano-256.onnx
            (Vietnam; plate polygons, one-line and square two-line plates), repeated 5 times. **That dataset states no
            licence**, so its terms are unknown; the user chose to ship on 2026-11-09. Crops holding a confident box off
            the labelled plates were left out, as possibly unlabelled plates. The set's other half stays a test.
+  What is hidden (2026-11-10; src/privacy.rs `Hide::plates`, src/plates.rs `sure`): not every detection. The user flagged
+  by eye what the export blurred at score 0.1 on 177 frames of 43 clips (1,414 views): of 1,756 regions 1,003 held no
+  plate (ground, fences, car parts, anything rectangular), and most of the others a plate far too small to read. Now a
+  track of detections is hidden only when two of them are sure: score >= 0.5 and 30 px wide or more on the pano
+  searched (of the plates labelled for `plates_rides` none under 30 px is legible even in part). Weaker detections
+  (>= 0.1, export.rs PMIN) still carry such a track on, and a detection reaches twice its size for its track, so that a
+  plate passing fast stays one track. A frame by itself (a photo, the preview) hides its sure detections alone.
+    tests/footage.rs `plates_flags` (the flags as fixtures flags_*.txt, never in git), before / after: regions without
+      a plate still blurred 1,002 / 89 of 1,003; plates 30 px wide or more still blurred 280 / 266 of 280; of the 2
+      plates the user marked as missed, uncovered 2 / 0. `plates_rides`: 4 of 85 uncovered, all unreadable (32 to 49
+      px); of the 32 readable ones none. `plates` (its plates are all under 30 px): nothing hidden any more.
+    Limits: score, width and count were chosen on the flags that test them. The 89 left are detections the model is
+      sure of again and again (bumpers, tail lights, wheel arches, lettering), some of them beside a real plate. A
+      third marked plate stays missed and out of the fixture (clip ..692 frame 56): a car passing within metres, lost
+      by the vehicle detector for some frames, so that no crop holds its plate. No flags for photos.
   Two-line fine-tune, chosen 2026-11-09 at score 0.1 (this file). Rides fine-tune (sha256 4408c8e9...) / this file:
     Held-out half of the Vietnamese street photos (450 photos; split in runs of 25 neighbouring photos, the ends of each
       training run dropped, hashes checked), two-line plates inside a vehicle crop with no box centred on them, of 668:
