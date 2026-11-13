@@ -1683,11 +1683,11 @@ fn plates_rides() {
 /// The plate regions against flags set by eye on 43 clips (`flags_dets.txt`, `flags_regions.txt`, `flags_marks.txt` in
 /// `X5_FIXTURES`, from plates-train's scripts/flags_fx.py, never in git; skipped without): `plate_views`' detections
 /// (score ≥ 0.1, every 3rd frame within half a second of a flagged frame) linked again as the export does; the regions
-/// the export blurred when flagged (a line each: clip, frame, direction, width in degrees, 1 if it held no plate), still
-/// blurred where a region's centre lies within 0.4 of their width; the readable plates marked as missed (clip, frame,
-/// direction, width and height). No GPU. Fails if more than 10 % of the regions without a plate are still blurred,
-/// fewer than 90 % of the others 30 px wide or more (at 7680; their box, without `Hide`'s growth of 1.5 and 1°) are, or a
-/// marked plate is uncovered.
+/// the export blurred in two galleries (a line each: clip, frame, direction, width in degrees, 1 if flagged as holding
+/// no plate in every view showing it whole, 0 if in none; the rest left out), still blurred where a region's centre
+/// lies within 0.4 of their width; the readable plates marked as missed (clip, frame, direction, width and height). No
+/// GPU. Fails if more than 10 % of the regions without a plate are still blurred, fewer than 90 % of the others 30 px
+/// wide or more (at 7680; their box, without `Hide`'s growth of 1.5 and 1°) are, or a marked plate is uncovered.
 #[test]
 fn plates_flags() {
     let fx = |f: &str| std::fs::read_to_string(fixtures().join(f));

@@ -43,7 +43,8 @@ pub(crate) const CMAX: usize = 32;
 /// A plate to hide by itself: the detector is sure of it and it is wide enough to be read. Under the score lie fences,
 /// patches of ground, anything rectangular: at 0.1 alone, 57 % of the regions blurred on 43 clips held no plate (flagged
 /// by eye, tests/footage.rs `plates_flags`). The width is in pixels of the pano it was found on: of the plates labelled
-/// on rides none under 30 px is legible even in part (`plates_rides`).
+/// on rides none under 30 px is legible even in part (`plates_rides`), yet in views of the clips the user read some of
+/// 14 to 29 px, which a clip's `Hide::plates` takes by repetition (`MANY`), a photo not.
 pub(crate) const SURE: f32 = 0.5;
 pub(crate) const WIDE: f32 = 30.0;
 

@@ -230,9 +230,18 @@ const MARGIN: f32 = 1.0;
 /// Plates: a detection reaches this many times its size for its track (a plate is small against its car's motion: one
 /// 2.5° wide passing at 4° a searched frame fell into a track a detection, each padded where the plate was not), and a
 /// track is hidden with this many `sure` detections only (a plate is found again and again; what is found once, or
-/// weakly throughout, is ground or a fence, or a plate too small to read).
+/// weakly throughout, is ground or a fence, or a plate too small to read), or with `MANY` of score `VERY` or more at
+/// any width within a second (plates the user reads under `sure`'s width, 14 to 29 px, are found that sure on 8 to 21
+/// of the searched frames of a second; over a whole track, a spot followed for long would get there however rarely it
+/// is that sure; without the width, `TWICE` sure ones blurred ground and car parts: blurs on nothing 14 to 36). Against
+/// the first two galleries' flags (scripts/rule_eval.py), at the frames shown: blurs on nothing 14 to 17, on plates too
+/// small to read 19 to 22, plates covered 241 to 338, marked missed plates uncovered 7 to 2 (no rule reaches those: no
+/// detection near one, no crop holds the other); the 3 new blurs on nothing are spots the model scores 0.8 or more 11
+/// to 15 times (a wall, a car seat, a car's flank), as often as the plates.
 const REACH: f32 = 2.0;
 const TWICE: usize = 2;
+const VERY: f32 = 0.8;
+const MANY: usize = 8;
 /// Plates, over time: a track of one detection has no motion to predict, so its second may lie this many degrees a
 /// second farther off if within `SOON` s (a plate passed within metres sweeps 4° a searched frame, beyond `REACH` of a
 /// 1.2° plate: each detection was a track of its own, held still over `PAD` on both sides, a row of blurs beside the
@@ -264,7 +273,7 @@ impl Hide {
         Self::default()
     }
 
-    /// For plates found on a pano `w` pixels wide (`REACH`, `TWICE`).
+    /// For plates found on a pano `w` pixels wide (`REACH`, `TWICE`, `MANY`).
     pub fn plates(w: u32) -> Self {
         Self { keys: vec![], w }
     }
@@ -277,7 +286,7 @@ impl Hide {
     /// Tracks: each detection joins the nearest track whose last detection is at most `GAP` old and
     /// within reach of where its last motion puts it (its size, `REACH` times for plates, at least 2°, more by the time
     /// since; plates: `SWEEP` more from a track of one detection, within `SOON` s), the best scores first; of plates,
-    /// the tracks with `TWICE` sure detections.
+    /// the tracks with `TWICE` sure detections or `MANY` very sure ones within a second.
     pub fn tracks(&self, fps: f32) -> Vec<Vec<(usize, Region)>> {
         let (reach, sweep) = if self.w > 0 {
             (REACH, SWEEP)
@@ -324,7 +333,14 @@ impl Hide {
                 }
             }
         }
-        tl.retain(|t| self.w == 0 || t.iter().filter(|d| sure(&d.1, self.w)).count() >= TWICE);
+        tl.retain(|t| {
+            let v: Vec<usize> = (t.iter().filter(|d| d.1.score >= VERY))
+                .map(|d| d.0)
+                .collect();
+            self.w == 0
+                || t.iter().filter(|d| sure(&d.1, self.w)).count() >= TWICE
+                || v.windows(MANY).any(|w| (w[MANY - 1] - w[0]) as f32 <= fps)
+        });
         tl
     }
 

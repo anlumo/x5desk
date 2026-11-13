@@ -94,6 +94,37 @@ plates-yolox-nano-256.onnx
            (Vietnam; plate polygons, one-line and square two-line plates), repeated 5 times. **That dataset states no
            licence**, so its terms are unknown; the user chose to ship on 2026-11-09. Crops holding a confident box off
            the labelled plates were left out, as possibly unlabelled plates. The set's other half stays a test.
+  Small plates by repetition (2026-11-12; src/privacy.rs `VERY`, `MANY`): the 30 px width of `sure` dropped plates the
+  user reads in the views, 14 to 29 px wide (the second gallery's marks). Now a plate track is also hidden with 8
+  detections of score >= 0.8 at any width within a second; two sure ones (>= 0.5, >= 30 px) still do as before (over
+  a whole track, a spot followed for long would reach 8 however rarely it is that sure). The width cannot simply go:
+  without it two detections >= 0.5 blurred ground and car parts (blurs on nothing 14 to 36). Score sums land on the
+  same curve as counts; a single high score adds blurs on nothing and no plate (the model's scores top out at 0.93).
+    tests/footage.rs `plates_flags` now reads both galleries, each region in the views that show it whole (the first
+      gallery alone, wrong if flagged in either of two neighbouring views, is kept as eval-fx/flags1). With the rule of
+      2026-11-11, old / new fixtures: regions without a plate still blurred 71 of 1,003 / 32 of 741; plates 30 px wide
+      or more still blurred 265 of 280 / 205 of 216; marked plates uncovered 0 of 2 / 5 of 8. New fixtures, before /
+      after: 32 / 38 of 741, 205 / 205 of 216, 5 / 0 of 8 (old fixtures: 71 / 94 of 1,003, 265 / 265 of 280, 0 / 0 of
+      2). `plates_rides`: unchanged, 2 of 85 uncovered (unreadable, 32 and 49 px), of the 32 readable ones none.
+      `plates` (its plates are all under 30 px, none hidden before): 59 of 100 uncovered; area of regions holding no
+      labelled plate, v635 / v606 / v627, 0 / 0.12 / 0.19 deg^2 per labelled frame. On the galleries' flags
+      (scripts/rule_eval.py): blurs on nothing 14 / 17, on plates too small to read 19 / 22, plates covered 241 / 338,
+      marked plates uncovered 7 / 2 (no rule reaches those two: no detection near one, no crop holds the other).
+    Limits: picked on the views it is scored on, the 2026-03-04 ride left out (there: blurs on nothing 1 / 1, plates
+      covered 10 / 12 of 35). The 3 new blurs on nothing are spots the model scores 0.8 or more 11 to 15 times (a wall,
+      a car seat, a car's flank), as often as the small plates: no score or count tells them apart. A count depends on
+      the search (every 3rd frame), on the frame rate (a second holds 20 searched frames at 60 fps, 10 at 30: one
+      marked plate of 30 fps footage had 8 at >= 0.8) and on linking (two boxes on one spot split its detections into
+      two tracks). Photos have no repetition: they keep `sure` alone.
+    Whole clips, which the views cannot show (plates_rides' segments searched from start to end, 28 minutes): the new
+      rule adds 359 hidden tracks to 2,113 (blurred track-time, summed over tracks, 5,374 to 6,374 s; counted over a
+      whole track instead of a second, 383 and 6,464 s); none lies on a labelled plate (those are all 30 px or more
+      and hidden already), and of 19 viewed every one is a car's plate, 13 to 28 px wide. The 2026-03-04 ride: 18
+      tracks added to 207 (604 to 675 s).
+    Reviewed (2026-11-13; a gallery of the views whose regions change, 121 of 1,416): the rule adds 159 regions and
+      removes none; the user flagged one (the car seat) and marked no missed plate. As a share of a second's searched
+      frames instead (0.8: 8 at 30 fps, 16 at 60) the seat goes, at 15 of 20, and 86 of the 159 with it, all at 60
+      fps; so the count stays.
   When it is hidden (2026-11-11; src/privacy.rs `SWEEP`, `SOON`, `CARRY`, `BRIDGE`): most of what the user still flagged
   was timing, not the model. A plate passed within metres moves past the linking reach between searched frames, so each
   detection was a track of its own, held still for 0.25 s on both sides: a row of blurs beside the plate. Now a plate
