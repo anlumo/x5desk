@@ -93,7 +93,8 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   takes 1.8× as long; 1fb1159). The app's own export is clean: 12 exports with plates of two clips (722 at
   60 fps, 604 at 30 fps; `Keep::video`, on the Radeon 8060S) gave the same regions and the same video every time, and
   all 9,600 lens frames hashed match ffmpeg's software decode (`target/dec-scratch`, probe hooks in
-  `probe-hooks.patch`). Open: `crates/stab/tests/footage.rs` decodes the same way; driver or the 4090's link (ffmpeg's
+  `probe-hooks.patch`). `crates/stab/tests/footage.rs` decoded the same way and got the same fix (bc5725e; its four tests pass on
+  fresh tracks, 937 s). Open: driver or the 4090's link (ffmpeg's
   Vulkan decode alone against a compute load from a plain process would tell); the validation layers aren't
   installed, so crate video's sync was only read against the spec (no defect found).
 - [ ] **No export on the RTX 4090.** Started on the 4090, the export fails the GPU self-test at step 3: NVIDIA's
