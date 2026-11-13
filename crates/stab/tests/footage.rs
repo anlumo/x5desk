@@ -145,11 +145,12 @@ impl Clip {
     }
 }
 
-/// ffmpeg's hardware decoder: Vulkan Video, as crate video on Linux; VideoToolbox on macOS.
+/// ffmpeg's hardware decoder on macOS (VideoToolbox); the software one on Linux: Vulkan Video on the GPU that also
+/// stitches returned runs of corrupt frames in crate track's footage tests (its `HWACCEL`), which decoded the same way.
 const HWACCEL: &str = if cfg!(target_os = "macos") {
     "videotoolbox"
 } else {
-    "vulkan"
+    "none"
 };
 
 /// Both lens streams as NV12 at S × S, frame by frame (two ffmpeg processes).
