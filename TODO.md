@@ -54,16 +54,54 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   `dump_flags.sh`, `make_flags.py`, `train_flags.sh` (watchdogs fixed to kill the whole scope).
 - [ ] **The 669 false positive.** The gap between a scooter rider and the scooter (2026-03-04, held out): a real
   detector mistake, still open with the fine-tune shelved.
-- [ ] **Re-pick `Hide`'s plate rule.** The second gallery's 10 missed-plate marks must stay covered. The 30 px width
-  gate (`WIDE`) drops plates the user can read (22–25 px wide): drop or lower it and let score and repetition
-  decide; a single detection at a high score (689 frame 807) has to count.
-- [ ] **`flags_fx.py` and the fixtures.** Label regions by the views that show them whole instead of "wrong in either
-  view", and add the second gallery's flags and marks.
-- [ ] **The van plate nothing detects** (717 frame 2638, about 50 px): find out why.
-- [ ] **Plates outside every vehicle crop are never searched.** The vehicle detector misses close-ups (in the
-  downloaded stills: 1080 of 1747 greenpack, 455 of 915 Tgmt) and cars passing within metres (692 frame 56: plate
-  tracked at frames 27–36 and 60–78, car lost between, region 4° off). Add a crop where a live plate track is
-  predicted.
+- [x] **Re-pick `Hide`'s plate rule** (0018c58). A track is now also hidden
+  with `MANY` 8 detections of score `VERY` 0.8 or more within one second, at any width (`privacy.rs`); `TWICE` sure
+  detections stay. On the reviewed views (`rule_eval.py`): blurs on nothing 14 → 17 (a car seat behind glass 720/803,
+  a white wall 690/2490, a car's flank 691/934), on unreadable plates 19 → 22, plates covered 241 → 338, marks
+  uncovered 7 → 2 (692/56 and 717/2638, which no rule reaches). Dropping the width gate outright: 34–36 blurs on
+  nothing. A single high score adds wrong blurs and no plate (689 frame 807 was covered already). Whole segments
+  (28 min): 359 more hidden tracks (2,113), blurred track-time +18.6 %; 19 of 20 sampled additions are car plates of
+  13–28 px. `plates_flags` 38 of 741 wrong still blurred (was 32), 205 of 216 kept, no mark uncovered (was 5 of 8);
+  `plates_rides` 2 of 85 (both unreadable), 0 of 32 readable; `plates` unchanged. A 60 fps clip gets twice the
+  chances at 8 detections; the variant "80 % of the second's searched frames" (not built) scores 13 / 18 / 276 with
+  every coverable mark covered. Fourth gallery (`views6d`, software decode; flags in `views6d/flagged`): the rule
+  adds 159 regions in 121 views and removes none; the user flagged one of them (the car seat 720/803) and marked
+  no missed plate. Three more flags are regions the old rule draws too (720/803 a second one, 689/2141, 689/2999).
+  The 80 % variant drops the car seat (15 of its second's 20 searched frames) and with it 86 of the 159, all at
+  60 fps; 75 % keeps the seat and still drops 69. So the count rule stands unless the user says otherwise; the
+  car seat is the detector's mistake. The user kept the count rule (2026-11-13).
+- [x] **`flags_fx.py` and the fixtures.** Regions are labelled by the views that show them whole (wrong in all of
+  them: 741; plate in none flagged: 572, of which 216 are 30 px or wider; the rest, 462, left out), with both
+  galleries' flags and the 8 marks (`eval-fx/flags_regions.txt`, `flags_marks.txt`; the old set in `eval-fx/flags1`).
+- [ ] **Plates no vehicle crop holds are never searched.** The van plate of 717 frame 2638 (about 50 px) is one: the
+  van's front sits between the rider's legs and the vehicle model never scores it above 0.2, while the plate model
+  finds the plate at 0.79–0.91 on any crop of 20° or less centred on it (0.42–0.85 at 24°, nothing from 48°). The
+  vehicle detector also misses close-ups (in the downloaded stills: 1080 of 1747 greenpack, 455 of 915 Tgmt) and cars
+  passing within metres (692 frame 56). Needs a search that doesn't depend on a vehicle, such as a ring of 20° crops
+  along the horizon (18 crops a row against 13.2 vehicle crops a frame now): not built, cost unmeasured.
+  - Tried and dropped: a crop where a live plate track is predicted (`target/crop-scratch/item2-track3.patch`). It
+    closes 692 frame 56's gap, but on the reviewed views it trades 3 flagged blurs for 8 new ones (a parking sign's
+    logo, bumper corners, a tail light) at +0.95 crops and +1.5 ms a searched frame, and 717's plate has no
+    detection within 15° to follow.
+- [ ] **Corrupt frames from the hardware decoder.** The footage tests decoded with `ffmpeg -hwaccel vulkan` on the GPU
+  the networks run on; while they ran, a run of frames up to the next key frame now and then came back corrupt (half
+  the luma pixels off, 17–19 levels on average), differently in each process, and the stitcher's smoothed colour fit
+  carried it to the end of the clip. This was the run-to-run "noise" of every unpaired GPU comparison so far; the
+  networks and the NMS are bit-exact on the same input, except in the first four clips a process searches, where
+  0.4–8 % of the detections differ in the third decimal from run to run (whichever clips come first; no rule outcome
+  changed; burn's kernel autotune at start-up is the suspect, unproven). Fix in `crates/track/tests/footage.rs` (software decode on Linux; `plate_views`
+  takes 1.8× as long; 1fb1159). The app's own export is clean: 12 exports with plates of two clips (722 at
+  60 fps, 604 at 30 fps; `Keep::video`, on the Radeon 8060S) gave the same regions and the same video every time, and
+  all 9,600 lens frames hashed match ffmpeg's software decode (`target/dec-scratch`, probe hooks in
+  `probe-hooks.patch`). Open: `crates/stab/tests/footage.rs` decodes the same way; driver or the 4090's link (ffmpeg's
+  Vulkan decode alone against a compute load from a plain process would tell); the validation layers aren't
+  installed, so crate video's sync was only read against the spec (no defect found).
+- [ ] **No export on the RTX 4090.** Started on the 4090, the export fails the GPU self-test at step 3: NVIDIA's
+  driver offers H.265 decode only with DPB and output images coinciding, and crate video requires them distinct. On
+  this host the app therefore decodes and runs its networks on the Radeon (`VK_ICD_FILENAMES`). Support coinciding
+  images, or pick the adapter by what it can decode.
+- [ ] **The MCP server's export skips the privacy pass** (`plate_blur` is listed as later; its jobs call `clip_job`
+  directly).
 - [ ] **Wrap up.** `plates_flags`, `plates_rides`, `plates` and the still checks; `cargo fmt`; models/README
   (sha256, data, results), the About page and `PLAN.md`; commit, merge and push on the user's word.
 - [ ] **Decide:** remove the old yolo-v9 plate model files? They stay in the tree unbuilt, and
