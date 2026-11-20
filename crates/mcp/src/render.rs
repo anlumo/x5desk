@@ -322,6 +322,8 @@ pub struct Want {
     pub qp: Option<u8>,
     /// a catalog label: mcp maps numbers onto them
     pub fps: Option<String>,
+    /// RNNoise strength; None or 0: off
+    pub denoise: Option<f32>,
     pub allow_frozen: bool,
 }
 
@@ -384,6 +386,9 @@ pub struct Catalog {
     pub smoothing_s: Range,
     pub looks: Vec<Named>,
     pub look_strength: Range,
+    /// an export's RNNoise strength (0: off, the default)
+    #[serde(default)]
+    pub denoise: Range,
     pub adjust: Vec<Adjust>,
     pub projections: Vec<Projection>,
     pub still: Still,

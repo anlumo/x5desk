@@ -349,8 +349,8 @@ pub const TOOLS: &[Def] = &[
         name: "catalog",
         tier: Tier::Read,
         desc: "What render_still and export accept: presets, sizes, codecs, frame rates, looks, adjustments, \
-               stabilisation, projections, blur targets, defaults, what agents can't do yet, and the GPU's state and \
-               limits (it starts with the first render_still or export).",
+               stabilisation, projections, blur targets, denoise, defaults, what agents can't do yet, and the GPU's \
+               state and limits (it starts with the first render_still or export).",
         schema: schema_for_empty_input,
         ann: None,
         gpu: true,
@@ -401,7 +401,8 @@ pub const TOOLS: &[Def] = &[
                job_cancel (no file is left). Exports end with this MCP server; they don't carry over. A picture \
                that can't be decoded fails the export unless allow_frozen. blur: [\"faces\", \"plates\"] blurs faces \
                and licence plates (a detection pass over the span first, about 2 to 2.5 times the span's length on \
-               a Radeon 8060S; best effort; job_status shows its progress under blur).",
+               a Radeon 8060S; best effort; job_status shows its progress under blur). denoise: 0-1 voice denoise of \
+               the audio (default 0, off; catalog: denoise).",
         schema: input::<render::ExportArgs>,
         ann: Some((false, false)),
         gpu: true,

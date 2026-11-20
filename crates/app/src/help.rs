@@ -202,8 +202,8 @@ fn guide(p: Page) -> &'static [&'static str] {
              Pick a preset or set resolution, codec (H.265 8 or 10-bit, H.264), bitrate or constant quality, and \
              frame rate.",
             "360 exports carry spherical metadata; flat ones follow the view. Options: AI seam (RAFT), colour \
-             matching between the lenses, stabilisation, a look and adjustments, and privacy blur of faces and license \
-             plates (plates are found on the vehicles the detector sees).",
+             matching between the lenses, stabilisation, a look and adjustments, privacy blur of faces and license \
+             plates (plates are found on the vehicles the detector sees), and voice denoise of the audio.",
             "Jobs run one after another; each shows its progress and can be cancelled. Open shows the result in the \
              Library.",
         ],

@@ -579,6 +579,9 @@ impl Render for Agent {
         };
         let mut w = q.want.clone();
         w.stabilisation = Some(stab.into());
+        if !still && w.denoise.is_some_and(|s| s > 0.0) && !src.aac {
+            return Err("denoise: the recording has no audio; leave out denoise".into());
+        }
         let (rate, dur) = probe(&q.files[0])?;
         let (x, v, proj) = set_of(&w, q.kind, self.raft_ok())?;
         let fps = x.rate(rate);
@@ -1222,7 +1225,8 @@ impl Run for AgentRun {
 
 /// The catalog from this screen's tables (built once): its presets, sizes (360 videos without the photos' 11904),
 /// codecs, rates and ranges; the looks, the editor's adjustments, the stabilisation modes, the player's flat
-/// projections; the still's preset-free defaults; the blur targets and the pass's stride; what agents can't do yet.
+/// projections; the still's preset-free defaults; the blur targets and the pass's stride; the denoise strength; what
+/// agents can't do yet.
 fn catalog() -> Catalog {
     let range = |min: f64, max: f64, d: Option<f64>| r::Range {
         min,
@@ -1277,6 +1281,7 @@ fn catalog() -> Catalog {
             })
             .collect(),
         look_strength: range(0.0, 1.0, Some(1.0)),
+        denoise: range(0.0, 1.0, Some(0.0)),
         adjust: (doc::ADJ.iter().zip(d))
             .map(|(a, d)| r::Adjust {
                 id: a.0.into(),
@@ -1375,6 +1380,7 @@ fn set_of(w: &Want, kind: Kind, raft: bool) -> Result<(Set, View, &'static str),
                     .ok_or_else(|| bad("fps", f))?
                     .0
             }
+            x.denoise = w.denoise.filter(|&s| s > 0.0);
         }
     }
     if let Some(a) = w.width {
@@ -1504,6 +1510,7 @@ fn settings(x: &Set, v: &View, proj: &str, w: &Want, kind: Kind, ab: [f64; 2], t
                 ("fps", json!(fps)),
                 ("start_s", json!(ab[0])),
                 ("end_s", json!(ab[1])),
+                ("denoise", json!(x.denoise.unwrap_or(0.0))),
                 ("allow_frozen", json!(w.allow_frozen)),
             ] {
                 s[k] = v

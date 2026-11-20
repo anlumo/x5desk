@@ -448,6 +448,11 @@ fn cat() -> Catalog {
             aliases: s(&["teal"]),
         }],
         look_strength: r(0.0, 1.0, 1.0),
+        denoise: Range {
+            min: 0.0,
+            max: 1.0,
+            default: Some(0.0),
+        },
         adjust: vec![Adjust {
             id: "exposure".into(),
             label: "Exposure (EV)".into(),

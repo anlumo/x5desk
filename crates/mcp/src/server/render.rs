@@ -60,7 +60,7 @@ const MEMORY: &str =
 
 /// The fields only one of the tools takes.
 const STILL_ONLY: [&str; 3] = ["time_s", "jpeg_quality", "wait_s"];
-const EXPORT_ONLY: [&str; 9] = [
+const EXPORT_ONLY: [&str; 10] = [
     "preset",
     "start_s",
     "end_s",
@@ -69,6 +69,7 @@ const EXPORT_ONLY: [&str; 9] = [
     "mbps",
     "qp",
     "fps",
+    "denoise",
     "allow_frozen",
 ];
 
@@ -168,6 +169,7 @@ struct Ask {
     mbps: Option<f32>,
     qp: Option<u8>,
     fps: Option<FpsArg>,
+    denoise: Option<f32>,
     allow_frozen: Option<bool>,
 }
 
@@ -278,6 +280,9 @@ render_args! {
         qp: Option<u8>,
         /// "source" (default), or 24, 25, 29.97, 30, 60 (a number or its label)
         fps: Option<FpsArg>,
+        /// voice denoise of the audio (RNNoise: wind, hiss, hum, rumble, engines down, speech kept), strength 0-1;
+        /// default 0, off: the source's audio copied (catalog: denoise)
+        denoise: Option<f32>,
         /// export even when pictures can't be decoded (they repeat the one before); default false
         allow_frozen: Option<bool>,
     }
@@ -712,6 +717,9 @@ fn want(kind: RKind, a: &Ask, c: &Catalog) -> Result<Want, String> {
     if let Some(x) = a.qp {
         within("qp", x, &c.qp)?
     }
+    if let Some(x) = a.denoise {
+        within("denoise", x, &c.denoise)?
+    }
     let given = match &a.codec {
         Some(x) => Some(
             (c.codecs.iter())
@@ -765,7 +773,7 @@ fn want(kind: RKind, a: &Ask, c: &Catalog) -> Result<Want, String> {
         }
     };
     (w.start_s, w.end_s, w.codec) = (a.start_s, a.end_s, given.map(|k| k.id.clone()));
-    (w.ten_bit, w.mbps, w.qp) = (a.ten_bit, a.mbps, a.qp);
+    (w.ten_bit, w.mbps, w.qp, w.denoise) = (a.ten_bit, a.mbps, a.qp, a.denoise);
     w.allow_frozen = a.allow_frozen.unwrap_or(false);
     Ok(w)
 }
@@ -1208,8 +1216,17 @@ fn shown_catalog(c: &Catalog, gpu: Value, raft: Option<&str>, blur: Option<&str>
         },
         "export": {
             "default": "the whole clip at default_preset",
-            "audio": "the source's AAC, copied",
+            "audio": "the source's AAC, copied; denoised (denoise above 0): decoded, denoised and encoded again \
+                      (AAC 192 kbit/s), in step with the video and as long",
             "allow_frozen": "false: a picture that can't be decoded fails the export",
+        },
+        "denoise": {
+            "min": c.denoise.min,
+            "max": c.denoise.max,
+            "default": c.denoise.default,
+            "note": "RNNoise, a speech denoiser: what is not speech goes down (wind, hiss, hum, rumble, engines); at 1 \
+                     a ride without speech is all but silent (30-45 dB down); lower values mix the source back in \
+                     linearly (0.5: the noise 6 dB down); 0: off",
         },
         "sources": {
             "accepted": "an X5 recording: .insv with its Insta360 trailer and both lenses (one file, or its _00_/_10_ \
@@ -2706,6 +2723,11 @@ mod tests {
                 },
             ],
             look_strength: r(0.0, 1.0, 1.0),
+            denoise: Range {
+                min: 0.0,
+                max: 1.0,
+                default: Some(0.0),
+            },
             adjust: vec![Adjust {
                 id: "exposure".into(),
                 label: "Exposure (EV)".into(),
@@ -2925,6 +2947,14 @@ mod tests {
             (&json!("plates"), &json!([]))
         );
         assert!(v["blur"].get("available").is_none(), "{}", v["blur"]);
+        assert_eq!(
+            (
+                &v["denoise"]["min"],
+                &v["denoise"]["max"],
+                &v["denoise"]["default"]
+            ),
+            (&json!(0.0), &json!(1.0), &json!(0.0))
+        );
         // 1. the arguments: a later feature by name before a bad look; a word for blur, a blur of the wrong type; the
         // other tool's fields; a typo
         let e = |r: Result<Value, String>| r.unwrap_err();
@@ -2976,6 +3006,10 @@ mod tests {
         }
         let r = call(&c, "render_still", ex(json!({ "allow_frozen": true }))).await;
         assert_eq!(e(r), "`allow_frozen` is for export only");
+        let r = call(&c, "render_still", ex(json!({ "denoise": 1 }))).await;
+        assert_eq!(e(r), "`denoise` is for export only");
+        let r = call(&c, "export", ex(json!({ "denoise": true }))).await;
+        assert!(e(r).contains("expected f32"));
         let r = call(&c, "export", ex(json!({ "time_s": 1 }))).await;
         assert_eq!(e(r), "`time_s` is for render_still only");
         let r = call(&c, "export", ex(json!({ "lok": "mono" }))).await;
@@ -3024,6 +3058,8 @@ mod tests {
                 "mbps or qp, not both",
             ),
             ("export", json!({ "qp": 50 }), "qp 50: 10 to 45"),
+            ("export", json!({ "denoise": 1.5 }), "denoise 1.5: 0 to 1"),
+            ("export", json!({ "denoise": -0.5 }), "denoise -0.5: 0 to 1"),
             (
                 "export",
                 json!({ "fps": 31 }),
@@ -3169,10 +3205,11 @@ mod tests {
         *f.fail.lock().unwrap() = Some("no Insta360 trailer".into());
         let a = ex(json!({
             "output": 360, "fps": 30, "look": "BLACK & white", "stabilization": "Horizon", "color_match": false,
-            "adjust": { "exposure": 0.5 }, "codec": "H265", "ten_bit": true,
+            "adjust": { "exposure": 0.5 }, "codec": "H265", "ten_bit": true, "denoise": 0.25,
         }));
         assert_eq!(e(call(&c, "export", a).await), "no Insta360 trailer");
         let w = f.asked.lock().unwrap().clone().unwrap();
+        assert_eq!(w.denoise, Some(0.25));
         assert_eq!(
             (
                 w.preset.as_deref(),

@@ -11,7 +11,8 @@ fn want(kind: Kind) -> Want {
 /// The catalog's ids are the app's tables': looks in `fx::Look::ALL`'s order with the test hook's first words and the
 /// display names; the player's projections but the equirect; `gyro::parse`'s modes; the editor's adjustments with
 /// their defaults; Shot Lab's effects; the presets, the 360 video widths without the photos' 11904; the blur targets in
-/// `Set::faces`, `Set::plates` order, searched every `STEP` frames, and no longer later.
+/// `Set::faces`, `Set::plates` order, searched every `STEP` frames, and no longer later; denoise 0 to 1, off by
+/// default.
 #[test]
 fn catalog_tables() {
     let c = catalog();
@@ -78,6 +79,10 @@ fn catalog_tables() {
     assert_eq!(c.fps[0], "source");
     assert!(c.fps.contains(&"29.97".to_string()));
     assert_eq!((c.still.pano_width, c.still.flat), (7680, [1920, 1080]));
+    assert_eq!(
+        (c.denoise.min, c.denoise.max, c.denoise.default),
+        (0.0, 1.0, Some(0.0))
+    );
 }
 
 /// Stills start from preset-free defaults whatever the preset, exports from theirs; a changed size or rate clears the
@@ -215,6 +220,23 @@ fn set_of_wants() {
         set_of(&blur(&["faces", "cats"]), Kind::Still, true).unwrap_err(),
         "blur \"cats\": not in the catalog"
     );
+    // denoise: an export's strength, 0 off; a still has none
+    for (d, on) in [(Some(0.5), Some(0.5)), (Some(0.0), None), (None, None)] {
+        let w = Want {
+            denoise: d,
+            ..want(Kind::Export)
+        };
+        assert_eq!(
+            set_of(&w, Kind::Export, true).unwrap().0.denoise,
+            on,
+            "{d:?}"
+        );
+    }
+    let w = Want {
+        denoise: Some(1.0),
+        ..want(Kind::Still)
+    };
+    assert_eq!(set_of(&w, Kind::Still, true).unwrap().0.denoise, None);
 }
 
 /// A still's time within the clip, an export's range at least a frame and not past the end: no clamping.
@@ -300,14 +322,18 @@ fn shown() {
         (&json!("h265"), &json!(true), &json!(5760))
     );
     assert!(s.get("view").is_none() && s.get("jpeg_quality").is_none());
-    assert_eq!(s["blur"], json!([]));
+    assert_eq!((&s["blur"], &s["denoise"]), (&json!([]), &json!(0.0)));
     let w = Want {
         blur: vec!["faces".into()],
+        denoise: Some(0.5),
         ..want(Kind::Export)
     };
     let (x, v, p) = set_of(&w, Kind::Export, true).unwrap();
     let s = settings(&x, &v, p, &w, Kind::Export, [0.0, 5.0], 0.0);
-    assert_eq!(s["blur"], json!(["faces"]));
+    assert_eq!(
+        (&s["blur"], &s["denoise"]),
+        (&json!(["faces"]), &json!(0.5))
+    );
 }
 
 /// mcp finds a strict export's failure at a picture that could not be decoded by export's own words, and names
@@ -627,6 +653,51 @@ fn blur_check() {
         "{e}"
     );
     std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// Denoise in the check's settings: off when left out, on the synthetic recording (no audio) too, where a strength is
+/// refused and 0 passes; on v635 (`X5_SAMPLES`, marked AI wind reduction like every X5 file) off when left out, an
+/// asked strength as asked; a still has none.
+#[test]
+fn denoise_check() {
+    let d = std::env::temp_dir().join(format!("x5-agent-denoise-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let src = d.join("VID_20260117_141148_00_635.insv");
+    ::export::synth::insv(&src, 60, 64).unwrap();
+    let a = Agent::new(false);
+    let ex = |dn: Option<f32>| Want {
+        end_s: Some(1.0),
+        stabilisation: None,
+        denoise: dn,
+        ..want(Kind::Export)
+    };
+    let shown = |f: &[PathBuf], w: Want| {
+        a.check(&req(Kind::Export, f, w))
+            .map(|p| p.settings["denoise"].clone())
+    };
+    let one = [src];
+    assert_eq!(shown(&one, ex(None)), Ok(json!(0.0)));
+    assert_eq!(shown(&one, ex(Some(0.0))), Ok(json!(0.0)));
+    assert_eq!(
+        shown(&one, ex(Some(0.5))),
+        Err("denoise: the recording has no audio; leave out denoise".into())
+    );
+    std::fs::remove_dir_all(&d).unwrap();
+    let Some(s) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+        eprintln!("X5_SAMPLES unset: v635 skipped");
+        return;
+    };
+    let v = [s.join("v635.insv")];
+    for (dn, want) in [(None, 0.0), (Some(0.5), 0.5), (Some(0.0), 0.0)] {
+        assert_eq!(shown(&v, ex(dn)), Ok(json!(want)), "{dn:?}");
+    }
+    let w = Want {
+        stabilisation: None,
+        ..want(Kind::Still)
+    };
+    let p = a.check(&req(Kind::Still, &v, w)).unwrap();
+    assert!(p.settings.get("denoise").is_none());
 }
 
 /// An engine up on the tests' one device (`export::tests::gpu`: `ai::MODELS` stays loaded for it), with burn as the

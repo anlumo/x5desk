@@ -224,11 +224,23 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
 Compared with the vendor's apps (2026-11-13). Here: Deep Track (VitTrack, YOLOX-nano, LOMO re-identification), face
 and licence plate blur (YuNet, our YOLOX-nano plate fine-tune), auto edit (heuristic highlights, auto framing), seam
 flow on exports and paused frames (RAFT-small), Shadow Clone and Clone Loop (PP-HumanSeg), voice denoise on editor
-timelines (RNNoise).
+timelines and exports (RNNoise).
 
-- [ ] **Wind noise on every export.** RNNoise runs on editor timelines only, off by default; the vendor's app applies
-  wind reduction by default to recordings the camera marks as AI audio. Offer it on library exports, and score
-  DeepFilterNet 3 (MIT / Apache-2.0, to verify) against RNNoise on ride audio: wind, engine, speech.
+- [x] **Wind noise on every export.** Library exports take the editor's RNNoise (`Set::denoise` into
+  `export::Edit::denoise`): the Export screen's Audio row, the MCP `export` tool's `denoise` (0–1; catalog: denoise).
+  Off by default: the vendor's app wind-reduces recordings whose trailer `audio_mode` (#61) is 9, AI wind reduction,
+  but all 46 X5 files we have carry 9 (firmware 1.7.43–1.13.21), so the mark tells nothing apart, and at strength 1 a
+  ride without speech exports nearly silent. Those recordings are dual mono (L = R). Score (no clean reference) on the
+  five ride dates, wind and motor whine, no speech; speech only in 910, 631 and 605: at strength 1 both RNNoise and
+  DeepFilterNet 3 take a ride 35–45 dB down below 300 Hz and ~30 dB above; the strength mixes linearly (0.5: −6 dB).
+  Clean LibriSpeech over ride noise, −10…+5 dB: DFN3 SI-SDR 11.2–20.6 dB against RNNoise's 6.1–13.1, PESQ-WB
+  1.62–2.88 against 1.33–2.24; on real speech the two are close. Cost, one core: RNNoise RTF 0.038, DFN3 0.030 (its
+  tract binary). DFN3: code and weights MIT or Apache-2.0 (README, since 2026-11-06).
+- [ ] **Replace RNNoise by DeepFilterNet 3** (the user decides). Better on speech under ride noise (above), same cost.
+  About 2.1 M parameters, 8.6 MB fp32 ONNX in three graphs (Conv, ConvTranspose, GRU, Einsum), which burn-onnx 0.22
+  turns into code that compiles (not run); around them a port of libDF's DSP (STFT 960 / 480, ERB and complex
+  features with running norms, the deep filter), or the `deep_filter` crate with tract as a dependency. Neither
+  removes wind alone: both are speech denoisers.
 - [x] **Forward view.** `stab::Lock::Forward`, "Forward" beside the locks in the player, the Export screen, the
   editor and the MCP's `stabilisation` (`forward`, catalog and docs); auto edit's framer looks along it where no
   subject wins (`track::Framer::ahead`: none yet, or the subject gone for `GONE`). The direction of travel from the

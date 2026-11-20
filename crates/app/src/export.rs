@@ -109,8 +109,8 @@ impl Spec {
     }
 }
 
-/// `x` with `<preset key>[:<look>][:faces][:plates][:noraft][:qp=<n>]` (a look by its name's first word, any case:
-/// vivid, warm, cool, film, black, teal).
+/// `x` with `<preset key>[:<look>][:faces][:plates][:noraft][:qp=<n>][:denoise=<s>]` (a look by its name's first word,
+/// any case: vivid, warm, cool, film, black, teal; denoise strength 0 to 1, 0 off).
 pub(crate) fn parse(mut x: Set, tok: &str) -> Result<Set, String> {
     let mut w = tok.split(':');
     let k = w.next().unwrap_or("");
@@ -122,6 +122,13 @@ pub(crate) fn parse(mut x: Set, tok: &str) -> Result<Set, String> {
             "noraft" => x.raft = false,
             _ if o.starts_with("qp=") => {
                 x.qp = Some(o[3..].parse().map_err(|_| format!("bad {o}"))?)
+            }
+            _ if o.starts_with("denoise=") => {
+                let s: f32 = o[8..].parse().map_err(|_| format!("bad {o}"))?;
+                if !(0.0..=1.0).contains(&s) {
+                    return Err(format!("bad {o}"));
+                }
+                x.denoise = (s > 0.0).then_some(s)
             }
             _ => {
                 x.look = Some(
@@ -213,6 +220,9 @@ pub struct Set {
     pub adj: fx::Params,
     pub faces: bool,
     pub plates: bool,
+    /// RNNoise strength on a video's audio (`export::Edit::denoise`, the editor's); None: the source's AAC copied.
+    /// An editor timeline brings its own.
+    pub denoise: Option<f32>,
     /// JPEG quality of grabs and photos
     pub jq: u8,
 }
@@ -275,6 +285,7 @@ impl Default for Set {
             adj: fx::Params::default(),
             faces: false,
             plates: false,
+            denoise: None,
             jq: 92,
         };
         s.apply(0);
@@ -822,6 +833,17 @@ impl Exp {
                         );
                     });
                     ui.end_row();
+                    ui.label("Audio");
+                    ui.horizontal(|ui| {
+                        let (mut on, mut s) = (x.denoise.is_some(), x.denoise.unwrap_or(1.0));
+                        ui.checkbox(&mut on, "Denoise").on_hover_text(
+                            "RNNoise on the clip's audio: wind, hiss, hum, rumble and engines down, speech kept (at \
+                             full strength a ride without speech goes nearly silent); off: the source's audio copied",
+                        );
+                        ui.add_enabled(on, egui::Slider::new(&mut s, 0.0..=1.0).text("Strength"));
+                        x.denoise = on.then_some(s);
+                    });
+                    ui.end_row();
                 }
                 ui.label("Look");
                 ui.horizontal(|ui| {
@@ -1134,7 +1156,7 @@ pub(crate) fn clip_job(
             .collect(),
         over: vec![],
         abr: ABR,
-        denoise: None,
+        denoise: x.denoise,
     };
     let job = export::Job {
         cut: export::Cut::Edit(Box::new(e)),

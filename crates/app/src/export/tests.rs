@@ -128,6 +128,14 @@ fn presets() {
     assert!(parse(d, "nope").is_err() && parse(d, "pano4k:sepia").is_err());
     let x = parse(d, "pano4k:plates").unwrap();
     assert!(x.plates && !x.faces && !parse(d, "pano4k:faces").unwrap().plates);
+    let on = Set {
+        denoise: Some(1.0),
+        ..d
+    };
+    assert_eq!(parse(d, "pano4k:denoise=0.5").unwrap().denoise, Some(0.5));
+    assert_eq!(parse(on, "pano4k:denoise=0").unwrap().denoise, None);
+    assert_eq!(parse(on, "pano4k").unwrap().denoise, Some(1.0));
+    assert!(parse(d, "pano4k:denoise=1.5").is_err() && parse(d, "pano4k:denoise=x").is_err());
     let s = Spec {
         files: vec!["v.insv".into()],
         photo: false,
@@ -1336,6 +1344,157 @@ fn queue() {
     eprintln!("gone: {:?}", c.st());
     assert!(matches!(c.st(), St::Failed(m) if m.contains("gone.insv")));
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Denoise on a library export (`Set::denoise`, the editor's `export::Edit::denoise`) of v606 2–5 s (`X5_SAMPLES`),
+/// flat 640 × 360 H.264, template seam, no stabilisation. Off, the audio is the source's over the span; on, it is the
+/// source run through `media::denoise::Stereo` from the span's start with its delay dropped: in step with it (best lag
+/// 0 within ±1200 samples), closer to it than to the source, quieter than off, and it ends with the video, which is
+/// as long as off's.
+#[test]
+fn denoise() {
+    let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+        eprintln!("X5_SAMPLES unset: skipped");
+        return;
+    };
+    let (_l, g, cx) = gpu();
+    let f = d.join("v606.insv");
+    let (_, dur) = probe(&f).unwrap();
+    let spec = Spec {
+        files: vec![f.clone()],
+        photo: false,
+        dur,
+        t: 0.0,
+        view: View::default(),
+        look: Look::Perspective,
+        stab: None,
+        smooth: 0.0,
+        follow: None,
+        faces: false,
+        plates: false,
+    };
+    let set = Set {
+        preset: None,
+        pano: false,
+        w: 640,
+        h: 360,
+        codec: Codec::H264,
+        deep: false,
+        raft: false,
+        colour: false,
+        stab: None,
+        ..Set::default()
+    };
+    let (mut k, ctx) = (Keep::default(), egui::Context::default());
+    let mut run = |dn: Option<f32>| {
+        let p = fixture(&format!("denoise_{}.mp4", dn.is_some()));
+        let t = task(
+            spec.clone(),
+            Set { denoise: dn, ..set },
+            p,
+            [2.0, 5.0],
+            false,
+        );
+        k.video(&g, &cx, &t, &ctx).unwrap();
+        t.it.path.clone()
+    };
+    let (off, on) = (run(None), run(Some(1.0)));
+    let tool = |cmd: &str, a: &[&str]| {
+        let o = std::process::Command::new(cmd).args(a).output().expect(cmd);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        o.stdout
+    };
+    // video and audio ends, s
+    let ends = |p: &Path| -> Vec<f64> {
+        let a = [
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=start_time,duration",
+            "-of",
+            "csv=p=0",
+        ];
+        let o = tool("ffprobe", &[&a[..], &[p.to_str().unwrap()]].concat());
+        (String::from_utf8_lossy(&o).lines())
+            .map(|l| l.split(',').map(|v| v.parse::<f64>().unwrap()).sum())
+            .collect()
+    };
+    // interleaved stereo, 48 kHz, from `pre` (FFmpeg input options)
+    let pcm = |p: &Path, pre: &[&str]| -> Vec<f32> {
+        let a = [&["-v", "error"], pre, &["-i", p.to_str().unwrap()]].concat();
+        let o = tool(
+            "ffmpeg",
+            &[
+                &a[..],
+                &["-map", "0:a:0", "-ar", "48000", "-f", "f32le", "-"],
+            ]
+            .concat(),
+        );
+        o.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect()
+    };
+    let avg = |x: &[f32]| -> Vec<f32> {
+        x.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|s| 0.5 * (s[0] + s[1]))
+            .collect()
+    };
+    let raw = pcm(&f, &["-ss", "2.0", "-t", "3.2"]);
+    const F: usize = media::denoise::FRAME;
+    let (mut st, mut wet) = (media::denoise::Stereo::new(), vec![]);
+    for c in raw.as_chunks::<{ 2 * F }>().0 {
+        let mut l: [f32; F] = std::array::from_fn(|i| c[2 * i]);
+        let mut r: [f32; F] = std::array::from_fn(|i| c[2 * i + 1]);
+        st.frame(&mut l, &mut r);
+        wet.extend(l.iter().zip(&r).map(|(a, b)| 0.5 * (a + b)));
+    }
+    let wet = &wet[media::denoise::DELAY..];
+    let (dry, a, b) = (avg(&raw), avg(&pcm(&off, &[])), avg(&pcm(&on, &[])));
+    // 2 s from 0.5 s in, lags up to ±1200 samples (the denoiser's delay is 960): the best lag, its correlation
+    let (o, n, m) = (24000usize, 96000usize, 1200isize);
+    let xc = |x: &[f32], y: &[f32]| {
+        let c = |l: isize| {
+            let (mut s, mut p, mut q) = (0f64, 0f64, 0f64);
+            for i in o..o + n {
+                let (u, v) = (x[i] as f64, y[(i as isize + l) as usize] as f64);
+                (s, p, q) = (s + u * v, p + u * u, q + v * v);
+            }
+            s / (p * q).sqrt().max(1e-30)
+        };
+        (-m..=m)
+            .map(|l| (l, c(l)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap()
+    };
+    let rms = |x: &[f32]| {
+        (x[o..o + n].iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / n as f64).sqrt()
+    };
+    let ((lo, co), (lw, cw), (ld, cd)) = (xc(&a, &dry), xc(&b, wet), xc(&b, &dry));
+    let (eo, en) = (ends(&off), ends(&on));
+    eprintln!(
+        "library export, denoise off: video / audio end {eo:?} s, against the source lag {lo} correlation {co:.4}, \
+         level {:.4}; on: ends {en:?} s, against the source denoised lag {lw} correlation {cw:.4}, against it dry \
+         lag {ld} correlation {cd:.4}, level {:.4}",
+        rms(&a),
+        rms(&b)
+    );
+    assert!(lo == 0 && co > 0.99, "off: not the source's audio");
+    assert!(
+        lw == 0 && cw > 0.95 && cw > cd + 0.05,
+        "on: not the denoised source"
+    );
+    assert!(rms(&b) < 0.8 * rms(&a), "on: not quieter");
+    assert!(
+        (en[0] - eo[0]).abs() < 1e-6 && (en[1] - en[0]).abs() <= 1.0 / 48000.0,
+        "on: length"
+    );
+    for p in [off, on] {
+        std::fs::remove_file(p).unwrap();
+    }
 }
 
 /// The surface-configure contract (main.rs `GATE`, `BURN`) on v635 (`X5_SAMPLES`): while a RAFT export with face
