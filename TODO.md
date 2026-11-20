@@ -166,12 +166,18 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   (today) changes none of these bytes; the system update of 11-03 10:55 brought linux-firmware 20261019 (the VCN
   firmware runs the rate control) and OBS 33: the firmware is the likeliest cause, unconfirmed. App exports (CBR,
   1000 ms) come out about 9 % over the rate asked, their first IDR worse. **Decide:** report upstream, a per-vendor
-  tolerance, or leave them failing; re-run `cbr` after the reboot into kernel 7.3.5. Also failing: obs's
-  `tests::layout` since OBS 33.0.1 (11-03: `LIBOBS_API_VER` ours 32.2.2; every layout matches), and four media tests
-  since FFmpeg 9.1 (a test tool, today): `encodes_v635_like_ffmpeg` and `rates_across_samples` (FFmpeg's AAC encoder
-  moved: 43.9 → 50.4 dB SNR at 192k, 32.5 → 40.9 dB at 128k; ours unchanged), `remux_edit_lists` (9.1's source cuts
-  the AAC padding with its audio edit, 3.0 s of 3.042 s; our remux rewrites the edit as media less priming,
-  3.0186 s), `music::tests::formats` (9.1's `dash.m4a` decodes 820 padding samples too many).
+  tolerance, or leave them failing; re-run `cbr` after the reboot into kernel 7.3.5. Fixed since, in crates obs and
+  media: obs's `tests::layout` wanted our declared libobs API (32.2.2) equal to the installed one (33.0.1 since
+  11-03), but libobs refuses only a module whose major.minor is newer than its own (`obs_open_module`, 32.0.0 to
+  33.0.1); the test now checks that, and the plugin keeps declaring 32.2 (libobs 33.0.1 loads it, refuses a module
+  declaring 33.1; declaring 33 would shut out OBS 32). `remux_edit_lists`: the remux applied only the start of the
+  source's edit, and FFmpeg 9.1 cuts the AAC remainder with the edit's end alone (9.0.2 also shortened the last
+  frame), so the remux played 820 samples more; `Track::end` gives the edit's end and the remux ends the track there.
+  The export copies X5 audio, which has no edit list, and ends it with the video. `music::tests::formats`: 9.1's
+  `dash.m4a` states its remainder only in `sidx` and the MPD; FFmpeg and mpv play those 820 samples too, as our
+  reader does, so the test expects the file's samples. `encodes_v635_like_ffmpeg` and `rates_across_samples` held
+  our AAC encoder to the installed FFmpeg's (9.1's gained 3–12 dB SNR); now to our own figures of October, judged
+  then against FFmpeg 9.0.2, less 1 dB, with FFmpeg's printed beside them; ours unchanged.
 - [ ] **Wrap up.** `plates_flags`, `plates_rides`, `plates` and the still checks; `cargo fmt`; models/README
   (sha256, data, results), the About page and `PLAN.md`; commit, merge and push on the user's word.
 - [ ] **Decide:** remove the old yolo-v9 plate model files? They stay in the tree unbuilt, and

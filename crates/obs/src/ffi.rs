@@ -73,6 +73,8 @@ pub const GS_BGRA: c_int = 5;
 pub const GS_R8G8: c_int = 18;
 pub const LOG_WARNING: c_int = 200;
 pub const LOG_INFO: c_int = 300;
+/// The libobs API the FFI is written against, which `obs_module_ver` declares: libobs refuses a module whose major.minor
+/// is newer than its own and loads older ones, so this is the oldest OBS the plugin loads in.
 pub const LIBOBS_API_VER: u32 = 32 << 24 | 2 << 16 | 2;
 
 #[link(name = "obs")]

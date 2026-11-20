@@ -82,6 +82,20 @@ impl Track {
         }
         0
     }
+    /// Where the presentation ends, on [`Track::shift`]'s timeline (track ticks): the end of the first media edit,
+    /// which also cuts an AAC encoder's remainder at the end. None without a media edit, or with a zero duration
+    /// (to the media's end: fragmented files).
+    pub fn end(&self, movie_ts: u32) -> Option<i64> {
+        let mut d = 0u128;
+        for e in &self.edits {
+            d += e.dur as u128;
+            if e.start >= 0 {
+                return (e.dur > 0)
+                    .then(|| (d * self.timescale as u128 / movie_ts.max(1) as u128) as i64);
+            }
+        }
+        None
+    }
     /// Index of the last sample with `dts <= t` (0 if none).
     pub fn at(&self, t: i64) -> usize {
         self.samples

@@ -563,8 +563,18 @@ mod tests {
                     "{name}: not gapless"
                 );
             } else {
+                // the DASH file's edit cuts the priming and runs to its samples' end, as FFmpeg and mpv play it: its
+                // remainder FFmpeg 9.1 states only in `sidx` and the MPD (earlier versions shortened the last sample)
+                let end = match name {
+                    "dash.m4a" => {
+                        let t = &Mp4::open(&f).unwrap().tracks[0];
+                        let total: u64 = t.samples.iter().map(|s| s.dur as u64).sum();
+                        (total - t.edits[0].start as u64) as usize
+                    }
+                    _ => n,
+                };
                 assert!(
-                    o == 3000 && len.abs_diff(n * 48000 / 44100) <= 1,
+                    o == 3000 && len.abs_diff(end * 48000 / 44100) <= 1,
                     "{name}: gapless"
                 );
             }

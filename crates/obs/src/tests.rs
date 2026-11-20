@@ -2,7 +2,8 @@ use crate::{drm::*, ffi::*, *};
 use std::{mem::offset_of, process::Command};
 
 /// Every layout, offset and constant the FFI relies on, as (C expression, our value): a C program built against the
-/// installed libobs and kernel headers prints the expressions, and they must match.
+/// installed libobs and kernel headers prints the expressions, and they must match; the API version we declare must
+/// be one the installed libobs loads (`obs_open_module`: its major.minor no newer than libobs').
 #[test]
 fn layout() {
     type I = SourceInfo;
@@ -160,11 +161,23 @@ fn layout() {
     let bad: Vec<_> = t
         .iter()
         .zip(&got)
-        .filter(|((_, v), g)| v != *g)
+        .filter(|((e, v), g)| match e.as_str() {
+            "LIBOBS_API_VER" => v & 0xffff0000 > **g,
+            _ => v != *g,
+        })
         .map(|((e, v), g)| format!("{e}: ours {v:#x}, C {g:#x}"))
         .collect();
     assert!(bad.is_empty(), "{bad:#?}");
-    println!("{} layouts and constants match", t.len());
+    let api = got[t.iter().position(|(e, _)| e == "LIBOBS_API_VER").unwrap()];
+    println!(
+        "{} layouts and constants match; API {}.{} declared, libobs {}.{}.{} loads it",
+        t.len() - 1,
+        LIBOBS_API_VER >> 24,
+        LIBOBS_API_VER >> 16 & 0xff,
+        api >> 24,
+        api >> 16 & 0xff,
+        api & 0xffff
+    );
 }
 
 /// The YUV matrix against libobs' own BT.709 limited-range one (video_format_get_parameters_for_format) and

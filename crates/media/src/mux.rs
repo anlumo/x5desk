@@ -672,8 +672,8 @@ mod tests {
     };
     use std::path::Path;
 
-    /// Copies `tracks` of `src` into `dst`, interleaved by decode time, with the source's edit lists applied to the
-    /// timestamps; `sph` marks video as 360.
+    /// Copies `tracks` of `src` into `dst`, interleaved by decode time, with the source's edit lists applied: their
+    /// start to the timestamps, their end as the track's; `sph` marks video as 360.
     fn remux(
         src: &Path,
         tracks: &[usize],
@@ -724,6 +724,11 @@ mod tests {
             x.write(j, &buf, s.dts + sh[j], s.pts + sh[j], s.dur, s.sync)
                 .unwrap();
             next[j] += 1;
+        }
+        for (j, &t) in tracks.iter().enumerate() {
+            if let Some(e) = m.tracks[t].end(m.timescale) {
+                x.end(j, e);
+            }
         }
         x.finish(faststart).unwrap();
         m
@@ -1009,9 +1014,11 @@ mod tests {
         assert!(res[1].0.abs() <= 1.0 / ts && res[1].1.abs() <= 1, "{res:?}");
     }
 
-    /// Edit lists survive a remux through `Track::shift`: B-frame delay (the shifted video starts at dts < 0) and
-    /// AAC priming (the first audio pts < 0). The source is made by FFmpeg (test tool); like the other tool-checked
-    /// tests it runs only with `X5_SAMPLES` set.
+    /// Edit lists survive a remux through `Track::shift` and `Track::end`: B-frame delay (the shifted video starts at
+    /// dts < 0), AAC priming (the first audio pts < 0) and the AAC remainder (cut by the audio edit's end alone since
+    /// FFmpeg 9.1, which no longer shortens the last frame's duration as well): FFmpeg decodes the source's audio
+    /// samples, no more. The source is made by FFmpeg (test tool); like the other tool-checked tests it runs only with
+    /// `X5_SAMPLES` set.
     #[test]
     fn remux_edit_lists() {
         if samples().is_none() {
@@ -1056,8 +1063,9 @@ mod tests {
         assert!(first[0].0 < 0 && first[1].1 < 0, "{first:?}");
         assert_eq!(hashes(&dst), hashes(&src));
         let (a, b) = (spans(&src), spans(&dst));
-        println!("source {a:?}, remux {b:?}");
-        assert_eq!(a, b);
+        let (na, nb) = (decoded_frames(&src), decoded_frames(&dst));
+        println!("source {a:?}, remux {b:?}; audio frames decoded: source {na}, remux {nb}");
+        assert_eq!((a, na), (b, nb));
         decodes_clean(&dst);
     }
 
