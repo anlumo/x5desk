@@ -15,10 +15,11 @@ use glam::{Quat, Vec2, Vec3};
 use std::{
     path::PathBuf,
     sync::{
-        Arc, Mutex, MutexGuard, OnceLock, Weak,
+        Arc, Mutex, MutexGuard, OnceLock, TryLockError, Weak,
         atomic::{AtomicBool, Ordering::Relaxed},
     },
     thread,
+    time::Duration,
 };
 use stitch::View;
 use track::{Sample, State, Subject};
@@ -42,14 +43,20 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct Models {
     /// the device they are on (by its `Gpu`: devices of separate instances compare equal by id; the weak reference
     /// keeps the address from being reused), the networks, warmed up
-    ai: Mutex<Option<(Weak<Gpu>, track::Ai, bool)>>,
+    ai: Mutex<Option<Loaded>>,
     note: Mutex<String>,
+    /// the thread in `with_stop` (an agents' lane: one stuck in a detection keeps them, and BURN, for good)
+    holder: Mutex<Option<thread::ThreadId>>,
 }
+
+/// What `Models::ai` holds once they are loaded.
+type Loaded = (Weak<Gpu>, track::Ai, bool);
 
 /// The app's models: one load per run (and per device: the tests open several).
 pub static MODELS: Models = Models {
     ai: Mutex::new(None),
     note: Mutex::new(String::new()),
+    holder: Mutex::new(None),
 };
 
 impl Models {
@@ -92,7 +99,79 @@ impl Models {
         ctx: Option<&egui::Context>,
         f: impl FnOnce(&mut track::Ai) -> Result<T, String>,
     ) -> Result<T, String> {
-        let mut m = lock(&self.ai);
+        self.held(&mut lock(&self.ai), g, warm, ctx, f)
+    }
+
+    /// `with` (no warm-up) where the wait for the models sees `stop` (`acquire`): a set one ends it with `CANCELLED`.
+    pub fn with_stop<T>(
+        &self,
+        g: &Arc<Gpu>,
+        stop: &AtomicBool,
+        ctx: Option<&egui::Context>,
+        f: impl FnOnce(&mut track::Ai) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut m = self.acquire(stop)?;
+        // cleared however `f` ends, a panic too
+        struct Holds<'a>(&'a Mutex<Option<thread::ThreadId>>);
+        impl Drop for Holds<'_> {
+            fn drop(&mut self) {
+                *lock(self.0) = None
+            }
+        }
+        *lock(&self.holder) = Some(thread::current().id());
+        let _h = Holds(&self.holder);
+        self.held(&mut m, g, false, ctx, f)
+    }
+
+    /// The thread in `with_stop` now, if one is.
+    pub fn holder(&self) -> Option<thread::ThreadId> {
+        *lock(&self.holder)
+    }
+
+    /// The models' mutex taken by polling it every 5 ms (a thread blocked in `lock` can't see its stop): Err(CANCELLED)
+    /// once `stop` is set while another holds it; a poisoned one taken over, as `lock` does.
+    fn acquire(&self, stop: &AtomicBool) -> Result<MutexGuard<'_, Option<Loaded>>, String> {
+        loop {
+            match self.ai.try_lock() {
+                Ok(m) => return Ok(m),
+                Err(TryLockError::Poisoned(e)) => return Ok(e.into_inner()),
+                Err(TryLockError::WouldBlock) if stop.load(Relaxed) => return Err(CANCELLED.into()),
+                Err(TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(5)),
+            }
+        }
+    }
+
+    /// The models dropped unless they are in use (they load again at the next use), under BURN: none of their burn
+    /// calls is in flight then. Whether they were loaded and dropped.
+    pub fn trim(&self) -> bool {
+        let mut m = match self.ai.try_lock() {
+            Ok(m) => m,
+            Err(TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        let _b = BURN.lock();
+        m.take().is_some()
+    }
+
+    /// Whether they are loaded; None while another holds them.
+    #[cfg(test)]
+    pub fn loaded(&self) -> Option<bool> {
+        match self.ai.try_lock() {
+            Ok(m) => Some(m.is_some()),
+            Err(TryLockError::Poisoned(e)) => Some(e.into_inner().is_some()),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+
+    /// `with`'s work once it holds the models (`m`).
+    fn held<T>(
+        &self,
+        m: &mut Option<Loaded>,
+        g: &Arc<Gpu>,
+        warm: bool,
+        ctx: Option<&egui::Context>,
+        f: impl FnOnce(&mut track::Ai) -> Result<T, String>,
+    ) -> Result<T, String> {
         if m.as_ref().is_none_or(|x| x.0.as_ptr() != Arc::as_ptr(g)) {
             *m = None;
             self.say("Loading the AI models…", ctx);

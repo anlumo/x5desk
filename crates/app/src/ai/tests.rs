@@ -20,12 +20,23 @@ pub(crate) fn samples() -> Option<PathBuf> {
     d
 }
 
+/// Skips a test that loads Core ML in this process unless `CFFIXED_USER_HOME` is set: Core ML's ANE cache follows it,
+/// not `HOME`, so without it the cache would go to the real home.
+pub(crate) fn no_cf_home() -> bool {
+    let unset = cfg!(target_os = "macos") && std::env::var_os("CFFIXED_USER_HOME").is_none();
+    if unset {
+        eprintln!("CFFIXED_USER_HOME unset (Core ML's cache would go to the real home): skipped");
+    }
+    unset
+}
+
 /// A progress note goes once its steps end, also when one fails (the warm-up's note stayed up after a failure).
 #[test]
 fn steps_note() {
     let m = Models {
         ai: Mutex::new(None),
         note: Mutex::new(String::new()),
+        holder: Mutex::new(None),
     };
     let mut seen = vec![];
     let r = m.steps("Warming", 3, None, |i| {
@@ -37,6 +48,57 @@ fn steps_note() {
     });
     assert_eq!(seen, ["Warming: 1 of 3", "Warming: 2 of 3"]);
     assert_eq!((r, m.note()), (Err("out of memory".into()), String::new()));
+}
+
+/// `with_stop`'s wait for the models (`acquire`) while another thread holds them: a stop ends it within 50 ms, with
+/// `CANCELLED`; with the stop clear it waits and gets them once the other lets go.
+#[test]
+fn with_stop() {
+    let m = Models {
+        ai: Mutex::new(None),
+        note: Mutex::new(String::new()),
+        holder: Mutex::new(None),
+    };
+    let (stop, ms) = (AtomicBool::new(false), std::time::Duration::from_millis);
+    thread::scope(|s| {
+        let held = lock(&m.ai);
+        let w = s.spawn(|| (m.acquire(&stop).map(drop), Instant::now()));
+        thread::sleep(ms(100));
+        assert!(!w.is_finished(), "got models another holds");
+        let t = Instant::now();
+        stop.store(true, Relaxed);
+        let (r, at) = w.join().unwrap();
+        assert_eq!(r, Err(CANCELLED.into()));
+        let d = at.saturating_duration_since(t);
+        assert!(d < ms(50), "{d:?} after the stop");
+        stop.store(false, Relaxed);
+        let w = s.spawn(|| m.acquire(&stop).is_ok());
+        thread::sleep(ms(100));
+        assert!(!w.is_finished(), "got models another holds");
+        drop(held);
+        assert!(w.join().unwrap());
+    });
+}
+
+/// `trim` with none loaded, or while another thread holds the models (it doesn't wait for them): nothing dropped;
+/// loaded (on this module's device) and free: dropped, once.
+#[test]
+fn trim() {
+    let m = Models {
+        ai: Mutex::new(None),
+        note: Mutex::new(String::new()),
+        holder: Mutex::new(None),
+    };
+    assert!(!m.trim());
+    let (_l, g, _) = gpu();
+    m.with(&g, false, None, |_| Ok(())).unwrap();
+    thread::scope(|s| {
+        let held = lock(&m.ai);
+        assert!(!s.spawn(|| m.trim()).join().unwrap());
+        drop(held);
+    });
+    assert!(m.loaded() == Some(true) && m.trim());
+    assert!(m.loaded() == Some(false) && !m.trim());
 }
 
 /// Waits for a job to end (at most `secs`).
@@ -236,6 +298,9 @@ fn track_v606() {
 /// edit checks, each clip reframed by perspective keys inside its source span.
 #[test]
 fn auto_v635() {
+    if no_cf_home() {
+        return;
+    }
     let Some(d) = samples() else { return };
     let (_l, g, cx) = gpu();
     let t0 = Instant::now();

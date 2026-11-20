@@ -6,7 +6,9 @@
 //! stitched as the export stitches it (crate track: YuNet on `face_tiles`, the plate detector on crops around YOLOX's
 //! vehicles; each linked over frames by a `Hide` of its own), then the job's effect hook blurs their regions:
 //! `track::Blur` in a 360 frame, [`Blur`] in a flat view (an editor timeline: a pass per clip over its
-//! source span, each output frame blurred with its clip's regions in its view). Photos (the camera's equirect JPEGs)
+//! source span, each output frame blurred with its clip's regions in its view). The pass ([`privacy_pass`]) is the
+//! agents' too: their lanes run it from `Job::pre`, the models held per searched frame ([`Hold`]), the screen's for
+//! the whole pass. Photos (the camera's equirect JPEGs)
 //! render here too: the view through the preview, the effects, the blur, a JPEG. A Deep Track follow view
 //! (`Spec::follow`) turns a flat output onto the subject, the track's directions turned into the frame the export
 //! stitches in; a Shot Lab job ([`Lab`]) brings its effect's hook maker, run on the export thread for the output's
@@ -1161,6 +1163,7 @@ pub(crate) fn clip_job(
         stab: x.stab.map(|l| (l, x.smooth)),
         fx,
         flat,
+        pre: None,
     };
     (job, n)
 }
@@ -1319,6 +1322,7 @@ impl Keep {
             stab,
             fx,
             flat: false,
+            pre: None,
         };
         let (it, mut last) = (&t.it, Instant::now());
         export::run(g, cx, &mut self.raft, job, &it.stop, &mut |p| {
@@ -1330,11 +1334,10 @@ impl Keep {
         })
     }
 
-    /// The faces and licence plates (as the job's settings ask) of source span `[a, b]` (s) of clip `f` every `STEP`
-    /// frames, found on the clip stitched with the poses the export stitches with (`PLATES_W` wide with plates, else
-    /// `FACES_W`), each linked into regions for every frame by a `Hide` of its own; the frame times. Adds its counts to
-    /// `sum` (face and plate detections, frames searched, face and plate tracks, frames blurred, frames) and notes the
-    /// totals.
+    /// The Export screen's privacy pass (`privacy_pass`, the models held for all of it) for the job's faces and
+    /// licence plates over source span `ab` (s) of clip `f`: its progress (`St::Privacy`), cancel and note. Adds its
+    /// counts to `sum` (face and plate detections, frames searched, face and plate tracks, frames blurred, frames) and
+    /// notes the totals; the frame times, the regions per frame.
     #[allow(clippy::too_many_arguments)]
     fn privacy(
         &mut self,
@@ -1343,94 +1346,38 @@ impl Keep {
         t: &Task,
         f: &[PathBuf],
         stab: Option<(stab::Lock, f64)>,
-        [a, b]: [f64; 2],
+        ab: [f64; 2],
         fps: edit::Rate,
         sum: &mut [usize; 7],
         ctx: &egui::Context,
     ) -> Result<(Vec<f64>, Regs), String> {
-        if f.len() > 1 {
-            return Err("privacy blur: recordings in a file per lens are not supported yet".into());
-        }
-        let c = shotlab::Clip::open(&f[0])?;
-        let poses = match stab {
-            Some((l, s)) => Some(
-                c.poses(l, s)
-                    .ok_or("privacy blur: no IMU record to stabilise with")?,
-            ),
-            None => None,
-        };
         let (fa, pl) = (t.set.faces, t.set.plates);
         let what = match (fa, pl) {
             (true, false) => "faces",
             (false, true) => "license plates",
             _ => "faces and license plates",
         };
-        let k0 = clip::frame_at(&c.times, a);
-        let k1 = c.times.partition_point(|&x| x < b - 1e-3).max(k0 + 1) - 1;
-        let ks: Vec<usize> = (k0..=k1).step_by(STEP).collect();
-        let (it, n, tiles) = (&t.it, ks.len(), track::face_tiles());
-        let (mut hide, mut pano, mut i, mut found) = (
-            [track::Hide::new(), track::Hide::plates(PLATES_W)],
-            None,
-            0,
-            [0; 2],
-        );
-        it.set(St::Privacy(0, n, what));
-        crate::ai::MODELS.with(g, false, Some(ctx), |ai| {
-            // shotlab decodes and submits each stitch on this thread between the calls: a surface configure the UI
-            // retries waits for that (no wait there depends on another thread); the detection runs under BURN instead,
-            // never inside GATE (the UI takes BURN, then GATE)
-            let mut gate = Some(crate::GATE.read());
-            c.frames(
-                g,
-                cx,
-                if pl { PLATES_W } else { FACES_W },
-                false,
-                &ks,
-                |k| c.pose(k, poses.as_deref()),
-                |tex, k| {
-                    if it.stop.load(Relaxed) {
-                        return Err(CANCELLED.into());
-                    }
-                    let p =
-                        pano.get_or_insert_with(|| ai.pano(&tex.create_view(&Default::default())));
-                    gate.take();
-                    // burn submits throughout
-                    let r = {
-                        let _b = crate::BURN.lock();
-                        let f = if fa {
-                            ai.faces(p, &tiles, MIN)
-                        } else {
-                            Ok(vec![])
-                        };
-                        let q = if pl { ai.plates(p, PMIN) } else { Ok(vec![]) };
-                        f.and_then(|f| Ok([f, q?]))
-                    };
-                    gate = Some(crate::GATE.read());
-                    for (j, r) in r?.into_iter().enumerate() {
-                        found[j] += r.len();
-                        hide[j].push(k, r);
-                    }
-                    i += 1;
-                    it.set(St::Privacy(i, n, what));
+        let it = &t.it;
+        let (times, r, c) = privacy_pass(
+            g,
+            cx,
+            f,
+            stab,
+            ab,
+            fps,
+            [fa, pl],
+            Hold::Pass,
+            &it.stop,
+            Some(ctx),
+            &mut |i, n| {
+                it.set(St::Privacy(i, n, what));
+                // none before the models load
+                if i > 0 {
                     ctx.request_repaint();
-                    Ok(())
-                },
-            )
-        })?;
-        let fps = fps.num as f32 / fps.den as f32;
-        let [rf, rp] = hide.each_ref().map(|h| h.regions(c.times.len(), fps));
-        let r: Regs = rf
-            .into_iter()
-            .zip(rp)
-            .map(|(a, b)| [a, b].concat())
-            .collect();
-        let on = r[k0..=k1].iter().filter(|r| !r.is_empty()).count();
-        let tr = hide.each_ref().map(|h| h.tracks(fps).len());
-        for (s, x) in sum
-            .iter_mut()
-            .zip([found[0], found[1], n, tr[0], tr[1], on, k1 + 1 - k0])
-        {
+                }
+            },
+        )?;
+        for (s, x) in sum.iter_mut().zip(c) {
             *s += x;
         }
         let [ff, fp, n, tf, tp, on, all] = *sum;
@@ -1444,7 +1391,7 @@ impl Keep {
         };
         *it.note.lock().unwrap_or_else(|e| e.into_inner()) =
             format!("{d} detections on {n} frames, {tr} tracks, blurred on {on} of {all} frames");
-        Ok((c.times, r))
+        Ok((times, r))
     }
 
     /// A photo: its 360 or its view through the preview, the look and adjustments, the faces and plates blurred; a JPEG
@@ -1580,6 +1527,150 @@ impl Keep {
             ..Default::default()
         })
     }
+}
+
+/// How a privacy pass holds `ai::MODELS` (one user at a time): for the whole pass, as the Export screen always has (a
+/// Deep Track, auto edit or preview started meanwhile waits for it), or per searched frame (the agents' lanes: a
+/// still's one frame waits for one detection of an export's pass, not for the whole pass).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Hold {
+    Pass,
+    Frame,
+}
+
+/// The first and last source frame of a privacy pass over `[a, b]` (s) of a clip with frame times `times`, and the
+/// frames it searches: every `STEP`th from the first.
+pub(crate) fn keys(times: &[f64], [a, b]: [f64; 2]) -> (usize, usize, Vec<usize>) {
+    let k0 = clip::frame_at(times, a);
+    let k1 = times.partition_point(|&x| x < b - 1e-3).max(k0 + 1) - 1;
+    (k0, k1, (k0..=k1).step_by(STEP).collect())
+}
+
+/// One searched frame's faces and plates on equirect `p` (as `[fa, pl]` asks; none of a kind not asked), under BURN
+/// (burn submits throughout). `still`: the pass's only frame, so its plates are a photo's (no track to judge them by).
+fn detect(
+    ai: &mut track::Ai,
+    p: &track::Pano,
+    tiles: &[track::Cam],
+    [fa, pl]: [bool; 2],
+    still: bool,
+) -> Result<[Vec<track::Region>; 2], String> {
+    let _b = crate::BURN.lock();
+    let f = if fa {
+        ai.faces(p, tiles, MIN)
+    } else {
+        Ok(vec![])
+    };
+    let q = match (pl, still) {
+        (false, _) => Ok(vec![]),
+        (true, false) => ai.plates(p, PMIN),
+        (true, true) => ai.plates_still(p),
+    };
+    f.and_then(|f| Ok([f, q?]))
+}
+
+/// The faces and licence plates (`[fa, pl]`) of source span `ab` (s) of clip `f` every `STEP` frames, found on the
+/// clip stitched with the poses the export stitches with (`PLATES_W` wide with plates, else `FACES_W`), each linked
+/// into regions for every frame by a `Hide` of its own, the models held as `hold` says. `stop` cancels it at the next
+/// searched frame (and a wait for the models, `Hold::Frame`); `say(i, n)`: i of n frames searched (0 before the models
+/// load); `ctx` repaints while they load. Returns the frame times, the regions per source frame (faces first) and its
+/// counts: face and plate detections, frames searched, face and plate tracks, frames blurred, frames.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn privacy_pass(
+    g: &Arc<Gpu>,
+    cx: &Ctx,
+    f: &[PathBuf],
+    stab: Option<(stab::Lock, f64)>,
+    ab: [f64; 2],
+    fps: edit::Rate,
+    [fa, pl]: [bool; 2],
+    hold: Hold,
+    stop: &AtomicBool,
+    ctx: Option<&egui::Context>,
+    say: &mut dyn FnMut(usize, usize),
+) -> Result<(Vec<f64>, Regs, [usize; 7]), String> {
+    if f.len() > 1 {
+        return Err("privacy blur: recordings in a file per lens are not supported yet".into());
+    }
+    let c = shotlab::Clip::open(&f[0])?;
+    let poses = match stab {
+        Some((l, s)) => Some(
+            c.poses(l, s)
+                .ok_or("privacy blur: no IMU record to stabilise with")?,
+        ),
+        None => None,
+    };
+    let (k0, k1, ks) = keys(&c.times, ab);
+    let (n, tiles) = (ks.len(), track::face_tiles());
+    // a frame grab searches one frame: `Hide::plates` wants a plate seen twice, so its plates are judged as a photo's
+    let still = n == 1;
+    let plates = match still {
+        true => track::Hide::new(),
+        false => track::Hide::plates(PLATES_W),
+    };
+    let (mut hide, mut i, mut found) = ([track::Hide::new(), plates], 0, [0; 2]);
+    say(0, n);
+    // a searched frame's regions
+    let mut keep = |k, r: [Vec<track::Region>; 2]| {
+        for (j, r) in r.into_iter().enumerate() {
+            found[j] += r.len();
+            hide[j].push(k, r);
+        }
+        i += 1;
+        say(i, n);
+    };
+    let w = if pl { PLATES_W } else { FACES_W };
+    let pose = |k| c.pose(k, poses.as_deref());
+    // shotlab decodes and submits each stitch on this thread between the calls: a surface configure the UI retries
+    // waits for that (no wait there depends on another thread); the detection runs under BURN instead, never inside
+    // GATE (the UI takes BURN, then GATE), and so does a wait for the models
+    match hold {
+        Hold::Pass => crate::ai::MODELS.with(g, false, ctx, |ai| {
+            let (mut gate, mut pano) = (Some(crate::GATE.read()), None);
+            c.frames(g, cx, w, false, &ks, pose, |tex, k| {
+                if stop.load(Relaxed) {
+                    return Err(CANCELLED.into());
+                }
+                let p = pano.get_or_insert_with(|| ai.pano(&tex.create_view(&Default::default())));
+                gate.take();
+                let r = detect(ai, p, &tiles, [fa, pl], still);
+                gate = Some(crate::GATE.read());
+                keep(k, r?);
+                Ok(())
+            })
+        }),
+        Hold::Frame => {
+            let mut gate = Some(crate::GATE.read());
+            c.frames(g, cx, w, false, &ks, pose, |tex, k| {
+                if stop.load(Relaxed) {
+                    return Err(CANCELLED.into());
+                }
+                gate.take();
+                // the frame bound afresh: the models may have been loaded again since the last
+                let r = crate::ai::MODELS.with_stop(g, stop, ctx, |ai| {
+                    let p = ai.pano(&tex.create_view(&Default::default()));
+                    detect(ai, &p, &tiles, [fa, pl], still)
+                });
+                gate = Some(crate::GATE.read());
+                keep(k, r?);
+                Ok(())
+            })
+        }
+    }?;
+    let fps = fps.num as f32 / fps.den as f32;
+    let [rf, rp] = hide.each_ref().map(|h| h.regions(c.times.len(), fps));
+    let r: Regs = rf
+        .into_iter()
+        .zip(rp)
+        .map(|(a, b)| [a, b].concat())
+        .collect();
+    let on = r[k0..=k1].iter().filter(|r| !r.is_empty()).count();
+    let tr = hide.each_ref().map(|h| h.tracks(fps).len());
+    Ok((
+        c.times,
+        r,
+        [found[0], found[1], n, tr[0], tr[1], on, k1 + 1 - k0],
+    ))
 }
 
 /// The export's effect hook that blurs the privacy regions of each output frame: `pick(k, t)` gives output frame k at

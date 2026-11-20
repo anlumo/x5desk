@@ -101,8 +101,20 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   driver offers H.265 decode only with DPB and output images coinciding, and crate video requires them distinct. On
   this host the app therefore decodes and runs its networks on the Radeon (`VK_ICD_FILENAMES`). Support coinciding
   images, or pick the adapter by what it can decode.
-- [ ] **The MCP server's export skips the privacy pass** (`plate_blur` is listed as later; its jobs call `clip_job`
-  directly).
+- [x] **Blur for the MCP server's agents.** e3e1dfe brought onto main:
+  `render_still` and `export` take `blur`, run the Export screen's pass (`export::privacy_pass`: main's `PMIN` 0.1 and
+  `Hide::plates`) from `Job::pre` on their lanes, and say what it found. On the Radeon (`x5_blur`, 3 s spans) it
+  searches 5.1 frames/s on v635 and 4.1 on v606 (the YOLOv9-t detector: 5.9 / 4.6), 2–2.5 times the span; the host
+  peaks at 356 MiB RSS, 1.4 GiB VRAM. A pass over one frame (a frame grab, a still) judges its plates as a photo's
+  (`plates_still`): `Hide::plates` never hides a plate seen once, so until then a grab blurred no plate.
+  `export::tests::plates` asked for a region on v606's Mercedes, which the detector finds at 0.75 but 20 px wide, under
+  the photo rule; it now asserts none. Left: no sample clip holds a plate a still blurs, so that side is untested;
+  the clips hold almost no plate an export hides either (a pass over all of v635: 5 detections, none hidden), so
+  `privacy_parity` compares plate detections only; the M4 figures (1.6 times the span, 160 MB freed by the trim)
+  predate our detector.
+- [ ] **Tests that fail on main.** Crate export's `segments` (PSNR 32.6 dB against a 35 dB floor), the app's MCP
+  test `x5_samples` (asks for 10–40 s of the 5.8 s v635), and `live::tests::rtmp` with `rtmp_backlog` when run
+  together (both write `x5desk-<pid>-live-rtmp30.flv`; each passes alone).
 - [ ] **Wrap up.** `plates_flags`, `plates_rides`, `plates` and the still checks; `cargo fmt`; models/README
   (sha256, data, results), the About page and `PLAN.md`; commit, merge and push on the user's word.
 - [ ] **Decide:** remove the old yolo-v9 plate model files? They stay in the tree unbuilt, and

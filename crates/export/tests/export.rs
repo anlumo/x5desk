@@ -2,7 +2,7 @@
 //! `exiv2` / `djpeg` (test tools only), and on the synthetic recording (`export::synth`) without them. Outputs go to
 //! `X5_EXPORT_OUT` (default: Cargo's test tmp directory, on disk). GPU timings are noisy: other work shares the GPU.
 
-use export::{Cut, Dest, Edit, Enc, Fx, Hook, Job, Out, Progress, Queue, Seg, State};
+use export::{Cut, Dest, Edit, Enc, Fx, Hook, Job, Out, Pre, Progress, Queue, Seg, State};
 use media::part;
 use std::{
     collections::HashMap,
@@ -10,7 +10,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Arc, Mutex, MutexGuard, OnceLock, RwLock,
-        atomic::{AtomicBool, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
     },
     time::{Duration, Instant},
 };
@@ -232,6 +232,7 @@ fn pano_main10() {
         stab: Some((stab::Lock::Horizon, 0.5)),
         flat: false,
         fx,
+        pre: None,
     };
     let (fx, got) = capture(&g, &ks);
     let (p, secs) = export(&g, &cx, job(true, path.clone(), Some(fx)));
@@ -396,6 +397,7 @@ fn fidelity() {
                 stab: None,
                 flat: false,
                 fx: Some(fx),
+                pre: None,
             },
         );
         let name = if deep {
@@ -476,6 +478,7 @@ fn flat_h264() {
         stab: Some((stab::Lock::Horizon, 1.0)),
         flat: false,
         fx: None,
+        pre: None,
     };
     let (p, secs) = export(&g, &cx, job);
     eprintln!(
@@ -560,6 +563,7 @@ fn trim_sync() {
         stab: None,
         flat: false,
         fx: None,
+        pre: None,
     };
     let enc = Enc::Video {
         codec: Codec::H265,
@@ -693,6 +697,7 @@ fn segments() {
         stab: None,
         flat: false,
         fx: None,
+        pre: None,
     };
     let path = out("segments.mp4");
     let enc = Enc::Video {
@@ -840,6 +845,7 @@ fn queue() {
             stab: None,
             flat: false,
             fx,
+            pre: None,
         });
         ids.push((id, name, path, want));
     }
@@ -918,6 +924,7 @@ fn cancel() {
         stab: None,
         flat: false,
         fx: None,
+        pre: None,
     });
     let t = Instant::now();
     loop {
@@ -997,6 +1004,7 @@ fn grab() {
                 stab: None,
                 flat: false,
                 fx: Some(fx),
+                pre: None,
             },
         );
         let px = stitch::read_texture(&g.device, &g.queue, &got.lock().unwrap()[0].1);
@@ -1075,6 +1083,7 @@ fn flat_sharpness() {
                 stab: None,
                 flat: false,
                 fx: Some(fx),
+                pre: None,
             },
         );
         stitch::read_texture(&g.device, &g.queue, &got.lock().unwrap()[0].1)
@@ -1238,6 +1247,7 @@ fn edit_job(tl: edit::Timeline, path: PathBuf, out: Out, enc: Enc, fx: Option<Ho
         stab: None,
         flat: false,
         fx,
+        pre: None,
     }
 }
 
@@ -1861,6 +1871,7 @@ fn flat_flag() {
             stab: None,
             flat,
             fx: None,
+            pre: None,
         };
         let (j, v) = (
             out(&format!("flag_{flat}.jpg")),
@@ -1926,6 +1937,7 @@ fn flat_job(src: &Path, t: [f64; 2], path: &Path) -> Job {
         stab: None,
         flat: false,
         fx: None,
+        pre: None,
     }
 }
 
@@ -2374,6 +2386,241 @@ fn lane_panic() {
         }
         assert!(want.is_none() || gone(&path), "{name}: output left");
     }
+    assert!(q.alive());
+}
+
+/// `f` as a `Job::pre`.
+fn pre(
+    f: impl FnOnce(&Ctx, &AtomicBool) -> Result<Option<Hook>, String> + Send + 'static,
+) -> Option<Pre> {
+    Some(Box::new(f))
+}
+
+/// A hook that counts its frames into `n`.
+fn count(n: &Arc<AtomicU64>) -> Hook {
+    let n = n.clone();
+    Box::new(move |_: Fx<'_>| {
+        n.fetch_add(1, Relaxed);
+    })
+}
+
+/// `jobs` (file name, `pre`) on `q`, each over 0.5 s of `src` into a `.part` it is handed; how they ended, in order.
+fn pre_jobs(q: &Queue, src: &Path, jobs: Vec<(&str, Option<Pre>)>) -> Vec<(State, PathBuf)> {
+    let ids: Vec<_> = (jobs.into_iter())
+        .map(|(name, pre)| {
+            let path = out(name);
+            let d = Dest {
+                part: Some(part::create(&path).unwrap()),
+                ..Default::default()
+            };
+            let job = Job {
+                pre,
+                ..flat_job(src, [0.0, 0.5], &path)
+            };
+            (q.push_into(job, d).unwrap(), path)
+        })
+        .collect();
+    (ids.into_iter())
+        .map(|(id, path)| {
+            let s = wait(q, id, 120);
+            eprintln!("{}: {s:?}", path.display());
+            (s, path)
+        })
+        .collect()
+}
+
+/// `Job::pre` runs once on the lane's thread with the stop clear, before the first frame; the hook it hands back runs
+/// before `Job::fx` on every frame. Also the hook alone, and `Job::fx` alone after a `pre` that hands none.
+#[test]
+fn pre_runs_first() {
+    type Log = Arc<Mutex<Vec<String>>>;
+    let src = synth();
+    let (_l, g, cx) = gpu();
+    let q = Queue::with(g.clone(), cx.clone(), "pre-lane").unwrap();
+    let to = |log: &Log, c: char| -> Hook {
+        let log = log.clone();
+        Box::new(move |f: Fx<'_>| log.lock().unwrap().push(format!("{c}{}", f.k)))
+    };
+    let mut jobs = vec![];
+    for (name, hook, fx) in [
+        ("pre_both.mp4", true, true),
+        ("pre_hook.mp4", true, false),
+        ("pre_fx.mp4", false, true),
+    ] {
+        let log = Log::default();
+        let (l, h) = (log.clone(), hook.then(|| to(&log, 'h')));
+        let path = out(name);
+        let job = Job {
+            fx: fx.then(|| to(&log, 'f')),
+            pre: pre(move |_, stop| {
+                let th = std::thread::current();
+                let s = format!("pre on {:?}, stop {}", th.name(), stop.load(Relaxed));
+                l.lock().unwrap().push(s);
+                Ok(h)
+            }),
+            ..flat_job(&src, [0.0, 0.5], &path)
+        };
+        jobs.push((q.push(job), name, path, log, hook, fx));
+    }
+    for (id, name, path, log, hook, fx) in jobs {
+        let s = wait(&q, id, 120);
+        let State::Done(p) = s else {
+            panic!("{name}: {s:?}")
+        };
+        assert!(p.done == p.total && p.total >= 10, "{name}: {p:?}");
+        assert_eq!(samples(&path), p.total as usize, "{name}");
+        let mut want = vec![r#"pre on Some("pre-lane"), stop false"#.to_string()];
+        for k in 0..p.total {
+            want.extend(hook.then(|| format!("h{k}")));
+            want.extend(fx.then(|| format!("f{k}")));
+        }
+        assert_eq!(*log.lock().unwrap(), want, "{name}");
+    }
+}
+
+/// A job cancelled in its `pre`: the stop reaches it, the lane is busy meanwhile (the job `Running` at 0 frames), and
+/// the job ends `Cancelled` without a frame of the hook it hands back after the stop, leaving neither the file nor
+/// the `.part` it was handed. A queued job's `pre` is dropped unrun once it is cancelled.
+#[test]
+fn pre_cancel() {
+    struct Flag(Arc<AtomicBool>);
+    impl Drop for Flag {
+        fn drop(&mut self) {
+            self.0.store(true, Relaxed)
+        }
+    }
+    let src = synth();
+    let (_l, g, cx) = gpu();
+    let q = Queue::with(g.clone(), cx.clone(), "pre-cancel").unwrap();
+    let (pa, pb) = (out("pre_cancel_a.mp4"), out("pre_cancel_b.mp4"));
+    let (inside, frames) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicU64::new(0)),
+    );
+    let (i, n) = (inside.clone(), frames.clone());
+    let d = Dest {
+        part: Some(part::create(&pa).unwrap()),
+        ..Default::default()
+    };
+    let job = Job {
+        pre: pre(move |_, stop| {
+            i.store(true, Relaxed);
+            let t = Instant::now();
+            while !stop.load(Relaxed) {
+                if t.elapsed().as_secs() > 120 {
+                    return Err("never stopped".into());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(Some(count(&n)))
+        }),
+        ..flat_job(&src, [0.0, 1.0], &pa)
+    };
+    let ia = q.push_into(job, d).unwrap();
+    let t = Instant::now();
+    while !inside.load(Relaxed) {
+        assert!(t.elapsed().as_secs() < 120, "{:?}", q.state(ia));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(q.busy());
+    assert_eq!(q.state(ia), Some(State::Running(Progress::default())));
+    assert!(part::of(&pa).exists());
+    let (ran, dropped) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (r, flag) = (ran.clone(), Flag(dropped.clone()));
+    let ib = q.push(Job {
+        pre: pre(move |_, _| {
+            let _ = &flag;
+            r.store(true, Relaxed);
+            Ok(None)
+        }),
+        ..flat_job(&src, [0.0, 1.0], &pb)
+    });
+    q.cancel(ib);
+    q.cancel(ia);
+    assert_eq!(wait(&q, ia, 120), State::Cancelled);
+    assert_eq!(q.state(ib), Some(State::Cancelled));
+    assert_eq!(frames.load(Relaxed), 0, "frames after the stop");
+    let t = Instant::now();
+    while q.busy() {
+        assert!(t.elapsed().as_secs() < 120, "{:?}", q.jobs());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(dropped.load(Relaxed) && !ran.load(Relaxed));
+    assert!(gone(&pa) && gone(&pb));
+}
+
+/// A `pre` that fails fails its job with its error: also a wgpu error in it, at once (its own error scope), before a
+/// frame of the hook it hands back. Neither the file nor its `.part` is left, and the lane runs the next job.
+#[test]
+fn pre_fails() {
+    let src = synth();
+    let (_l, g, cx) = gpu();
+    let q = Queue::with(g.clone(), cx.clone(), "pre-fails").unwrap();
+    let frames = Arc::new(AtomicU64::new(0));
+    let (n, gd) = (frames.clone(), g.clone());
+    let wgpu = pre(move |_, _| {
+        // a texture of no size: a validation error
+        let _ = gd.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("nothing"),
+            size: wgpu::Extent3d {
+                width: 0,
+                height: 16,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        Ok(Some(count(&n)))
+    });
+    let jobs = vec![
+        ("pre_err.mp4", pre(|_, _| Err("x".into()))),
+        ("pre_wgpu.mp4", wgpu),
+        ("pre_next.mp4", pre(|_, _| Ok(None))),
+    ];
+    let s = pre_jobs(&q, &src, jobs);
+    assert_eq!(s[0].0, State::Failed("x".into()));
+    assert!(matches!(&s[1].0, State::Failed(e) if e.starts_with("wgpu: ")));
+    assert_eq!(frames.load(Relaxed), 0, "frames after the pre's wgpu error");
+    assert!(gone(&s[0].1) && gone(&s[1].1), "output left");
+    let State::Done(p) = s[2].0 else {
+        panic!("{:?}", s[2].0)
+    };
+    assert_eq!(samples(&s[2].1), p.total as usize);
+    assert!(q.alive() && q.lost().is_none());
+}
+
+/// Panics in a `pre` and in the hook it hands back fail their job alone, leaving neither the file nor its `.part`;
+/// the lane runs the next job.
+#[test]
+fn pre_panics() {
+    let src = synth();
+    let (_l, g, cx) = gpu();
+    let q = Queue::with(g.clone(), cx.clone(), "pre-panics").unwrap();
+    let late: Hook = Box::new(|f: Fx<'_>| {
+        if f.k == 5 {
+            panic!("its hook at frame 5")
+        }
+    });
+    let jobs = vec![
+        ("pre_panic.mp4", pre(|_, _| panic!("a pre that panics"))),
+        ("pre_hook_panic.mp4", pre(|_, _| Ok(Some(late)))),
+        ("pre_after.mp4", pre(|_, _| Ok(None))),
+    ];
+    let s = pre_jobs(&q, &src, jobs);
+    assert_eq!(s[0].0, State::Failed("panic: a pre that panics".into()));
+    assert_eq!(s[1].0, State::Failed("panic: its hook at frame 5".into()));
+    assert!(gone(&s[0].1) && gone(&s[1].1), "output left");
+    let State::Done(p) = s[2].0 else {
+        panic!("{:?}", s[2].0)
+    };
+    assert_eq!(samples(&s[2].1), p.total as usize);
     assert!(q.alive());
 }
 

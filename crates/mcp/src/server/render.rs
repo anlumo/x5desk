@@ -16,7 +16,7 @@ use crate::{
         Cap, Catalog, GpuInfo, Kind as RKind, Lane, Named, Output, Plan, Preset, Range, Render,
         Req, RunSt, Start, View as RView, Want,
     },
-    renders::{ENDED, End, Prog as RProg, RJob, Snap},
+    renders::{ENDED, End, Prog as RProg, RJob, Snap, render_secs},
 };
 use media::part::{Id, Space};
 use std::{
@@ -88,6 +88,41 @@ pub(super) enum FpsArg {
     S(String),
 }
 
+/// true (both), a catalog blur id, or a list of them
+#[derive(Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub(super) enum BlurArg {
+    All(bool),
+    One(String),
+    Many(Vec<String>),
+}
+
+/// Words agents might guess for `blur`: said so before serde's "unknown field".
+const BLUR_WORDS: [&str; 12] = [
+    "faces",
+    "plates",
+    "face_blur",
+    "plate_blur",
+    "blur_faces",
+    "blur_plates",
+    "license_plates",
+    "licence_plates",
+    "privacy",
+    "anonymize",
+    "anonymise",
+    "redact",
+];
+
+/// What a blurred job's result says of its detection.
+const BEST_EFFORT: &str = "best effort: detection can miss small, distant, turned-away or partly hidden faces and \
+                           plates; look at the result before sharing it. tracks ≈ the faces and plates seen; frames \
+                           are the source's";
+
+/// What the note adds once a pass found nothing: no track, so no region (plate detections the app's rule does not hide,
+/// too weak, too small or too rare, make none).
+const NONE_FOUND: &str =
+    "nothing was found, so nothing was blurred: say none were detected, not that they were blurred";
+
 /// A flat output's projection and direction, degrees.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -119,6 +154,7 @@ struct Ask {
     smoothing_s: Option<f64>,
     raft: Option<bool>,
     colour_match: Option<bool>,
+    blur: Option<BlurArg>,
     subdir: Option<String>,
     name: Option<String>,
     time_s: Option<f64>,
@@ -170,6 +206,12 @@ macro_rules! render_args {
             /// the lenses' colours matched (default true)
             #[serde(alias = "color_match")]
             colour_match: Option<bool>,
+            /// faces and/or licence plates, blurred: ["faces", "plates"] (catalog blur ids or aliases; "faces" alone;
+            /// true: both; default none). A detection pass runs first: a still searches its one frame (the plates
+            /// it is sure of there; an export also takes small ones found often), an export every 3rd frame of its span (about 2 to
+            /// 2.5 times the span's length on a Radeon 8060S, before the first frame); best effort: it can miss small,
+            /// distant, turned-away or partly hidden ones, so look at the result before sharing it
+            blur: Option<BlurArg>,
             /// a folder in the agent folder (relative, no `..`; made if missing)
             subdir: Option<String>,
             /// the file name without extension (a safe name, not a camera file's; numbered when taken)
@@ -192,6 +234,7 @@ macro_rules! render_args {
                     smoothing_s: a.smoothing_s,
                     raft: a.raft,
                     colour_match: a.colour_match,
+                    blur: a.blur,
                     subdir: a.subdir,
                     name: a.name,
                     $($f: a.$f,)*
@@ -332,8 +375,8 @@ fn named(v: &[Named], s: &str) -> Option<String> {
         .map(|n| n.id.clone())
 }
 
-/// The arguments of `kind`'s tool. A field of a feature agents can't use yet, or of the other tool, is said so before
-/// serde's own message, which then comes only for real typos.
+/// The arguments of `kind`'s tool. A field of a feature agents can't use yet, of the other tool, or a word for `blur`
+/// is said so before serde's own message, which then comes only for real typos; so is a `blur` of the wrong type.
 fn parse(kind: RKind, a: JsonObject, c: &Catalog) -> Result<Ask, String> {
     let (other, tool) = match kind {
         RKind::Still => (&EXPORT_ONLY[..], "export"),
@@ -351,6 +394,43 @@ fn parse(kind: RKind, a: JsonObject, c: &Catalog) -> Result<Ask, String> {
         }
         if other.contains(&k.as_str()) {
             return Err(format!("`{k}` is for {tool} only"));
+        }
+    }
+    if let Some(k) = (a.keys()).find(|k| BLUR_WORDS.iter().any(|w| w.eq_ignore_ascii_case(k))) {
+        // a word meaning no blur is pointed at none, not at a blur
+        let off = match &a[k] {
+            Value::Null | Value::Bool(false) => true,
+            Value::Number(n) => n.as_f64() == Some(0.0),
+            Value::String(s) => {
+                ["", "off", "no", "none", "false", "0"].contains(&&*s.trim().to_lowercase())
+            }
+            Value::Array(v) => v.is_empty(),
+            _ => false,
+        };
+        if off {
+            return Err(format!(
+                "`{k}` is no argument: leave it out (no blur is the default)"
+            ));
+        }
+        let l = k.to_ascii_lowercase();
+        let to = match () {
+            _ if l.contains("plate") => r#"["plates"]"#,
+            _ if l.contains("face") => r#"["faces"]"#,
+            _ => r#"["faces", "plates"]"#,
+        };
+        return Err(format!("`{k}` is no argument: blur: {to} (catalog: blur)"));
+    }
+    // an untagged enum's own error says only that no variant matched
+    if let Some(b) = a.get("blur") {
+        let fits = match b {
+            Value::Null | Value::Bool(_) | Value::String(_) => true,
+            Value::Array(v) => v.iter().all(Value::is_string),
+            _ => false,
+        };
+        if !fits {
+            return Err(format!(
+                "blur {b}: true, a catalog blur id or a list of them (catalog: blur)"
+            ));
         }
     }
     Ok(match kind {
@@ -502,9 +582,9 @@ fn video_size(a: &Ask, out: Output, p: Option<&Preset>, c: &Catalog) -> Result<S
     Ok((asked, asked.or(of)))
 }
 
-/// `a` checked against catalog `c` (an export starts from preset `def` unless it names one): every id and range, the
-/// sizes, the rules between fields; the ids as the catalog spells them.
-fn want(kind: RKind, a: &Ask, c: &Catalog, def: &str) -> Result<Want, String> {
+/// `a` checked against catalog `c` (an export starts from the catalog's default preset unless it names one): every id
+/// and range, the sizes, the rules between fields; the ids as the catalog spells them.
+fn want(kind: RKind, a: &Ask, c: &Catalog) -> Result<Want, String> {
     let still = kind == RKind::Still;
     let preset = match &a.preset {
         Some(p) => Some(
@@ -515,7 +595,7 @@ fn want(kind: RKind, a: &Ask, c: &Catalog, def: &str) -> Result<Want, String> {
                     format!("preset {p:?}: not a catalog preset ({})", ids(all))
                 })?,
         ),
-        None if !still => c.presets.iter().find(|x| x.id == def),
+        None if !still => c.presets.iter().find(|x| x.id == c.default_preset),
         None => None,
     };
     let output = a.output.as_ref().map(output).transpose()?;
@@ -568,6 +648,30 @@ fn want(kind: RKind, a: &Ask, c: &Catalog, def: &str) -> Result<Want, String> {
     }
     (w.look_strength, w.smoothing_s) = (a.look_strength, a.smoothing_s);
     (w.raft, w.colour_match) = (a.raft, a.colour_match);
+    // blur, for both kinds: never dropped, so a catalog without it refuses `true` too
+    let asks = match &a.blur {
+        None | Some(BlurArg::All(false)) => false,
+        Some(BlurArg::Many(v)) => !v.is_empty(),
+        _ => true,
+    };
+    if asks && c.blur.is_empty() {
+        return Err("blur: this x5desk has none".into());
+    }
+    let pick = |s: &String| {
+        named(&c.blur, s)
+            .ok_or_else(|| format!("blur {s:?}: one of {}", ids(c.blur.iter().map(|x| &x.id))))
+    };
+    let asked: Vec<String> = match &a.blur {
+        None | Some(BlurArg::All(false)) => vec![],
+        Some(BlurArg::All(true)) => c.blur.iter().map(|x| x.id.clone()).collect(),
+        Some(BlurArg::One(s)) => vec![pick(s)?],
+        Some(BlurArg::Many(v)) => v.iter().map(pick).collect::<Result<_, _>>()?,
+    };
+    // deduplicated, in the catalog's order
+    w.blur = (c.blur.iter())
+        .filter(|x| asked.contains(&x.id))
+        .map(|x| x.id.clone())
+        .collect();
     if still {
         [w.width, w.height] = match still_size(a, out, c)? {
             Some([x, y]) => [Some(x), Some(y)],
@@ -846,9 +950,9 @@ fn source(sh: &Shared, path: &str) -> Result<Vec<PathBuf>, String> {
         .collect()
 }
 
-/// The device's limits for plan `p` on `lane` (step 6): the lane usable, RAFT there if it renders with it, the size
-/// within the texture limit, the source's tracks among what it decodes, the codec, size and rate among what it
-/// encodes.
+/// The device's limits for plan `p` on `lane` (step 6): the lane usable, burn there if it renders with RAFT or blur
+/// (and no lane stuck in a detection, which holds it), the size within the texture limit, the source's tracks among
+/// what it decodes, the codec, size and rate among what it encodes.
 fn fit(i: &GpuInfo, p: &Plan, lane: Lane) -> Result<(), String> {
     if i.wedged.contains(&lane) {
         return Err(format!(
@@ -862,6 +966,22 @@ fn fit(i: &GpuInfo, p: &Plan, lane: Lane) -> Result<(), String> {
         return Err(format!(
             "RAFT (optical-flow seams) is unavailable on this GPU: {w}; pass raft: false"
         ));
+    }
+    // no quiet default as for RAFT: blur is only ever asked
+    if !p.blur.is_empty()
+        && let Some(w) = &i.raft
+    {
+        return Err(crate::render::no_blur(w));
+    }
+    if !p.blur.is_empty()
+        && let Some(l) = i.blur_stuck
+    {
+        return Err(crate::render::stuck_blur(l));
+    }
+    if p.raft
+        && let Some(l) = i.blur_stuck
+    {
+        return Err(crate::render::stuck_raft(l));
     }
     let [w, h] = p.size;
     if w.max(h) > i.max_texture {
@@ -954,19 +1074,9 @@ fn device(st: &GpuSt, p: &Plan, lane: Lane) -> Result<Option<GpuInfo>, String> {
     }
 }
 
-/// Exports' default preset: the user's (the app's `preset=`) when it is a catalog id, not read under `--sim` or
-/// `dir` (no file of the user's is); else the catalog's.
-fn default_preset(sh: &Shared, c: &Catalog) -> String {
-    let user = sh
-        .downloads
-        .then(|| crate::host::app_settings().2)
-        .flatten();
-    user.filter(|p| c.presets.iter().any(|x| x.id == *p))
-        .unwrap_or_else(|| c.default_preset.clone())
-}
-
 /// What the device accepts of catalog `c`: its codecs (10-bit and the long edge as it encodes them), the video sizes
-/// one of them encodes within the texture limit, the rates within its limits.
+/// one of them encodes within the texture limit, the rates within its limits; no RAFT by default while a lane stuck in
+/// a detection holds burn.
 fn accepted(c: &Catalog, i: &GpuInfo) -> Catalog {
     let caps = |k: &String| -> Vec<&Cap> { i.encode.iter().filter(|x| x.codec == *k).collect() };
     let codecs: Vec<_> = (c.codecs.iter())
@@ -988,6 +1098,7 @@ fn accepted(c: &Catalog, i: &GpuInfo) -> Catalog {
             })
     };
     let mut a = c.clone();
+    a.raft &= i.blur_stuck.is_none();
     a.pano_widths.retain(|&w| ok(w, w / 2));
     a.flat_sizes.retain(|&[w, h]| ok(w, h));
     if let Some(m) = (i.encode.iter())
@@ -1006,8 +1117,8 @@ fn accepted(c: &Catalog, i: &GpuInfo) -> Catalog {
 }
 
 /// The catalog as the tool shows it: `c` in the layout agents read, with mcp's own rules, the sources, the preview,
-/// the limits and the GPU (`raft`: why the GPU has none).
-fn shown_catalog(c: &Catalog, def: &str, gpu: Value, raft: Option<&str>) -> Value {
+/// the limits and the GPU (`raft`: why the GPU has no burn, so neither RAFT nor blur; `blur`: why else no blur).
+fn shown_catalog(c: &Catalog, gpu: Value, raft: Option<&str>, blur: Option<&str>) -> Value {
     let r = |r: &Range| json!({ "min": r.min, "max": r.max });
     let projections: Vec<Value> = (c.projections.iter())
         .map(|p| {
@@ -1027,10 +1138,32 @@ fn shown_catalog(c: &Catalog, def: &str, gpu: Value, raft: Option<&str>) -> Valu
         rf["available"] = false.into();
         rf["why"] = w.into();
     }
+    let mut bl = json!({
+        "targets": c.blur,
+        "default": [],
+        "how": format!(
+            "a detection pass before the render: one source frame in {} stitched and searched (faces: YuNet; licence \
+             plates: YOLOX's vehicles, then a plate detector on them), the detections linked over time and grown \
+             (a plate's once found sure on two searched frames, or very sure on 8 within a second), then each output \
+             frame blurred; a still searches its one frame and blurs the plates found sure on it",
+            c.blur_every.max(1)
+        ),
+        "best_effort": "detection can miss small, distant, turned-away or partly hidden faces and plates: look at the \
+                        result (a still's preview) before sharing it",
+        "cost": "the pass decodes the span again and comes before the first frame; the server's first blur loads the \
+                 detectors",
+    });
+    if let Some(w) = (c.blur.is_empty().then_some("this x5desk has none"))
+        .or(raft)
+        .or(blur)
+    {
+        bl["available"] = false.into();
+        bl["why"] = w.into();
+    }
     json!({
         "version": 1,
         "presets": c.presets,
-        "default_preset": def,
+        "default_preset": c.default_preset,
         "outputs": {
             "360": {
                 "video_widths": c.pano_widths,
@@ -1045,6 +1178,7 @@ fn shown_catalog(c: &Catalog, def: &str, gpu: Value, raft: Option<&str>) -> Valu
         "rate": { "mbps": r(&c.mbps), "qp": r(&c.qp), "rule": "mbps or qp, not both" },
         "fps": { "labels": c.fps, "note": "a number works too: 30, 29.97" },
         "raft": rf,
+        "blur": bl,
         "colour_match": { "default": c.colour_match },
         "stabilisation": {
             "modes": c.stabilisation,
@@ -1249,6 +1383,7 @@ fn reserve(
             lane: lane(kind),
             settings: plan.settings.clone(),
             frames: plan.frames,
+            search: plan.search,
             bytes: plan.bytes,
             cancelled: false,
             end: None,
@@ -1350,7 +1485,7 @@ async fn submit(sh: &Arc<Shared>, h: String, p: Box<Parked>, i: &GpuInfo) -> Res
         };
         let mut jobs = sh.jobs.lock().unwrap();
         if let Some(x) = jobs.r.v.iter_mut().find(|x| x.h == h) {
-            (x.settings, x.frames) = (plan.settings.clone(), plan.frames)
+            (x.settings, x.frames, x.search) = (plan.settings.clone(), plan.frames, plan.search)
         }
         if let Err(e) = jobs.r.save() {
             sh.log.line(&format!("the renders file: {e}"))
@@ -1471,7 +1606,8 @@ async fn starter(sh: Arc<Shared>) {
 }
 
 /// What an export's first answer notes: its length, frames and size, a time guess from this server's last export of
-/// that size and RAFT setting, and how to take a part when no range was given.
+/// that size and RAFT setting (its blur pass taken out), the blur pass's from its last of these targets, and how to
+/// take a part when no range was given.
 fn note(jobs: &Jobs, h: &str, a: &Ask, p: &Plan) -> String {
     let [w, hh] = p.size;
     let mut s = format!("{:.2} s, {} frames at {w} × {hh}", p.secs, p.frames);
@@ -1484,10 +1620,10 @@ fn note(jobs: &Jobs, h: &str, a: &Ask, p: &Plan) -> String {
             && r.h != h
             && (keys.iter()).all(|k| !p.settings[k].is_null() && r.settings[k] == p.settings[k])
     };
+    let done = |r: &RJob| r.end.as_ref().filter(|e| e.state == "done").cloned();
     let fps = (jobs.r.v.iter().rev().filter(same)).find_map(|r| {
-        (r.end.as_ref())
-            .filter(|e| e.state == "done" && e.secs > 0.0 && e.frames > 0)
-            .map(|e| e.frames as f64 / e.secs)
+        let e = done(r).filter(|e| e.frames > 0)?;
+        Some(e.frames as f64 / render_secs(&e)?)
     });
     if let Some(f) = fps {
         s += &format!(
@@ -1495,11 +1631,34 @@ fn note(jobs: &Jobs, h: &str, a: &Ask, p: &Plan) -> String {
             p.frames as f64 / f
         )
     }
+    if p.search > 0 {
+        // a record from before blur has no key: unblurred
+        let targets = |v: &Value| v["blur"].as_array().cloned().unwrap_or_default();
+        let rate = (jobs.r.v.iter().rev())
+            .filter(|r| r.kind == RKind::Export && r.h != h)
+            .filter(|r| targets(&r.settings) == targets(&p.settings))
+            .find_map(|r| {
+                let f = done(r)?.found.filter(|f| f.searched > 0 && f.secs > 0.0)?;
+                Some(f.searched as f64 / f.secs)
+            });
+        s += &match rate {
+            Some(r) => format!(
+                "; first a blur pass over {} source frames, about {:.0} s at this server's last {r:.1} frames/s",
+                p.search,
+                p.search as f64 / r
+            ),
+            None => format!(
+                "; a blur pass over {} source frames comes first (no earlier pass on this server to time it by: \
+                 roughly 2 to 2.5 times the span's length on a Radeon 8060S)",
+                p.search
+            ),
+        }
+    }
     s + "; job_wait follows it"
 }
 
 /// What job_cancel answers when the run has not stopped within 3 s.
-const STOPPING: &str = "stopping at its next frame (the first RAFT kernel compile can take up to a minute); \
+const STOPPING: &str = "stopping at its next frame (the first RAFT or blur compile can take up to a minute); \
                         job_wait follows it";
 
 /// The render record handle `h` names.
@@ -1516,7 +1675,9 @@ fn r1(x: f64) -> f64 {
 }
 
 /// A render job as job_status and job_wait show it: its size, a still's time and an export's length from its settings
-/// at the top too, and once finished the run's time (`secs`; `elapsed_s` says it too, and the age before).
+/// at the top too, and once finished the run's time (`secs`; `elapsed_s` says it too, and the age before). A blurred
+/// one's pass under `blur`: its frames searched, its rates while detecting (the top-level ones are the frames'),
+/// what it found once done.
 pub(super) fn render_dto(r: &RJob, p: &RProg) -> Value {
     let note = match p.state {
         "done" if r.cancelled => Some("finished before the cancel"),
@@ -1559,6 +1720,37 @@ pub(super) fn render_dto(r: &RJob, p: &RProg) -> Value {
             v["time_s"] = at("time_s").into()
         }
     }
+    if let Some(t) = r.settings["blur"].as_array().filter(|t| !t.is_empty()) {
+        let has = |k: &str| t.iter().any(|x| x == k);
+        let found = p.found.map(|f| {
+            let mut x =
+                json!({ "blurred_frames": f.blurred, "frames": f.frames, "pass_s": r1(f.secs) });
+            if has("faces") {
+                x["faces"] = json!({ "detections": f.faces, "tracks": f.face_tracks })
+            }
+            if has("plates") {
+                x["plates"] = json!({ "detections": f.plates, "tracks": f.plate_tracks })
+            }
+            x
+        });
+        // a rate once the pass has one (two frames searched)
+        let rate = p.pass_fps.filter(|f| *f > 0.0);
+        let note = match p.found {
+            Some(f) if f.face_tracks + f.plate_tracks == 0 => {
+                format!("{BEST_EFFORT}; {NONE_FOUND}")
+            }
+            _ => BEST_EFFORT.into(),
+        };
+        v["blur"] = json!({
+            "targets": t,
+            "frames_searched": p.searched,
+            "frames_to_search": p.search,
+            "fps": rate.map(r1),
+            "eta_s": rate.and(p.pass_eta).map(r1),
+            "found": found,
+            "note": note,
+        });
+    }
     v
 }
 
@@ -1589,7 +1781,8 @@ fn creep(quiet: Duration) -> f64 {
     (1.0 - 0.75f64.powi((quiet.as_secs() / 5).min(1000) as i32)).min(0.99)
 }
 
-/// A progress notification's message: the frames, or before the first one what the job does.
+/// A progress notification's message: the frames, or before the first one what the job does (its blur pass: the
+/// frames searched).
 fn told(k: RKind, p: &RProg) -> String {
     let k = k.name();
     let what = match p.phase {
@@ -1602,6 +1795,20 @@ fn told(k: RKind, p: &RProg) -> String {
                 Some(e) if p.phase == Some("frames") => m += &format!(", {e:.0} s left"),
                 _ if p.phase == Some("finishing") => m += ", finishing the file",
                 _ => {}
+            }
+            m
+        }
+        Some("detecting") if p.searched == 0 => {
+            "blur pass: loading the detectors (the first blur on this server compiles them: up to a minute)".into()
+        }
+        Some("detecting") => {
+            let mut m = format!(
+                "blur pass: {} of {} frames searched",
+                p.searched, p.search
+            );
+            let rate = p.pass_fps.is_some_and(|f| f > 0.0);
+            if let Some(e) = p.pass_eta.filter(|e| rate && e.is_finite() && *e > 0.0) {
+                m += &format!(", {e:.0} s left")
             }
             m
         }
@@ -1632,14 +1839,17 @@ impl Conn {
         let sh = self.sh();
         let r = sh.render.as_ref().ok_or(NO_GPU)?;
         let c = caught(|| r.catalog())?;
-        let def = default_preset(sh, &c);
         let st = gpu_st(&**r);
-        let (c, raft) = match &st {
-            GpuSt::Ready(i) => (accepted(&c, i), i.raft.clone()),
-            _ => (c, None),
+        let (c, raft, blur) = match &st {
+            GpuSt::Ready(i) => (
+                accepted(&c, i),
+                i.raft.clone(),
+                i.blur_stuck.map(crate::render::stuck_blur),
+            ),
+            _ => (c, None, None),
         };
         let gpu = gpu_value(st, sh.gpu_at.get().copied());
-        ok(shown_catalog(&c, &def, gpu, raft.as_deref()))
+        ok(shown_catalog(&c, gpu, raft.as_deref(), blur.as_deref()))
     }
 
     /// Checks a render call in order (nothing of it starts the GPU), then reserves its job and submits it when the GPU
@@ -1651,17 +1861,18 @@ impl Conn {
         let c = caught(|| r.catalog())?;
         let ask = parse(kind, a, &c)?;
         // 2. against the catalog
-        let mut want = want(kind, &ask, &c, &default_preset(&sh, &c))?;
+        let mut want = want(kind, &ask, &c)?;
         let stem = ask.name.as_deref().map(|n| name(n, kind)).transpose()?;
         let dir = paths::sub(&sh.agent, ask.subdir.as_deref().unwrap_or(""))?;
         // 3. the host
         host_ok(&sh)?;
         // 4. the source
         let files = source(&sh, &ask.path)?;
-        // 5. the backend's check; a GPU known to have no RAFT renders without it unless asked to
+        // 5. the backend's check; a GPU known to have no RAFT (or a lane stuck in a detection) renders without it
+        // unless asked to
         let st = gpu_st(&*r);
         if let GpuSt::Ready(i) = &st
-            && i.raft.is_some()
+            && (i.raft.is_some() || i.blur_stuck.is_some())
             && want.raft.is_none()
         {
             want.raft = Some(false)
@@ -1743,7 +1954,8 @@ impl Conn {
     }
 
     /// A render job's DTO once it is finished or after `wait`. With a progress token, at most one notification a
-    /// second: frames done plus [`creep`], out of the frames + 1.
+    /// second: the source frames searched and the frames done plus [`creep`], out of the frames to search (the
+    /// record's, so the total stays from the first answer on) + the frames + 1.
     async fn follow(
         &self,
         h: &str,
@@ -1769,14 +1981,14 @@ impl Conn {
                 v["waited_s"] = json!(r1(t0.elapsed().as_secs_f64()));
                 return Ok(v);
             }
-            let x = p.done as f64 + creep(q);
+            let x = (p.searched.min(p.search) + p.done) as f64 + creep(q);
             if let Some(t) = &tok
                 && sent.elapsed() >= Duration::from_secs(1)
                 && x > last
             {
                 (sent, last) = (Instant::now(), x);
                 let n = ProgressNotificationParam::new(t.clone(), x)
-                    .with_total(p.total as f64 + 1.0)
+                    .with_total((p.search + p.total) as f64 + 1.0)
                     .with_message(told(k, &p));
                 let _ = ctx.peer.notify_progress(n).await;
             }
@@ -1905,7 +2117,7 @@ mod tests {
         Opts,
         config::Source,
         host::Rec,
-        render::{Adjust, Backend, Codec, Later, Phase, Projection, Run, RunSt, Still},
+        render::{Adjust, Backend, Codec, Found, Later, Phase, Projection, Run, RunSt, Still},
         renders::{Renders, Snap, tests::rjob},
     };
     use rmcp::{RoleClient, ServiceExt, service::RunningService};
@@ -1981,6 +2193,7 @@ mod tests {
                 fps: 12.34,
                 eta: 4.46,
                 concealed: 0,
+                searched: 0,
             },
             at: t,
             last_frame_at: t,
@@ -2092,6 +2305,239 @@ mod tests {
         assert!(s(10) > s(5) && s(60) > s(10) && s(600) < 1.0 && s(u64::MAX) < 1.0);
     }
 
+    /// A blurred job's DTO: while detecting, its pass's frames and rates under `blur` and none at the top, and the
+    /// notification's text; done, what it found (of its targets) and the frames' rate without the pass, none when the
+    /// pass took about all the run. A catalog without blur refuses any asked.
+    #[test]
+    fn blur_dto() {
+        let mut r = Renders::default();
+        let mut j = rjob("/agent/VID_20260117_141148_00_635_blur_pano57.mp4");
+        (j.settings["blur"], j.search) = (json!(["faces"]), 34);
+        r.add("h-1".into(), j);
+        let v = render_dto(&r.v[0], &r.prog(0));
+        assert_eq!(
+            (
+                &v["blur"]["frames_searched"],
+                &v["blur"]["frames_to_search"],
+                &v["blur"]["found"],
+                &v["blur"]["fps"]
+            ),
+            (&json!(0), &json!(34), &Value::Null, &Value::Null)
+        );
+        let t = Instant::now();
+        let pass = |searched, fps, eta| Snap {
+            st: RunSt::Running {
+                phase: Phase::Detecting,
+                done: 0,
+                total: 175,
+                fps,
+                eta,
+                concealed: 0,
+                searched,
+            },
+            at: t,
+            last_frame_at: t,
+            moved: t,
+        };
+        r.v[0].live = Some(pass(0, 0.0, 0.0));
+        assert_eq!(
+            told(RKind::Export, &r.prog(0)),
+            "export: blur pass: loading the detectors (the first blur on this server compiles them: up to a minute)"
+        );
+        let v = render_dto(&r.v[0], &r.prog(0));
+        assert_eq!(
+            (&v["phase"], &v["eta_s"], &v["blur"]["eta_s"]),
+            (&json!("detecting"), &Value::Null, &Value::Null)
+        );
+        r.v[0].live = Some(pass(12, 6.14, 3.66));
+        let v = render_dto(&r.v[0], &r.prog(0));
+        assert_eq!(
+            (&v["phase"], &v["frames_done"], &v["fps"], &v["eta_s"]),
+            (&json!("detecting"), &json!(0), &Value::Null, &Value::Null)
+        );
+        let b = &v["blur"];
+        assert_eq!(
+            (&b["targets"], &b["frames_searched"], &b["fps"], &b["eta_s"]),
+            (&json!(["faces"]), &json!(12), &json!(6.1), &json!(3.7))
+        );
+        assert!(b["note"].as_str().unwrap().starts_with("best effort: "));
+        assert_eq!(
+            told(RKind::Export, &r.prog(0)),
+            "export: blur pass: 12 of 34 frames searched, 4 s left"
+        );
+        let found = Found {
+            faces: 37,
+            face_tracks: 4,
+            searched: 34,
+            blurred: 41,
+            frames: 100,
+            secs: 4.0,
+            ..Found::default()
+        };
+        r.v[0].end = Some(End {
+            found: Some(found),
+            ..End::done(175, 18.0, 9, 0)
+        });
+        let v = render_dto(&r.v[0], &r.prog(0));
+        assert_eq!(
+            (&v["fps"], &v["blur"]["frames_searched"], &v["blur"]["fps"]),
+            (&json!(12.5), &json!(34), &Value::Null)
+        );
+        assert_eq!(
+            v["blur"]["found"],
+            json!({
+                "faces": { "detections": 37, "tracks": 4 }, "blurred_frames": 41, "frames": 100, "pass_s": 4.0,
+            })
+        );
+        assert_eq!(v["blur"]["note"], BEST_EFFORT);
+        // nothing found (plate detections no track kept count for nothing): the note says nothing was blurred
+        r.v[0].settings["blur"] = json!(["faces", "plates"]);
+        r.v[0].end = Some(End {
+            found: Some(Found {
+                plates: 3,
+                searched: 34,
+                frames: 100,
+                secs: 4.0,
+                ..Found::default()
+            }),
+            ..End::done(175, 18.0, 9, 0)
+        });
+        assert_eq!(
+            render_dto(&r.v[0], &r.prog(0))["blur"]["note"],
+            format!(
+                "{BEST_EFFORT}; nothing was found, so nothing was blurred: say none were detected, not that they \
+                     were blurred"
+            )
+        );
+        r.v[0].end = Some(End {
+            found: Some(Found {
+                secs: 17.5,
+                ..found
+            }),
+            ..End::done(175, 18.0, 9, 0)
+        });
+        assert_eq!(render_dto(&r.v[0], &r.prog(0))["fps"], Value::Null);
+        r.v[0].settings["blur"] = json!([]);
+        assert!(render_dto(&r.v[0], &r.prog(0)).get("blur").is_none());
+        // no blur in the catalog: refused, true too; false and [] ask none
+        let mut c = cat();
+        c.blur.clear();
+        for (b, w) in [
+            (
+                BlurArg::All(true),
+                Err("blur: this x5desk has none".to_string()),
+            ),
+            (
+                BlurArg::Many(vec!["faces".into()]),
+                Err("blur: this x5desk has none".into()),
+            ),
+            (BlurArg::All(false), Ok(vec![])),
+            (BlurArg::Many(vec![]), Ok(vec![])),
+        ] {
+            let a = Ask {
+                blur: Some(b),
+                ..Ask::default()
+            };
+            assert_eq!(want(RKind::Still, &a, &c).map(|w| w.blur), w);
+        }
+    }
+
+    /// An export's time guess over the records: the frames' rate from the last done export of that size and RAFT, its
+    /// blur pass taken out (one whose frames come to under 1 s skipped); a blurred plan's pass from the last pass of
+    /// its targets; a record from before blur (no `blur` key) reads as unblurred.
+    #[test]
+    fn notes() {
+        let mut jobs = Jobs::new("zz.0001".into());
+        let plan = |blur: &[&str], search| Plan {
+            frames: 300,
+            secs: 10.0,
+            size: [64, 32],
+            codec: Some("h265".into()),
+            ten_bit: false,
+            raft: false,
+            blur: blur.iter().map(|b| b.to_string()).collect(),
+            search,
+            mbps: None,
+            qp: None,
+            tracks: vec![],
+            stem: "x".into(),
+            ext: "mp4",
+            bytes: 1,
+            settings: json!({ "width": 64, "height": 32, "raft": false, "blur": blur }),
+        };
+        let a = Ask {
+            end_s: Some(10.0),
+            ..Ask::default()
+        };
+        let n = |j: &Jobs, b: &[&str], search| note(j, "zz.0001-9", &a, &plan(b, search));
+        let done = |s: Value, found| RJob {
+            settings: s,
+            end: Some(End {
+                found,
+                ..End::done(300, 10.0, 1, 0)
+            }),
+            ..rjob("/agent/x.mp4")
+        };
+        let head = "10.00 s, 300 frames at 64 × 32";
+        let first = "a blur pass over 100 source frames comes first (no earlier pass on this server to time it by: \
+                     roughly 2 to 2.5 times the span's length on a Radeon 8060S)";
+        assert_eq!(n(&jobs, &[], 0), format!("{head}; job_wait follows it"));
+        assert_eq!(
+            n(&jobs, &["faces"], 100),
+            format!("{head}; {first}; job_wait follows it")
+        );
+        // from before blur: its frames' rate for both, no pass to time one by
+        let old = json!({ "width": 64, "height": 32, "raft": false });
+        jobs.r.add("zz.0000-1".into(), done(old, None));
+        let rate = |r: &str| format!("{head}; about {r} at this server's last");
+        assert_eq!(
+            n(&jobs, &[], 0),
+            format!(
+                "{} 30.0 frames/s for that size; job_wait follows it",
+                rate("10 s")
+            )
+        );
+        assert_eq!(
+            n(&jobs, &["faces"], 100),
+            format!(
+                "{} 30.0 frames/s for that size; {first}; job_wait follows it",
+                rate("10 s")
+            )
+        );
+        // a blurred export: its frames 6 s of its 10, its pass's rate for its targets alone
+        let faces = json!({ "width": 64, "height": 32, "raft": false, "blur": ["faces"] });
+        let found = Found {
+            searched: 100,
+            secs: 4.0,
+            ..Found::default()
+        };
+        jobs.r
+            .add("zz.0000-2".into(), done(faces.clone(), Some(found)));
+        let frames = format!("{} 50.0 frames/s for that size", rate("6 s"));
+        assert_eq!(n(&jobs, &[], 0), format!("{frames}; job_wait follows it"));
+        assert_eq!(
+            n(&jobs, &["faces"], 50),
+            format!(
+                "{frames}; first a blur pass over 50 source frames, about 2 s at this server's last 25.0 \
+                 frames/s; job_wait follows it"
+            )
+        );
+        assert_eq!(
+            n(&jobs, &["plates"], 100),
+            format!("{frames}; {first}; job_wait follows it")
+        );
+        // a pass that took about all of its run: no frames' rate from it, the one before's; its pass's rate is one
+        let all = Found { secs: 9.5, ..found };
+        jobs.r.add("zz.0000-3".into(), done(faces, Some(all)));
+        assert_eq!(
+            n(&jobs, &["faces"], 50),
+            format!(
+                "{frames}; first a blur pass over 50 source frames, about 5 s at this server's last 10.5 \
+                 frames/s; job_wait follows it"
+            )
+        );
+    }
+
     /// The recording the fake's tests render.
     const REC: &str = "VID_20260117_141148_00_635.insv";
 
@@ -2187,7 +2633,7 @@ mod tests {
         }
     }
 
-    /// Two presets, two codecs, two looks, two projections, one adjustment, Shot Lab and face blur later.
+    /// Two presets, two codecs, two looks, two projections, one adjustment, two blur targets, Shot Lab later.
     fn cat() -> Catalog {
         let r = |min, max, d| Range {
             min,
@@ -2270,19 +2716,25 @@ mod tests {
                 flat: [1920, 1080],
                 jpeg_quality: r(50.0, 100.0, 92.0),
             },
-            later: vec![
-                Later {
-                    id: "face_blur".into(),
-                    aliases: s(&["faces", "blur"]),
-                    ..Default::default()
+            blur: vec![
+                Named {
+                    id: "faces".into(),
+                    name: Some("Faces".into()),
+                    aliases: s(&["face"]),
                 },
-                Later {
-                    id: "shot_lab".into(),
-                    aliases: s(&["effect"]),
-                    effects: s(&["trails", "stars"]),
-                    ..Default::default()
+                Named {
+                    id: "plates".into(),
+                    name: Some("Licence plates".into()),
+                    aliases: s(&["plate", "licence_plates", "license_plates", "number_plates"]),
                 },
             ],
+            blur_every: 3,
+            later: vec![Later {
+                id: "shot_lab".into(),
+                aliases: s(&["effect"]),
+                effects: s(&["trails", "stars"]),
+                ..Default::default()
+            }],
         }
     }
 
@@ -2299,6 +2751,13 @@ mod tests {
             let still = r.kind == RKind::Still;
             let stem = r.files[0].file_stem().unwrap().to_str().unwrap();
             let raft = r.want.raft.unwrap_or(true);
+            let blur = r.want.blur.clone();
+            // a pass over a still's one frame, an export's 10
+            let search = match (blur.is_empty(), still) {
+                (true, _) => 0,
+                (_, true) => 1,
+                _ => 10,
+            };
             Ok(Plan {
                 frames: if still { 1 } else { 10 },
                 secs: 0.4,
@@ -2306,13 +2765,15 @@ mod tests {
                 codec: (!still).then(|| "h265".into()),
                 ten_bit: false,
                 raft,
+                blur: blur.clone(),
+                search,
                 mbps: None,
                 qp: None,
                 tracks: vec![],
                 stem: format!("{stem}_{}", if still { "still" } else { "p360" }),
                 ext: if still { "jpg" } else { "mp4" },
                 bytes: self.bytes.load(Relaxed),
-                settings: json!({ "width": 64, "height": 32, "raft": raft }),
+                settings: json!({ "width": 64, "height": 32, "raft": raft, "blur": blur }),
             })
         }
         fn start(&self, _: &Start) -> Result<GpuInfo, String> {
@@ -2453,18 +2914,60 @@ mod tests {
             (&json!("off"), &json!([3840, 5760, 7680]))
         );
         assert_eq!(v["limits"]["unfinished_jobs"], 16);
-        // 1. the arguments: a later feature by name before a bad look; the other tool's fields; a typo
-        let e = |r: Result<Value, String>| r.unwrap_err();
-        let r = call(&c, "export", ex(json!({ "faces": true, "look": "sepia" }))).await;
         assert_eq!(
-            e(r),
-            "`faces` is not available to agents yet (catalog: later: face_blur)"
+            (&v["blur"]["targets"][1]["id"], &v["blur"]["default"]),
+            (&json!("plates"), &json!([]))
         );
-        let r = call(&c, "export", ex(json!({ "trails": 1 }))).await;
+        assert!(v["blur"].get("available").is_none(), "{}", v["blur"]);
+        // 1. the arguments: a later feature by name before a bad look; a word for blur, a blur of the wrong type; the
+        // other tool's fields; a typo
+        let e = |r: Result<Value, String>| r.unwrap_err();
+        let r = call(&c, "export", ex(json!({ "trails": 1, "look": "sepia" }))).await;
         assert_eq!(
             e(r),
             "`trails` is not available to agents yet (catalog: later: shot_lab)"
         );
+        for (a, w) in [
+            (
+                json!({ "faces": true, "look": "sepia" }),
+                r#"`faces` is no argument: blur: ["faces"] (catalog: blur)"#,
+            ),
+            (
+                json!({ "License_Plates": true }),
+                r#"`License_Plates` is no argument: blur: ["plates"] (catalog: blur)"#,
+            ),
+            (
+                json!({ "privacy": true }),
+                r#"`privacy` is no argument: blur: ["faces", "plates"] (catalog: blur)"#,
+            ),
+            // a no is told to leave the word out, not to turn blur on
+            (
+                json!({ "faces": false }),
+                "`faces` is no argument: leave it out (no blur is the default)",
+            ),
+            (
+                json!({ "redact": [] }),
+                "`redact` is no argument: leave it out (no blur is the default)",
+            ),
+            (
+                json!({ "privacy": "Off" }),
+                "`privacy` is no argument: leave it out (no blur is the default)",
+            ),
+            (
+                json!({ "faces": " no" }),
+                "`faces` is no argument: leave it out (no blur is the default)",
+            ),
+            (
+                json!({ "blur": 1 }),
+                "blur 1: true, a catalog blur id or a list of them (catalog: blur)",
+            ),
+            (
+                json!({ "blur": ["faces", 2] }),
+                r#"blur ["faces",2]: true, a catalog blur id or a list of them (catalog: blur)"#,
+            ),
+        ] {
+            assert_eq!(e(call(&c, "render_still", ex(a.clone())).await), w, "{a}");
+        }
         let r = call(&c, "render_still", ex(json!({ "allow_frozen": true }))).await;
         assert_eq!(e(r), "`allow_frozen` is for export only");
         let r = call(&c, "export", ex(json!({ "time_s": 1 }))).await;
@@ -2590,6 +3093,16 @@ mod tests {
                 json!({ "name": "x.mp4" }),
                 "name \"x.mp4\": a still is a .jpg, not a .mp4",
             ),
+            (
+                "export",
+                json!({ "blur": ["faces", "cats"] }),
+                "blur \"cats\": one of faces, plates",
+            ),
+            (
+                "render_still",
+                json!({ "blur": "dogs" }),
+                "blur \"dogs\": one of faces, plates",
+            ),
         ] {
             assert_eq!(e(call(&c, k, ex(a.clone())).await), w, "{k} {a}");
         }
@@ -2693,7 +3206,24 @@ mod tests {
             (w.width, w.height, w.preset),
             (Some(3840), Some(1920), None)
         );
-        assert_eq!(f.checks.load(Relaxed), 3);
+        // blur on both tools: ids, names or aliases, any case, deduplicated in the catalog's order; true both
+        for (k, b, w) in [
+            ("render_still", json!("Faces"), vec!["faces"]),
+            (
+                "export",
+                json!(["plate", "face", "faces"]),
+                vec!["faces", "plates"],
+            ),
+            ("export", json!(true), vec!["faces", "plates"]),
+            ("render_still", json!(["Licence Plates"]), vec!["plates"]),
+            ("export", json!(false), vec![]),
+            ("render_still", json!([]), vec![]),
+        ] {
+            let r = call(&c, k, ex(json!({ "blur": b })));
+            assert_eq!(e(r.await), "no Insta360 trailer");
+            assert_eq!(f.asked.lock().unwrap().clone().unwrap().blur, w, "{k} {b}");
+        }
+        assert_eq!(f.checks.load(Relaxed), 9);
         *f.fail.lock().unwrap() = None;
         // 6. the device: lost, failed for good, a lane stuck, RAFT asked of a GPU without, a codec it lacks
         let set = |g| *f.gpu.lock().unwrap() = g;
@@ -2729,6 +3259,9 @@ mod tests {
             r,
             "RAFT (optical-flow seams) is unavailable on this GPU: burn's attach failed; pass raft: false"
         );
+        // blur needs burn too, and has no default to fall back to: raft false is no way out
+        let r = e(call(&c, "export", ex(json!({ "raft": false, "blur": true }))).await);
+        assert_eq!(r, crate::render::no_blur("burn's attach failed"));
         i.encode.remove(0);
         set(GpuSt::Ready(i.clone()));
         let r = e(call(&c, "export", ex(json!({}))).await);
@@ -2747,6 +3280,43 @@ mod tests {
             ),
             (&json!(false), &json!(false), &json!("ready"))
         );
+        assert_eq!(
+            (
+                &v["blur"]["available"],
+                &v["blur"]["why"],
+                &v["gpu"]["blur"]["available"]
+            ),
+            (&json!(false), &json!("burn's attach failed"), &json!(false))
+        );
+        // a lane stuck in a detection keeps the detectors: blur refused on the other lane too
+        let stuck = crate::render::stuck_blur(Lane::Export);
+        set(GpuSt::Ready(GpuInfo {
+            blur_stuck: Some(Lane::Export),
+            ..info()
+        }));
+        let r = e(call(&c, "render_still", ex(json!({ "blur": "faces" }))).await);
+        assert_eq!(r, stuck);
+        let v = call(&c, "catalog", json!({})).await.unwrap();
+        assert_eq!(
+            (
+                &v["blur"]["available"],
+                &v["blur"]["why"],
+                &v["gpu"]["blur"]["why"]
+            ),
+            (&json!(false), &json!(stuck), &json!(stuck))
+        );
+        // and burn: RAFT refused, and off by default (the call gets past the device check to the space one)
+        let seam = crate::render::stuck_raft(Lane::Export);
+        assert_eq!(
+            (&v["raft"]["default"], &v["gpu"]["raft"]["why"]),
+            (&json!(false), &json!(seam))
+        );
+        let r = e(call(&c, "render_still", ex(json!({ "raft": true }))).await);
+        assert_eq!(r, seam);
+        f.bytes.store(u64::MAX / 4, Relaxed);
+        let r = e(call(&c, "export", ex(json!({}))).await);
+        assert!(r.starts_with("not enough space in "), "{r}");
+        assert_eq!(f.asked.lock().unwrap().as_ref().unwrap().raft, Some(false));
         // 7. the destination: too little space; nothing reserved
         set(GpuSt::Ready(info()));
         f.bytes.store(u64::MAX / 4, Relaxed);
@@ -3109,6 +3679,7 @@ mod tests {
             fps: 5.0,
             eta: 1.4,
             concealed: 0,
+            searched: 0,
         }
     }
 
@@ -3153,6 +3724,7 @@ mod tests {
             secs: 2.0,
             bytes: 5,
             concealed: 0,
+            found: None,
         });
         let x = reads(&c, &job, "done").await;
         assert_eq!(
@@ -3184,6 +3756,7 @@ mod tests {
                 secs: 0.5,
                 bytes: jpg.len() as u64,
                 concealed: 1,
+                found: None,
             });
         };
         let (r, ()) = tokio::join!(c.call_tool(ask), drive);
@@ -3331,6 +3904,7 @@ mod tests {
             secs: 0.1,
             bytes: 1,
             concealed: 0,
+            found: None,
         });
         reads(&c, &w["job"], "done").await;
         assert_eq!(f.wedged.lock().unwrap().len(), 1);
@@ -3350,6 +3924,124 @@ mod tests {
                 .starts_with("a render of this host is stuck in a GPU driver call"),
             "{r:?}"
         );
+        drop(c);
+        h.shutdown().await;
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A blurred export: its first answer notes the pass (none earlier to time it by); each searched frame is a move
+    /// for the watchdog, so a pass that makes no frame is no stall; done, what it found in its DTO and the log line,
+    /// and the next one's note times the frames (without the pass) and the pass from it. One that stops searching is
+    /// cancelled as stuck.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blur_runs() {
+        let f = fake();
+        *f.gpu.lock().unwrap() = GpuSt::Ready(info());
+        let (h, c, d) = setup(&f, "blur").await;
+        let p = d.join(REC).display().to_string();
+        let a = h.agent().to_path_buf();
+        let x = call(&c, "export", json!({ "path": p, "blur": "faces" }))
+            .await
+            .unwrap();
+        let n = x["note"].as_str().unwrap();
+        assert!(
+            n.ends_with(
+                "; a blur pass over 10 source frames comes first (no earlier pass on this server to time it by: \
+                 roughly 2 to 2.5 times the span's length on a Radeon 8060S); job_wait follows it"
+            ),
+            "{n}"
+        );
+        let pass = |k: u64| RunSt::Running {
+            phase: Phase::Detecting,
+            done: 0,
+            total: 10,
+            fps: 2.0,
+            eta: (10 - k) as f64 / 2.0,
+            concealed: 0,
+            searched: k,
+        };
+        // 3 s with no frame, one searched every 300 ms (the watchdog's quiet is 1 s here)
+        for k in 1..=10 {
+            f.run(0).set(pass(k));
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        let s = call(&c, "job_status", json!({ "job": x["job"] }))
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                &s["state"],
+                &s["phase"],
+                &s["frames_done"],
+                &s["blur"]["frames_searched"]
+            ),
+            (
+                &json!("running"),
+                &json!("detecting"),
+                &json!(0),
+                &json!(10)
+            )
+        );
+        assert!(!f.run(0).stop.load(Relaxed));
+        let dst = a.join("VID_20260117_141148_00_635_p360.mp4");
+        publish(&f.run(0), &dst, b"12345");
+        let found = Found {
+            faces: 7,
+            face_tracks: 2,
+            searched: 10,
+            blurred: 25,
+            frames: 30,
+            secs: 3.0,
+            ..Found::default()
+        };
+        f.run(0).set(RunSt::Done {
+            frames: 10,
+            secs: 5.0,
+            bytes: 5,
+            concealed: 0,
+            found: Some(found),
+        });
+        let s = reads(&c, &x["job"], "done").await;
+        assert_eq!(
+            (
+                &s["fps"],
+                &s["blur"]["found"]["faces"]["detections"],
+                &s["blur"]["found"]["pass_s"]
+            ),
+            (&json!(5.0), &json!(7), &json!(3.0))
+        );
+        assert_eq!(
+            h.sh.jobs.lock().unwrap().r.v[0].end.as_ref().unwrap().found,
+            Some(found)
+        );
+        // the next one's guess from it
+        let y = call(
+            &c,
+            "export",
+            json!({ "path": p, "blur": ["face"], "name": "y" }),
+        )
+        .await
+        .unwrap();
+        let n = y["note"].as_str().unwrap();
+        assert!(
+            n.ends_with(
+                "; about 2 s at this server's last 5.0 frames/s for that size; first a blur pass over 10 source \
+                 frames, about 3 s at this server's last 3.3 frames/s; job_wait follows it"
+            ),
+            "{n}"
+        );
+        // a pass that stops searching
+        f.run(1).set(pass(3));
+        let s = reads(&c, &y["job"], "failed").await;
+        assert_eq!(s["error"], "stuck in detecting: nothing for 1 s");
+        assert!(!media::part::of(&a.join("y.mp4")).exists());
+        let log = std::fs::read_to_string(&h.sim().unwrap().log).unwrap();
+        let l = format!(
+            "export {} done: 10 frames in 5.0 s (5.0 frames/s) → VID_20260117_141148_00_635_p360.mp4; blur: 7 face \
+             and 0 plate detections, 2 and 0 tracks, on 25 of 30 frames, pass 3.0 s",
+            x["job"].as_str().unwrap()
+        );
+        assert!(log.contains(&l), "{l}\n{log}");
         drop(c);
         h.shutdown().await;
         std::fs::remove_dir_all(&d).unwrap();

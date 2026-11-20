@@ -101,7 +101,7 @@ const OFF: &str = "x5desk (Insta360 X5 camera control) has no tools enabled. The
 
 /// What the instructions add with a GPU backend.
 const RENDERS: &str = " Stills and exports of X5 recordings: catalog, then render_still or export, then job_wait; \
-                       photos: later.";
+                       photos: later. Faces and licence plates: blur (best effort).";
 
 /// The longest a call waits (`job_wait`, `render_still`), s: under the 60 s MCP clients commonly give a request
 /// (Claude Code ended a 240 s `job_wait` with "Request timed out"); for a longer job the agent calls again.
@@ -349,8 +349,8 @@ pub const TOOLS: &[Def] = &[
         name: "catalog",
         tier: Tier::Read,
         desc: "What render_still and export accept: presets, sizes, codecs, frame rates, looks, adjustments, \
-               stabilisation, projections, defaults, what agents can't do yet, and the GPU's state and limits (it \
-               starts with the first render_still or export).",
+               stabilisation, projections, blur targets, defaults, what agents can't do yet, and the GPU's state and \
+               limits (it starts with the first render_still or export).",
         schema: schema_for_empty_input,
         ann: None,
         gpu: true,
@@ -384,8 +384,10 @@ pub const TOOLS: &[Def] = &[
         desc: "Renders one frame of an X5 recording (a path under the read roots) to a JPEG in the agent folder or a \
                subfolder, never over a file (names in use are numbered): the 360 sphere (with GPano metadata) or a \
                flat view. Waits up to wait_s (50 s at most) and answers with the file and a preview image; a longer render \
-               answers a job that job_wait finishes with the image. job_cancel stops it and leaves no file. Photos \
-               (.insp): later.",
+               answers a job that job_wait finishes with the image. job_cancel stops it and leaves no file. blur: \
+               [\"faces\", \"plates\"] blurs faces and licence plates (a detection pass first, on its one frame: \
+               the plates it is sure of there, fewer than an export finds; best effort: look at the preview). \
+               Photos (.insp): later.",
         schema: input::<render::StillArgs>,
         ann: Some((false, false)),
         gpu: true,
@@ -397,7 +399,9 @@ pub const TOOLS: &[Def] = &[
                of it, never over a file (names in use are numbered): a catalog preset, or its settings changed, \
                over the whole clip or start_s-end_s. Answers a job at once: follow it with job_wait, stop it with \
                job_cancel (no file is left). Exports end with this MCP server; they don't carry over. A picture \
-               that can't be decoded fails the export unless allow_frozen.",
+               that can't be decoded fails the export unless allow_frozen. blur: [\"faces\", \"plates\"] blurs faces \
+               and licence plates (a detection pass over the span first, about 2 to 2.5 times the span's length on \
+               a Radeon 8060S; best effort; job_status shows its progress under blur).",
         schema: input::<render::ExportArgs>,
         ann: Some((false, false)),
         gpu: true,
@@ -795,7 +799,13 @@ fn gpu_value(st: GpuSt, started: Option<std::time::SystemTime>) -> Value {
             "decode": i.decode,
             "encode": i.encode,
             "max_texture": i.max_texture,
-            "raft": match i.raft {
+            // a lane stuck in a detection keeps burn
+            "raft": match i.raft.clone().or(i.blur_stuck.map(crate::render::stuck_raft)) {
+                None => json!({ "available": true }),
+                Some(w) => json!({ "available": false, "why": w }),
+            },
+            // the detectors run on burn too, and a lane stuck in a detection keeps them
+            "blur": match i.raft.clone().or(i.blur_stuck.map(crate::render::stuck_blur)) {
                 None => json!({ "available": true }),
                 Some(w) => json!({ "available": false, "why": w }),
             },

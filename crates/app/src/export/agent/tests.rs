@@ -10,7 +10,8 @@ fn want(kind: Kind) -> Want {
 
 /// The catalog's ids are the app's tables': looks in `fx::Look::ALL`'s order with the test hook's first words and the
 /// display names; the player's projections but the equirect; `gyro::parse`'s modes; the editor's adjustments with
-/// their defaults; Shot Lab's effects; the presets, the 360 video widths without the photos' 11904.
+/// their defaults; Shot Lab's effects; the presets, the 360 video widths without the photos' 11904; the blur targets in
+/// `Set::faces`, `Set::plates` order, searched every `STEP` frames, and no longer later.
 #[test]
 fn catalog_tables() {
     let c = catalog();
@@ -53,9 +54,19 @@ fn catalog_tables() {
     let lab = c.later.iter().find(|l| l.id == "shot_lab").unwrap();
     assert_eq!(lab.effects.len(), lab::FXS.len());
     assert!(lab.effects.iter().zip(lab::FXS).all(|(e, f)| e == f.2));
-    for a in ["faces", "plates"] {
-        assert!(c.later.iter().any(|l| l.aliases.contains(&a.to_string())));
+    assert_eq!(c.later.len(), 6);
+    for a in ["faces", "plates", "blur", "face_blur", "plate_blur"] {
+        let a = a.to_string();
+        assert!(
+            !c.later.iter().any(|l| l.id == a || l.aliases.contains(&a)),
+            "{a}"
+        );
     }
+    let ids: Vec<&str> = c.blur.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(ids, ["faces", "plates"]);
+    assert_eq!(c.blur[1].name.as_deref(), Some("Licence plates"));
+    assert!(c.blur[1].aliases.contains(&"license_plates".to_string()));
+    assert_eq!(c.blur_every, 3);
     assert_eq!(c.presets.len(), PRESETS.len());
     assert_eq!(
         (&c.presets[0].id, c.presets[0].output, &c.presets[0].codec),
@@ -70,7 +81,8 @@ fn catalog_tables() {
 }
 
 /// Stills start from preset-free defaults whatever the preset, exports from theirs; a changed size or rate clears the
-/// preset as on the screen; looks, adjustments, the view and the rate land where the screen keeps them.
+/// preset as on the screen; looks, adjustments, the view, the rate and the blur's boxes land where the screen keeps
+/// them.
 #[test]
 fn set_of_wants() {
     let (x, _, p) = set_of(&want(Kind::Still), Kind::Still, true).unwrap();
@@ -186,6 +198,23 @@ fn set_of_wants() {
             .unwrap_err()
             .contains("sepia")
     );
+    let blur = |b: &[&str]| Want {
+        blur: b.iter().map(|b| b.to_string()).collect(),
+        ..want(Kind::Export)
+    };
+    for (b, on) in [
+        (&["plates"][..], (false, true)),
+        (&["faces"], (true, false)),
+        (&["faces", "plates"], (true, true)),
+        (&[], (false, false)),
+    ] {
+        let (x, _, _) = set_of(&blur(b), Kind::Export, true).unwrap();
+        assert_eq!((x.faces, x.plates), on, "{b:?}");
+    }
+    assert_eq!(
+        set_of(&blur(&["faces", "cats"]), Kind::Still, true).unwrap_err(),
+        "blur \"cats\": not in the catalog"
+    );
 }
 
 /// A still's time within the clip, an export's range at least a frame and not past the end: no clamping.
@@ -231,7 +260,7 @@ fn ranges() {
 }
 
 /// Results show the settings as resolved: a still's time and quality, an export's preset, rate and range, the flat
-/// view; the keys the export time guess compares.
+/// view, the blur's targets (none: `[]`); the keys the export time guess compares.
 #[test]
 fn shown() {
     let w = Want {
@@ -271,6 +300,14 @@ fn shown() {
         (&json!("h265"), &json!(true), &json!(5760))
     );
     assert!(s.get("view").is_none() && s.get("jpeg_quality").is_none());
+    assert_eq!(s["blur"], json!([]));
+    let w = Want {
+        blur: vec!["faces".into()],
+        ..want(Kind::Export)
+    };
+    let (x, v, p) = set_of(&w, Kind::Export, true).unwrap();
+    let s = settings(&x, &v, p, &w, Kind::Export, [0.0, 5.0], 0.0);
+    assert_eq!(s["blur"], json!(["faces"]));
 }
 
 /// mcp finds a strict export's failure at a picture that could not be decoded by export's own words, and names
@@ -367,6 +404,8 @@ fn in_driver() {
         dst: dst.clone(),
         cut: AtomicBool::new(false),
         t: Mutex::new((Instant::now(), None, None)),
+        scan: None,
+        search: 0,
     };
     go.store(true, Relaxed);
     while !matches!(rd.export.q.state(id), Some(::export::State::Done(_))) {
@@ -497,4 +536,551 @@ fn hints() {
     }
     assert_eq!(hint("another error".into()), "another error");
     std::fs::remove_dir_all(&d).unwrap();
+}
+
+fn req(kind: Kind, files: &[PathBuf], want: Want) -> Req {
+    Req {
+        kind,
+        files: files.to_vec(),
+        want,
+    }
+}
+
+/// A blur of these ids.
+fn blur(b: &[&str]) -> Vec<String> {
+    b.iter().map(|b| b.to_string()).collect()
+}
+
+/// Blur's check, before the GPU (`shotlab::Clip::open` only), on the synthetic recording (300 frames at 30 fps, no
+/// IMU): the source frames its pass searches (an export's every 3rd of its span whatever its rate, a still's one), the
+/// plan's targets and settings, the `_blur_` name; none without blur. Refused on a recording in a file per lens (which
+/// the source check takes) and with burn kept off; an asked stabilisation there is no IMU for is refused by the
+/// source check first, a defaulted one resolves to off.
+#[test]
+fn blur_check() {
+    let d = std::env::temp_dir().join(format!("x5-agent-blur-check-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let src = d.join("VID_20260117_141148_00_635.insv");
+    ::export::synth::insv(&src, 300, 256).unwrap();
+    let one = [src.clone()];
+    let a = Agent::new(false);
+    let ex = |b: &[&str]| Want {
+        end_s: Some(2.0),
+        stabilisation: None,
+        blur: blur(b),
+        ..want(Kind::Export)
+    };
+    let p = a
+        .check(&req(Kind::Export, &one, ex(&["faces", "plates"])))
+        .unwrap();
+    assert_eq!((p.search, p.frames), (20, 60));
+    assert_eq!(p.blur, ["faces", "plates"]);
+    assert_eq!(
+        (&p.settings["blur"], &p.settings["stabilisation"]),
+        (&json!(["faces", "plates"]), &json!("off"))
+    );
+    assert_eq!(p.stem, "VID_20260117_141148_00_635_blur_pano57");
+    let w = Want {
+        fps: Some("25".into()),
+        ..ex(&["plates"])
+    };
+    let p = a.check(&req(Kind::Export, &one, w)).unwrap();
+    assert_eq!(
+        (p.search, p.frames, &p.blur[..]),
+        (20, 50, &["plates".to_string()][..])
+    );
+    let w = Want {
+        time_s: Some(1.0),
+        stabilisation: None,
+        blur: blur(&["faces"]),
+        ..want(Kind::Still)
+    };
+    let p = a.check(&req(Kind::Still, &one, w)).unwrap();
+    assert_eq!((p.search, p.frames), (1, 1));
+    assert_eq!(p.stem, "VID_20260117_141148_00_635_blur_1.00s_360_7680");
+    let p = a.check(&req(Kind::Export, &one, ex(&[]))).unwrap();
+    assert_eq!(
+        (p.search, &p.blur[..], &p.settings["blur"]),
+        (0, &[][..], &json!([]))
+    );
+    assert_eq!(p.stem, "VID_20260117_141148_00_635_pano57");
+    // a file per lens: the source check takes the pair, the pass doesn't
+    let ten = d.join("VID_20260117_141148_10_635.insv");
+    std::fs::copy(&src, &ten).unwrap();
+    let pair = [src.clone(), ten];
+    assert!(a.check(&req(Kind::Export, &pair, ex(&[]))).is_ok());
+    assert_eq!(
+        a.check(&req(Kind::Export, &pair, ex(&["faces"])))
+            .unwrap_err(),
+        "blur: a recording in a file per lens (_00_ + _10_) is not supported yet; leave out blur"
+    );
+    let e = Agent::new(true).check(&req(Kind::Export, &one, ex(&["faces"])));
+    assert_eq!(e.unwrap_err(), r::no_blur(gpu::NOATTACH));
+    let w = Want {
+        stabilisation: Some("horizon".into()),
+        ..ex(&["faces"])
+    };
+    let e = a.check(&req(Kind::Export, &one, w)).unwrap_err();
+    assert!(
+        e.ends_with(": use stabilisation off") && !e.starts_with("blur"),
+        "{e}"
+    );
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// An engine up on the tests' one device (`export::tests::gpu`: `ai::MODELS` stays loaded for it), with burn as the
+/// tests attach it; `raft`: why the device has none (blur refused).
+fn engine(g: &Arc<Gpu>, cx: &stitch::Ctx, raft: Option<&str>) -> Agent {
+    let lane = |n| LaneQ {
+        q: ::export::Queue::with(g.clone(), cx.clone(), n).unwrap(),
+        wedged: Mutex::new(None),
+    };
+    let rd = Arc::new(Ready {
+        g: g.clone(),
+        info: GpuInfo {
+            raft: raft.map(String::from),
+            ..base(g)
+        },
+        still: lane("x5-test-still"),
+        export: lane("x5-test-export"),
+        warm: AtomicBool::new(false),
+    });
+    let a = Agent::new(false);
+    let _ = a.dev.set(rd.clone());
+    *lock(&a.st) = Eng::Ready(rd);
+    a
+}
+
+/// How long a blurred run may take at most: ai's tests (their own device) hold the models for whole runs of minutes
+/// (Deep Track, auto edit with `X5_SAMPLES`), which a pass waits for.
+const BOUND: Duration = Duration::from_secs(1800);
+
+/// `q` checked and run on `lane` of `a` into `<dir>/<plan's stem>.<ext>`: the plan, its readings every 5 ms until it
+/// finished (the last one's how), the file.
+fn run_on(a: &Agent, q: Req, dir: &Path, lane: Lane) -> (Plan, Vec<RunSt>, PathBuf) {
+    let p = a.check(&q).unwrap();
+    let dst = dir.join(format!("{}.{}", p.stem, p.ext));
+    let part = media::part::create(&dst).unwrap();
+    let run = a.submit(q, &p, &dst, part, lane).unwrap();
+    let (t0, mut seen) = (Instant::now(), vec![]);
+    loop {
+        let s = run.state();
+        let over = !matches!(s, RunSt::Queued | RunSt::Running { .. });
+        seen.push(s);
+        if over {
+            break;
+        }
+        assert!(t0.elapsed() < BOUND, "{:?}", seen.last());
+        thread::sleep(Duration::from_millis(5))
+    }
+    (p, seen, dst)
+}
+
+/// A blurred export of the synthetic recording on an engine over the tests' one device: `detecting` from its first
+/// reading, the frames searched rising to the plan's with the pass's own rate and its seconds left falling to 0, then
+/// the frames (the searched ones still counted); done with what it found (nothing on grey: 20 frames searched of 60)
+/// and its file. After the idle trim a blurred still loads the detectors again. One cancelled in its pass ends there,
+/// with no file. A device without burn refuses blur at submit, in mcp's words.
+#[test]
+fn blur_run() {
+    if super::super::tests::no_cf_home() {
+        return;
+    }
+    let (_l, g, cx) = super::super::tests::gpu();
+    let d = std::env::temp_dir().join(format!("x5-agent-blur-run-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let src = d.join("synth.insv");
+    ::export::synth::insv(&src, 300, 256).unwrap();
+    let one = [src.clone()];
+    let w = Want {
+        output: Some(Output::Flat),
+        width: Some(640),
+        height: Some(360),
+        codec: Some("h264".into()),
+        mbps: Some(8.0),
+        raft: Some(false),
+        stabilisation: None,
+        end_s: Some(2.0),
+        blur: blur(&["faces", "plates"]),
+        ..want(Kind::Export)
+    };
+    let a = engine(&g, &cx, None);
+    let (p, seen, dst) = run_on(&a, req(Kind::Export, &one, w.clone()), &d, Lane::Export);
+    let mut pass = vec![];
+    let mut after = false;
+    for s in &seen {
+        match *s {
+            RunSt::Running {
+                phase: Phase::Detecting,
+                done,
+                searched,
+                fps,
+                eta,
+                ..
+            } => {
+                assert!(!after && done == 0, "{seen:?}");
+                pass.push((searched, fps, eta))
+            }
+            RunSt::Running { done, searched, .. } => {
+                assert_eq!(searched, p.search, "{s:?}");
+                after |= done > 0;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        matches!(
+            seen[0],
+            RunSt::Queued
+                | RunSt::Running {
+                    phase: Phase::Detecting,
+                    ..
+                }
+        ),
+        "{:?}",
+        seen[0]
+    );
+    assert!(pass.len() > 1, "{seen:?}");
+    assert!(pass.windows(2).all(|w| w[0].0 <= w[1].0), "{pass:?}");
+    for &(k, fps, eta) in &pass {
+        match k >= 2 {
+            true => assert!(
+                fps > 0.0 && eta.is_finite() && (eta > 0.0) == (k < p.search),
+                "{pass:?}"
+            ),
+            false => assert_eq!((fps, eta), (0.0, 0.0)),
+        }
+    }
+    let RunSt::Done {
+        frames,
+        found: Some(f),
+        ..
+    } = seen.last().unwrap().clone()
+    else {
+        panic!("{:?}", seen.last())
+    };
+    assert_eq!(frames, 60);
+    assert!(f.secs > 0.0, "{f:?}");
+    let zero = r::Found {
+        searched: 20,
+        frames: 60,
+        secs: f.secs,
+        ..Default::default()
+    };
+    assert_eq!(f, zero);
+    assert!(dst.exists() && !media::part::of(&dst).exists());
+    // the idle trim drops the detectors (once ai's tests, on their own device, let go of them): a blurred still loads
+    // them again
+    let (t0, mut kept) = (Instant::now(), 0);
+    loop {
+        a.trim();
+        match crate::ai::MODELS.loaded() {
+            Some(false) => break,
+            // loaded again by another test in between, at most a few times
+            Some(true) => kept += 1,
+            None => assert!(t0.elapsed() < BOUND, "the models held"),
+        }
+        assert!(kept < 3, "the trim kept the detectors");
+        thread::sleep(Duration::from_millis(50))
+    }
+    let w1 = Want {
+        time_s: Some(1.0),
+        ..w.clone()
+    };
+    let (_, seen, _) = run_on(&a, req(Kind::Still, &one, w1), &d, Lane::Still);
+    let Some(RunSt::Done { found: Some(f), .. }) = seen.last() else {
+        panic!("{:?}", seen.last())
+    };
+    assert_eq!((f.searched, f.frames, f.faces + f.plates), (1, 1, 0));
+    // cancelled in its pass (the whole clip: 100 frames to search): at its next searched frame, no file
+    let q = req(
+        Kind::Export,
+        &one,
+        Want {
+            end_s: None,
+            ..w.clone()
+        },
+    );
+    let p = a.check(&q).unwrap();
+    let o = d.join("cut.mp4");
+    let run = (a.submit(q, &p, &o, media::part::create(&o).unwrap(), Lane::Export)).unwrap();
+    let t0 = Instant::now();
+    while !matches!(
+        run.state(),
+        RunSt::Running {
+            phase: Phase::Detecting,
+            searched: 2..,
+            ..
+        }
+    ) {
+        assert!(t0.elapsed() < BOUND, "{:?}", run.state());
+        thread::sleep(Duration::from_millis(5))
+    }
+    let (t1, at) = (Instant::now(), run.state());
+    run.cancel();
+    while !matches!(run.state(), RunSt::Cancelled) {
+        assert!(t1.elapsed() < Duration::from_secs(3), "{:?}", run.state());
+        thread::sleep(Duration::from_millis(5))
+    }
+    assert!(
+        !o.exists() && !media::part::of(&o).exists(),
+        "cancelled at {at:?}"
+    );
+    assert_eq!(p.search, 100);
+    // the GPU up without burn: refused at submit too, though mcp's device check refuses it first
+    let b = engine(&g, &cx, Some("burn's attach failed"));
+    let q = req(Kind::Export, &one, w);
+    let p = b.check(&q).unwrap();
+    let o = d.join("refused.mp4");
+    let e = b.submit(q, &p, &o, media::part::create(&o).unwrap(), Lane::Export);
+    assert_eq!(e.err(), Some(r::no_blur("burn's attach failed")));
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// A lane wedged while it is in a detection (`ai::MODELS` held in `with_stop`, as a driver call that never returns
+/// would) keeps the detectors and BURN: blur is refused at check, at submit and in the GPU's info (mcp's device check),
+/// on the other lane too, while unblurred jobs check (without RAFT by default; asked for, it is refused at submit);
+/// once the detection ends, blur and RAFT are back. A lane in a detection that isn't wedged refuses nothing.
+#[test]
+fn blur_stuck() {
+    let (_l, g, cx) = super::super::tests::gpu();
+    let d = std::env::temp_dir().join(format!("x5-agent-blur-stuck-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let src = d.join("synth.insv");
+    ::export::synth::insv(&src, 30, 256).unwrap();
+    let one = [src.clone()];
+    let a = engine(&g, &cx, None);
+    let rd = a.ready().unwrap();
+    // an export whose pass holds the models until let go
+    let w = Want {
+        output: Some(Output::Flat),
+        width: Some(640),
+        height: Some(360),
+        codec: Some("h264".into()),
+        mbps: Some(8.0),
+        raft: Some(false),
+        stabilisation: Some("off".into()),
+        ..want(Kind::Export)
+    };
+    let (x, v, _) = set_of(&w, Kind::Export, false).unwrap();
+    let (rate, dur) = probe(&src).unwrap();
+    let fps = x.rate(rate);
+    let ab = span(range(&w, Kind::Export, fps, dur).unwrap(), false, fps, dur);
+    let dst = d.join("held.mp4");
+    let (mut job, _) = clip_job(&one, dur, rate, &x, ab, false, move |_| v, dst, None, false);
+    let (inside, go) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let (gg, i, l) = (g.clone(), inside.clone(), go.clone());
+    job.pre = Some(Box::new(move |_, stop| {
+        crate::ai::MODELS.with_stop(&gg, stop, None, |_| {
+            i.store(true, Relaxed);
+            while !l.load(Relaxed) {
+                thread::sleep(Duration::from_millis(5))
+            }
+            Ok(())
+        })?;
+        Ok(None)
+    }));
+    let id = rd.export.q.push(job);
+    // let go however the test ends: dropping the lane joins its thread
+    struct Go(Arc<AtomicBool>);
+    impl Drop for Go {
+        fn drop(&mut self) {
+            self.0.store(true, Relaxed)
+        }
+    }
+    let go = Go(go);
+    let t0 = Instant::now();
+    while !inside.load(Relaxed) {
+        assert!(t0.elapsed() < BOUND, "{:?}", rd.export.q.state(id));
+        thread::sleep(Duration::from_millis(5))
+    }
+    let seam = |b: &[&str], raft| {
+        let w = Want {
+            time_s: Some(1.0),
+            stabilisation: None,
+            blur: blur(b),
+            raft,
+            ..want(Kind::Still)
+        };
+        req(Kind::Still, &one, w)
+    };
+    let still = |b: &[&str]| seam(b, None);
+    let p = a.check(&still(&["faces"])).unwrap();
+    let rp = a.check(&seam(&[], Some(true))).unwrap();
+    assert!(a.check(&still(&[])).unwrap().raft);
+    let info = |a: &Agent| match a.gpu() {
+        GpuSt::Ready(i) => i,
+        s => panic!("{s:?}"),
+    };
+    assert_eq!(info(&a).blur_stuck, None);
+    a.wedge(Lane::Export, "stuck in detecting");
+    let stuck = r::stuck_blur(Lane::Export);
+    assert_eq!(a.check(&still(&["faces"])).unwrap_err(), stuck);
+    assert!(
+        !a.check(&still(&[])).unwrap().raft,
+        "RAFT by default while stuck"
+    );
+    assert_eq!(info(&a).blur_stuck, Some(Lane::Export));
+    let sub = |q, p, n: &str| {
+        let o = d.join(n);
+        a.submit(q, p, &o, media::part::create(&o).unwrap(), Lane::Still)
+    };
+    assert_eq!(sub(still(&["faces"]), &p, "blur.jpg").err(), Some(stuck));
+    let e = sub(seam(&[], Some(true)), &rp, "raft.jpg").err();
+    assert_eq!(e, Some(r::stuck_raft(Lane::Export)));
+    drop(go);
+    while !matches!(rd.export.q.state(id), Some(::export::State::Done(_))) {
+        let s = rd.export.q.state(id);
+        assert!(
+            t0.elapsed() < BOUND && !matches!(s, Some(::export::State::Failed(_))),
+            "{s:?}"
+        );
+        thread::sleep(Duration::from_millis(5))
+    }
+    assert!(a.check(&still(&["faces"])).is_ok());
+    assert!(a.check(&still(&[])).unwrap().raft);
+    assert_eq!(info(&a).blur_stuck, None);
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// An agent's blurred still is the Export screen's grab, byte for byte, on a recording (`X5_SAMPLES`: v635, else its
+/// first `.insv`) at `X5_BLUR_AT` s (0 by default): a flat 1920 × 1080 view with the template seam and the stabilisation
+/// the check resolves, aimed at the strongest face or plate the pass finds there; both blurs. The screen's grab runs
+/// twice first: if those differ, the detectors aren't deterministic in this process, and the test says so and only
+/// asks that the agent's still was blurred.
+#[test]
+fn agent_grab_parity() {
+    use super::super::tests::{gpu, no_cf_home, sample, task};
+    if no_cf_home() {
+        return;
+    }
+    let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+        eprintln!("X5_SAMPLES unset: skipped");
+        return;
+    };
+    let f = sample(&d);
+    let at: f64 =
+        std::env::var("X5_BLUR_AT").map_or(0.0, |s| s.parse().expect("X5_BLUR_AT: seconds"));
+    let (_l, g, cx) = gpu();
+    let o = std::env::temp_dir().join(format!("x5-agent-grab-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&o);
+    std::fs::create_dir_all(&o).unwrap();
+    let a = engine(&g, &cx, None);
+    let mut w = Want {
+        output: Some(Output::Flat),
+        raft: Some(false),
+        time_s: Some(at),
+        blur: blur(&["faces", "plates"]),
+        ..Want::default()
+    };
+    let files = [f.clone()];
+    let p = a.check(&req(Kind::Still, &files, w.clone())).unwrap();
+    w.stabilisation = p.settings["stabilisation"].as_str().map(String::from);
+    // aimed at what the pass finds on the frame
+    let (x, _, _) = set_of(&w, Kind::Still, false).unwrap();
+    let (src, dur) = probe(&f).unwrap();
+    let ab = span([at; 2], true, x.rate(src), dur);
+    let stop = AtomicBool::new(false);
+    let stab = x.stab.map(|l| (l, x.smooth));
+    let (times, regs, _) = privacy_pass(
+        &g,
+        &cx,
+        &files,
+        stab,
+        ab,
+        src,
+        [true; 2],
+        Hold::Pass,
+        &stop,
+        None,
+        &mut |_, _| {},
+    )
+    .unwrap();
+    let k0 = keys(&times, ab).0;
+    let r = *(regs[k0].iter())
+        .max_by(|a, b| a.score.total_cmp(&b.score))
+        .unwrap_or_else(|| {
+            panic!("nothing found at {at} s: X5_BLUR_AT a time with a face or plate")
+        });
+    let [yaw, pitch] = track::yaw_pitch(r.dir);
+    eprintln!(
+        "{} regions at {at} s; aiming at yaw {yaw:.1}° pitch {pitch:.1}° ({:.1}° × {:.1}°, score {:.2})",
+        regs[k0].len(),
+        r.size.x,
+        r.size.y,
+        r.score
+    );
+    w.view = Some(r::View {
+        yaw: Some(yaw),
+        pitch: Some(pitch),
+        ..Default::default()
+    });
+    let (x, v, _) = set_of(&w, Kind::Still, false).unwrap();
+    // the screen's grab of that frame with these settings
+    let (mut k, ctx) = (
+        super::super::Keep::default(),
+        eframe::egui::Context::default(),
+    );
+    let mut grab = |n: &str, x: Set| {
+        let s = Spec {
+            files: files.to_vec(),
+            photo: false,
+            dur,
+            t: at,
+            view: v,
+            look: player::Look::Perspective,
+            stab: x.stab,
+            smooth: x.smooth,
+            follow: None,
+            faces: x.faces,
+            plates: x.plates,
+        };
+        let t = task(s, x, o.join(format!("{n}.jpg")), [at; 2], true);
+        k.video(&g, &cx, &t, &ctx).unwrap();
+        (std::fs::read(&t.it.path).unwrap(), t.it.note())
+    };
+    let (gui, note) = grab("gui", x);
+    let again = grab("gui2", x).0;
+    let sharp = grab(
+        "sharp",
+        Set {
+            faces: false,
+            plates: false,
+            ..x
+        },
+    )
+    .0;
+    let (p, seen, dst) = run_on(&a, req(Kind::Still, &files, w), &o, Lane::Still);
+    assert!(p.stem.contains("_blur_"), "{}", p.stem);
+    let Some(RunSt::Done { found: Some(c), .. }) = seen.last() else {
+        panic!("{:?}", seen.last())
+    };
+    let agent = std::fs::read(&dst).unwrap();
+    let said = format!(
+        "{} face and {} plate detections on {} frames, {} and {} tracks, blurred on {} of {} frames",
+        c.faces, c.plates, c.searched, c.face_tracks, c.plate_tracks, c.blurred, c.frames
+    );
+    eprintln!("the screen: {note}; the agent: {said}");
+    assert!(agent != sharp, "the agent's still is not blurred");
+    assert!(c.faces + c.plates > 0 && c.blurred == 1, "{c:?}");
+    match gui == again {
+        true => {
+            assert_eq!(said, note);
+            assert!(
+                gui != sharp && agent == gui,
+                "the agent's still differs from the screen's"
+            );
+        }
+        false => eprintln!(
+            "the detectors aren't deterministic in this process: two grabs of the screen differ; only the agent's \
+             blur checked"
+        ),
+    }
+    std::fs::remove_dir_all(&o).unwrap();
 }

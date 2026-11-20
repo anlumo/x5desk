@@ -6,7 +6,8 @@
 //! an editor timeline that is more than a plain cut mixes its clips' audio, time-stretched to their speed (and
 //! denoised), with the music and encodes it (`Edit`). Either way the audio ends with the last video frame. Frame grabs
 //! (`Enc::Jpeg`) take the same path into a JPEG (`jpeg`, GPano for 360). `Queue` runs jobs one after another on a
-//! background thread with progress and cancel. `source` reads what a recording holds without the GPU.
+//! background thread with progress and cancel. `source` reads what a recording holds without the GPU. `Job::pre` runs
+//! once before a job's frames and can hand them a hook of its own, run before `Job::fx`.
 //!
 //! Output goes to `<path>.part`, made new at the job's start (or reserved by the caller, `Dest`) and known by its
 //! identity from then on (`media::part`); once complete it is published to `path` without replacing anything there.
@@ -238,10 +239,34 @@ pub struct Job {
     /// A `Out::Pano` picture that is not a sphere (a flat 2:1 picture a 360 hook made): no `sv3d` / `st3d`, no GPano,
     /// no wrapping across longitude in the effects. False for 360 output.
     pub flat: bool,
+    /// Run first (`Pre`); None for most jobs.
+    pub pre: Option<Pre>,
 }
 
 /// `Job::fx`: called once per frame on the render thread.
 pub type Hook = Box<dyn FnMut(Fx<'_>) + Send>;
+
+/// `Job::pre`: work the frames' hook needs done first (crate app's privacy pass), run once on the job's render thread
+/// inside an error scope of its own, after the plan and before RAFT loads and the decoders open. It sees the job's
+/// stop (checked again after it); Ok(Some(h)): `h` runs on every frame, before `Job::fx`.
+pub type Pre = Box<dyn FnOnce(&Ctx, &AtomicBool) -> Result<Option<Hook>, String> + Send>;
+
+/// `a`, then `b`, on each frame.
+fn chain(a: Option<Hook>, b: Option<Hook>) -> Option<Hook> {
+    match (a, b) {
+        (Some(mut a), Some(mut b)) => Some(Box::new(move |f: Fx<'_>| {
+            let Fx { enc, tex, k, t } = f;
+            a(Fx {
+                enc: &mut *enc,
+                tex,
+                k,
+                t,
+            });
+            b(Fx { enc, tex, k, t })
+        })),
+        (a, b) => a.or(b),
+    }
+}
 
 /// Frames done of all, steady throughput (frames per second after the first frame, which includes RAFT's warm-up),
 /// estimated seconds left; source pictures that could not be decoded and repeat the one before (VideoToolbox
@@ -1389,6 +1414,14 @@ pub fn run_into(
             return Err(format!("output {w}x{h} outside 1..={max}"));
         }
         size = (w, h);
+        if let Some(pre) = job.pre.take() {
+            // its own scope: a wgpu error in it fails the job now, not once the whole render ran
+            let h = scoped(&g.device, || pre(cx, stop))?;
+            if stop.load(Relaxed) {
+                return Err(CANCELLED.into());
+            }
+            job.fx = chain(h, job.fx.take());
+        }
         if job.raft && raft.is_none() {
             let _b = burn();
             *raft = Some(Raft::new(&g.instance, &g.adapter, &g.device, &g.queue)?);
@@ -2063,6 +2096,11 @@ impl Queue {
     /// The thread runs.
     pub fn alive(&self) -> bool {
         self.th.as_ref().is_some_and(|t| !t.is_finished())
+    }
+
+    /// Its thread's id.
+    pub fn thread(&self) -> Option<thread::ThreadId> {
+        self.th.as_ref().map(|t| t.thread().id())
     }
 
     /// The thread drops its RAFT model once the jobs queued before are done (the next RAFT job loads it again, about

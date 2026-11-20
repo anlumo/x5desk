@@ -8,7 +8,7 @@
 
 use crate::{
     job,
-    render::{Kind, Lane, Phase, RunSt},
+    render::{Found, Kind, Lane, Phase, RunSt},
 };
 use media::part::{Id, Settled};
 use serde::{Deserialize, Serialize};
@@ -54,6 +54,9 @@ pub struct RJob {
     pub settings: Value,
     /// output frames (1 for a still)
     pub frames: u64,
+    /// the source frames its blur pass searches (0: none)
+    #[serde(default)]
+    pub search: u64,
     /// the estimate the free-space check counted
     pub bytes: u64,
     /// `job_cancel` was called on it
@@ -83,6 +86,16 @@ pub struct End {
     /// pictures that could not be decoded and repeat the one before
     #[serde(default)]
     pub concealed: u64,
+    /// what its blur pass found, done (none: no pass, or its host crashed)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub found: Option<Found>,
+    /// the source frames its blur pass searched, ended before done (done: `found`'s)
+    #[serde(default, skip_serializing_if = "none")]
+    pub searched: u64,
+}
+
+fn none(n: &u64) -> bool {
+    *n == 0
 }
 
 impl End {
@@ -95,6 +108,8 @@ impl End {
             secs,
             bytes,
             concealed,
+            found: None,
+            searched: 0,
         }
     }
 
@@ -115,13 +130,25 @@ impl End {
             secs: 0.0,
             bytes: 0,
             concealed: 0,
+            found: None,
+            searched: 0,
         }
     }
 }
 
-/// The poller's reading of a run: its state, when read, when its last frame came (before the first: when the job was
-/// made, so job_wait's progress creeps on through the queue and the setup), and when it last moved (it began running,
-/// changed phase or made a frame: the watchdog's).
+/// The seconds a done job's frames took: its run's less its blur pass's. None when it did not run (its host crashed),
+/// or for a pass when what is left is under 1 s or the frames under 10: the run's clock starts at the poller's first
+/// sight of it, the pass's inside the lane, so their difference is no time to go by.
+pub fn render_secs(e: &End) -> Option<f64> {
+    match e.found {
+        None => (e.secs > 0.0).then_some(e.secs),
+        Some(f) => Some(e.secs - f.secs).filter(|s| *s >= 1.0 && e.frames >= 10),
+    }
+}
+
+/// The poller's reading of a run: its state, when read, when its last step came (an output frame or a searched one;
+/// before the first: when the job was made, so job_wait's progress creeps on through the queue and the setup), and
+/// when it last moved (it began running, changed phase or made a step: the watchdog's).
 #[derive(Clone, Debug)]
 pub struct Snap {
     pub st: RunSt,
@@ -137,7 +164,7 @@ impl Snap {
             RunSt::Running { phase, .. } => Some(*phase),
             _ => None,
         };
-        let framed = frames(&st) > prev.map_or(0, |p| frames(&p.st));
+        let framed = steps(&st) > prev.map_or(0, |p| steps(&p.st));
         let made = (SystemTime::now().duration_since(made).ok())
             .and_then(|d| now.checked_sub(d))
             .unwrap_or(now);
@@ -168,20 +195,42 @@ pub fn frames(s: &RunSt) -> u64 {
     }
 }
 
+/// The source frames a reading says its blur pass searched: none unless running or done.
+pub fn searched(s: &RunSt) -> u64 {
+    match s {
+        RunSt::Running { searched, .. } => *searched,
+        RunSt::Done { found, .. } => found.map_or(0, |f| f.searched),
+        _ => 0,
+    }
+}
+
+/// What counts as a step: output frames made plus source frames searched (the quiet clock's, the watchdog's).
+pub fn steps(s: &RunSt) -> u64 {
+    frames(s) + searched(s)
+}
+
 /// A render job's state as its readers show it ([`Renders::prog`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prog {
     /// `queued`, `running`, `done`, `failed`, `cancelled`, as for downloads
     pub state: &'static str,
-    /// unfinished only: `gpu_starting` (no lane yet), `waiting` (queued in its lane), `setting_up`, `compiling` (the
-    /// first RAFT flow), `frames`, `finishing`
+    /// unfinished only: `gpu_starting` (no lane yet), `waiting` (queued in its lane), `detecting` (the blur pass),
+    /// `setting_up`, `compiling` (the first RAFT flow), `frames`, `finishing`
     pub phase: Option<&'static str>,
     /// output frames there, and in all
     pub done: u64,
     pub total: u64,
-    /// frames/s and the seconds left while it runs; frames/s over the run once done
+    /// frames/s and the seconds left while it makes frames (none while detecting); frames/s over its frames once done
     pub fps: Option<f64>,
     pub eta: Option<f64>,
+    /// the blur pass's source frames searched, and to search (0: no pass)
+    pub searched: u64,
+    pub search: u64,
+    /// while detecting, the pass's searched frames/s and seconds left
+    pub pass_fps: Option<f64>,
+    pub pass_eta: Option<f64>,
+    /// what the pass found, done
+    pub found: Option<Found>,
     /// pictures that could not be decoded and repeat the one before (`allow_frozen`)
     pub concealed: u64,
     /// the file's bytes, done
@@ -201,6 +250,7 @@ impl Prog {
 
 fn phase(p: Phase) -> &'static str {
     match p {
+        Phase::Detecting => "detecting",
         Phase::Setup => "setting_up",
         Phase::Compiling => "compiling",
         Phase::Frames => "frames",
@@ -280,6 +330,11 @@ impl Renders {
             total: r.frames,
             fps: None,
             eta: None,
+            searched: 0,
+            search: r.search,
+            pass_fps: None,
+            pass_eta: None,
+            found: None,
             concealed: 0,
             bytes: None,
             secs: Some(age.map_or(0.0, |d| d.as_secs_f64())),
@@ -292,11 +347,14 @@ impl Renders {
                 _ => "cancelled",
             };
             let ran = e.secs > 0.0;
+            let secs = render_secs(e).filter(|_| state == "done");
             return Prog {
                 state,
                 phase: None,
                 done: e.frames,
-                fps: (ran && state == "done").then(|| e.frames as f64 / e.secs),
+                fps: secs.map(|s| e.frames as f64 / s),
+                searched: e.found.map_or(e.searched, |f| f.searched),
+                found: e.found,
                 concealed: e.concealed,
                 bytes: (state == "done").then_some(e.bytes),
                 secs: ran.then_some(e.secs),
@@ -322,21 +380,34 @@ impl Renders {
                 fps,
                 eta,
                 concealed,
-            } => Prog {
-                state: "running",
-                phase: Some(phase(*p)),
-                done: *done,
-                total: if *total > 0 { *total } else { r.frames },
-                fps: Some(*fps),
-                eta: Some(*eta),
-                concealed: *concealed,
-                ..base
-            },
+                searched,
+            } => {
+                // while detecting the rates are the pass's: no output frame has a rate yet
+                let pass = *p == Phase::Detecting;
+                Prog {
+                    state: "running",
+                    phase: Some(phase(*p)),
+                    done: *done,
+                    total: if *total > 0 { *total } else { r.frames },
+                    fps: (!pass).then_some(*fps),
+                    eta: (!pass).then_some(*eta),
+                    searched: *searched,
+                    pass_fps: pass.then_some(*fps),
+                    pass_eta: pass.then_some(*eta),
+                    concealed: *concealed,
+                    ..base
+                }
+            }
             RunSt::Done {
-                frames, concealed, ..
+                frames,
+                concealed,
+                found,
+                ..
             } => Prog {
                 done: *frames,
                 concealed: *concealed,
+                searched: found.map_or(0, |f| f.searched),
+                found: *found,
                 ..ending
             },
             RunSt::Failed(_) | RunSt::Cancelled => ending,
@@ -424,6 +495,7 @@ pub(crate) mod tests {
             lane: Lane::Export,
             settings: json!({ "preset": "pano57", "raft": true }),
             frames: 175,
+            search: 0,
             bytes: 92_000_000,
             cancelled: false,
             end: None,
@@ -462,6 +534,7 @@ pub(crate) mod tests {
             fps: 1.0,
             eta: 1.0,
             concealed: 0,
+            searched: 0,
         };
         let a = Snap::after(None, RunSt::Queued, at(1), made);
         let age = at(1).duration_since(a.last_frame_at);
@@ -484,6 +557,28 @@ pub(crate) mod tests {
         assert_eq!((g.last_frame_at, g.moved), (at(6), at(6)));
         let h = Snap::after(Some(&g), run(Phase::Frames, 2), at(8), made);
         assert_eq!((h.last_frame_at, h.moved), (at(8), at(8)));
+        // a blur pass: a searched frame is a step, no output frame made
+        let step = |phase, done, searched| RunSt::Running {
+            phase,
+            done,
+            total: 10,
+            fps: 1.0,
+            eta: 1.0,
+            concealed: 0,
+            searched,
+        };
+        let pass = |searched| step(Phase::Detecting, 0, searched);
+        let i = Snap::after(Some(&c), pass(0), at(9), made);
+        assert_eq!((i.last_frame_at, i.moved), (a.last_frame_at, at(9)));
+        let j = Snap::after(Some(&i), pass(1), at(10), made);
+        assert_eq!((j.last_frame_at, j.moved), (at(10), at(10)));
+        let k = Snap::after(Some(&j), pass(1), at(11), made);
+        assert_eq!((k.last_frame_at, k.moved), (at(10), at(10)));
+        let l = Snap::after(Some(&k), step(Phase::Setup, 0, 1), at(12), made);
+        assert_eq!((l.last_frame_at, l.moved), (at(10), at(12)));
+        let m = Snap::after(Some(&l), step(Phase::Frames, 1, 1), at(13), made);
+        assert_eq!((m.last_frame_at, m.moved), (at(13), at(13)));
+        assert_eq!((steps(&m.st), frames(&m.st)), (2, 1));
     }
 
     /// A later host reads the records as saved (identity, end, cancel; the snapshot is memory only), lines that do
@@ -643,8 +738,26 @@ pub(crate) mod tests {
             fps: 0.0,
             eta: 0.0,
             concealed: 0,
+            searched: 0,
         });
         assert_eq!(p(&r), ("running", Some("compiling"), 0, 175, false));
+        // the blur pass: its rates apart, none for the frames
+        r.v[0].search = 59;
+        r.v[0].live = snap(RunSt::Running {
+            phase: Phase::Detecting,
+            done: 0,
+            total: 175,
+            fps: 6.0,
+            eta: 8.5,
+            concealed: 0,
+            searched: 8,
+        });
+        let x = r.prog(0);
+        assert_eq!(
+            (x.phase, x.searched, x.search, x.fps, x.eta),
+            (Some("detecting"), 8, 59, None, None)
+        );
+        assert_eq!((x.pass_fps, x.pass_eta), (Some(6.0), Some(8.5)));
         r.v[0].live = snap(RunSt::Running {
             phase: Phase::Frames,
             done: 120,
@@ -652,6 +765,7 @@ pub(crate) mod tests {
             fps: 12.3,
             eta: 4.5,
             concealed: 2,
+            searched: 0,
         });
         let x = r.prog(0);
         assert_eq!(
@@ -669,6 +783,7 @@ pub(crate) mod tests {
             secs: 14.2,
             bytes: 9,
             concealed: 0,
+            found: None,
         });
         assert_eq!(p(&r), ("running", Some("finishing"), 175, 175, false));
         r.v[0].end = Some(End::done(175, 14.0, 9_000, 0));
@@ -678,6 +793,47 @@ pub(crate) mod tests {
             ("done", None, 175, Some(9_000), Some(14.0), true)
         );
         assert_eq!(x.fps, Some(12.5));
+        // what the pass found: kept on the record, a still done awaiting its preview says it too
+        let found = Found {
+            faces: 3,
+            searched: 59,
+            frames: 177,
+            secs: 4.0,
+            ..Found::default()
+        };
+        r.v[0].end = Some(End {
+            found: Some(found),
+            ..End::done(175, 14.0, 9_000, 0)
+        });
+        let x = r.prog(0);
+        assert_eq!((x.searched, x.found, x.fps), (59, Some(found), Some(17.5)));
+        let line = serde_json::to_string(&r.v[0]).unwrap();
+        let back: RJob = serde_json::from_str(&line).unwrap();
+        assert_eq!((back.end, back.search), (r.v[0].end.clone(), 59));
+        let old = line.replace(r#","search":59"#, "").replace(
+            &format!(r#","found":{}"#, serde_json::to_string(&found).unwrap()),
+            "",
+        );
+        assert!(!old.contains("search") && !old.contains("found"), "{old}");
+        let back: RJob = serde_json::from_str(&old).unwrap();
+        assert_eq!((back.end.unwrap().found, back.search), (None, 0));
+        // one ended before done keeps the frames its pass searched
+        r.v[0].end = Some(End {
+            searched: 12,
+            ..End::cancelled("")
+        });
+        assert_eq!((r.prog(0).searched, r.prog(0).found), (12, None));
+        let line = serde_json::to_string(&r.v[0]).unwrap();
+        assert_eq!(serde_json::from_str::<RJob>(&line).unwrap().end, r.v[0].end);
+        r.v[0].end = None;
+        r.v[0].live = snap(RunSt::Done {
+            frames: 1,
+            secs: 1.0,
+            bytes: 9,
+            concealed: 0,
+            found: Some(found),
+        });
+        assert_eq!((r.prog(0).searched, r.prog(0).found), (59, Some(found)));
         r.v[0].live = None;
         r.v[0].end = Some(End::cancelled(GONE));
         let x = r.prog(0);
