@@ -1,7 +1,8 @@
 //! AI features (PLAN.md milestone 9, group 11) on crate track's open models. [`MODELS`]: the networks, loaded once
 //! per app run on first use and warmed up off the UI thread. Deep Track ([`Track`]): a subject the user boxes in a
 //! view, followed through the clip on a background thread (the player's follow view, the editor's reframing keys,
-//! Shot Lab's subject). Auto edit ([`Auto`]): highlights cut along the auto framer's path into an editor timeline.
+//! Shot Lab's subject). Auto edit ([`Auto`]): highlights cut along the auto framer's path into an editor timeline,
+//! with a music track under them their cuts on its beats.
 //! [`privacy`]: the faces and licence plates of one frame for the viewers' privacy preview.
 //!
 //! Frames come from `shotlab::Clip` (decoded and stitched on the shared device) with the stabilisation the result is
@@ -648,6 +649,8 @@ pub fn privacy(
 pub struct Auto {
     pub file: PathBuf,
     pub stab: (gyro::Mode, f64),
+    /// a music file to lay under the highlights, their cuts on its beats
+    pub music: Option<PathBuf>,
     st: Mutex<St>,
     pub out: Mutex<Option<edit::Timeline>>,
     pub stop: AtomicBool,
@@ -657,7 +660,8 @@ impl Auto {
     /// Analyses `file` stitched with `stab` (every `STEP`th frame: detections over the sphere for the framer and the
     /// people, faces, a thumbnail for visual change; camera motion from the gyro, loudness from the AAC track; the
     /// direction of travel, `export::travel`, where no subject wins), picks highlights filling `SHARE` of it and cuts
-    /// them into a timeline of views framed for `aspect`, on a thread.
+    /// them into a timeline of views framed for `aspect`, on a thread. With `music`, the music plays from its start
+    /// under them, ducked as the editor's music, and the cuts move onto its beats (`track::fit`).
     pub fn start(
         g: &Arc<Gpu>,
         cx: &stitch::Ctx,
@@ -665,10 +669,12 @@ impl Auto {
         file: PathBuf,
         stab: (gyro::Mode, f64),
         aspect: f32,
+        music: Option<PathBuf>,
     ) -> Arc<Auto> {
         let a = Arc::new(Auto {
             file,
             stab,
+            music,
             st: Mutex::new(St::Wait),
             out: Mutex::new(None),
             stop: AtomicBool::new(false),
@@ -766,10 +772,32 @@ impl Auto {
         }
         sc.audio(&self.file)
             .map_err(|e| format!("{}: {e}", self.file.display()))?;
-        let hs = sc.pick((SHARE * dur).max(MIN_AUTO));
+        let mut hs = sc.pick((SHARE * dur).max(MIN_AUTO));
+        let bt = (self.music.as_ref())
+            .map(|m| media::beat::of(m).map_err(|e| format!("{}: {e}", m.display())))
+            .transpose()?;
+        if let Some(b) = &bt {
+            track::fit(&mut hs, &b.t, fps);
+        }
         let r = fps.num as f64 / fps.den as f64;
         let path = fm.path(n, r as f32);
-        track::timeline(&self.file.to_string_lossy(), dur, fps, r, &hs, &path).map_err(|e| e.0)
+        let mut tl = track::timeline(&self.file.to_string_lossy(), dur, fps, r, &hs, &path)
+            .map_err(|e| e.0)?;
+        if let (Some(m), Some(b)) = (&self.music, bt) {
+            tl.files.push(edit::File {
+                path: m.to_string_lossy().into(),
+                dur: b.dur,
+            });
+            // as the editor's import puts it on
+            tl.out.music = Some(edit::Music {
+                file: 1,
+                offset: 0.0,
+                gain: 1.0,
+                duck: true,
+            });
+            tl.check().map_err(|e| format!("{}: {e}", m.display()))?;
+        }
+        Ok(tl)
     }
 }
 

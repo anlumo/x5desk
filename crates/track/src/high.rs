@@ -8,8 +8,9 @@
 //! - audio: loudness (RMS in dB) of the file's AAC track.
 //!
 //! The score is smoothed (Gaussian, σ 1 s); highlights grow from the best bins while the score stays above the median,
-//! 2 to 8 s each, until they fill the duration asked for. [`timeline`] cuts them into an `edit::Timeline` in clip
-//! order, each reframed along the auto framer's path ([`crate::Framer`]).
+//! 2 to 8 s each, until they fill the duration asked for. [`fit`] moves their cuts onto a music track's beats;
+//! [`timeline`] cuts them into an `edit::Timeline` in clip order, each reframed along the auto framer's path
+//! ([`crate::Framer`]).
 
 use crate::{Ai, Cam, Crops, Det, In, Job, Pano, RGB, Region, Shot, read, yaw_pitch};
 use glam::{Vec2, Vec3};
@@ -34,16 +35,20 @@ pub enum Sig {
 /// Weights and the floors of the 10–90 % spread, per `Sig`.
 const W: [f32; 4] = [0.2, 0.25, 0.35, 0.2];
 const FLOOR: [f32; 4] = [0.3, 0.02, 1.0, 6.0];
-/// Highlight length, s.
+/// Highlight length, s; the shortest [`fit`] trims one to.
 const MIN: f64 = 2.0;
 const MAX: f64 = 8.0;
+const SHORT: f64 = 1.0;
 
-/// A highlight: source range, s, and its mean score.
+/// A highlight: source range, s, its mean score, and its scored span `lo..hi` around it (on while the score stays
+/// at the median, at most halfway to its neighbours), which [`fit`] may extend it into.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Highlight {
     pub a: f64,
     pub b: f64,
     pub score: f32,
+    pub lo: f64,
+    pub hi: f64,
 }
 
 pub struct Scorer {
@@ -194,7 +199,7 @@ impl Scorer {
 
     /// Highlights filling about `total` s, in clip order: from the best bin not yet used, grown on the higher side
     /// while the score stays at or above the median, `MIN` to `MAX` s and at most what is left of `total` (but `MIN`),
-    /// kept 1 s apart.
+    /// kept 1 s apart; then each one's scored span.
     pub fn pick(&self, total: f64) -> Vec<Highlight> {
         let s = self.score();
         let n = s.len();
@@ -243,11 +248,75 @@ impl Scorer {
                 a: ta,
                 b: tb,
                 score: s[a..b].iter().sum::<f32>() / (b - a) as f32,
+                lo: ta,
+                hi: tb,
             });
             sum += tb - ta;
         }
         out.sort_by(|x, y| x.a.total_cmp(&y.a));
+        for i in 0..out.len() {
+            let l = if i > 0 {
+                (out[i - 1].b + out[i].a) / 2.0
+            } else {
+                0.0
+            };
+            let r = out.get(i + 1).map_or(self.dur, |x| (out[i].b + x.a) / 2.0);
+            let (mut a, mut b) = (
+                (out[i].a / BIN).round() as usize,
+                (out[i].b / BIN).ceil() as usize,
+            );
+            while a > 0 && s[a - 1] >= med && (a - 1) as f64 * BIN >= l {
+                a -= 1;
+            }
+            while b < n && s[b] >= med && ((b + 1) as f64 * BIN).min(self.dur) <= r {
+                b += 1;
+            }
+            (out[i].lo, out[i].hi) = (a as f64 * BIN, (b as f64 * BIN).min(self.dur));
+        }
         out
+    }
+}
+
+/// Moves the cuts of highlights `h` (clip order, played back to back from output time 0 at 1×, as [`timeline`] cuts
+/// them at `fps`) onto beats `bt` (output times, s, ascending, with their strength: `media::beat::Beats::t`). In turn,
+/// each one's end goes to the beat, on a whole frame, that its length reaches (at least `SHORT`, or its own length if
+/// shorter, at most its scored span) and that is nearest its own end in beat periods, less 0.4 per rms of strength (up
+/// to 2): a beat of twice the rms wins over a silent one up to 0.8 periods nearer. It ends earlier, or later and, past
+/// its span's end, starts earlier. One no beat is in reach of stays as it is.
+pub fn fit(h: &mut [Highlight], bt: &[(f64, f32)], fps: edit::Rate) {
+    if bt.len() < 2 {
+        return;
+    }
+    let q = (bt.iter().map(|b| b.1 * b.1).sum::<f32>() / bt.len() as f32).sqrt();
+    let mut d: Vec<f64> = bt.windows(2).map(|w| fps.n(w[1].0 - w[0].0)).collect();
+    d.sort_by(f64::total_cmp);
+    let p = d[d.len() / 2];
+    let cost = |w: f64, (f, s): (f64, f32)| {
+        (f - w).abs() / p - 0.4 * (s / q.max(1e-6)).clamp(0.0, 2.0) as f64
+    };
+    // the clip's first output frame
+    let mut f0 = 0u64;
+    for x in h {
+        let len = x.b - x.a;
+        let at = |t: f64| f0 as f64 + fps.n(t);
+        let (w, lo, hi) = (at(len), at(SHORT.min(len)) - 1e-6, at(x.hi - x.lo) + 1e-6);
+        let best = (bt.iter())
+            .map(|&(t, s)| (fps.n(t).round(), s))
+            .filter(|&(f, _)| f >= lo && f <= hi)
+            .min_by(|&a, &b| cost(w, a).total_cmp(&cost(w, b)));
+        f0 = match best {
+            Some((f, _)) => {
+                let l = fps.t(f as u64 - f0);
+                if x.a + l <= x.hi {
+                    x.b = x.a + l;
+                } else {
+                    (x.a, x.b) = ((x.hi - l).max(x.lo), x.hi);
+                }
+                f as u64
+            }
+            // as `edit::Timeline::fix` rounds it
+            None => f0 + ((fps.n(len) + 0.5 + 1e-6).floor() as u64).max(1),
+        };
     }
 }
 

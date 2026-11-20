@@ -146,7 +146,8 @@ fn guide(p: Page) -> &'static [&'static str] {
             "AI: on the Reframe tab, Track a subject and draw a box around it in the viewer; it is followed from the \
              playhead to the clip's end and the clip gets keys that keep it in view (its tracking states show along \
              the clip). A media file's menu (right click) has Auto edit: its highlights, framed automatically, onto \
-             the timeline.",
+             the timeline. With Auto edit music chosen under Media, the music plays under them, ducked under their \
+             audio, and the cuts land on its beats.",
         ],
         Page::Lab => &[
             "Shot Lab works on the clip open in the Library. Pick an effect, set its range and parameters; Preview \

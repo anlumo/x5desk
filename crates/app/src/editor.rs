@@ -174,6 +174,8 @@ enum Dlg {
     Open,
     Save,
     Music,
+    /// auto edit's music
+    Beat,
     Png,
     Nadir,
     Cube,
@@ -264,6 +266,8 @@ pub struct Editor {
     /// an auto edit being made; export it with these `export::parse` tokens once it is on the timeline (test hook)
     auto: Option<Arc<ai::Auto>>,
     pub autox: Option<String>,
+    /// the music auto edits lay under their highlights, the cuts on its beats
+    beat: Option<PathBuf>,
 }
 
 fn name(p: &str) -> &str {
@@ -388,6 +392,7 @@ impl Editor {
             tbox: None,
             auto: None,
             autox: None,
+            beat: None,
         }
     }
 
@@ -760,8 +765,9 @@ impl Editor {
         }
     }
 
-    /// Puts an auto edit of `p` (highlights framed for the export preset) on the timeline once made; an empty timeline
-    /// takes stabilisation `stab` (the player's) first, a timeline with clips keeps its own, which the analysis uses.
+    /// Puts an auto edit of `p` (highlights framed for the export preset, cut to the beats of the music chosen for auto
+    /// edits) on the timeline once made; an empty timeline takes stabilisation `stab` (the player's) first, a timeline
+    /// with clips keeps its own, which the analysis uses.
     pub fn auto(&mut self, p: &Path, stab: (gyro::Mode, f64)) {
         let f = crate::library::pair(p).main.into_iter().next();
         let Some(f) = f else {
@@ -781,6 +787,7 @@ impl Editor {
             f,
             (self.x.stab, self.x.smooth),
             self.aspect(),
+            self.beat.clone(),
         ));
     }
 
@@ -827,7 +834,8 @@ impl Editor {
     }
 
     /// The clips of `tl` (of its first file; views in its frame stitched with `stab`) onto the end of the timeline as
-    /// one undo step; an empty timeline takes its frame rate and `stab`. Returns the first new clip's index.
+    /// one undo step; an empty timeline takes its frame rate and `stab`. Its music, if any, becomes the timeline's,
+    /// moved with the clips (earlier clips play without). Returns the first new clip's index.
     pub fn put(&mut self, tl: edit::Timeline, stab: (gyro::Mode, f64)) -> Result<usize, String> {
         let f0 = tl.files.first().ok_or("no file")?;
         let empty = self.pj.tl().is_empty();
@@ -842,12 +850,26 @@ impl Editor {
         }
         let r = self.pj.file(&f0.path, f0.dur).and_then(|f| {
             let fps = empty && self.pj.tl().out.fps != tl.out.fps;
-            let n = self.pj.tl().clips.len();
+            let (n, t0) = (self.pj.tl().clips.len(), self.pj.tl().dur());
             self.begin();
             let mut r = match fps {
                 true => self.pj.edit_out(|o| o.fps = tl.out.fps),
                 false => Ok(()),
             };
+            if let Some(m) = &tl.out.music
+                && r.is_ok()
+            {
+                let mf = &tl.files[m.file as usize];
+                r = self.pj.file(&mf.path, mf.dur).and_then(|file| {
+                    self.pj.edit_out(|o| {
+                        o.music = Some(edit::Music {
+                            file,
+                            offset: m.offset - t0,
+                            ..m.clone()
+                        })
+                    })
+                });
+            }
             for (i, c) in tl.clips.iter().enumerate() {
                 if r.is_ok() {
                     r = self.pj.insert(
@@ -1511,7 +1533,7 @@ impl Editor {
                     .add_filter("x5desk project", &["x5edit"])
                     .set_file_name("project.x5edit")
                     .save_file(),
-                Dlg::Music => f.add_filter("Music", &MUSIC).pick_file(),
+                Dlg::Music | Dlg::Beat => f.add_filter("Music", &MUSIC).pick_file(),
                 Dlg::Png | Dlg::Nadir => f.add_filter("PNG", &["png"]).pick_file(),
                 Dlg::Cube => f.add_filter("Cube LUT", &["cube"]).pick_file(),
             };
@@ -1527,6 +1549,9 @@ impl Editor {
             Dlg::Open => self.load(p),
             Dlg::Save => self.save(p),
             Dlg::Music => self.music(p),
+            Dlg::Beat => media::music::Music::open(p)
+                .map(|_| self.beat = Some(p.to_path_buf()))
+                .map_err(|e| format!("{}: {e}", p.display())),
             Dlg::Cube => self.cube(p),
             Dlg::Png | Dlg::Nadir => {
                 let s = p.to_string_lossy().to_string();
@@ -1792,6 +1817,27 @@ impl Editor {
         if let Some(p) = auto {
             self.auto(&p, (self.x.stab, self.x.smooth));
         }
+        ui.separator();
+        ui.label("Auto edit music");
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("Choose…")
+                .on_hover_text(
+                    "MP3, FLAC, WAV, Ogg Vorbis, M4A: it plays under an auto edit's highlights, ducked under their \
+                     audio, the cuts on its beats",
+                )
+                .clicked()
+            {
+                self.dialog(Dlg::Beat);
+            }
+            if self.beat.is_some() && ui.button("Remove").clicked() {
+                self.beat = None;
+            }
+        });
+        match &self.beat {
+            Some(p) => ui.label(name(&p.to_string_lossy())),
+            None => ui.label("No music"),
+        };
     }
 
     fn viewer(&mut self, ui: &mut egui::Ui, rs: &RenderState) {

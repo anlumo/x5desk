@@ -223,9 +223,9 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
 ## AI features
 
 Compared with the vendor's apps (2026-11-13). Here: Deep Track (VitTrack, YOLOX-nano, LOMO re-identification), face
-and licence plate blur (YuNet, our YOLOX-nano plate fine-tune), auto edit (heuristic highlights, auto framing), seam
-flow on exports and paused frames (RAFT-small), Shadow Clone and Clone Loop (PP-HumanSeg), voice denoise on editor
-timelines and exports (RNNoise).
+and licence plate blur (YuNet, our YOLOX-nano plate fine-tune), auto edit (heuristic highlights, auto framing, cuts on
+the music's beats), seam flow on exports and paused frames (RAFT-small), Shadow Clone and Clone Loop (PP-HumanSeg),
+voice denoise on editor timelines and exports (RNNoise).
 
 - [x] **Wind noise on every export.** Library exports take the editor's RNNoise (`Set::denoise` into
   `export::Edit::denoise`): the Export screen's Audio row, the MCP `export` tool's `denoise` (0–1; catalog: denoise).
@@ -277,8 +277,31 @@ timelines and exports (RNNoise).
 - [ ] **Overtakes.** Vehicles passing within metres (the vendor's Overtaker): YOLOX vehicle tracks crossing from
   ahead to behind or back, as a Shot Lab preset that follows the passing vehicle and as a highlight signal for auto
   edit. Bounded by the vehicle detector missing cars that close (plate item "Plates no vehicle crop holds").
-- [ ] **Music in auto edit.** A music track under the highlights, cuts moved onto its beats (onset strength and
-  dynamic-programming beat tracking, no model), ducked as in the editor.
+- [x] **Music in auto edit.** The editor's Media panel picks it (Auto edit music: Choose…, the editor's music
+  formats; the player's Auto edit uses it too; not in the MCP, which has no auto edit). It plays from its start under
+  the highlights as the timeline's music, gain 1 and ducked as the editor's import puts it on (`edit::Music`, the
+  editor's mixer path); appended to a timeline with clips it moves with them and replaces the timeline's. Each cut,
+  the edit's end too, moves onto a beat (`track::fit`): in turn each highlight's end to the beat, on a whole frame,
+  that its length reaches (at least 1 s, at most its scored span `Highlight::lo..hi`: on while the score stays at the
+  median, at most halfway to its neighbours), nearest in beat periods less 0.4 per rms of the beat's bass strength (up
+  to 2); it ends earlier, or later and past its span's end starts earlier. Without music nothing changed. The editor
+  fades no music (its mixer stops it at the timeline's end), so the music stops there, on a beat. Beats
+  (`media::beat`, after Ellis 2007, no model): mean positive flux of a 40-band log mel spectrum (32 ms Hann, 4 ms hop
+  at 48 kHz on crate media's FFT, floored 80 dB under the peak), high-passed at 0.4 Hz; the tempo from its
+  autocorrelation under a log-Gaussian prior (120 BPM, 1.4 octaves) plus half its double's (TPS2), 40–240 BPM;
+  Ellis's dynamic programme (α 100, predecessors p/2 to 2p back), weak beats at the ends dropped; a beat's strength
+  is the envelope of the four bass bands (to 200 Hz). Measured on synthetic tracks only (`beat::tests`; no music on
+  this machine, none in git), 39 of 30 s at 70–180 BPM (click tracks in noise; kick, snare, hi-hat, bass, a melody and
+  a chord pad in noise at −30 dB, straight and swung; three after 4 s of silence): F-measure (±70 ms) clicks 0.999
+  (min 0.990), drums 0.973, swung 0.968; tempo right on 37, an octave low on 2 (drums and swung at 180 → 90 BPM, F
+  0.657), no 3:2 or other error; beats 0 ms (clicks) and 4 ms (drums) late on average. The bass strength puts beats 1
+  and 3 (kick) over 2 and 4 (snare) in 111 of 184 bars (median ratio 2.2), all bands the backbeat (0 of 184, 0.43):
+  cuts lean to the kick's beats, downbeat-ish only where the kick falls on 1 and 3. Real music: unverified. Cost: the
+  39 tracks, synthesis included, in 4.8 s on one core. Tests: `track::tests::beats` (every cut within a frame of a
+  beat at 70 / 120 / 180 BPM, 30 and 29.97 fps; clips inside their spans, 1 s or longer; the total within a period
+  per clip), `ai::tests::auto_v635_music` (v635 to a 100 BPM drum loop: its cut 4.9 ms off a beat),
+  `editor::tests::put_music`. Open: a music fade at the edit's end (the editor has none); appended to a timeline at
+  another frame rate than the clip's, each clip's frame rounding can move the cuts after it by up to half a frame.
 - [ ] **Auto framing for a whole clip.** `track::Framer` frames only auto edit's highlights; offer it for the whole
   clip as a follow view (player, flat export) and as editor keys, with the forward view where no subject wins.
 - [ ] **Pick by click.** The detector's people and animals boxed on the paused frame, a click starting Deep Track

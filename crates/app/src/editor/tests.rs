@@ -1815,3 +1815,72 @@ fn deep_track() {
     e.undo();
     assert!(e.pj.tl().clips[0].view.is_empty());
 }
+
+/// An auto edit's timeline onto the editor's (no samples needed): onto an empty timeline it brings its frame rate,
+/// clips and music as they are; onto one with clips its music moves with its clips (the offset less where they start,
+/// so the music's beats stay on their cuts) and replaces the timeline's, one step undoing it; one without music leaves
+/// the timeline's music alone.
+#[test]
+fn put_music() {
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = stitch::Ctx::new(&g.device, &g.queue);
+    let mut e = Editor::new(
+        &g,
+        &cx,
+        &egui::Context::default(),
+        player::still(&g, &cx),
+        None,
+    );
+    let fps = edit::Rate { num: 30, den: 1 };
+    let auto = |music: bool| {
+        let mut tl = edit::Timeline::new(fps);
+        tl.files.push(edit::File {
+            path: "/nowhere/a.insv".into(),
+            dur: 20.0,
+        });
+        tl.clips = vec![Clip::new(0, 2.0, 4.0), Clip::new(0, 8.0, 9.5)];
+        if music {
+            tl.files.push(edit::File {
+                path: "/nowhere/song.mp3".into(),
+                dur: 180.0,
+            });
+            tl.out.music = Some(edit::Music {
+                file: 1,
+                offset: 0.0,
+                gain: 1.0,
+                duck: true,
+            });
+        }
+        tl.fix();
+        tl
+    };
+    let st = (e.x.stab, e.x.smooth);
+    e.put(auto(true), st).unwrap();
+    let tl = e.pj.tl().clone();
+    let m = tl.out.music.clone().unwrap();
+    assert_eq!(
+        (
+            tl.out.fps,
+            tl.clips.len(),
+            &tl.files[m.file as usize].path[..]
+        ),
+        (fps, 2, "/nowhere/song.mp3")
+    );
+    assert!(m.offset == 0.0 && m.duck && m.gain == 1.0);
+    let t0 = tl.dur();
+    e.put(auto(true), st).unwrap();
+    let tl = e.pj.tl().clone();
+    let m = tl.out.music.clone().unwrap();
+    assert_eq!((tl.clips.len(), m.offset), (4, -t0));
+    let at = tl.frame(tl.frames(2).start).unwrap().music.unwrap().0;
+    assert!(
+        at.abs() < 1e-9,
+        "the music at the second edit's start: {at}"
+    );
+    e.undo();
+    let m = e.pj.tl().out.music.clone();
+    assert_eq!((e.pj.tl().clips.len(), m.map(|m| m.offset)), (2, Some(0.0)));
+    e.put(auto(false), st).unwrap();
+    let m = e.pj.tl().out.music.clone();
+    assert_eq!((e.pj.tl().clips.len(), m.map(|m| m.offset)), (4, Some(0.0)));
+}

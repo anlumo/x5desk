@@ -821,12 +821,9 @@ fn plate_crops() {
     );
 }
 
-/// Synthetic signals over 30 s: people from 10 to 14 s, loud from 20 to 23 s, the camera turning from 4 to 6 s. The
-/// picks (12 s) lie on those, fill the budget within a bin plus `MIN`, are 2 to 8 s, in order and apart; their
-/// timeline passes crate edit's checks with view keys from the framing path.
-#[test]
-fn highlights() {
-    use crate::{Det, Scorer, Shot, Sig, timeline};
+/// Synthetic signals over 30 s: people from 10 to 14 s, loud from 20 to 23 s, the camera turning from 4 to 6 s.
+fn scorer() -> crate::Scorer {
+    use crate::{Det, Scorer, Sig};
     let mut s = Scorer::new(30.0);
     for i in 0..300 {
         let t = i as f64 / 10.0;
@@ -861,7 +858,16 @@ fn highlights() {
             &[],
         );
     }
-    let h = s.pick(12.0);
+    s
+}
+
+/// The picks of `scorer` (12 s) lie on its events, fill the budget within a bin plus `MIN`, are 2 to 8 s, in order
+/// and apart, each inside its scored span, the spans apart; their timeline passes crate edit's checks with view keys
+/// from the framing path.
+#[test]
+fn highlights() {
+    use crate::{Shot, timeline};
+    let h = scorer().pick(12.0);
     let sum: f64 = h.iter().map(|x| x.b - x.a).sum();
     assert!(
         (12.0..=12.0 + crate::BIN + 2.0).contains(&sum),
@@ -870,7 +876,14 @@ fn highlights() {
     for x in &h {
         assert!(x.b - x.a >= 2.0 - 1e-9 && x.b - x.a <= 8.0 + 1e-9, "{x:?}");
     }
-    assert!(h.windows(2).all(|w| w[1].a >= w[0].b + 1.0));
+    assert!(
+        h.windows(2)
+            .all(|w| w[1].a >= w[0].b + 1.0 && w[1].lo >= w[0].hi)
+    );
+    assert!(
+        h.iter()
+            .all(|x| x.lo <= x.a && x.hi >= x.b && x.lo >= 0.0 && x.hi <= 30.0)
+    );
     for c in [12.0, 21.5, 5.0] {
         assert!(
             h.iter().any(|x| x.a <= c && c <= x.b),
@@ -896,6 +909,83 @@ fn highlights() {
     let [y, _, _] = e.view.ypr();
     let want = (e.src * 30.0) as f32 * 0.2;
     assert!((y - want).abs() < 2.0, "{x:?}: yaw {y}, path {want}");
+}
+
+/// Cuts onto beats: `scorer`'s picks (12 s) fitted to beats at 70, 120 and 180 BPM over 40 s of music (every second
+/// beat strong, times jittered ±15 ms) at 30 and 29.97 fps. Every cut of the timeline (each clip's end) lies within a
+/// frame of a beat; every clip inside its highlight's scored span and at least 1 s long; the total within a beat period
+/// per clip of the picks'; the timeline with the music on passes crate edit's checks.
+#[test]
+fn beats() {
+    use crate::{Shot, fit, timeline};
+    let h0 = scorer().pick(12.0);
+    let sum: f64 = h0.iter().map(|x| x.b - x.a).sum();
+    let path: Vec<Shot> = (0..900)
+        .map(|k| Shot {
+            dir: dir(k as f32 * 0.2, -5.0),
+            fov: 80.0,
+            subject: None,
+        })
+        .collect();
+    let mut r = 1u32;
+    for fps in [
+        edit::Rate { num: 30, den: 1 },
+        edit::Rate {
+            num: 30000,
+            den: 1001,
+        },
+    ] {
+        for bpm in [70.0, 120.0, 180.0] {
+            let p = 60.0 / bpm;
+            let bt: Vec<(f64, f32)> = (0..(40.0 / p) as usize)
+                .map(|i| {
+                    r = r.wrapping_mul(1664525).wrapping_add(1013904223);
+                    let j = 0.015 * ((r >> 8) as f64 / (1 << 23) as f64 - 1.0);
+                    (0.21 + i as f64 * p + j, if i % 2 == 0 { 2.0 } else { 0.5 })
+                })
+                .collect();
+            let mut h = h0.clone();
+            fit(&mut h, &bt, fps);
+            let mut tl = timeline("a.insv", 30.0, fps, 30.0, &h, &path).unwrap();
+            tl.files.push(edit::File {
+                path: "m.wav".into(),
+                dur: 40.0,
+            });
+            tl.out.music = Some(edit::Music {
+                file: 1,
+                offset: 0.0,
+                gain: 1.0,
+                duck: true,
+            });
+            tl.check().unwrap();
+            let (dt, mut strong) = (fps.t(1), 0);
+            for (k, (c, x)) in tl.clips.iter().zip(&h).enumerate() {
+                let t = fps.t(tl.frames(k).end);
+                let b = (bt.iter())
+                    .min_by(|a, b| (a.0 - t).abs().total_cmp(&(b.0 - t).abs()))
+                    .unwrap();
+                assert!(
+                    (b.0 - t).abs() <= dt,
+                    "{bpm} BPM: cut {k} at {t}, beat {b:?}"
+                );
+                strong += (b.1 > 1.0) as usize;
+                assert!(
+                    c.a >= x.lo - 1e-9 && c.b <= x.hi + 1e-9 && c.b - c.a >= 1.0 - 1e-9,
+                    "{bpm} BPM: clip {k} {}..{} outside {x:?}",
+                    c.a,
+                    c.b
+                );
+            }
+            println!(
+                "{bpm} BPM at {:.2} fps: {} cuts on beats ({strong} strong), {:.2} s against {sum:.2}: {:?}",
+                fps.num as f64 / fps.den as f64,
+                tl.clips.len(),
+                tl.dur(),
+                tl.clips.iter().map(|c| (c.a, c.b)).collect::<Vec<_>>()
+            );
+            assert!((tl.dur() - sum).abs() <= h0.len() as f64 * p);
+        }
+    }
 }
 
 /// The blur on a checkerboard equirect (1 px squares, Rgba8Unorm) with regions in the middle, across the seam and on

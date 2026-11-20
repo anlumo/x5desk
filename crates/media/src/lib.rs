@@ -1,12 +1,13 @@
 //! Containers and media I/O without FFmpeg: MP4 demux ([`mp4`]) and mux ([`mux`]), the Insta360 trailer
 //! ([`insv`]), AAC decode and the audio master clock ([`audio`]), MJPEG decode ([`mjpeg`]), baseline JPEG encode
 //! ([`jpeg`]) and UVC capture of the X5's Webcam Mode ([`uvc`], 64-bit Linux). Audio for the editor and export:
-//! AAC-LC encoder ([`aacenc`]), music import ([`music`]), resampler ([`resample`]), time-stretch ([`stretch`]), mixer
-//! ([`mix`]), speech denoise ([`denoise`]). Output files written beside their name and published without replacing
-//! anything ([`part`]); an RGBA area downscaler ([`scale`]).
+//! AAC-LC encoder ([`aacenc`]), music import ([`music`]) and its beats ([`beat`]), resampler ([`resample`]),
+//! time-stretch ([`stretch`]), mixer ([`mix`]), speech denoise ([`denoise`]). Output files written beside their name
+//! and published without replacing anything ([`part`]); an RGBA area downscaler ([`scale`]).
 
 pub mod aacenc;
 pub mod audio;
+pub mod beat;
 pub mod denoise;
 mod fft;
 pub mod insv;

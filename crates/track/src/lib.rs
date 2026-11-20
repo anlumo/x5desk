@@ -28,7 +28,7 @@ mod vit;
 pub use blur::Blur;
 pub use det::{CLASSES, Det, SIDE, ring, sphere};
 pub use frame::{Framer, LOW, Shot};
-pub use high::{BIN, Highlight, Scorer, Sig, timeline};
+pub use high::{BIN, Highlight, Scorer, Sig, fit, timeline};
 pub use plates::{VEHICLES, plate_crops};
 pub use privacy::{Hide, Region, face_tiles};
 pub use reid::{DIM, Emb, Gallery, sim};

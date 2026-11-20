@@ -1536,7 +1536,10 @@ impl Player {
             }
             if ui
                 .add_enabled(main, egui::Button::new("Auto edit"))
-                .on_hover_text("Highlights of this clip, framed automatically, as an editor timeline")
+                .on_hover_text(
+                    "Highlights of this clip, framed automatically, as an editor timeline (cut to the beats of the \
+                     editor's auto edit music, if one is chosen)",
+                )
                 .clicked()
             {
                 self.auto = true;

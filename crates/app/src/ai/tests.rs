@@ -311,6 +311,7 @@ fn auto_v635() {
         d.join("v635.insv"),
         (Some(stab::Lock::Horizon), gyro::SMOOTH),
         16.0 / 9.0,
+        None,
     );
     let r = wait(|| a.st(), 600);
     assert_eq!(r, St::Done, "{r:?}");
@@ -326,11 +327,118 @@ fn auto_v635() {
             .map(|c| (c.a, c.b, c.view.len()))
             .collect::<Vec<_>>()
     );
-    assert!(!tl.clips.is_empty() && tl.dur() >= 1.9 && tl.dur() <= 5.9);
+    assert!(!tl.clips.is_empty() && tl.dur() >= 1.9 && tl.dur() <= 5.9 && tl.out.music.is_none());
     for c in &tl.clips {
         assert!(c.view.len() >= 2);
         for k in &c.view {
             assert!(k.t >= c.a - 1e-9 && k.t <= c.b + 1e-9 && k.v.proj == edit::Proj::Persp);
         }
+    }
+}
+
+/// A 16-bit stereo 48 kHz WAV of a drum loop at `bpm`, `secs` long, the first beat 0.23 s in: a kick (a falling sine)
+/// on every beat, the bar's first louder, a hi-hat (differenced noise) on the off-beats.
+fn drums(p: &std::path::Path, secs: f64, bpm: f64) {
+    let (n, per) = ((secs * 48000.0) as usize, 60.0 / bpm);
+    let mut y = vec![0f32; n];
+    let mut r = 1u32;
+    for (i, t) in (0..)
+        .map(|i| 0.23 + i as f64 * per)
+        .take_while(|&t| t < secs)
+        .enumerate()
+    {
+        let a = if i % 4 == 0 { 0.7 } else { 0.45 };
+        let i0 = (t * 48000.0) as usize;
+        for (j, v) in y[i0..n.min(i0 + 19200)].iter_mut().enumerate() {
+            let u = j as f64 / 48000.0;
+            let ph = std::f64::consts::TAU * (50.0 * u + 2.1 * (1.0 - (-u / 0.03).exp()));
+            *v += (a * ph.sin() * (-u / 0.15).exp()) as f32;
+        }
+        let i0 = ((t + per / 2.0) * 48000.0) as usize;
+        let mut last = 0f32;
+        for (j, v) in y[i0.min(n)..n.min(i0 + 2880)].iter_mut().enumerate() {
+            r ^= r << 13;
+            r ^= r >> 17;
+            r ^= r << 5;
+            let x = r as f32 / 2147483648.0 - 1.0;
+            *v += 0.08 * (x - last) * (-(j as f32) / 720.0).exp();
+            last = x;
+        }
+    }
+    let mut b = Vec::with_capacity(44 + 4 * n);
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + 4 * n as u32).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    for v in [16u32, 0x0002_0001, 48000, 4 * 48000, 0x0010_0004] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&(4 * n as u32).to_le_bytes());
+    for v in y {
+        let s = ((v.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes();
+        b.extend_from_slice(&[s[0], s[1], s[0], s[1]]);
+    }
+    std::fs::write(p, b).unwrap();
+}
+
+/// Auto edit on v635 (`X5_SAMPLES`) with music, a drum loop at 100 BPM made here: the timeline carries it as its
+/// music from its start, ducked at gain 1 (the editor's import); every cut (each clip's end, the last too) lies within
+/// a frame of one of its beats (`media::beat::of`); each clip at least 1 s long and keyed inside its source span; the
+/// whole between 1 s and the clip's length.
+#[test]
+fn auto_v635_music() {
+    if no_cf_home() {
+        return;
+    }
+    let Some(d) = samples() else { return };
+    let tmp = crate::clip::tests::Tmp::new("auto-music");
+    let m = tmp.0.join("drums100.wav");
+    drums(&m, 20.0, 100.0);
+    let (_l, g, cx) = gpu();
+    let a = Auto::start(
+        &g,
+        &cx,
+        &egui::Context::default(),
+        d.join("v635.insv"),
+        (Some(stab::Lock::Horizon), gyro::SMOOTH),
+        16.0 / 9.0,
+        Some(m.clone()),
+    );
+    let r = wait(|| a.st(), 600);
+    assert_eq!(r, St::Done, "{r:?}");
+    let tl = lock(&a.out).clone().unwrap();
+    tl.check().unwrap();
+    let mu = tl.out.music.clone().unwrap();
+    assert_eq!((mu.file, mu.offset, mu.gain, mu.duck), (1, 0.0, 1.0, true));
+    assert_eq!(PathBuf::from(&tl.files[1].path), m);
+    let b = media::beat::of(&m).unwrap();
+    let dt = tl.out.fps.t(1);
+    let cuts: Vec<(f64, f64)> = (0..tl.clips.len())
+        .map(|k| {
+            let t = tl.out.fps.t(tl.frames(k).end);
+            let e =
+                b.t.iter()
+                    .map(|x| x.0 - t)
+                    .min_by(|x, y| x.abs().total_cmp(&y.abs()));
+            (t, e.unwrap())
+        })
+        .collect();
+    eprintln!(
+        "v635 auto edit to {:.1} BPM ({} beats): {} clips, {:.2} s, cuts (s, off the nearest beat): {cuts:?}; clips {:?}",
+        b.bpm,
+        b.t.len(),
+        tl.clips.len(),
+        tl.dur(),
+        tl.clips.iter().map(|c| (c.a, c.b)).collect::<Vec<_>>()
+    );
+    assert!(cuts.iter().all(|c| c.1.abs() <= dt));
+    assert!(tl.dur() >= 1.0 && tl.dur() <= tl.files[0].dur);
+    for c in &tl.clips {
+        assert!(c.b - c.a >= 1.0 - 1e-9 && c.view.len() >= 2);
+        assert!(
+            c.view
+                .iter()
+                .all(|k| k.t >= c.a - 1e-9 && k.t <= c.b + 1e-9)
+        );
     }
 }
