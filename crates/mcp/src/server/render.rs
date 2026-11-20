@@ -196,7 +196,10 @@ macro_rules! render_args {
             look_strength: Option<f32>,
             /// catalog adjust ids to values, e.g. {"exposure": 0.5}
             adjust: Option<BTreeMap<String, f32>>,
-            /// off | free | horizon | direction (default: horizon with IMU data, else off)
+            /// off | free | horizon | direction | forward (default: horizon with IMU data, else off). forward looks
+            /// along the direction of travel, not where the camera points (the horizon lock's heading while standing);
+            /// an analysis pass over the whole recording runs first, before the first frame (about half the
+            /// recording's length on a Radeon 8060S; kept while this server runs)
             #[serde(alias = "stabilization")]
             stabilisation: Option<String>,
             /// 0-2 (default 0.5)
@@ -1184,6 +1187,9 @@ fn shown_catalog(c: &Catalog, gpu: Value, raft: Option<&str>, blur: Option<&str>
             "modes": c.stabilisation,
             "default": "horizon when the recording has IMU data, else off",
             "smoothing_s": c.smoothing_s,
+            "forward": "the view along the direction of travel (from the image motion the gyro's rotation leaves), \
+                        the horizon lock's heading while standing; an analysis pass over the whole recording first \
+                        (about half its length on a Radeon 8060S), kept while the server runs",
         },
         "looks": c.looks,
         "look_strength": c.look_strength,
@@ -2685,7 +2691,7 @@ mod tests {
             fps: s(&["source", "24", "25", "29.97", "30", "60"]),
             raft: true,
             colour_match: true,
-            stabilisation: s(&["off", "free", "horizon", "direction"]),
+            stabilisation: s(&["off", "free", "horizon", "direction", "forward"]),
             smoothing_s: r(0.0, 2.0, 0.5),
             looks: vec![
                 Named {
@@ -3051,7 +3057,7 @@ mod tests {
             (
                 "export",
                 json!({ "stabilization": "wobbly" }),
-                "stabilisation \"wobbly\": one of off, free, horizon, direction",
+                "stabilisation \"wobbly\": one of off, free, horizon, direction, forward",
             ),
             (
                 "export",

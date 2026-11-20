@@ -333,11 +333,12 @@ fn esc(s: &str) -> String {
     o
 }
 
-const LOCKS: [(gyro::Mode, &str); 4] = [
+const LOCKS: [(gyro::Mode, &str); 5] = [
     (None, "off"),
     (Some(stab::Lock::Free), "free"),
     (Some(stab::Lock::Horizon), "horizon"),
     (Some(stab::Lock::Direction), "direction"),
+    (Some(stab::Lock::Forward), "forward"),
 ];
 
 impl Extra {

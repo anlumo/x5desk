@@ -1,7 +1,8 @@
 //! Auto framing: detections every few frames over the whole horizon are linked into tracklets, each scored per key
 //! frame by class, confidence, size, motion, height above or below the horizon and persistence; the main subject
 //! changes only when another one clearly wins for a while. The view follows it and fits its height, then the path is
-//! smoothed over time in yaw and pitch, so that it stays level when it pans from one subject to another.
+//! smoothed over time in yaw and pitch, so that it stays level when it pans from one subject to another. Where no
+//! subject wins (none yet, or the subject gone), the view looks along `Framer::ahead` (the forward view) if given.
 
 use crate::Det;
 use glam::Vec3;
@@ -33,6 +34,9 @@ pub struct Framer {
     keys: Vec<(usize, Vec<Det>)>,
     /// Output width / height.
     pub aspect: f32,
+    /// The direction of travel per frame (equirect frame), the view where no subject wins; empty: the last
+    /// subject's direction holds (the front before the first).
+    pub ahead: Vec<Vec3>,
 }
 
 /// Tracklet: detections linked over key frames (key index, detection).
@@ -45,6 +49,7 @@ impl Framer {
         Self {
             keys: vec![],
             aspect,
+            ahead: vec![],
         }
     }
 
@@ -159,8 +164,15 @@ impl Framer {
                 }
                 _ => lost += dt,
             }
-            if let Some(d) = cur.and_then(|c| sc.iter().find(|s| s.0 == c)).map(|s| s.2) {
+            let won = cur.and_then(|c| sc.iter().find(|s| s.0 == c)).map(|s| s.2);
+            if let Some(d) = won {
                 (dir, h) = (d.dir, d.size.y);
+            }
+            let ahead = (cur.is_none() || won.is_none() && lost >= GONE)
+                .then(|| self.ahead.get(*k))
+                .flatten();
+            if let Some(&a) = ahead {
+                dir = a;
             }
             let v = (h / FILL).clamp(1.0, 170.0).to_radians() / 2.0;
             let fov = (2.0 * (v.tan() * self.aspect).atan())
@@ -174,7 +186,11 @@ impl Framer {
             let y = keys
                 .last()
                 .map_or(y, |l| y + 360.0 * ((l.1.x - y) / 360.0).round());
-            keys.push((*k, Vec3::new(y, p.max(LOW + v), fov.ln()), cur));
+            keys.push((
+                *k,
+                Vec3::new(y, p.max(LOW + v), fov.ln()),
+                cur.filter(|_| ahead.is_none()),
+            ));
         }
         // per frame: hold before the first key and after the last, interpolate between, then smooth, all in yaw,
         // pitch and log field of view: the view pans level from one subject to the next, where the great-circle arc

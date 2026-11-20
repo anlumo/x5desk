@@ -80,7 +80,7 @@ const CODECS: [(Codec, &str, bool, u32); 2] = [
 /// Look ids in `fx::Look::ALL`'s order; the first word of the name (the test hook's) is an alias where it differs.
 const LOOKS: [&str; 6] = ["vivid", "warm", "cool", "film", "mono", "teal_orange"];
 /// Stabilisation ids, `gyro::parse`'s, in `gyro::MODES`' order.
-const STAB: [&str; 4] = ["off", "free", "horizon", "direction"];
+const STAB: [&str; 5] = ["off", "free", "horizon", "direction", "forward"];
 /// The flat projections (`player::Look::parse`'s ids, the project files' `persp` too): the 360 output is the equirect.
 const VIEWS: [(&str, &[&str], player::Look); 3] = [
     ("perspective", &["persp"], player::Look::Perspective),

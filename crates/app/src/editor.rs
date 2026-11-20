@@ -1095,17 +1095,30 @@ impl Editor {
             && !self.asked.contains_key(p)
         {
             self.asked.insert(p.into(), key);
-            let (tx, path, ctx, s) = (
+            let (tx, path, ctx, s, g, cx) = (
                 self.pq.0.clone(),
                 p.to_string(),
                 self.ctx.clone(),
                 self.x.smooth,
+                self.g.clone(),
+                self.cx.clone(),
             );
             thread::spawn(move || {
-                let r = shotlab::Clip::open(Path::new(&path)).and_then(|c| {
-                    c.poses(lock, s)
-                        .ok_or("no IMU record to stabilise with".into())
-                });
+                // the forward view: the clip's analysis first (kept for the process)
+                let fwd = match lock {
+                    stab::Lock::Forward => {
+                        let f = [PathBuf::from(&path)];
+                        let stop = std::sync::atomic::AtomicBool::new(false);
+                        export::travel(&g, &cx, &f, &stop, &mut |_, _| {}).map(drop)
+                    }
+                    _ => Ok(()),
+                };
+                let r = fwd
+                    .and_then(|_| shotlab::Clip::open(Path::new(&path)))
+                    .and_then(|c| {
+                        c.poses(lock, s)
+                            .ok_or("no IMU record to stabilise with".into())
+                    });
                 let _ = tx.send((path, key, r));
                 ctx.request_repaint();
             });

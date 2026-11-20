@@ -816,6 +816,7 @@ impl Player {
             if meta.stream == 4 { 180.0 } else { 0.0 },
             t.and_then(|t| t.stab).unwrap_or(Some(stab::Lock::Horizon)),
             t.and_then(|t| t.smooth).unwrap_or(gyro::SMOOTH),
+            Some((g.clone(), cx.clone())),
             ctx,
         );
         let (audio, clock, a_off, sound) = audio(&first, s.v.end);
@@ -1054,6 +1055,9 @@ impl Player {
         }
         if self.stab.tick() {
             self.dirty = true;
+        }
+        if let Some(n) = self.stab.note.take() {
+            self.note = Some(n);
         }
         while let Ok(r) = self.reply.1.try_recv() {
             self.busy = false;
@@ -1676,7 +1680,7 @@ impl Player {
                 _ => "Template seam".into(),
             });
         }
-        if let Some(s) = self.stab.stage {
+        if let Some(s) = &self.stab.stage {
             lines.push(format!("Stabilising: {s}…"));
         }
         if self.show_stats {

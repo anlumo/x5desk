@@ -655,8 +655,9 @@ pub struct Auto {
 
 impl Auto {
     /// Analyses `file` stitched with `stab` (every `STEP`th frame: detections over the sphere for the framer and the
-    /// people, faces, a thumbnail for visual change; camera motion from the gyro, loudness from the AAC track), picks
-    /// highlights filling `SHARE` of it and cuts them into a timeline of views framed for `aspect`, on a thread.
+    /// people, faces, a thumbnail for visual change; camera motion from the gyro, loudness from the AAC track; the
+    /// direction of travel, `export::travel`, where no subject wins), picks highlights filling `SHARE` of it and cuts
+    /// them into a timeline of views framed for `aspect`, on a thread.
     pub fn start(
         g: &Arc<Gpu>,
         cx: &stitch::Ctx,
@@ -705,11 +706,25 @@ impl Auto {
         aspect: f32,
     ) -> Result<edit::Timeline, String> {
         let c = shotlab::Clip::open(&self.file)?;
+        let file = std::slice::from_ref(&self.file);
+        if c.imu.is_some() {
+            export::travel(g, cx, file, &self.stop, &mut |i, n| {
+                *lock(&self.st) = St::Run(i as usize, n as usize);
+                ctx.request_repaint();
+            })?;
+        }
         let poses = poses(&c, self.stab)?;
         let (fps, dur) = crate::export::probe(&self.file)?;
         let n = c.times.len();
         let ks: Vec<usize> = (0..n).step_by(STEP).collect();
         let (mut sc, mut fm) = (track::Scorer::new(dur), track::Framer::new(aspect));
+        // the forward view's centre, turned into the frame this edit stitches in
+        if let Some(f) = c.poses(stab::Lock::Forward, gyro::SMOOTH) {
+            fm.ahead = (0..n)
+                .map(|k| c.pose(k, poses.as_deref()).q.inverse() * c.pose(k, Some(&f)).q)
+                .map(|q| q * track::dir(0.0, 0.0))
+                .collect();
+        }
         let (st, ft) = (track::sphere(), track::face_tiles());
         MODELS.with(g, false, Some(ctx), |ai| {
             let mut pano = None;

@@ -301,8 +301,8 @@ pub(crate) fn stem_tag(stem: &str, x: &Set, grab: Option<f64>, pre: &str) -> Str
 #[derive(Clone, Debug, PartialEq)]
 pub enum St {
     Queued,
-    /// privacy pass: frames done of all, what it finds
-    Privacy(usize, usize, &'static str),
+    /// a pass before the frames (privacy, the forward view's analysis): frames done of all, what it finds
+    Pass(usize, usize, &'static str),
     Run(export::Progress),
     /// the final progress, wall time (s)
     Done(export::Progress, f64),
@@ -972,7 +972,7 @@ impl Exp {
                         .on_hover_text(i.path.display().to_string());
                     let st = i.st();
                     ui.horizontal(|ui| match &st {
-                        St::Queued | St::Privacy(..) | St::Run(_) => {
+                        St::Queued | St::Pass(..) | St::Run(_) => {
                             if ui.button("Cancel").clicked() {
                                 i.stop.store(true, Relaxed);
                             }
@@ -990,7 +990,7 @@ impl Exp {
                     });
                     let (f, s) = match &st {
                         St::Queued => (0.0, "queued".into()),
-                        St::Privacy(k, n, w) => (
+                        St::Pass(k, n, w) => (
                             *k as f32 / (*n).max(1) as f32,
                             format!("finding {w}: {k} of {n} frames"),
                         ),
@@ -1182,6 +1182,7 @@ impl Keep {
         // a grab: one output frame from the frame shown
         let r = if t.grab { [s.t; 2] } else { t.range };
         let [a, b] = span(r, t.grab, x.rate(src), s.dur);
+        self.ahead(g, cx, t, &s.files, stab, ctx)?;
         let faces = match x.faces || x.plates {
             true => Some(self.privacy(g, cx, t, &s.files, stab, [a, b], src, &mut [0; 7], ctx)?),
             false => None,
@@ -1274,6 +1275,9 @@ impl Keep {
     ) -> Result<export::Progress, String> {
         let (x, fps) = (&t.set, e.tl.out.fps);
         let stab = e.stab.map(|l| (l, e.smooth));
+        for f in &e.files {
+            self.ahead(g, cx, t, f, stab, ctx)?;
+        }
         let fx = match x.faces || x.plates {
             true => {
                 // a privacy pass per clip over its source span; an output frame takes its clip's regions and view
@@ -1334,8 +1338,31 @@ impl Keep {
         })
     }
 
+    /// The forward view's analysis of clip `f` (`export::travel`, kept for the process) with its progress
+    /// (`St::Pass`) and cancel, before the privacy pass, which stitches with the job's stabilisation; the job's plan
+    /// then finds it kept.
+    fn ahead(
+        &mut self,
+        g: &Arc<Gpu>,
+        cx: &Ctx,
+        t: &Task,
+        f: &[PathBuf],
+        stab: Option<(stab::Lock, f64)>,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        if !matches!(stab, Some((stab::Lock::Forward, _))) {
+            return Ok(());
+        }
+        let it = &t.it;
+        export::travel(g, cx, f, &it.stop, &mut |i, n| {
+            it.set(St::Pass(i as usize, n as usize, "the direction of travel"));
+            ctx.request_repaint();
+        })
+        .map(drop)
+    }
+
     /// The Export screen's privacy pass (`privacy_pass`, the models held for all of it) for the job's faces and
-    /// licence plates over source span `ab` (s) of clip `f`: its progress (`St::Privacy`), cancel and note. Adds its
+    /// licence plates over source span `ab` (s) of clip `f`: its progress (`St::Pass`), cancel and note. Adds its
     /// counts to `sum` (face and plate detections, frames searched, face and plate tracks, frames blurred, frames) and
     /// notes the totals; the frame times, the regions per frame.
     #[allow(clippy::too_many_arguments)]
@@ -1370,7 +1397,7 @@ impl Keep {
             &it.stop,
             Some(ctx),
             &mut |i, n| {
-                it.set(St::Privacy(i, n, what));
+                it.set(St::Pass(i, n, what));
                 // none before the models load
                 if i > 0 {
                     ctx.request_repaint();

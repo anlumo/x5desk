@@ -1458,7 +1458,7 @@ impl Keep {
             0,
             [0; 2],
         );
-        it.set(St::Privacy(0, n, what));
+        it.set(St::Pass(0, n, what));
         crate::ai::MODELS.with(g, false, Some(ctx), |ai| {
             // shotlab decodes and submits each stitch on this thread between the calls: a surface configure the UI
             // retries waits for that (no wait there depends on another thread); the detection runs under BURN instead,
@@ -1495,7 +1495,7 @@ impl Keep {
                         hide[j].push(k, r);
                     }
                     i += 1;
-                    it.set(St::Privacy(i, n, what));
+                    it.set(St::Pass(i, n, what));
                     ctx.request_repaint();
                     Ok(())
                 },
@@ -1570,7 +1570,7 @@ fn privacy_synth() {
     assert_eq!((times.len(), r.len()), (300, 300));
     assert!(r.iter().all(|r| r.is_empty()), "a region on grey");
     assert_eq!(sum, [0, 0, 20, 0, 0, 0, 60]);
-    assert_eq!(t.it.st(), St::Privacy(20, 20, "faces and license plates"));
+    assert_eq!(t.it.st(), St::Pass(20, 20, "faces and license plates"));
     assert_eq!(
         t.it.note(),
         "0 face and 0 plate detections on 20 frames, 0 and 0 tracks, blurred on 0 of 60 frames"
@@ -1753,14 +1753,14 @@ fn privacy_parity() {
             &mut |i, n| said = (i, n),
         )
         .unwrap();
-        let St::Privacy(.., what) = old.3 else {
+        let St::Pass(.., what) = old.3 else {
             panic!("{:?}", old.3)
         };
         let frame = (
             times,
             bits(&r),
             old.2.clone(),
-            St::Privacy(said.0, said.1, what),
+            St::Pass(said.0, said.1, what),
             c,
         );
         if let Some(e) = differ(&old, &frame) {

@@ -118,8 +118,10 @@ fn guide(p: Page) -> &'static [&'static str] {
              from the Recent and Downloaded lists on the left. The files of one recording (both lenses, the proxy) \
              open together, whichever you pick.",
             "The viewer stitches the two lenses live. Pick the view below it: perspective, Panini, equirect or tiny \
-             planet. Stabilisation follows the camera's gyro: off, free, horizon lock or direction lock, with a \
-             smoothing time.",
+             planet. Stabilisation follows the camera's gyro: off, free, horizon lock, direction lock or forward, \
+             with a smoothing time. Forward looks along the direction of travel rather than where the camera points \
+             (on a helmet, where the head turns); it first analyses the whole clip's motion (the line says how far), \
+             and keeps the horizon lock's heading while standing.",
             "When the full resolution falls behind, playback switches to the proxy. Paused, the frame shows with the \
              AI seam (RAFT).",
             "Export… takes the file and the current view to the Export screen; Grab 360 and Grab view make a JPEG of \

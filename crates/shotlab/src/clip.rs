@@ -12,6 +12,7 @@ use video::{Codec, Decoder, Gpu, decode::OUT};
 
 /// An `.insv` with both lenses as its two video tracks.
 pub struct Clip {
+    file: std::path::PathBuf,
     mp4: Mp4,
     /// tracks of lens 0, lens 1
     lens: [usize; 2],
@@ -57,6 +58,7 @@ impl Clip {
         let imu = (imu.len() >= 2 && !ex.is_empty())
             .then(|| (stab::Track::new(&imu, stab::KP, stab::KI), ex));
         Ok(Clip {
+            file: p.into(),
             mp4,
             lens,
             times,
@@ -86,14 +88,20 @@ impl Clip {
         Some(m.to_degrees())
     }
 
-    /// Stabilised poses (`stab::poses`): with `Lock::Direction` all frames look into the same world directions.
+    /// Stabilised poses (`stab::poses`): with `Lock::Direction` all frames look into the same world directions;
+    /// `Lock::Forward` follows the direction of travel of the clip's analysis if it ran (`export::travel`), else
+    /// it is the horizon lock.
     pub fn poses(&self, lock: stab::Lock, smooth: f64) -> Option<Vec<stab::Pose>> {
         let (tr, ex) = self.imu.as_ref()?;
-        Some(stab::poses(
-            tr,
-            ex,
-            &stab::Opts::new(&self.meta, lock, smooth),
-        ))
+        let ahead = match lock {
+            stab::Lock::Forward => export::travelled(std::slice::from_ref(&self.file)),
+            _ => None,
+        };
+        let o = stab::Opts {
+            ahead: ahead.as_deref().unwrap_or_default(),
+            ..stab::Opts::new(&self.meta, lock, smooth)
+        };
+        Some(stab::poses(tr, ex, &o))
     }
 
     /// The stitch pose of frame `k`: `p` (stabilisation; None: the camera's own orientation), then the exporter's

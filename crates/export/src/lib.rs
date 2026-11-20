@@ -468,12 +468,20 @@ pub fn source(files: &[PathBuf], stab: bool) -> Result<Src, String> {
 }
 
 impl Clip {
-    fn open(files: &[PathBuf], lock: Option<(stab::Lock, f64)>) -> Result<Clip, String> {
+    /// `ahead`: the direction of travel `Lock::Forward` follows (`travel`).
+    fn open(
+        files: &[PathBuf],
+        lock: Option<(stab::Lock, f64)>,
+        ahead: &[stab::fwd::Est],
+    ) -> Result<Clip, String> {
         let h = Head::open(files)?;
         let poses = match lock {
             Some((lock, smooth)) => {
                 let (imu, ex) = h.motion(&files[0])?;
-                let o = stab::Opts::new(&h.meta, lock, smooth);
+                let o = stab::Opts {
+                    ahead,
+                    ..stab::Opts::new(&h.meta, lock, smooth)
+                };
                 Some(stab::poses(
                     &stab::Track::new(&imu, stab::KP, stab::KI),
                     &ex,
@@ -527,6 +535,214 @@ impl Clip {
     }
 }
 
+/// The forward view's analysis (`travel`): pairs of frames about this far apart, s, on a panorama this wide (on the
+/// Radeon 8060S the tracking keeps up with the decoding at 1024, 27–38 s a minute of footage, the decoding alone 34;
+/// 2048 took 134–184 s and did no better on eight rides); its corners tracked between these polar angles (rad; the
+/// nadir is the vehicle's and the rider's).
+pub const FWD_DT: f64 = 1.0 / 15.0;
+pub const FWD_W: u32 = 1024;
+const FWD_BAND: [f64; 2] = [10f64.to_radians(), 160f64.to_radians()];
+
+/// The forward view's analysis of the recording in `files` (`stab::fwd`): both lenses decoded, a frame about every
+/// `dt` s stitched `w` wide with the gyro's rotation taken out (direction lock, unsmoothed: world fixed), read back,
+/// its corners tracked into the next one's (`stab::vis`); `f` gets each pair's features as world rays, `progress(i, n)`
+/// the frames analysed.
+pub fn flow(
+    g: &Gpu,
+    cx: &Ctx,
+    files: &[PathBuf],
+    (w, dt): (u32, f64),
+    stop: &AtomicBool,
+    progress: &mut dyn FnMut(u64, u64),
+    mut f: impl FnMut(stab::fwd::Pair) -> Result<(), String> + Send,
+) -> Result<(), String> {
+    let h = Head::open(files)?;
+    let (imu, ex) = h.motion(&files[0])?;
+    let tr = stab::Track::new(&imu, stab::KP, stab::KI);
+    let o = stab::Opts::new(&h.meta, stab::Lock::Direction, 0.0);
+    let ps = stab::poses(&tr, &ex, &o);
+    let n = h.times.len();
+    let tk = |k: usize| {
+        let e = ex[k.min(ex.len() - 1)];
+        e.t as f64 * 1e-6 - 0.5 * e.time + o.offset
+    };
+    let step = ((dt * h.fps[0] as f64 / h.fps[1] as f64).round() as usize).max(1);
+    let ks: Vec<usize> = (0..n).step_by(step).collect();
+    let tks = h.lens.map(|(i, t)| &h.mp4[i].tracks[t]);
+    let mut d = vec![];
+    for t in tks {
+        let (c, ps) = match &t.codec {
+            mp4::Codec::Hevc { ps, .. } => (Codec::H265, ps),
+            mp4::Codec::Avc { ps, .. } => (Codec::H264, ps),
+            _ => return Err("not a video track".into()),
+        };
+        d.push(Decoder::new(g, c, ps, t.width, t.height).map_err(|e| format!("decoder: {e}"))?);
+    }
+    let mut d: [Decoder; 2] = d.try_into().map_err(|_| "decoders")?;
+    let fr = Frame {
+        w: d[0].view[2],
+        h: d[0].view[3],
+        crop: h.meta.crop,
+        shift: h.meta.shift,
+    };
+    let so = Opts {
+        blend: h.meta.blend.unwrap_or(6.0),
+        colour: None,
+        ..Opts::default()
+    };
+    let st = Stitcher::new(cx, &h.cal, fr, w, w / 2, so)?;
+    let src: [Vec<stitch::Src>; 2] = [0, 1].map(|l| {
+        (0..OUT as u64)
+            .map(|s| cx.rect(&d[l].planes(s), d[l].view))
+            .collect()
+    });
+    let nal = tks.map(|t| match t.codec {
+        mp4::Codec::Hevc { nal, .. } | mp4::Codec::Avc { nal, .. } => nal as usize,
+        _ => 4,
+    });
+    let (wu, hu) = (w as usize, w as usize / 2);
+    let (ps, tr) = (&ps, &tr);
+    // the features tracked on a thread of its own, a frame behind the decoding
+    thread::scope(|sc| {
+        let (tx, rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(1);
+        let wk = sc.spawn(move || -> Result<(), String> {
+            let (mut prev, mut m) = (None::<(usize, stab::vis::Pano)>, vec![]);
+            for (k, px) in rx {
+                let pano = stab::vis::Pano::rgba(&px, wu, hu);
+                if let Some((k0, a)) = &prev {
+                    stab::vis::track(a, &pano, FWD_BAND, &mut m);
+                    // output -> world: body -> world after output -> body
+                    let rw = |k: usize| {
+                        let r = tr.at(tk(k));
+                        (r, r * ps[k.min(ps.len() - 1)].q.as_dquat())
+                    };
+                    let ((r0, w0), (r1, w1)) = (rw(*k0), rw(k));
+                    let ray = |p: [f32; 2]| stab::vis::ray(wu, hu, p.map(f64::from));
+                    f(stab::fwd::Pair {
+                        t: [tk(*k0), tk(k)],
+                        r: [r0, r1],
+                        m: m.iter().map(|x| [w0 * ray(x[0]), w1 * ray(x[1])]).collect(),
+                    })?;
+                }
+                prev = Some((k, pano));
+            }
+            Ok(())
+        });
+        let r = (|| {
+            let (mut buf, mut i) = (vec![], 0);
+            for k in 0..=ks[ks.len() - 1] {
+                if stop.load(Relaxed) {
+                    return Err(CANCELLED.to_string());
+                }
+                let mut fs = [0; 2];
+                for l in 0..2 {
+                    let (mm, x) = (&h.mp4[h.lens[l].0], tks[l].samples[k]);
+                    mm.read(&x, &mut buf)
+                        .map_err(|e| format!("frame {k}: {e}"))?;
+                    let mut au = [&[][..]; 64];
+                    let c = nals(&buf, nal[l], &mut au);
+                    fs[l] = loop {
+                        let r = {
+                            let _g = gate();
+                            d[l].decode(g, &au[..c])
+                        };
+                        match r {
+                            Ok(x) => break x,
+                            Err(video::Error::Full) if !stop.load(Relaxed) => {}
+                            Err(video::Error::Full) => return Err(CANCELLED.into()),
+                            Err(e) => return Err(format!("decode frame {k}, lens {l}: {e}")),
+                        }
+                    };
+                }
+                if ks.get(i) != Some(&k) {
+                    for (x, f) in d.iter().zip(fs) {
+                        x.ring.release(g, f);
+                    }
+                    continue;
+                }
+                i += 1;
+                let p = ps[k.min(ps.len() - 1)];
+                st.pose(&Pose {
+                    q: p.q,
+                    rs: [p.rs; 2],
+                });
+                let mut e = g.device.create_command_encoder(&Default::default());
+                st.encode(
+                    &mut e,
+                    [0, 1].map(|l| &src[l][(fs[l] % OUT as u64) as usize]),
+                );
+                let px = {
+                    let _g = gate();
+                    for (x, f) in d.iter().zip(fs) {
+                        x.ring.acquire(g, f);
+                    }
+                    g.queue.submit([e.finish()]);
+                    for (x, f) in d.iter().zip(fs) {
+                        x.ring.release(g, f);
+                    }
+                    stitch::read_texture(&g.device, &g.queue, &st.out)
+                };
+                // a closed channel: the tracking thread failed, its error tells
+                if tx.send((k, px)).is_err() {
+                    break;
+                }
+                progress(i as u64, ks.len() as u64);
+            }
+            Ok(())
+        })();
+        drop(tx);
+        let w = wk.join().unwrap_or_else(|x| Err(panicked(x)));
+        r.and(w)
+    })
+}
+
+/// What `travel` keeps per recording: its first file, that file's size and modification time.
+type Rec = (PathBuf, u64, Option<std::time::SystemTime>);
+static TRAVEL: Mutex<Vec<(Rec, Arc<[stab::fwd::Est]>)>> = Mutex::new(vec![]);
+
+fn rec(files: &[PathBuf]) -> Option<Rec> {
+    let f = files.first()?;
+    let m = std::fs::metadata(f).ok()?;
+    Some((f.clone(), m.len(), m.modified().ok()))
+}
+
+/// `travel`'s result for `files` if it is kept.
+pub fn travelled(files: &[PathBuf]) -> Option<Arc<[stab::fwd::Est]>> {
+    let r = rec(files)?;
+    let v = TRAVEL.lock().unwrap_or_else(PoisonError::into_inner);
+    v.iter().find(|x| x.0 == r).map(|x| x.1.clone())
+}
+
+/// The direction of travel of each analysed pair of the recording in `files` (`flow`, `stab::fwd::fit`), what
+/// `stab::Lock::Forward` follows. Kept for the process (the last 16 recordings): the player, the exports and auto edit
+/// share one analysis.
+pub fn travel(
+    g: &Gpu,
+    cx: &Ctx,
+    files: &[PathBuf],
+    stop: &AtomicBool,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<Arc<[stab::fwd::Est]>, String> {
+    if let Some(e) = travelled(files) {
+        return Ok(e);
+    }
+    let mut es = vec![];
+    flow(g, cx, files, (FWD_W, FWD_DT), stop, progress, |p| {
+        es.push(stab::fwd::fit(&p));
+        Ok(())
+    })?;
+    let es: Arc<[stab::fwd::Est]> = es.into();
+    if let Some(r) = rec(files) {
+        let mut v = TRAVEL.lock().unwrap_or_else(PoisonError::into_inner);
+        v.retain(|x| x.0.0 != r.0);
+        if v.len() >= 16 {
+            v.remove(0);
+        }
+        v.push((r, es.clone()));
+    }
+    Ok(es)
+}
+
 /// One decode pass over a clip: the source frame each output frame shows, non-decreasing.
 struct Run {
     c: usize,
@@ -544,11 +760,25 @@ struct Plan {
     of: Vec<usize>,
 }
 
-fn plan(cut: &Cut, lock: Option<(stab::Lock, f64)>) -> Result<Plan, String> {
+/// The job's plan; with `Lock::Forward` each clip's forward analysis first (`travel`: kept from an earlier one).
+fn plan(
+    g: &Gpu,
+    cx: &Ctx,
+    cut: &Cut,
+    lock: Option<(stab::Lock, f64)>,
+    stop: &AtomicBool,
+) -> Result<Plan, String> {
+    let open = |files: &[PathBuf]| {
+        let ahead = match lock {
+            Some((stab::Lock::Forward, _)) => Some(travel(g, cx, files, stop, &mut |_, _| {})?),
+            _ => None,
+        };
+        Clip::open(files, lock, ahead.as_deref().unwrap_or_default())
+    };
     let e = match cut {
         Cut::Segs(segs) => {
             let clips = (segs.iter())
-                .map(|s| Clip::open(&s.files, lock))
+                .map(|s| open(&s.files))
                 .collect::<Result<Vec<_>, _>>()?;
             let fps = clips.first().ok_or("job without segments")?.fps;
             if let Some(c) = clips.iter().find(|c| c.fps != fps) {
@@ -594,7 +824,7 @@ fn plan(cut: &Cut, lock: Option<(stab::Lock, f64)>) -> Result<Plan, String> {
         let f = c.file as usize;
         if of[f] == usize::MAX {
             of[f] = clips.len();
-            clips.push(Clip::open(&e.paths(f), lock)?);
+            clips.push(open(&e.paths(f))?);
         }
     }
     // a frame shows the source frame with the latest pts ≤ its source time + 1 µs (crate edit)
@@ -1400,7 +1630,7 @@ pub fn run_into(
     let mut size = (0, 0);
     // also a panic while setting up (a damaged clip's parser, the model) ends as an error
     let r = scoped(&g.device, || {
-        let mut p = plan(&job.cut, job.stab)?;
+        let mut p = plan(g, cx, &job.cut, job.stab, stop)?;
         if still {
             p.runs.truncate(1);
             p.runs[0].k.truncate(1);

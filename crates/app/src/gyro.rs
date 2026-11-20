@@ -1,5 +1,6 @@
 //! Stabilisation in the player (crate stab): a worker thread turns a clip's trailer IMU and exposure record into one
-//! pose per frame, cached per clip and per setting. [`Stab`] is a player's side of it: the setting, the poses shown,
+//! pose per frame, cached per clip and per setting; the forward view first runs the clip's analysis on the player's
+//! device (`export::travel`, kept for the process). [`Stab`] is a player's side of it: the setting, the poses shown,
 //! and the mapping of any of the clip's videos (the `.lrv` too) onto the posed one by time.
 
 use eframe::egui;
@@ -8,10 +9,15 @@ use stab::{KI, KP, Lock, Opts, Pose, Track};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering::Relaxed},
+        mpsc,
+    },
     thread,
     time::Instant,
 };
+use video::Gpu;
 
 /// Default smoothing σ, s (crate stab's measurements use it), and the slider's range.
 pub const SMOOTH: f64 = 0.5;
@@ -22,11 +28,12 @@ const BUDGET: usize = 1 << 21;
 /// Stabilisation setting: None = off.
 pub type Mode = Option<Lock>;
 
-pub const MODES: [(Mode, &str); 4] = [
+pub const MODES: [(Mode, &str); 5] = [
     (None, "Off"),
     (Some(Lock::Free), "Free"),
     (Some(Lock::Horizon), "Horizon lock"),
     (Some(Lock::Direction), "Direction lock"),
+    (Some(Lock::Forward), "Forward"),
 ];
 
 pub fn parse(s: &str) -> Option<Mode> {
@@ -35,6 +42,7 @@ pub fn parse(s: &str) -> Option<Mode> {
         "free" => Some(Lock::Free),
         "horizon" => Some(Lock::Horizon),
         "direction" => Some(Lock::Direction),
+        "forward" => Some(Lock::Forward),
         _ => return None,
     })
 }
@@ -45,7 +53,7 @@ type Poses = Arc<[Pose]>;
 
 pub enum Msg {
     /// What the worker does now, for the progress line.
-    Stage(&'static str),
+    Stage(String),
     /// The poses of `Key`, and how long they took, s.
     Done(Key, Result<(Poses, f64), String>),
 }
@@ -55,13 +63,16 @@ pub struct Req {
     key: Key,
     tx: mpsc::Sender<Msg>,
     ctx: egui::Context,
+    /// the forward view's analysis: the device it runs on, and its stop (the player left the mode or closed)
+    gpu: Option<(Arc<Gpu>, stitch::Ctx)>,
+    stop: Arc<AtomicBool>,
 }
 
 /// The orientation track, frame record and timing of one clip.
 struct Clip {
     tr: Track,
     ex: Vec<Exposure>,
-    o: Opts,
+    o: Opts<'static>,
 }
 
 fn load(f: &Path) -> Result<Clip, String> {
@@ -97,21 +108,46 @@ pub fn worker() -> mpsc::Sender<Req> {
                 Some(p) => Ok(p.clone()),
                 None => {
                     if clip.as_ref().is_none_or(|c| c.0 != r.file) {
-                        let _ = r.tx.send(Msg::Stage("reading and integrating the IMU"));
+                        let _ =
+                            r.tx.send(Msg::Stage("reading and integrating the IMU".into()));
                         r.ctx.request_repaint();
                         clip = Some((r.file.clone(), load(&r.file)));
                     }
-                    clip.as_ref()
-                        .unwrap()
-                        .1
-                        .as_ref()
-                        .map_err(Clone::clone)
-                        .map(|c| {
-                            let _ = r.tx.send(Msg::Stage("smoothing the camera path"));
-                            r.ctx.request_repaint();
+                    let say = |s: String| {
+                        let _ = r.tx.send(Msg::Stage(s));
+                        r.ctx.request_repaint();
+                    };
+                    // the forward view: the direction of travel first
+                    let ahead = match (r.key.0, &r.gpu) {
+                        (Lock::Forward, Some((g, cx))) => export::travel(
+                            g,
+                            cx,
+                            std::slice::from_ref(&r.file),
+                            &r.stop,
+                            &mut |i, n| {
+                                say(format!(
+                                    "finding the direction of travel, {i} of {n} frames"
+                                ))
+                            },
+                        )
+                        .map(Some),
+                        (Lock::Forward, None) => {
+                            Err("no GPU for the forward view's analysis".into())
+                        }
+                        _ => Ok(None),
+                    };
+                    // a stopped analysis: the player asked for something else meanwhile
+                    if r.stop.load(Relaxed) && r.key.0 == Lock::Forward {
+                        continue;
+                    }
+                    (clip.as_ref().unwrap().1.as_ref().map_err(Clone::clone))
+                        .and_then(|c| Ok((c, ahead?)))
+                        .map(|(c, ahead)| {
+                            say("smoothing the camera path".into());
                             let o = Opts {
                                 lock: r.key.0,
                                 smooth: f64::from_bits(r.key.1),
+                                ahead: ahead.as_deref().unwrap_or_default(),
                                 ..c.o
                             };
                             let p: Poses = stab::poses(&c.tr, &c.ex, &o).into();
@@ -151,8 +187,13 @@ pub struct Stab {
     /// the newest poses in (shown until the current setting's arrive) and the setting asked for
     have: Option<(Key, Poses)>,
     want: Option<Key>,
-    pub stage: Option<&'static str>,
+    pub stage: Option<String>,
     pub err: Option<String>,
+    /// why the forward view fell back to the horizon lock, for the player's note
+    pub note: Option<String>,
+    /// the device for the forward view's analysis, and the stop of the one asked for
+    gpu: Option<(Arc<Gpu>, stitch::Ctx)>,
+    stop: Arc<AtomicBool>,
     /// compute time of the last poses, s
     pub took: f64,
     req: mpsc::Sender<Req>,
@@ -170,6 +211,7 @@ impl Stab {
         yaw: f32,
         mode: Mode,
         smooth: f64,
+        gpu: Option<(Arc<Gpu>, stitch::Ctx)>,
         ctx: &egui::Context,
     ) -> Stab {
         let mut s = Stab {
@@ -183,6 +225,9 @@ impl Stab {
             want: None,
             stage: None,
             err: None,
+            note: None,
+            gpu,
+            stop: Arc::new(AtomicBool::new(false)),
             took: 0.0,
             req: req.clone(),
             rx: mpsc::channel(),
@@ -196,8 +241,12 @@ impl Stab {
         self.mode.map(|l| (l, self.smooth.to_bits()))
     }
 
-    /// After a setting change: asks the worker for its poses unless they are in or asked for.
+    /// After a setting change: asks the worker for its poses unless they are in or asked for. Leaving the forward view
+    /// stops its analysis.
     pub fn ask(&mut self) {
+        if self.mode != Some(Lock::Forward) {
+            self.stop.store(true, Relaxed);
+        }
         let Some(k) = self.key() else { return };
         if self.err.is_some()
             || self.want == Some(k)
@@ -206,12 +255,17 @@ impl Stab {
             return;
         }
         self.want = Some(k);
-        self.stage = Some("queued");
+        self.stage = Some("queued".into());
+        if self.stop.load(Relaxed) {
+            self.stop = Arc::new(AtomicBool::new(false));
+        }
         let _ = self.req.send(Req {
             file: self.file.clone(),
             key: k,
             tx: self.rx.0.clone(),
             ctx: self.ctx.clone(),
+            gpu: self.gpu.clone(),
+            stop: self.stop.clone(),
         });
     }
 
@@ -227,6 +281,12 @@ impl Stab {
                     }
                     match r {
                         Ok((p, s)) => (self.have, self.took, new) = (Some((k, p)), s, true),
+                        // the analysis failed (no GPU, one lens): the horizon lock instead
+                        Err(e) if k.0 == Lock::Forward => {
+                            self.note = Some(format!("Forward view: {e}; horizon lock instead"));
+                            self.mode = Some(Lock::Horizon);
+                            self.ask();
+                        }
                         Err(e) => (self.err, self.want, self.stage) = (Some(e), None, None),
                     }
                 }
@@ -270,6 +330,12 @@ impl Stab {
     }
 }
 
+impl Drop for Stab {
+    fn drop(&mut self) {
+        self.stop.store(true, Relaxed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,12 +346,23 @@ mod tests {
     #[test]
     fn mapping() {
         assert_eq!(parse("horizon"), Some(Some(Lock::Horizon)));
+        assert_eq!(parse("forward"), Some(Some(Lock::Forward)));
         assert_eq!((parse("off"), parse("level")), (Some(None), None));
         let times: Arc<[f64]> = (0..100).map(|k| k as f64 * 1001.0 / 30000.0).collect();
         let (tx, _rx) = mpsc::channel();
         let ctx = egui::Context::default();
         let ff = 1_000_000;
-        let mut s = Stab::new(&tx, "x".into(), times.clone(), ff, 0.0, None, SMOOTH, &ctx);
+        let mut s = Stab::new(
+            &tx,
+            "x".into(),
+            times.clone(),
+            ff,
+            0.0,
+            None,
+            SMOOTH,
+            None,
+            &ctx,
+        );
         s.mode = Some(Lock::Free);
         s.have = Some((
             (Lock::Free, SMOOTH.to_bits()),

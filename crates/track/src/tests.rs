@@ -603,6 +603,32 @@ fn framing() {
         let c = Cam::view(y, p, 0.0, s.fov, 16.0 / 9.0).px(d.dir).unwrap();
         assert!(c.abs().max_element() < 1.0, "D at {c} in the view");
     }
+
+    // with the direction of travel (turning from yaw −30° at 2°/s): no subject for 3 s, then a person at yaw 90°
+    // until 6 s: the view looks ahead, frames the person, and looks ahead again once the person has been gone a while
+    let mut f = Framer::new(16.0 / 9.0);
+    let ahead = |k: usize| -30.0 + 2.0 * k as f32 / fps;
+    f.ahead = (0..n).map(|k| dir(ahead(k), 0.0)).collect();
+    for k in (0..n).step_by(10) {
+        let t = k as f32 / fps;
+        f.push(
+            k,
+            match (3.0..6.0).contains(&t) {
+                true => vec![det(90.0, 20.0, 0)],
+                false => vec![],
+            },
+        );
+    }
+    let p = f.path(n, fps);
+    for (k, want, sub) in [
+        (30, ahead(30), None),
+        (135, 90.0, Some(0)),
+        (270, ahead(270), None),
+    ] {
+        let y = yaw_pitch(p[k].dir)[0];
+        assert!((y - want).abs() < 3.0, "frame {k}: yaw {y}, want {want}");
+        assert_eq!(p[k].subject, sub, "frame {k}");
+    }
 }
 
 /// Every direction up to 2° from the poles lies well inside a face tile (|x|, |y| ≤ 0.85), in one where a face upright

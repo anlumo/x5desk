@@ -229,10 +229,34 @@ timelines (RNNoise).
 - [ ] **Wind noise on every export.** RNNoise runs on editor timelines only, off by default; the vendor's app applies
   wind reduction by default to recordings the camera marks as AI audio. Offer it on library exports, and score
   DeepFilterNet 3 (MIT / Apache-2.0, to verify) against RNNoise on ride audio: wind, engine, speech.
-- [ ] **Forward view.** The view along the direction of travel (the vendor's AI Forward), not the camera's heading,
-  which on a helmet is the head's. From the focus of expansion of the image motion left after the gyro's rotation
-  (`stab::vis` tracks), smoothed, horizon lock below walking pace; GPS course where the file has it. A mode for the
-  player, exports and auto edit. No model.
+- [x] **Forward view.** `stab::Lock::Forward`, "Forward" beside the locks in the player, the Export screen, the
+  editor and the MCP's `stabilisation` (`forward`, catalog and docs); auto edit's framer looks along it where no
+  subject wins (`track::Framer::ahead`: none yet, or the subject gone for `GONE`). The direction of travel from the
+  focus of expansion of the image motion the gyro leaves: `export::flow` stitches a frame every 1/15 s 1024 wide with
+  the gyro's rotation out and tracks its corners between 10° and 160° polar (`stab::vis`); `stab::fwd::fit` fits the
+  translation per pair (RANSAC over the great-circle constraint t · (a × b) = 0 with the expansion's sign, then least
+  squares on the inliers); features without parallax (under 0.09°: sky, far scenery) or that keep their place
+  relative to the camera body (the rider, the scooter) don't vote, moving objects are outliers. `fwd::yaws` smooths it
+  on the circle (Gaussian, robustly reweighted; σ the smoothing setting, at least 0.25 s); below walking pace (speed
+  over camera height under 0.3/s, from the ground features; v606 walking 0.4–0.6, standing 0.03–0.2) the horizon
+  lock's heading turned by the travel's usual offset from it (±2 s around the stop), faded over 1 s at the edges. The
+  analysis is kept per file for the process (`export::travel`): the player runs it on its worker (the line counts the
+  frames; leaving the mode stops it), the Export screen before the privacy pass, auto edit before its detections, a
+  job's plan otherwise (MCP). Measured (`crates/export/tests/forward.rs`; figures by
+  `target/forward-scratch/py/measure.py`, `sigma.py`): on eight rides of five days (scooter stem mount: the camera's
+  heading is the travel's plus steering) the travel runs 12.3–13.9° off the camera's heading (9.5° on 03-11),
+  per pair 0.7–1.6° (median) from that, over 10° on 0–1.7 % of travelling pairs; at σ 0.5 s the view stays within
+  2.6–6.7° (p95) of camera + offset on straight stretches, with 1.4–3.4 °/s of heading jitter there against the horizon
+  lock's 1.7–2.8 (smoother on 7 of 8), and no lag (yaw-rate cross-correlation 0 ± 50 ms). σ 0.25 / 0.5 / 0.75 / 1 s:
+  jitter 3.2 / 2.0 / 1.6 / 1.4 °/s, turns rounded by 1.6 / 3.1 / 6.6 / 12.0° (p95); 0.5 s (the default) is the knee.
+  v606 travels 61 % of the time (standing before 5 s and after 26 s), v627 and v635 never. Contact sheets (forward view
+  over the horizon lock's every 3 s, the raw travel as a red ring): `target/forward-scratch/out/*_forward.jpg`; the
+  roads' and paths' vanishing points sit at the forward view's centre. Cost on the Radeon 8060S: 27–38 s a minute of
+  footage, the decoding alone 34 (2048 wide: 116–184 s, no better). GPS: none of the 11 clips has a GPS record
+  (record 7, 0 bytes), so no course over ground is used. Open: no helmet clip to try; the vendor's AI Forward not
+  compared; on 738 the road's vanishing point, where the travel sits, drifts from 13° above to 13° below the horizon:
+  the gravity estimate's tilt (`Track::new`, branch `level-check`), which the forward view inherits as every lock
+  does; the travel's elevation on roads could check the level.
 - [ ] **Highlight marks in auto edit.** Marks set while recording (Capture's highlight mark, the phone app's) in
   trailer record 10 become highlights auto edit always keeps, and show on the seek bar and the editor's timeline.
   Needs a marked clip to confirm the record and its layout on X5 files (Camera: "Unconfirmed on X5 firmware"). If X5

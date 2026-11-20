@@ -68,6 +68,7 @@ impl Rig {
             yaw,
             mode,
             gyro::SMOOTH,
+            Some((self.g.clone(), self.cx.clone())),
             &self.ctx,
         );
         let t0 = Instant::now();
@@ -451,6 +452,55 @@ fn against(
 /// exposure records and first frame as its `.insv`, so each of its frames takes the pose of the main frame at the same
 /// time, and its stabilised picture lies on the main one's. A v606 proxy that starts 10 frames late (its trailer
 /// says so) checks the mapping on a moving clip, and the stabilisation of proxy playback.
+/// The forward view through the player's worker on v606 (walking from 5 to 25 s): the analysis says how far it is on
+/// the progress line, then at 15 s the view looks along the walk, which runs about 22° off the camera's heading
+/// (`export::flow`'s measurements), so 10–35° from the horizon lock's view.
+#[test]
+fn stab_forward() {
+    let Some(d) = samples() else { return };
+    let (r, f) = (Rig::new(), d.join("v606.insv"));
+    let m = Trailer::open(&f).unwrap().meta;
+    let s = r.src(std::slice::from_ref(&f), &m, 3840.0, 0);
+    let yaw = if m.stream == 4 { 180.0 } else { 0.0 };
+    let gpu = Some((r.g.clone(), r.cx.clone()));
+    let mut st = Stab::new(
+        &r.gyro,
+        f.clone(),
+        s.v.times.clone(),
+        s.ff,
+        yaw,
+        Some(Lock::Forward),
+        gyro::SMOOTH,
+        gpu,
+        &r.ctx,
+    );
+    let (t0, mut said) = (Instant::now(), None);
+    while !st.ready() {
+        st.tick();
+        if let Some(x) = st.stage.as_ref().filter(|x| x.starts_with("finding")) {
+            said = Some(x.clone());
+        }
+        assert!(t0.elapsed().as_secs() < 300, "forward poses");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        st.err.is_none() && st.note.is_none(),
+        "{:?} {:?}",
+        st.err,
+        st.note
+    );
+    let h = r.stab(&f, &s, &m, Some(Lock::Horizon));
+    let t = s.v.times[0] + 15.0;
+    // the views' centres in the body: both level, so their angle is the headings' difference
+    let c = |x: &Stab| x.pose(t, s.v.times[0], s.ff).q * glam::Vec3::NEG_X;
+    let a = c(&st).angle_between(c(&h)).to_degrees();
+    eprintln!(
+        "v606 forward: poses in {:.1} s (last line {said:?}); at 15 s {a:.1}° off the horizon lock",
+        st.took
+    );
+    assert!(said.is_some() && (10.0..35.0).contains(&a));
+}
+
 #[test]
 fn stab_proxy() {
     let Some(d) = samples() else { return };

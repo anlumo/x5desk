@@ -1,5 +1,6 @@
 //! Stabilisation maths for the X5: trailer IMU ([`media::insv`]) -> per-frame orientation, a smoothed camera path
-//! (FlowState-like), horizon / direction lock and the rolling-shutter term of `stitch::Pose`.
+//! (FlowState-like), horizon / direction lock, the forward view (the direction of travel, [`fwd`]) and the
+//! rolling-shutter term of `stitch::Pose`.
 //!
 //! Frames: body = the camera's calibration world (`stitch`: Z up when the camera stands upright, lens 0 axis −X);
 //! world = Z up (against gravity), yaw arbitrary (no magnetometer); orientations are body -> world.
@@ -53,6 +54,7 @@
 //!   the same in all three clips) matches none of these biases; it is not used.
 //! - IMU stamps come in batches of 16, 1 ms apart, at a true 1002 Hz: up to ~30 µs off, ignored.
 
+pub mod fwd;
 pub mod vis;
 
 use glam::{DMat3, DQuat, DVec3, Quat, Vec3};
@@ -244,10 +246,13 @@ pub enum Lock {
     Horizon,
     /// Level, and the heading stays at the start's.
     Direction,
+    /// Level, and the heading follows the direction of travel (`fwd`; `Opts::ahead`), the horizon lock's while
+    /// standing.
+    Forward,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Opts {
+pub struct Opts<'a> {
     pub lock: Lock,
     /// Gaussian σ of the path smoothing, s (0: follow the camera).
     pub smooth: f64,
@@ -255,9 +260,12 @@ pub struct Opts {
     pub readout: f64,
     /// Frame time = exposure-record time − exposure / 2 + `offset`, s.
     pub offset: f64,
+    /// `Lock::Forward`: the direction of travel of the clip's analysed pairs (`fwd::fit`, ascending); none: the
+    /// horizon lock.
+    pub ahead: &'a [fwd::Est],
 }
 
-impl Opts {
+impl Opts<'_> {
     /// The measured timing for a file with metadata `m`.
     pub fn new(m: &Meta, lock: Lock, smooth: f64) -> Self {
         Self {
@@ -265,6 +273,7 @@ impl Opts {
             smooth,
             readout: m.rolling_shutter * 1e-3,
             offset: OFFSET,
+            ahead: &[],
         }
     }
 }
@@ -279,13 +288,14 @@ pub struct Pose {
 }
 
 /// exp(−4.5): the smoothing kernel at 3σ.
-const E3: f64 = 0.011108996538242306;
+pub(crate) const E3: f64 = 0.011108996538242306;
 
 /// The virtual camera's path (virtual camera -> world) for orientations `r` at times `t` (ascending): a Gaussian
 /// mean on the rotation manifold over ±3σ (two Gauss-Newton steps from the frame's own orientation), then the lock.
 /// Zero-phase, so turns are rounded but never late. The kernel is lowered to reach 0 at ±3σ: a cut-off step there
-/// makes the path jump by ~0.3° whenever a frame of an 11 rad/s spin enters the window.
-pub fn path(t: &[f64], r: &[DQuat], lock: Lock, sigma: f64) -> Vec<DQuat> {
+/// makes the path jump by ~0.3° whenever a frame of an 11 rad/s spin enters the window. `Lock::Forward` turns the
+/// horizon lock's heading onto the direction of travel of `ahead` (`fwd::yaws`).
+pub fn path(t: &[f64], r: &[DQuat], lock: Lock, sigma: f64, ahead: &[fwd::Est]) -> Vec<DQuat> {
     let mut s = r.to_vec();
     if sigma > 0.0 {
         let (mut lo, mut hi, w) = (0, 0, 3.0 * sigma);
@@ -321,18 +331,27 @@ pub fn path(t: &[f64], r: &[DQuat], lock: Lock, sigma: f64) -> Vec<DQuat> {
             s[k] = m;
         }
     }
-    // heading = azimuth of the body X axis (the lens axes): defined upright and upside down
-    let yaw = |q: DQuat| {
-        let x = q * DVec3::X;
-        DQuat::from_rotation_z(x.y.atan2(x.x))
+    // heading = azimuth of the body X axis (the lens axes): defined upright and upside down; the X5's framing
+    // centres +X, so Forward points it along the travel
+    let az = |q: &DQuat| {
+        let x = *q * DVec3::X;
+        x.y.atan2(x.x)
     };
     match lock {
         Lock::Free => {}
-        Lock::Horizon => s.iter_mut().for_each(|q| *q = yaw(*q)),
+        Lock::Horizon => s
+            .iter_mut()
+            .for_each(|q| *q = DQuat::from_rotation_z(az(q))),
         Lock::Direction => {
             if let Some(&q) = s.first() {
-                s.fill(yaw(q));
+                s.fill(DQuat::from_rotation_z(az(&q)));
             }
+        }
+        Lock::Forward => {
+            let cam: Vec<f64> = s.iter().map(az).collect();
+            s = (fwd::yaws(t, &cam, ahead, sigma).into_iter())
+                .map(DQuat::from_rotation_z)
+                .collect();
         }
     }
     s
@@ -346,7 +365,7 @@ pub fn poses(tr: &Track, ex: &[Exposure], o: &Opts) -> Vec<Pose> {
         .collect();
     let r: Vec<DQuat> = t.iter().map(|&t| tr.at(t)).collect();
     let h = o.readout / 2.0;
-    path(&t, &r, o.lock, o.smooth)
+    path(&t, &r, o.lock, o.smooth, o.ahead)
         .iter()
         .zip(&r)
         .zip(&t)
@@ -504,7 +523,7 @@ mod tests {
                 .sum::<f64>()
                 / 539.0
         };
-        let p = path(&t, &r, Lock::Free, 0.3);
+        let p = path(&t, &r, Lock::Free, 0.3, &[]);
         let (a, b) = (rough(&r), rough(&p));
         let off = (30..570)
             .map(|k| deg(p[k] * slow(t[k]).inverse()))
@@ -513,9 +532,9 @@ mod tests {
             "free σ 0.3 s: jitter {a:.3}°/frame -> {b:.4}°/frame, max distance from the pan {off:.3}°"
         );
         assert!(b < a / 20.0 && off < 0.5);
-        assert_eq!(path(&t, &r, Lock::Free, 0.0), r);
+        assert_eq!(path(&t, &r, Lock::Free, 0.0, &[]), r);
 
-        let p = path(&t, &r, Lock::Horizon, 0.3);
+        let p = path(&t, &r, Lock::Horizon, 0.3, &[]);
         for (k, q) in p.iter().enumerate().skip(30).take(540) {
             let x = slow(t[k]) * DVec3::X;
             let yaw = (q * DVec3::X)
@@ -526,14 +545,14 @@ mod tests {
                 "{k}: heading off by {yaw}°"
             );
         }
-        let p = path(&t, &r, Lock::Direction, 0.3);
+        let p = path(&t, &r, Lock::Direction, 0.3, &[]);
         assert!(p.iter().all(|q| *q == p[0]) && (p[0] * DVec3::Z - DVec3::Z).length() < 1e-12);
 
         // a spin speeding up from 3 to 11 rad/s turns more than π inside the ±3σ window; about one axis the manifold
         // mean is the Gaussian mean of the unwrapped angle
         let a = |t: f64| 3.0 * t + 0.2 * t * t;
         let r: Vec<DQuat> = t.iter().map(|&t| DQuat::from_rotation_z(a(t))).collect();
-        let p = path(&t, &r, Lock::Free, 0.5);
+        let p = path(&t, &r, Lock::Free, 0.5, &[]);
         let off = (45..555)
             .map(|k| {
                 let (mut s, mut ws) = (0.0, 0.0);
@@ -559,12 +578,13 @@ mod tests {
             })
             .collect();
         let tk = |k: usize| ex[k].t as f64 * 1e-6 - 0.005;
-        for lock in [Lock::Free, Lock::Horizon, Lock::Direction] {
+        for lock in [Lock::Free, Lock::Horizon, Lock::Direction, Lock::Forward] {
             let o = Opts {
                 lock,
                 smooth: 0.5,
                 readout: 0.02,
                 offset: 0.0,
+                ahead: &[],
             };
             let p = poses(&tr, &ex, &o);
             // world direction of the output's centre and up
@@ -581,7 +601,8 @@ mod tests {
             eprintln!("{lock:?}: max centre turn {turn:.3}°/frame, max tilt {tilt:.2}°");
             match lock {
                 Lock::Free => assert!(turn < 1.0),
-                Lock::Horizon => assert!(tilt < 0.05 && turn < 1.0),
+                // without a direction of travel: the horizon lock
+                Lock::Horizon | Lock::Forward => assert!(tilt < 0.05 && turn < 1.0),
                 Lock::Direction => assert!(tilt < 0.05 && turn < 0.01),
             }
             let w = log(motion(tk(100) - 1.01).inverse() * motion(tk(100) - 0.99));
