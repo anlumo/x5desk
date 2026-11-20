@@ -1779,13 +1779,22 @@ fn x5_blur() {
     }
     println!("{seen} searched frames of the first {m} changed, each bridged to the two after it");
     assert!(seen > 0);
-    let mut a = long(&src);
+    // the biggest sample: its pass has to outlast the still and the cancel below (v635's ends 3 s after an idle
+    // host's still)
+    let big = (names(&d).iter())
+        .filter(|n| n.ends_with(".insv"))
+        .map(|n| d.join(n))
+        .max_by_key(|f| std::fs::metadata(f).map_or(0, |m| m.len()))
+        .unwrap();
+    let mut a = long(&big);
     a["blur"] = true.into();
     let (v, _) = k.render("export", a, 60);
     let h = job(&v);
     println!(
-        "whole clip blurred: {} frames to search of {}",
-        v["blur"]["frames_to_search"], v["frames_total"]
+        "{} blurred whole: {} frames to search of {}",
+        big.display(),
+        v["blur"]["frames_to_search"],
+        v["frames_total"]
     );
     k.until(&h, 300, |v| {
         v["blur"]["frames_searched"].as_u64() >= Some(3)
