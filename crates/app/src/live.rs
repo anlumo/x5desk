@@ -2290,7 +2290,7 @@ mod tests {
             eprintln!("no ffprobe: skipping");
             return;
         }
-        let file = out(&format!("live-rtmp{fps}.flv"));
+        let file = out(&format!("live-rtmp{fps}-{back}.flv"));
         let f = file.to_str().unwrap();
         let (mut ff, url, _) = serve(&file);
         let g = Arc::new(Gpu::new().unwrap());

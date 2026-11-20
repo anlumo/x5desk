@@ -1524,7 +1524,8 @@ fn x5_samples() {
     assert_eq!(c["state"], "cancelled", "{c}");
     assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
     nothing(&c);
-    let a = json!({ "path": p, "preset": "flat1080", "start_s": 10, "end_s": 40 });
+    // the whole clip, as any range may lie past the end of a short one (v635: 5.8 s)
+    let a = json!({ "path": p, "preset": "flat1080" });
     let (v, _) = k.render("export", a, 60);
     let h = job(&v);
     k.until(&h, 120, frames_at(10));

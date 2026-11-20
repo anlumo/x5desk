@@ -152,9 +152,26 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   the clips hold almost no plate an export hides either (a pass over all of v635: 5 detections, none hidden), so
   `privacy_parity` compares plate detections only; the M4 figures (1.6 times the span, 160 MB freed by the trim)
   predate our detector.
-- [ ] **Tests that fail on main.** Crate export's `segments` (PSNR 32.6 dB against a 35 dB floor), the app's MCP
-  test `x5_samples` (asks for 10–40 s of the 5.8 s v635), and `live::tests::rtmp` with `rtmp_backlog` when run
-  together (both write `x5desk-<pid>-live-rtmp30.flv`; each passes alone).
+- [ ] **Tests that fail on main.** Fixed: the app's MCP test `x5_samples` asked for 10–40 s, written against a
+  62.9 s clip (its proof run of 11-07 had no v635 and took the first `.insv`, v603); v635 is 5.84 s and the server
+  refuses a range past the end by design, so the export cut short by stdin's end now takes the whole clip.
+  `live::tests::rtmp` and `rtmp_backlog` named their file by the frame rate alone; now by both of `stream`'s
+  parameters (`live-rtmp<fps>-<back>.flv`). Still failing, from the Radeon's CBR rather than our code: crate video's
+  `cbr` (H.264 +9.2 %, H.265 +13.2 % at a 1000 ms buffer, 2 % allowed) and `h265_lens0` (+10.8 % against 10 %, and
+  its first IDR at 32.8 dB against 33), crate export's `segments` (its first IDR at 32.6 dB against 35). Between 10-27
+  and 11-03 the encoder's rate control changed: for the same pictures from a 250 ms buffer on, the stream's first IDR
+  comes out smaller (`segments`: 1080 → 732 kB, 38.5 → 32.6 dB, the JPEG grab beside it byte-identical) and the
+  P-frames run over their share and never pay it back; 100 ms streams and VBR stay byte-identical. The code of 10-27
+  (0c67ef9) and of the first commit (495bbc4) write today's bytes; Mesa 26.2.6 lists no RADV encode change and 26.3.1
+  (today) changes none of these bytes; the system update of 11-03 10:55 brought linux-firmware 20261019 (the VCN
+  firmware runs the rate control) and OBS 33: the firmware is the likeliest cause, unconfirmed. App exports (CBR,
+  1000 ms) come out about 9 % over the rate asked, their first IDR worse. **Decide:** report upstream, a per-vendor
+  tolerance, or leave them failing; re-run `cbr` after the reboot into kernel 7.3.5. Also failing: obs's
+  `tests::layout` since OBS 33.0.1 (11-03: `LIBOBS_API_VER` ours 32.2.2; every layout matches), and four media tests
+  since FFmpeg 9.1 (a test tool, today): `encodes_v635_like_ffmpeg` and `rates_across_samples` (FFmpeg's AAC encoder
+  moved: 43.9 → 50.4 dB SNR at 192k, 32.5 → 40.9 dB at 128k; ours unchanged), `remux_edit_lists` (9.1's source cuts
+  the AAC padding with its audio edit, 3.0 s of 3.042 s; our remux rewrites the edit as media less priming,
+  3.0186 s), `music::tests::formats` (9.1's `dash.m4a` decodes 820 padding samples too many).
 - [ ] **Wrap up.** `plates_flags`, `plates_rides`, `plates` and the still checks; `cargo fmt`; models/README
   (sha256, data, results), the About page and `PLAN.md`; commit, merge and push on the user's word.
 - [ ] **Decide:** remove the old yolo-v9 plate model files? They stay in the tree unbuilt, and
