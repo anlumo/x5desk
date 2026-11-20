@@ -180,6 +180,18 @@ impl Calib {
         let s = fr.w as f64 / crop;
         let c0 = [0, 1].map(|k| (self.side - crop) / 2.0 + fr.shift[k] as f64);
         let lim = (self.fov / 2.0).to_radians();
+        if flow.is_none() {
+            // seam low band (`stitch.wgsl` `low`): even blocks about 3° across at the seam, 90° off the lens axis,
+            // at least 2 per side
+            let x = |deg: f64| {
+                self.project(0, [deg.to_radians().sin(), 0.0, deg.to_radians().cos()])[0]
+            };
+            let most = (fr.w.min(fr.h) / 4).max(1) as f64;
+            let f = ((x(91.5) - x(88.5)) * s / 2.0).round().clamp(1.0, most) * 2.0;
+            p[14] = f as f32;
+            p[15] = (fr.w as f64 / f).ceil() as f32;
+            p[16] = (fr.h as f64 / f).ceil() as f32;
+        }
         for (i, l) in self.lens.iter().enumerate() {
             let q = &mut p[32 + 32 * i..32 + 32 * (i + 1)];
             for (k, v) in l.rot.iter().flatten().enumerate() {

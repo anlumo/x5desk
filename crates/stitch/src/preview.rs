@@ -174,14 +174,13 @@ impl Preview {
             .write_buffer(&self.st.pose, 0, bytemuck::bytes_of(&p.bytes()));
     }
 
-    /// Records the colour fit for a newly shown video frame (no-op when colour matching is off).
+    /// Records the passes of a newly shown video frame: the colour fit (when on) and the template seam's low band
+    /// (until the first, the seam draws with the single ramp).
     pub fn colour(&self, enc: &mut wgpu::CommandEncoder, src: [&Src; 2]) {
-        if self.st.colour.is_some() {
-            self.st.colour(
-                &self.cx,
-                &mut enc.begin_compute_pass(&Default::default()),
-                src,
-            );
+        if self.st.colour.is_some() || self.st.low.is_some() {
+            let mut c = enc.begin_compute_pass(&Default::default());
+            self.st.colour(&self.cx, &mut c, src);
+            self.st.low(&self.cx, &mut c, src);
         }
     }
 

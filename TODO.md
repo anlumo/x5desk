@@ -10,10 +10,17 @@ From comparing our stitch with golblick's notes
 (<https://github.com/AkshayRao27/golblick/blob/main/docs/formats/insta360-agent-notes.md#stitching-the-seam>;
 comparison page <https://claude.ai/artifact/WzKEEXqGvqmLj1ojXMq9p8>). Their figures are theirs, on their clips.
 
-- [ ] **Two bands on the template path.** Without flow (live preview `fs`, exports with flow off) `stitch.wgsl`
-  `shade` fades over one 6° ramp; golblick saw a single 6° fade double a glove and a zip. Their blend: a narrow
-  fade, min(3°, max(1.5°, 4 rows)), plus the lens difference blurred over about 3° (a mip level) handed over across
-  6°. Done when flow-off seam error and ghosting on 635 / 606 / 627 beat the single ramp.
+- [x] **Two bands on the template path.** Without flow (live preview `fs`, exports with flow off) `stitch.wgsl`
+  `seam` hands detail over across a narrow fade, min(3°, max(1.5°, 4 rows)), and the lenses' difference blurred
+  over about 3° across the 6° ramp (golblick); the blur comes from `low`, a pass over each lens into blocks about 3°
+  across (decoded NV12 has no mips), recorded with the stitch and in `Preview::colour`. The flow path (`shade`,
+  `main`, `ff`) is untouched: RAFT frames identical before / after. 24 frames each of 635 / 606 / 627 (5.7K, colour
+  fit on), against the single ramp: ghosting 1.66 / 1.59 / 0.80 → 0.56 / 0.54 / 0.32 levels and seam error
+  (gradient domain) 64 / 52 / 37 → 32 / 26 / 19, lower on every frame; the low band's step 2.20 / 0.92 / 0.30 →
+  1.96 / 0.72 / 0.33 (627 worse). Cost on the Radeon: +0.3 ms a 5.7K frame (0.7 → 1.0 ms), +0.2 ms a new
+  preview frame. Open: on these clips a lone 1.5° fade scores as well; the low band pays only on a brightness step
+  between the lenses (lens 1 × 0.8, colour matching off: step 4.4 lone fade, 3.0 two bands, 3.1 single ramp), and it
+  spreads a very near object's edge into a soft 6° haze (635 railing). Scoring: `target/bands-scratch/harness`.
 - [ ] **Lens guards.** With guards on, the mask at 200° (`offset.rs` `pack`, q[16]) blends the guard's rim into the
   overlap. golblick reads a stored guard factor of 1.0225 (field of view about 2.25 % narrower) and picks it per
   photo by scoring the overlap at both angles. Find the field, shrink the image circle when set; needs a clip shot

@@ -1111,11 +1111,32 @@ fn vs_old() {
     eprintln!("template 7680x3840 RGBA: {ms:.2} ms/frame");
     let tpl = old(&c, w, false);
     if let Some(r) = &tpl {
-        let p = psnr(&new, r);
+        // insta360-stitch fades the seam in one ramp, the template seam here in two bands: compared more than 8° (the
+        // widest ramp, at the nadir) from the seam; the framing turns only about the vertical, so that is
+        // |sin φ cos θ| > sin 8° in panorama angles
+        let (w, h) = (w as usize, h as usize);
+        let keep: Vec<bool> = (0..w * h)
+            .map(|i| {
+                let th = std::f64::consts::TAU * (i % w) as f64 / w as f64;
+                let ph = std::f64::consts::PI * (i / w) as f64 / (h - 1) as f64;
+                (ph.sin() * th.cos()).abs() > 8f64.to_radians().sin()
+            })
+            .collect();
+        let away = |px: &[u8]| -> Vec<u8> {
+            (px.chunks(4).zip(&keep))
+                .filter(|(_, k)| **k)
+                .flat_map(|(p, _)| p)
+                .copied()
+                .collect()
+        };
+        let (a, b) = (away(&new), away(r));
+        let p = psnr(&a, &b);
         eprintln!(
-            "template vs insta360-stitch: PSNR {p:.2} dB, > 2 levels {:.4} %, > 8 levels {:.4} %",
-            100.0 * over(&new, r, 2),
-            100.0 * over(&new, r, 8)
+            "template vs insta360-stitch, away from the seam: PSNR {p:.2} dB, > 2 levels {:.4} %, > 8 levels {:.4} % \
+             (whole panorama {:.2} dB)",
+            100.0 * over(&a, &b, 2),
+            100.0 * over(&a, &b, 8),
+            psnr(&new, r)
         );
         assert!(p > 40.0, "PSNR {p:.2} dB");
     }
@@ -1437,6 +1458,10 @@ fn preview() {
         wgpu::TextureFormat::Rgba8Unorm,
     );
     pv.pose(&pose);
+    // the frame's passes, as a player records them for each new frame (the seam's low band)
+    let mut enc = g.dev.create_command_encoder(&Default::default());
+    pv.colour(&mut enc, src);
+    g.q.submit([enc.finish()]);
     let (w, h) = (1920u32, 1080u32);
     let t = texture(&g, w, h, wgpu::TextureFormat::Rgba8Unorm);
     let tv = t.create_view(&Default::default());

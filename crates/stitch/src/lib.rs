@@ -178,15 +178,16 @@ pub struct Ctx {
     /// Linear, repeating across the equirect's longitude (lens gathers stay inside their rects).
     smp: wgpu::Sampler,
     state: wgpu::BindGroupLayout,
-    /// Group 3 per pass: stitch into RGBA8, belt, stats, view, stitch into RGBA16F, view with the flows.
-    g3: [wgpu::BindGroupLayout; 6],
+    /// Group 3 per pass: stitch into RGBA8, belt, stats, view, stitch into RGBA16F, view with the flows, seam low band.
+    g3: [wgpu::BindGroupLayout; 7],
     /// post.wgsl: fold, fin, yuv.
     post: [wgpu::BindGroupLayout; 3],
     module: wgpu::ShaderModule,
-    /// Stitch into RGBA8, RGBA16F.
-    main: [wgpu::ComputePipeline; 2],
+    /// Stitch into RGBA8, RGBA16F: with flow (`main`), without (`tpl`, the template seam in two bands).
+    main: [[wgpu::ComputePipeline; 2]; 2],
     belt: wgpu::ComputePipeline,
     stats: wgpu::ComputePipeline,
+    low: wgpu::ComputePipeline,
     fold: wgpu::ComputePipeline,
     fin: wgpu::ComputePipeline,
     yuv: wgpu::ComputePipeline,
@@ -271,7 +272,15 @@ impl Ctx {
         let smp = T::Sampler(wgpu::SamplerBindingType::Filtering);
         let lens = bgl(dev, &[(0, tex), (1, tex), (2, UNIFORM), (3, smp)]);
         let pano = bgl(dev, &[(3, smp), (4, tex)]);
-        let state = bgl(dev, &[(0, storage(true)), (1, UNIFORM), (2, storage(true))]);
+        let state = bgl(
+            dev,
+            &[
+                (0, storage(true)),
+                (1, UNIFORM),
+                (2, storage(true)),
+                (3, storage(true)),
+            ],
+        );
         let out = |format| T::StorageTexture {
             access: wgpu::StorageTextureAccess::WriteOnly,
             format,
@@ -285,6 +294,7 @@ impl Ctx {
             bgl(dev, &[(5, UNIFORM)]),
             main(wgpu::TextureFormat::Rgba16Float),
             bgl(dev, &[(2, storage(true)), (5, UNIFORM)]),
+            bgl(dev, &[(6, storage(false))]),
         ];
         let post = [
             bgl(
@@ -328,9 +338,10 @@ impl Ctx {
         };
         let g = |i: usize| [&lens, &lens, &state, &g3[i]];
         Self {
-            main: [pipe(&module, "main", &g(0)), pipe(&wide, "main", &g(4))],
+            main: ["main", "tpl"].map(|e| [pipe(&module, e, &g(0)), pipe(&wide, e, &g(4))]),
             belt: pipe(&module, "belt", &g(1)),
             stats: pipe(&module, "stats", &g(2)),
+            low: pipe(&module, "low", &g(6)),
             fold: pipe(&pm, "fold", &[&post[0]]),
             fin: pipe(&pm, "fin", &[&post[1]]),
             yuv: pipe(&pm, "yuv", &[&post[2]]),
@@ -431,6 +442,9 @@ struct State {
     bg: wgpu::BindGroup,
     /// Colour matching on: statistics (group 3) and fold bind groups.
     colour: Option<(wgpu::BindGroup, wgpu::BindGroup)>,
+    /// Template seam (no flow): the low band pass's state group (the band itself can't be bound there while it is
+    /// written), its output group, its blocks across and down.
+    low: Option<(wgpu::BindGroup, wgpu::BindGroup, [u32; 2])>,
 }
 
 /// Colour statistics workgroups (`stitch.wgsl` `stats`).
@@ -455,15 +469,28 @@ impl State {
             bytemuck::bytes_of(&COL0),
             U::STORAGE | U::COPY_DST | U::COPY_SRC,
         );
-        let bg = bind(
-            d,
-            &cx.state,
-            &[
-                (0, pb.as_entire_binding()),
-                (1, pose.as_entire_binding()),
-                (2, col.as_entire_binding()),
-            ],
-        );
+        let n = [p[15] as u32, p[16] as u32];
+        let band = buf(d, (32 * n[0] * n[1]).max(16) as u64, U::STORAGE);
+        let state = |b: &wgpu::Buffer| {
+            bind(
+                d,
+                &cx.state,
+                &[
+                    (0, pb.as_entire_binding()),
+                    (1, pose.as_entire_binding()),
+                    (2, col.as_entire_binding()),
+                    (3, b.as_entire_binding()),
+                ],
+            )
+        };
+        let bg = state(&band);
+        let low = (n[0] > 0).then(|| {
+            (
+                state(&buf(d, 16, U::STORAGE)),
+                bind(d, &cx.g3[6], &[(6, band.as_entire_binding())]),
+                n,
+            )
+        });
         let colour = colour.map(|s| {
             let part = buf(d, GROUPS as u64 * 64, U::STORAGE);
             let u = init(
@@ -489,7 +516,21 @@ impl State {
             col,
             bg,
             colour,
+            low,
         }
+    }
+
+    /// Records the template seam's low band for this frame (no-op with flow); leaves groups 0..3 to be re-bound.
+    fn low(&self, cx: &Ctx, c: &mut wgpu::ComputePass, src: [&Src; 2]) {
+        let Some((bg, out, n)) = &self.low else {
+            return;
+        };
+        c.set_pipeline(&cx.low);
+        c.set_bind_group(0, &src[0].0, &[]);
+        c.set_bind_group(1, &src[1].0, &[]);
+        c.set_bind_group(2, bg, &[]);
+        c.set_bind_group(3, out, &[]);
+        c.dispatch_workgroups(n[0], n[1], 2);
     }
 
     /// Records the colour fit for this frame (no-op when off); leaves groups 0..3 to be re-bound.
@@ -660,11 +701,13 @@ impl Stitcher {
         }))
     }
 
-    /// Records colour matching (if on) and the stitch of `src` (lens 0, lens 1) into `out`.
+    /// Records colour matching (if on), the template seam's low band (without flow) and the stitch of `src` (lens 0,
+    /// lens 1) into `out`.
     pub fn encode(&self, enc: &mut wgpu::CommandEncoder, src: [&Src; 2]) {
         let mut c = enc.begin_compute_pass(&Default::default());
         self.st.colour(&self.cx, &mut c, src);
-        c.set_pipeline(&self.cx.main[self.wide as usize]);
+        self.st.low(&self.cx, &mut c, src);
+        c.set_pipeline(&self.cx.main[self.belt.is_none() as usize][self.wide as usize]);
         self.st.groups(&mut c, src, &self.g3);
         c.dispatch_workgroups(self.w.div_ceil(8), self.h.div_ceil(8), 1);
     }
