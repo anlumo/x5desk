@@ -59,12 +59,14 @@ comparison page <https://claude.ai/artifact/WzKEEXqGvqmLj1ojXMq9p8>). Their figu
   camera's levelled equirect (NV12 1280 × 640, BT.709, framed on lens 1 like ours) of the frame 2.97 s in where the
   camera marks `trim_start` 3 s, 1 s into a dash-cam segment, else frame 0; our horizon-levelled stitch of it is
   aligned by correlation (yaw × tilt ±30° at 160 × 80, then 320 × 160 and 640 × 320; a known turn comes back within
-  0.02°). 47 of 48 clips aligned (`X5_LEVEL`). Handheld / stick (12): residual tilt rms 0.98°, max 1.85°, unrelated
-  to the camera's tilt (−30…77°), so axes and signs hold; the current gains leave the least of four sets. Left:
-  scooter rides (35 dash-cam clips): rms 6.0°, up to 16°; the backward pass starts from one accelerometer sample
-  and the 1 g gate sees raw samples under 0.3–0.7 g of vibration. Seeded from the mean of the last 0.5 s: 3.4°
-  (handheld 0.92°); with the accelerometer averaged over ±50 ms too and a second backward pass: 2.2° (handheld
-  0.93°) (`stab` docs, Measurements). Decide, then re-run `verify` / `gains`, which tuned the gains on the old seed.
+  0.02°). 47 of 48 clips aligned (`X5_LEVEL`). Handheld / stick (12): residual tilt unrelated to the camera's tilt
+  (−30…77°), so axes and signs hold. Scooter rides (35 dash-cam clips, 0.3–0.7 g of vibration) were 6.0° rms, up to
+  16°: `Track::new` now averages the accelerometer over ±50 ms for the gate and the correction and runs a second
+  backward pass (a 0.5 s seed added nothing on top): rides 2.25° rms (median 4.8° → 1.3°, max 6.0°, better on 27),
+  handheld 0.98° → 0.91° (better on 7 of 12); image horizon v606 0.78° → 0.96°, v627 1.10° → 1.00°. Left: rides
+  still up to 6° (2026-04-13 `_723`, 04-16 `_738`, 03-11 `_720`: 4.8–6.0°); the image now prefers Kp 0.05 / Ki 0.001 by 0.08°, the camera the current gains,
+  kept; the live preview's own filter (`app/src/feed.rs` `Att`) still gates raw samples; 692's thumbnail frame is
+  not 1 s in.
 
 ## Plate detector (branch `plates-yolox`, worktree `target/plates-wt`)
 

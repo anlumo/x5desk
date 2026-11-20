@@ -30,18 +30,22 @@
 //!   stitch shader (v606, 8 s): 0.596 px without the term, 0.569 / 0.556 / 0.564 px at 0.5 / 1 / 1.5 × the
 //!   trailer's readout and 0.660 px with the sign flipped.
 //! - **Gravity** ([`KP`], [`KI`]): Mahony gains chosen by the horizon tilt measured in the image (near-vertical edges
-//!   are meridians when level), horizon lock, v606 / v627 mean: Kp 0.1 / Ki 0.005 0.78° / 1.12°; 0.5 / 0.05
-//!   1.31° / 1.02°; 0.05 / 0.001 1.73° / 1.52°; gyro only 7.0° / 7.9° (mostly its start attitude). The image measure
-//!   reads 1.23× a known added tilt on these frames. Correction is gated to |a| within 0.1 g of 1 g.
+//!   are meridians when level), horizon lock, v606 / v627 mean, with one backward pass on raw samples: Kp 0.1 /
+//!   Ki 0.005 0.78° / 1.10°; 0.5 / 0.05 1.31° / 1.08°; 0.05 / 0.001 1.73° / 1.53°; gyro only 7.0° / 7.9° (mostly its
+//!   start attitude). With the averaged accelerometer and the second backward pass (`Track::new`): 0.96° / 1.00°;
+//!   1.34° / 1.02°; 0.91° / 0.89°; gyro only the same. The image now ranks 0.05 / 0.001 first by 0.08°, the camera
+//!   (below) Kp 0.1 / Ki 0.005 (handheld 0.91° against 1.08°, scooter 2.25° against 2.61°), so the gains stay. The
+//!   image measure reads 1.19–1.23× a known added tilt on these frames. Correction is gated to |a| within 0.1 g of 1 g.
 //! - **Levelling against the camera** (`tests/footage.rs` `level`, 48 clips): the trailer thumbnail is the camera's
 //!   own levelled stitch of one frame; our horizon-levelled stitch of that frame is aligned to it (a known turn comes
-//!   back within 0.02°). Handheld and on a stick (12 clips, camera tilted −30…77°): residual tilt rms 0.98°, max 1.85°
-//!   (v635, 7 s), mean 0.3° / 0.5° about our output X / Y, unrelated to the camera's tilt (slope < 0.01), so axes and
-//!   signs hold; of the gains above, these leave the least (0.5 / 0.05 1.43°, 0.05 / 0.001 1.71°, gyro only 19°).
-//!   On a scooter (35 dash-cam clips, mounted 50–75° off upright, 0.3–0.7 g of vibration, a quarter to a third of the
-//!   samples inside the gate): rms 6.0°, up to 16°. Two causes: the backward pass starts from one accelerometer
-//!   sample (from the mean of the last 0.5 s: 3.4°, better on 30 of 35; handheld 0.92°) and the gate sees raw 1 kHz
-//!   samples (with the accelerometer averaged over ±50 ms too and a second backward pass: 2.2°; handheld 0.93°).
+//!   back within 0.02°). Handheld and on a stick (12 clips, camera tilted −30…77°): residual tilt rms 0.91°, max 1.76°,
+//!   mean 0.1° / 0.5° about our output X / Y, unrelated to the camera's tilt (slope ≤ 0.012), so axes and signs hold.
+//!   On a scooter (35 dash-cam clips, mounted 50–75° off upright, 0.3–0.7 g of vibration): rms 2.25°, median 1.27°,
+//!   max 5.97°. One backward pass from one raw sample, with raw 1 kHz samples at the gate (a quarter to a third of
+//!   them inside it), left 6.0°, median 4.8°, up to 16° there and 0.98° handheld; better now on 27 of 35 rides and 7
+//!   of 12 handheld clips (worst: 693 +1.2°, 603 +0.5°). Seeding the backward pass from the mean of the last 0.5 s
+//!   adds nothing on top (from the poses: scooter 2.21° with it, 2.25° without; handheld 0.93° / 0.91°), so the
+//!   seed stays one sample.
 //! - **Yaw** (not corrected: no magnetometer): gyro minus visual rotation over the clip leaves a bias about body Z
 //!   of 0.075°/s on v627; direction lock turns −1.9° in 22 s there (visual). On v606 (walking past near columns) the
 //!   same measures give 0.63°/s and −22.3° in 31 s, but parallax biases the visual rotation there (that fit also
@@ -64,6 +68,9 @@ pub const RS: f64 = 1.0;
 /// Mahony gains: proportional (rad/s per unit error) and integral (rad/s² per unit error).
 pub const KP: f64 = 0.1;
 pub const KI: f64 = 0.005;
+/// The gravity correction's accelerometer: mean over ±`AVG` samples (±50 ms at the X5's 1 kHz). Raw samples under
+/// vibration (0.3–0.7 g on a scooter) seldom fall within the 1 g gate, and those that do lean.
+const AVG: usize = 50;
 
 /// Rotation vector of `q` (shortest way round).
 pub fn log(q: DQuat) -> DVec3 {
@@ -148,12 +155,23 @@ pub struct Track {
 }
 
 impl Track {
-    /// From the trailer's IMU samples (at least two). The correction pulls the up estimate toward the accelerometer
-    /// while |a| is within 0.1 g of 1 g (walking and swinging push it out of that band). The same filter runs
-    /// backward over the clip first, from the last sample's gravity, and its attitude at the first sample starts the
-    /// forward pass: clips often start while the camera still swings, where averaged gravity is degrees off.
+    /// From the trailer's IMU samples (at least two). The correction pulls the up estimate toward the accelerometer,
+    /// averaged over ±50 ms (`AVG`), while that is within 0.1 g of 1 g (walking and swinging push it out of the
+    /// band). The filter runs backward over the clip from the last sample's gravity, forward, backward again and
+    /// forward for the track: clips often start while the camera still swings, where averaged gravity is degrees
+    /// off, and the second backward pass starts from an attitude that followed gravity over the whole clip (on a
+    /// vibrating mount one pass from one sample leaves several degrees).
     pub fn new(imu: &[Imu], kp: f64, ki: f64) -> Track {
         let v = |a: [f32; 3]| AXES * DVec3::new(a[0] as f64, a[1] as f64, a[2] as f64);
+        let n = imu.len();
+        let mut cs = vec![DVec3::ZERO; n + 1];
+        for (i, s) in imu.iter().enumerate() {
+            cs[i + 1] = cs[i] + v(s.acc);
+        }
+        let acc = |i: usize| {
+            let (a, b) = (i.saturating_sub(AVG), (i + AVG + 1).min(n));
+            (cs[b] - cs[a]) / (b - a) as f64
+        };
         let step = |q: DQuat, bi: &mut DVec3, w: DVec3, a: DVec3, dt: f64| {
             let n = a.length();
             let e = if (n - 1.0).abs() < 0.1 {
@@ -166,33 +184,38 @@ impl Track {
         };
         let dt = |p: &[Imu]| (p[1].t - p[0].t) as f64 * 1e-6;
         let (mut q, mut bi) = (
-            DQuat::from_rotation_arc(v(imu[imu.len() - 1].acc).normalize(), DVec3::Z),
+            DQuat::from_rotation_arc(v(imu[n - 1].acc).normalize(), DVec3::Z),
             DVec3::ZERO,
         );
-        for p in imu.windows(2).rev() {
-            q = step(
-                q,
-                &mut bi,
-                -0.5 * (v(p[0].gyro) + v(p[1].gyro)),
-                v(p[0].acc),
-                dt(p),
-            );
-        }
-        // backward, the integral term learnt the negated bias
-        bi = -bi;
-        let (mut t, mut qs) = (Vec::with_capacity(imu.len()), Vec::with_capacity(imu.len()));
-        t.push(imu[0].t as f64 * 1e-6);
-        qs.push(q);
-        for p in imu.windows(2) {
-            q = step(
-                q,
-                &mut bi,
-                0.5 * (v(p[0].gyro) + v(p[1].gyro)),
-                v(p[1].acc),
-                dt(p),
-            );
-            t.push(p[1].t as f64 * 1e-6);
+        let (t, mut qs) = (
+            imu.iter().map(|s| s.t as f64 * 1e-6).collect(),
+            Vec::with_capacity(n),
+        );
+        for _ in 0..2 {
+            for (i, p) in imu.windows(2).enumerate().rev() {
+                q = step(
+                    q,
+                    &mut bi,
+                    -0.5 * (v(p[0].gyro) + v(p[1].gyro)),
+                    acc(i),
+                    dt(p),
+                );
+            }
+            // a backward pass learns the negated bias, a forward one the bias the next backward pass needs negated
+            bi = -bi;
+            qs.clear();
             qs.push(q);
+            for (i, p) in imu.windows(2).enumerate() {
+                q = step(
+                    q,
+                    &mut bi,
+                    0.5 * (v(p[0].gyro) + v(p[1].gyro)),
+                    acc(i + 1),
+                    dt(p),
+                );
+                qs.push(q);
+            }
+            bi = -bi;
         }
         Track { t, q: qs }
     }
