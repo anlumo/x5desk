@@ -234,21 +234,33 @@ fn nals(b: &[u8], out: &mut Vec<Range<usize>>) {
 }
 
 /// Gravity-corrected gyro integration (crate stab's Mahony filter and gains, forward only: the stream has no end to
-/// run back from), starting from the first accelerometer sample. IMU axes as in the files (`stab::AXES`).
+/// run back from), starting from the first window's mean. IMU axes as in the files (`stab::AXES`). The
+/// correction's accelerometer is the mean of the last `AVG` samples, as the files' filter's (`stab::Track::new`): raw
+/// samples of a vibrating mount seldom pass the 1 g gate, and those that do lean.
 #[derive(Default)]
 struct Att {
     q: Option<DQuat>,
     bi: DVec3,
     t: i64,
+    acc: VecDeque<DVec3>,
+    sum: DVec3,
 }
+
+/// 100 ms of the stream's 500 samples a second.
+const AVG: usize = 50;
 
 impl Att {
     fn step(&mut self, s: &link::Imu) -> DQuat {
         let v = |a: [f64; 3]| stab::AXES * DVec3::from(a);
         let (w, a) = (v(s.gyro), v(s.acc));
+        if self.acc.len() == AVG {
+            self.sum -= self.acc.pop_front().unwrap();
+        }
+        self.acc.push_back(a);
+        self.sum += a;
+        let a = self.sum / self.acc.len() as f64;
         let q = match self.q {
-            None => DQuat::from_rotation_arc(a.normalize_or(DVec3::Z), DVec3::Z),
-            Some(q) => {
+            Some(q) if self.acc.len() == AVG => {
                 let dt = (s.ts - self.t).clamp(0, 100) as f64 * 1e-3;
                 let n = a.length();
                 let e = if (n - 1.0).abs() < 0.1 {
@@ -259,6 +271,8 @@ impl Att {
                 self.bi += stab::KI * dt * e;
                 (q * stab::exp((w + stab::KP * e + self.bi) * dt)).normalize()
             }
+            // the first 100 ms: no window yet, the heading still free
+            _ => DQuat::from_rotation_arc(a.normalize_or(DVec3::Z), DVec3::Z),
         };
         (self.q, self.t) = (Some(q), s.ts);
         q
@@ -1056,5 +1070,45 @@ mod tests {
         let o = p.q.as_dquat() * DVec3::Z;
         assert!((o - q.inverse() * DVec3::Z).length() < 1e-5, "{o:?}");
         assert_eq!(h.pose(120, false, Pose::default()).q, glam::Quat::IDENTITY);
+    }
+
+    /// Recordings' IMU at the stream's rate (every second sample of the files' 1 kHz) through the live filter: its
+    /// gravity against the files' two-way filter's (`stab::Track::new`), rms and worst after 10 s. Files: `X5_LEVEL`
+    /// (a path list; unset: skipped). Rides on a scooter's stem stay within 6° rms (0.7–4.9°; gating raw samples from
+    /// the first one on: 2.5–16.7°).
+    #[test]
+    fn ride() {
+        let Some(v) = std::env::var_os("X5_LEVEL") else {
+            println!("X5_LEVEL unset: skipped");
+            return;
+        };
+        let mut all = 0f64;
+        for f in std::env::split_paths(&v).filter(|p| !p.as_os_str().is_empty()) {
+            let imu = media::insv::Trailer::open(&f).unwrap().imu().unwrap();
+            let tr = stab::Track::new(&imu, stab::KP, stab::KI);
+            let (mut a, mut sum, mut n, mut worst) = (Att::default(), 0.0, 0, 0f64);
+            for s in imu.iter().step_by(2) {
+                let q = a.step(&link::Imu {
+                    ts: (s.t / 1000) as i64,
+                    acc: s.acc.map(f64::from),
+                    gyro: s.gyro.map(f64::from),
+                });
+                let t = s.t as f64 * 1e-6;
+                if t - tr.t[0] < 10.0 {
+                    continue;
+                }
+                let e = (q.inverse() * DVec3::Z)
+                    .angle_between(tr.at(t).inverse() * DVec3::Z)
+                    .to_degrees();
+                (sum, n, worst) = (sum + e * e, n + 1, worst.max(e));
+            }
+            let rms = (sum / n.max(1) as f64).sqrt();
+            println!(
+                "{}: {n} samples, gravity off the file filter's by {rms:.2}° rms, {worst:.2}° at worst",
+                f.file_name().unwrap().to_string_lossy()
+            );
+            all = all.max(rms);
+        }
+        assert!(all < 6.0, "{all}");
     }
 }

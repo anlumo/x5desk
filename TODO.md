@@ -65,8 +65,9 @@ comparison page <https://claude.ai/artifact/WzKEEXqGvqmLj1ojXMq9p8>). Their figu
   backward pass (a 0.5 s seed added nothing on top): rides 2.25° rms (median 4.8° → 1.3°, max 6.0°, better on 27),
   handheld 0.98° → 0.91° (better on 7 of 12); image horizon v606 0.78° → 0.96°, v627 1.10° → 1.00°. Left: rides
   still up to 6° (2026-04-13 `_723`, 04-16 `_738`, 03-11 `_720`: 4.8–6.0°); the image now prefers Kp 0.05 / Ki 0.001 by 0.08°, the camera the current gains,
-  kept; the live preview's own filter (`app/src/feed.rs` `Att`) still gates raw samples; 692's thumbnail frame is
-  not 1 s in.
+  kept; 692's thumbnail frame is not 1 s in. The live preview's filter (`app/src/feed.rs` `Att`) averages the same way
+  (the last 100 ms) and starts from its first window: on seven recordings' IMU at the stream's rate its gravity is
+  0.5–4.9° rms off the files' filter's (raw samples: 2.5–16.7°; test `ride`); not tried on the camera's stream.
 
 ## Plate detector (branch `plates-yolox`, worktree `target/plates-wt`)
 
