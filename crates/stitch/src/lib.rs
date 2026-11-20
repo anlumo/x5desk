@@ -51,6 +51,10 @@ pub struct Flow {
     pub scale: u32,
     /// Each new flow = smooth·new + (1 − smooth)·previous (1 = off).
     pub smooth: f32,
+    /// Decline rule: per 10° stretch of the seam, the new flow counts only where it cuts the seam's grey
+    /// disagreement by 10 % and the template seam disagrees by 2 levels or more (both smoothed over time); elsewhere
+    /// the flow fades to the template through `smooth` (`post.wgsl` `judge`).
+    pub decline: bool,
 }
 
 impl Flow {
@@ -64,8 +68,12 @@ impl Flow {
         roi: [32, 128],
         scale: 2,
         smooth: 0.3,
+        decline: true,
     };
 }
+
+/// Seam stretches the decline rule judges (`post.wgsl` `NJ`).
+const STRETCHES: u64 = 36;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Opts {
@@ -180,7 +188,7 @@ pub struct Ctx {
     state: wgpu::BindGroupLayout,
     /// Group 3 per pass: stitch into RGBA8, belt, stats, view, stitch into RGBA16F, view with the flows, seam low band.
     g3: [wgpu::BindGroupLayout; 7],
-    /// post.wgsl: fold, fin, yuv.
+    /// post.wgsl: fold, judge and fin, yuv.
     post: [wgpu::BindGroupLayout; 3],
     module: wgpu::ShaderModule,
     /// Stitch into RGBA8, RGBA16F: with flow (`main`), without (`tpl`, the template seam in two bands).
@@ -189,6 +197,7 @@ pub struct Ctx {
     stats: wgpu::ComputePipeline,
     low: wgpu::ComputePipeline,
     fold: wgpu::ComputePipeline,
+    judge: wgpu::ComputePipeline,
     fin: wgpu::ComputePipeline,
     yuv: wgpu::ComputePipeline,
 }
@@ -303,7 +312,13 @@ impl Ctx {
             ),
             bgl(
                 dev,
-                &[(3, storage(true)), (4, storage(false)), (5, UNIFORM)],
+                &[
+                    (3, storage(true)),
+                    (4, storage(false)),
+                    (5, UNIFORM),
+                    (9, storage(true)),
+                    (10, storage(false)),
+                ],
             ),
             bgl(dev, &[(6, tex), (7, storage(false)), (8, UNIFORM)]),
         ];
@@ -343,6 +358,7 @@ impl Ctx {
             stats: pipe(&module, "stats", &g(2)),
             low: pipe(&module, "low", &g(6)),
             fold: pipe(&pm, "fold", &[&post[0]]),
+            judge: pipe(&pm, "judge", &[&post[1]]),
             fin: pipe(&pm, "fin", &[&post[1]]),
             yuv: pipe(&pm, "yuv", &[&post[2]]),
             smp: dev.create_sampler(&wgpu::SamplerDescriptor {
@@ -554,12 +570,14 @@ impl State {
     }
 }
 
-/// RAFT state: the belt pass's output, the region flows copied from RAFT, the post pass.
+/// RAFT state: the belt pass's output, the region flows copied from RAFT, the decline rule's judgement, the post
+/// pass.
 struct Belt {
     cfg: Flow,
     buf: wgpu::Buffer,
     bg: wgpu::BindGroup,
     raw: wgpu::Buffer,
+    judged: wgpu::Buffer,
     fin: wgpu::Buffer,
     fbg: wgpu::BindGroup,
     /// No flow yet: the next one is taken without smoothing.
@@ -630,7 +648,7 @@ impl Stitcher {
         };
         // the shader binds the flows also without flow: a minimal buffer then
         let n = o.flow.map_or(1, |f| (f.cols * f.rows) as u64);
-        let flows = buf(d, 2 * n * 8, U::STORAGE | U::COPY_DST);
+        let flows = buf(d, 2 * n * 8, U::STORAGE | U::COPY_DST | U::COPY_SRC);
         let g3 = bind(
             d,
             &cx.g3[if wide { 4 } else { 0 }],
@@ -640,7 +658,8 @@ impl Stitcher {
             let n = (cfg.roi[1] * cfg.rows) as u64;
             let b = buf(d, 2 * 3 * n * 4, U::STORAGE | U::COPY_SRC);
             let raw = buf(d, 2 * 2 * n * 4, U::STORAGE | U::COPY_DST);
-            let fin = buf(d, 48, U::UNIFORM | U::COPY_DST);
+            let judged = buf(d, STRETCHES * 16, U::STORAGE | U::COPY_SRC);
+            let fin = buf(d, 64, U::UNIFORM | U::COPY_DST);
             Belt {
                 cfg,
                 bg: bind(d, &cx.g3[1], &[(3, b.as_entire_binding())]),
@@ -651,10 +670,13 @@ impl Stitcher {
                         (3, raw.as_entire_binding()),
                         (4, flows.as_entire_binding()),
                         (5, fin.as_entire_binding()),
+                        (9, b.as_entire_binding()),
+                        (10, judged.as_entire_binding()),
                     ],
                 ),
                 buf: b,
                 raw,
+                judged,
                 fin,
                 fresh: true,
             }
@@ -699,6 +721,22 @@ impl Stitcher {
         Some(std::array::from_fn(|k| {
             [f[4 * k], f[4 * k + 1], f[4 * k + 2]]
         }))
+    }
+
+    /// The belt flows `encode` warps with, read back (waits): L2R, then R2L, `cols` × `rows` each, in belt px; for
+    /// evaluation. None without flow.
+    pub fn flows(&self) -> Option<Vec<[f32; 2]>> {
+        self.belt.as_ref()?;
+        let b = read_buffer(&self.cx.dev, &self.cx.q, &self.flows);
+        Some(bytemuck::cast_slice(&b).to_vec())
+    }
+
+    /// The decline rule's last judgement per 10° stretch of the seam from a = −180° (`post.wgsl` `judge`), read back
+    /// (waits): grey disagreement straight and with the new flow, then both smoothed (what the rule decides on); for
+    /// evaluation. None without flow.
+    pub fn judged(&self) -> Option<Vec<[f32; 4]>> {
+        let b = read_buffer(&self.cx.dev, &self.cx.q, &self.belt.as_ref()?.judged);
+        Some(bytemuck::cast_slice(&b).to_vec())
     }
 
     /// Records colour matching (if on), the template seam's low band (without flow) and the stitch of `src` (lens 0,
@@ -747,23 +785,29 @@ impl Stitcher {
             ));
         }
         let r = o.r.resource();
-        let mut u = [0u32; 12];
+        let mut u = [0u32; 16];
         u[..4].copy_from_slice(&o.st);
-        u[4..10].copy_from_slice(&[
+        u[4..13].copy_from_slice(&[
             b.cfg.cols,
             h,
             b.cfg.roi[0],
             w,
             b.cfg.smooth.to_bits(),
             b.fresh as u32,
+            // the belt's px/rad across, as `offset.rs` `pack` P[9]
+            (((h - 1) as f64 / 400.0).to_degrees() as f32).to_bits(),
+            (b.cfg.belt_angle as f32 / 2.0).to_bits(),
+            b.cfg.decline as u32,
         ]);
         self.cx.q.write_buffer(&b.fin, 0, bytemuck::bytes_of(&u));
         let mut enc = self.cx.dev.create_command_encoder(&Default::default());
         enc.copy_buffer_to_buffer(&r.buffer, r.offset, &b.raw, 0, size);
         {
             let mut c = enc.begin_compute_pass(&Default::default());
-            c.set_pipeline(&self.cx.fin);
             c.set_bind_group(0, &b.fbg, &[]);
+            c.set_pipeline(&self.cx.judge);
+            c.dispatch_workgroups(STRETCHES as u32, 1, 1);
+            c.set_pipeline(&self.cx.fin);
             c.dispatch_workgroups(b.cfg.cols.div_ceil(8), h.div_ceil(8), 2);
         }
         self.cx.q.submit([enc.finish()]);

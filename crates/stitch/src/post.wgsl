@@ -29,16 +29,87 @@ fn fold() {
 }
 
 // RAFT region flows -> belt flows: extended over the whole belt (columns outside the region repeat its edge
-// columns, so the warp zone never runs off the belt), nadir wrap cross-faded (blendFlow 2°), smoothed over time.
-struct Fin { st: vec4u, cols: u32, rows: u32, c0: u32, w: u32, ema: f32, first: u32 }
+// columns, so the warp zone never runs off the belt), nadir wrap cross-faded (blendFlow 2°), weighted by the decline
+// rule, smoothed over time. k: belt px/rad across, ba: warp ramp half-width (deg), on: decline rule on.
+struct Fin { st: vec4u, cols: u32, rows: u32, c0: u32, w: u32, ema: f32, first: u32, k: f32, ba: f32, on: u32 }
 
 @group(0) @binding(3) var<storage, read> R: array<f32>;            // [2 (L2R, R2L), 2 (x, y), H, W], strides st
 @group(0) @binding(4) var<storage, read_write> Fl: array<vec2f>;   // belt flows: L2R, then R2L
 @group(0) @binding(5) var<uniform> V: Fin;
+@group(0) @binding(9) var<storage, read> Bt: array<f32>;           // RAFT inputs: lens 0 [3, H, W], then lens 1
+@group(0) @binding(10) var<storage, read_write> J: array<vec4f>;   // per stretch: grey |Δ| template, flow; smoothed
 
 fn reg(k: u32, y: u32, c: u32) -> vec2f {
     let i = k * V.st.x + y * V.st.z + (clamp(c, V.c0, V.c0 + V.w - 1u) - V.c0) * V.st.w;
     return vec2f(R[i], R[i + V.st.y]);
+}
+
+// Stretches of 10° along the seam from a = −180°; weight of each new judgement (the decision follows the smoothed
+// disagreement: decided per frame it flips at the threshold, and every flip moves the flow by its full size)
+const NJ = 36u;
+const JS = 0.1;
+
+// lens l's RAFT input (grey in [−1, 1]) at region px p, bilinear, clamped
+fn bt(l: u32, p: vec2f) -> f32 {
+    let hi = vec2u(V.w, V.rows) - 1u;
+    let c = clamp(p, vec2f(0.0), vec2f(hi));
+    let i = vec2u(c);
+    let j = min(i + 1u, hi);
+    let f = c - vec2f(i);
+    let o = 3u * l * V.w * V.rows;
+    let r0 = mix(Bt[o + i.y * V.w + i.x], Bt[o + i.y * V.w + j.x], f.x);
+    let r1 = mix(Bt[o + j.y * V.w + i.x], Bt[o + j.y * V.w + j.x], f.x);
+    return mix(r0, r1, f.y);
+}
+
+var<workgroup> jac: array<vec3f, 256>;
+
+// Decline rule (golblick's guard for its seam router): per stretch, the mean grey |lens 0 − lens 1| over ±3° of the
+// template seam, straight and warped as `stitch.wgsl` `warp` does with this frame's flows, smoothed over time; the
+// flow stays where the straight seam disagrees by 2 levels or more and the flow cuts that by 10 % or more (`keep`). On
+// the belt RAFT saw, so nothing samples the lenses and nothing waits for the CPU.
+@compute @workgroup_size(256)
+fn judge(@builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wg: vec3u) {
+    let d = 400.0 / f32(V.rows - 1u);
+    let y0 = u32(ceil((20.0 + 10.0 * f32(wg.x)) / d));
+    let y1 = u32(ceil((30.0 + 10.0 * f32(wg.x)) / d));
+    // the template seam's column in the region, and the gnomonic half-width of ±3°
+    let m = f32(V.cols - 1u) / 2.0 - f32(V.c0);
+    let x = V.k * tan(radians(3.0));
+    let x0 = u32(ceil(m - x));
+    let nx = u32(m + x) + 1u - x0;
+    var s = vec3f(0.0);
+    for (var i = li; i < (y1 - y0) * nx; i += 256u) {
+        let p = vec2u(x0 + i % nx, y0 + i / nx);
+        let q = vec2f(p);
+        let al = clamp(0.5 + degrees(atan((m - q.x) / V.k)) / (2.0 * V.ba), 0.0, 1.0);
+        let c = p.x + V.c0;
+        let f = abs(bt(0u, q + (1.0 - al) * reg(1u, p.y, c)) - bt(1u, q + al * reg(0u, p.y, c)));
+        s += vec3f(abs(bt(0u, q) - bt(1u, q)), f, 1.0);
+    }
+    jac[li] = s;
+    for (var k = 128u; k > 0u; k >>= 1u) {
+        workgroupBarrier();
+        if li < k { jac[li] += jac[li + k]; }
+    }
+    if li == 0u {
+        let e = jac[0].xy * 127.5 / jac[0].z;
+        J[wg.x] = vec4f(e, select(mix(J[wg.x].zw, e, JS), e, V.first != 0u));
+    }
+}
+
+// stretch j keeps the flow: 1 or 0
+fn keep(j: u32) -> f32 {
+    let s = J[j].zw;
+    return select(1.0, f32(s.x >= 2.0 && s.y <= 0.9 * s.x), V.on != 0u);
+}
+
+// the decline weight at belt row y: linear between the stretches' centres, across the wrap at ±180°
+fn weight(y: u32) -> f32 {
+    let a = -200.0 + f32(y) * 400.0 / f32(V.rows - 1u);
+    let u = fract((a + 180.0) / 360.0) * f32(NJ) - 0.5;
+    let j = u32(floor(u) + f32(NJ)) % NJ;
+    return mix(keep(j), keep((j + 1u) % NJ), fract(u));
 }
 
 @compute @workgroup_size(8, 8)
@@ -58,6 +129,7 @@ fn fin(@builtin(global_invocation_id) id: vec3u) {
             v = mix(v, reg(k, id.y - span, id.x), clamp((b + 181.0) / 2.0, 0.0, 1.0));
         }
     }
+    v *= weight(id.y);
     let i = (k * V.rows + id.y) * V.cols + id.x;
     Fl[i] = select(mix(Fl[i], v, V.ema), v, V.first != 0u);
 }

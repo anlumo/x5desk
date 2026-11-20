@@ -1268,11 +1268,11 @@ fn vs_old() {
     assert!(pb > 30.0 && pb > pt);
 }
 
-/// Lens k's colour toward body direction `w`, projected on the CPU with `Calib::project` into its RGBA image of `fr`'s
-/// size and sampled bilinearly; None unless fully inside its mask.
-fn look(cal: &Calib, fr: Frame, k: usize, img: &[u8], w: [f64; 3]) -> Option<[f32; 3]> {
-    let (n, crop) = (fr.w as usize, fr.crop as f64);
-    let s = n as f64 / crop;
+/// Body direction `w` in lens k's picture of `fr`'s size (texture px), projected on the CPU with `Calib::project`, and
+/// whether it lies fully inside the mask; None outside the lens's field of view (`stitch.wgsl` `inside`).
+fn lens_px(cal: &Calib, fr: Frame, k: usize, w: [f64; 3]) -> Option<([f64; 2], bool)> {
+    let crop = fr.crop as f64;
+    let s = fr.w as f64 / crop;
     let c0 = [0, 1].map(|k| (cal.side - crop) / 2.0 + fr.shift[k] as f64);
     let lim = (cal.fov / 2.0).to_radians();
     let l = &cal.lens[k];
@@ -1284,9 +1284,14 @@ fn look(cal: &Calib, fr: Frame, k: usize, img: &[u8], w: [f64; 3]) -> Option<[f3
     let t = [(q[0] - c0[0]) * s, (q[1] - c0[1]) * s];
     let r = (cal.project(k, [lim.sin(), 0.0, lim.cos()])[0] - l.cx) * s;
     let d = (t[0] - (l.cx - c0[0]) * s).hypot(t[1] - (l.cy - c0[1]) * s);
-    if (r - d) * 0.2439 < 1.0 {
-        return None;
-    }
+    Some((t, (r - d) * 0.2439 >= 1.0))
+}
+
+/// Lens k's colour toward body direction `w`, projected on the CPU into its RGBA image of `fr`'s size and sampled
+/// bilinearly; None unless fully inside its mask.
+fn look(cal: &Calib, fr: Frame, k: usize, img: &[u8], w: [f64; 3]) -> Option<[f32; 3]> {
+    let n = fr.w as usize;
+    let (t, _) = lens_px(cal, fr, k, w).filter(|p| p.1)?;
     let (x, y) = (t[0] - 0.5, t[1] - 0.5);
     let (x0, y0) = (x.floor(), y.floor());
     let (fx, fy) = ((x - x0) as f32, (y - y0) as f32);
@@ -1966,4 +1971,324 @@ fn ring() {
         (steps[1] - steps[0]).abs() < 0.3,
         "colour matching changes the ring"
     );
+}
+
+/// NV12 picture (side n) -> full-range BT.709 R'G'B' at texture px q, as `stitch.wgsl` `yuv` samples it: bilinear
+/// over the 2 × 2 footprint with clamped edges, chroma sited left.
+fn nv_rgb(nv: &[u8], n: usize, q: [f64; 2]) -> [f32; 3] {
+    let bil = |o: usize, m: usize, c: usize, q: [f64; 2]| {
+        let s = 1 + (o > 0) as usize;
+        let p = q.map(|v| v - 0.5);
+        let i = p.map(|v| v.floor().clamp(0.0, (m - 2) as f64));
+        let f = [0, 1].map(|k| (p[k] - i[k]).clamp(0.0, 1.0) as f32);
+        let at = |dx: usize, dy: usize| {
+            nv[o + ((i[1] as usize + dy) * m + i[0] as usize + dx) * s + c] as f32
+        };
+        let t = at(0, 0) + f[0] * (at(1, 0) - at(0, 0));
+        let b = at(0, 1) + f[0] * (at(1, 1) - at(0, 1));
+        (t + f[1] * (b - t)) / 255.0
+    };
+    let l = bil(0, n, 0, q);
+    let cq = [(q[0] + 0.5) / 2.0, q[1] / 2.0];
+    let [cb, cr] = [0, 1].map(|c| bil(n * n, n / 2, c, cq) - 128.0 / 255.0);
+    [
+        l + 1.5748 * cr,
+        l - 0.187324 * cb - 0.468124 * cr,
+        l + 1.8556 * cb,
+    ]
+    .map(|v| v.clamp(0.0, 1.0))
+}
+
+/// A point of the belt-space seam score: body ray, its position in the `Flow::RAFT` belt, warp ramp α, blend weight of
+/// lens 0, 10° stretch from a = −180° (`Stitcher::judged`'s).
+struct Pt {
+    w: [f64; 3],
+    b: [f64; 2],
+    al: f64,
+    a0: f64,
+    j: usize,
+}
+
+/// The points within ±`emax`° of the template seam, rows 30° ≤ |a| ≤ 150°, every `step`-th row of a 12 px/° belt
+/// (the old belt dump's master belt); `h`: half blend angle.
+fn band_pts(emax: f64, step: usize, h: f64) -> Vec<Pt> {
+    let f = Flow::RAFT;
+    let k = ((f.rows - 1) as f64 / 400.0).to_degrees();
+    let km = (4800.0 / 400.0f64).to_degrees();
+    let mut v = vec![];
+    for r in (0..4801).step_by(step) {
+        let a = -200.0 + r as f64 / 12.0;
+        if !(30.0..=150.0).contains(&a.abs()) {
+            continue;
+        }
+        let (s, c) = a.to_radians().sin_cos();
+        for col in 0..613 {
+            let t = (306.0 - col as f64) / km;
+            let e = t.atan().to_degrees();
+            if e.abs() <= emax {
+                let n = t.hypot(1.0);
+                v.push(Pt {
+                    w: [-t / n, s / n, c / n],
+                    b: [
+                        (f.cols - 1) as f64 / 2.0 - k * t,
+                        (a + 200.0) * (f.rows - 1) as f64 / 400.0,
+                    ],
+                    al: (0.5 + e / f.belt_angle).clamp(0.0, 1.0),
+                    a0: ((h + e) / (2.0 * h)).clamp(0.0, 1.0),
+                    j: ((a + 180.0) / 10.0) as usize,
+                });
+            }
+        }
+    }
+    v
+}
+
+/// One frame's lens pictures (NV12) and colour fit, sampled on the CPU.
+struct Eval<'a> {
+    cal: &'a Calib,
+    fr: Frame,
+    nv: [&'a [u8]; 2],
+    fit: [[f32; 3]; 4],
+}
+
+impl Eval<'_> {
+    /// Lens k's grey (0..255, after the colour fit) toward body ray w; None unless fully inside its mask.
+    fn grey(&self, k: usize, w: [f64; 3]) -> Option<f64> {
+        let (t, _) = lens_px(self.cal, self.fr, k, w).filter(|p| p.1)?;
+        let c = nv_rgb(self.nv[k], self.fr.w as usize, t);
+        let y = (0..3).map(|i| {
+            (self.fit[2 * k][i] * c[i] + self.fit[2 * k + 1][i]).clamp(0.0, 1.0) as f64
+                * [0.2126, 0.7152, 0.0722][i]
+        });
+        Some(y.sum::<f64>() * 255.0)
+    }
+
+    /// Both lenses' grey at point p through belt flows `fl` (None: the template seam), warped as `stitch.wgsl` `warp`.
+    fn pair(&self, p: &Pt, fl: Option<&[[f32; 2]]>) -> Option<[f64; 2]> {
+        let f = Flow::RAFT;
+        let (cols, rows) = (f.cols as usize, f.rows as usize);
+        let hi = [(cols - 1) as f64, (rows - 1) as f64];
+        let k = (hi[1] / 400.0).to_degrees();
+        let ray = |l: usize| {
+            let Some(fl) = fl else { return p.w };
+            let c = [0, 1].map(|n| p.b[n].clamp(0.0, hi[n]));
+            let i = c.map(|v| v.floor() as usize);
+            let j = [(i[0] + 1).min(cols - 1), (i[1] + 1).min(rows - 1)];
+            let at = |x: usize, y: usize| fl[(1 - l) * cols * rows + y * cols + x].map(f64::from);
+            let lerp = |a: [f64; 2], b: [f64; 2], t: f64| [0, 1].map(|n| a[n] + t * (b[n] - a[n]));
+            let (fx, fy) = (c[0] - i[0] as f64, c[1] - i[1] as f64);
+            let v = lerp(
+                lerp(at(i[0], i[1]), at(j[0], i[1]), fx),
+                lerp(at(i[0], j[1]), at(j[0], j[1]), fx),
+                fy,
+            );
+            // lens 0 follows (1 − α)·R2L, lens 1 follows α·L2R
+            let t = if l == 0 { 1.0 - p.al } else { p.al };
+            let q = [0, 1].map(|n| (p.b[n] + t * v[n]).clamp(0.0, hi[n]));
+            let a = (-200.0 + q[1] * 400.0 / hi[1]).to_radians();
+            let s = [((cols - 1) as f64 / 2.0 - q[0]) / k, -a.sin(), a.cos()];
+            let n = (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt();
+            let w = [-s[0] / n, -s[1] / n, s[2] / n];
+            // a warped ray outside the lens's field of view keeps the template lookup
+            match lens_px(self.cal, self.fr, l, w) {
+                Some(_) => w,
+                None => p.w,
+            }
+        };
+        Some([self.grey(0, ray(0))?, self.grey(1, ray(1))?])
+    }
+}
+
+/// Per 10° stretch: Σ |grey lens 0 − lens 1| and samples over `seam` through flows `fl`; with `prev`, Σ |change of
+/// the blend| and samples over `wide` from flows `prev` to `fl` on the same frame (wobble).
+fn seam_sums(
+    e: &Eval,
+    seam: &[Pt],
+    wide: &[Pt],
+    fl: Option<&[[f32; 2]]>,
+    prev: Option<&[[f32; 2]]>,
+) -> Vec<[f64; 4]> {
+    let n = 32;
+    std::thread::scope(|s| {
+        let hs: Vec<_> = (0..n)
+            .map(|i| {
+                s.spawn(move || {
+                    let mut o = vec![[0f64; 4]; 36];
+                    for p in seam.iter().skip(i).step_by(n) {
+                        if let Some([a, b]) = e.pair(p, fl) {
+                            o[p.j][0] += (a - b).abs();
+                            o[p.j][1] += 1.0;
+                        }
+                    }
+                    for p in wide.iter().skip(i).step_by(n).filter(|_| prev.is_some()) {
+                        if let (Some(x), Some(y)) = (e.pair(p, fl), e.pair(p, prev)) {
+                            let bl = |v: [f64; 2]| p.a0 * v[0] + (1.0 - p.a0) * v[1];
+                            o[p.j][2] += (bl(x) - bl(y)).abs();
+                            o[p.j][3] += 1.0;
+                        }
+                    }
+                    o
+                })
+            })
+            .collect();
+        let mut t = vec![[0f64; 4]; 36];
+        for h in hs {
+            for (a, b) in t.iter_mut().zip(h.join().unwrap()) {
+                a.iter_mut().zip(b).for_each(|(x, y)| *x += y);
+            }
+        }
+        t
+    })
+}
+
+/// The decline rule against RAFT always, scored in belt space as the old belt dump was (insta360-stitch
+/// `tools/eval/flowlab.py`, PROTOCOL.md §9.9), but sampling the decoded lens pictures directly on the CPU: seam =
+/// mean |grey lens 0 − lens 1| over ±3° of the template seam at the rays the stitch warps to with the flows it applies
+/// (read back after the colour fit); wobble = mean change of the blended ±8° band of the same frame from the previous
+/// frame's flows to this one's; rows 30° ≤ |a| ≤ 150°. Per 10° stretch and frame, with the rule's own judgement, as
+/// CSV. `X5_SEAM` = `<file>:<first>:<count>,…` (relative to `X5_SAMPLES`), `X5_SEAM_OUT` = output dir,
+/// `X5_SEAM_DUMP` = `<file stem>:<frame>,…` whose panoramas (3840 × 1920, both modes) go there as PPM.
+#[test]
+#[ignore]
+fn seam_score() {
+    let (Some(dir), Ok(win)) = (samples(), std::env::var("X5_SEAM")) else {
+        return;
+    };
+    let out = PathBuf::from(std::env::var_os("X5_SEAM_OUT").expect("X5_SEAM_OUT"));
+    std::fs::create_dir_all(&out).unwrap();
+    let dump = std::env::var("X5_SEAM_DUMP").unwrap_or_default();
+    let dump: Vec<&str> = dump.split(',').collect();
+    let g = gpu();
+    let cx = Ctx::new(&g.dev, &g.q);
+    let raft = Raft::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
+    let (pw, ph) = (3840, 1920);
+    for w in win.split(',') {
+        let [file, first, count] = w.split(':').collect::<Vec<_>>()[..] else {
+            panic!("window {w}: <file>:<first>:<count>");
+        };
+        let (first, count): (usize, usize) = (first.parse().unwrap(), count.parse().unwrap());
+        let insv = dir.join(file);
+        let name = insv.file_stem().unwrap().to_string_lossy().into_owned();
+        let meta = trailer(&insv);
+        let cal = Calib::parse(&meta.offset).unwrap();
+        let probe = Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0", "-show_entries"])
+            .args(["stream=width", "-of", "csv=p=0"])
+            .arg(&insv)
+            .output()
+            .unwrap();
+        let side: usize = String::from_utf8_lossy(&probe.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        let fr = Frame {
+            w: side as u32,
+            h: side as u32,
+            crop: meta.crop,
+            shift: meta.shift,
+        };
+        let blend = meta.blend.unwrap_or(6.0);
+        eprintln!("{name}: {side}², blend {blend}°, reverse {}", meta.reverse);
+        let (seam, wide) = (band_pts(3.0, 2, blend / 2.0), band_pts(8.0, 3, blend / 2.0));
+        let mut st = [false, true].map(|decline| {
+            let o = Opts {
+                blend,
+                flow: Some(Flow {
+                    decline,
+                    ..Flow::RAFT
+                }),
+                colour: Some(0.1),
+                ..Default::default()
+            };
+            Stitcher::new(&cx, &cal, fr, pw, ph, o).unwrap()
+        });
+        st.iter().for_each(|s| s.pose(&framing(&meta)));
+        let mut dec = [0, 1].map(|t| {
+            let sel = format!("select=between(n\\,{first}\\,{})", first + count - 1);
+            Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&insv)
+                .args(["-map", &format!("0:v:{t}"), "-vf", &sel])
+                .args([
+                    "-fps_mode",
+                    "passthrough",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "nv12",
+                    "-",
+                ])
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        });
+        let mut pipe = dec.each_mut().map(|c| c.stdout.take().unwrap());
+        let mut nv = [0, 1].map(|_| vec![0u8; side * side * 3 / 2]);
+        let mut prev: [Option<Vec<[f32; 2]>>; 2] = [None, None];
+        let mut csv =
+            String::from("clip,frame,mode,j,tpl,tpl_n,seam,seam_n,wob,wob_n,gt,gf,st,sf\n");
+        let mut tot = [[0f64; 6]; 2];
+        let t0 = Instant::now();
+        'frames: for i in 0..count {
+            for (k, v) in nv.iter_mut().enumerate() {
+                if std::io::Read::read_exact(&mut pipe[k ^ meta.reverse as usize], v).is_err() {
+                    break 'frames;
+                }
+            }
+            let n = first + i;
+            let src = nv
+                .each_ref()
+                .map(|v| upload(&g, &cx, v, side as u32, side as u32));
+            let src = [&src[0], &src[1]];
+            for s in st.iter_mut() {
+                let mut enc = g.dev.create_command_encoder(&Default::default());
+                s.belt(&mut enc, src, &raft);
+                g.q.submit([enc.finish()]);
+                s.flow(&raft).unwrap();
+                let mut enc = g.dev.create_command_encoder(&Default::default());
+                s.encode(&mut enc, src);
+                g.q.submit([enc.finish()]);
+            }
+            let e = |m: usize| Eval {
+                cal: &cal,
+                fr,
+                nv: [&nv[0], &nv[1]],
+                fit: st[m].fit().unwrap(),
+            };
+            let tpl = seam_sums(&e(0), &seam, &[], None, None);
+            for m in 0..2 {
+                let fl = st[m].flows().unwrap();
+                let jd = st[m].judged().unwrap();
+                let sm = seam_sums(&e(m), &seam, &wide, Some(&fl), prev[m].as_deref());
+                for (j, (s, (t, d))) in sm.iter().zip(tpl.iter().zip(&jd)).enumerate() {
+                    csv += &format!(
+                        "{name},{n},{m},{j},{:.3},{},{:.3},{},{:.3},{},{:.3},{:.3},{:.3},{:.3}\n",
+                        t[0], t[1], s[0], s[1], s[2], s[3], d[0], d[1], d[2], d[3]
+                    );
+                    let v = [t[0], t[1], s[0], s[1], s[2], s[3]];
+                    tot[m].iter_mut().zip(v).for_each(|(a, b)| *a += b);
+                }
+                if dump.contains(&format!("{name}:{n}").as_str()) {
+                    let px = stitch::read_texture(&g.dev, &g.q, &st[m].out);
+                    let mut ppm = format!("P6 {pw} {ph} 255\n").into_bytes();
+                    ppm.extend(px.chunks(4).flat_map(|p| &p[..3]));
+                    std::fs::write(out.join(format!("{name}_{n}_{m}.ppm")), ppm).unwrap();
+                }
+                prev[m] = Some(fl);
+            }
+            if i % 10 == 9 {
+                eprintln!("{name} frame {n}: {:.1} s", t0.elapsed().as_secs_f64());
+            }
+        }
+        std::fs::write(out.join(format!("{name}_{first}.csv")), csv).unwrap();
+        for (m, t) in tot.iter().enumerate() {
+            eprintln!(
+                "{name} {first}+{count} {}: seam template {:.3}, flow {:.3}, wobble {:.4}",
+                ["always", "decline"][m],
+                t[0] / t[1],
+                t[2] / t[3],
+                t[4] / t[5]
+            );
+        }
+    }
 }

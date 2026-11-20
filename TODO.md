@@ -29,9 +29,22 @@ comparison page <https://claude.ai/artifact/WzKEEXqGvqmLj1ojXMq9p8>). Their figu
   vendor player (error 4.0 with, 2.4 without; near content moved 10–13 levels). Ours (`Opts::colour`, on by default:
   `app/src/export.rs` `colour: true`) was never scored that way. Error against an app export of the same clip, on
   vs off; turn the default off if off wins.
-- [ ] **Decline rule for the flow.** golblick keeps the straight seam unless the alternative cuts the disagreement
-  by 10 % (and the straight seam disagrees by 2 grey levels or more). Per frame, fall back to the template where
-  RAFT doesn't pay (flat scenes, night) to drop the wobble there. Score with the belt dump (seam ±3°, wobble).
+- [x] **Decline rule for the flow.** golblick keeps the straight seam unless the alternative cuts the disagreement
+  by 10 % (and the straight seam disagrees by 2 grey levels or more). Ours (`Flow::decline`, on in `Flow::RAFT`;
+  `post.wgsl` `judge`): per 10° stretch of the seam, on the belt RAFT saw (no lens samples, no readback), the mean grey
+  |lens 0 − lens 1| over ±3° straight and warped with the new flow, smoothed over time (0.1); a stretch failing either
+  test fades its flow to the template through the flow's own smoothing, weights linear between stretch centres.
+  Decided per frame the stretches flipped on 3–20 % of frames, and each flip moves the flow by its full size: wobble
+  +14 % / +12 % on v635 / v606 H. A per-frame decision over the whole seam never declined on these clips. Scored by
+  `tests/stitch.rs` `seam_score` (ignored; the belt dump's seam ±3° and wobble, sampled from the lens pictures on the
+  CPU), 40 frames at the start / middle, RAFT always → rule: seam v635 8.17 → 8.19 / 7.76 → 7.79, v606 6.80 → 6.80 /
+  5.14 → 5.14, v627 (night) 4.79 → 4.81 / 4.04 → 4.10; wobble 0.410 → 0.372 / 0.388 → 0.388, 0.412 → 0.411 / 0.404 →
+  0.398, 0.326 → 0.276 / 0.184 → 0.164. So the wobble drops on all six (−5 % mean) but the seam rises on four (+0.3 to
+  +1.4 %, mean +0.4 %): where the 2-level floor declines dark ground the flow still helped, and on flat walls where it
+  cut about 10 %. Night bike rides (669, 713): seam −2.2 to +0.4 %, wobble −24 to −36 %; there RAFT mangles close
+  bike parts and lights the template leaves whole. Declined: 1–13 % of stretches by day, 32–52 % at night. Export
+  speed (v635 5760 Main 10, Radeon) unchanged: 12.74 / 12.80 fps against 12.77 / 13.01. Open: the belt reads 20–30 %
+  less disagreement than full resolution, so the floor acts at about 2.5 levels there.
 - [ ] **Levelling check without a rig.** Correlate the stitch with the camera's own stitched preview (trailer
   thumbnail) to check the IMU axes and the Mahony gains independently. golblick: FFT correlation, global 256 × 128
   then 512 × 256, 47 of 48 X5 stills aligned.
