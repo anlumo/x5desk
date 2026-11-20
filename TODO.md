@@ -77,8 +77,28 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   van's front sits between the rider's legs and the vehicle model never scores it above 0.2, while the plate model
   finds the plate at 0.79–0.91 on any crop of 20° or less centred on it (0.42–0.85 at 24°, nothing from 48°). The
   vehicle detector also misses close-ups (in the downloaded stills: 1080 of 1747 greenpack, 455 of 915 Tgmt) and cars
-  passing within metres (692 frame 56). Needs a search that doesn't depend on a vehicle, such as a ring of 20° crops
-  along the horizon (18 crops a row against 13.2 vehicle crops a frame now): not built, cost unmeasured.
+  passing within metres (692 frame 56). A search that doesn't depend on a vehicle needs a plate detector that knows
+  scenes without one first: ours was trained on vehicle crops only.
+  - Tried and dropped: a ring of 18 crops of 22° along the horizon at pitch −3° (the sure plates' median; 95 % of
+    them lie within its ±11°) next to the vehicle crops, each half on alternate searched frames
+    (`target/crop-scratch/ring.patch`). It covers both marks, the regions squarely on the plates, but shown crops
+    without a vehicle the plate model fires on lettering, signs and posters, the rider's own legs, bumper corners and
+    tail lights. On the reviewed views (a run on the 4090, both searches on the same vehicles): 35 new regions, by eye
+    5 on plates, 4 on unreadable plates, 26 on nothing (a rental truck's side lettering became a 15° plate, also in
+    `plates`: v606's area holding no labelled plate 0.17 → 75.8 deg² a labelled frame), 5 gone (1 plate, 1
+    unreadable, 3 nothing); `rule_eval.py` blurs on nothing 17 → 21, on unreadable plates 22 → 20, plates covered
+    338 → 334, marks uncovered 2 → 0, regions on no labelled spot 14 → 40; `plates_rides` 2 → 1 of 85 uncovered (a
+    49 px plate nobody can read), readable 0 of 32 either way; `plates` covers the same labelled plates. Cost on the
+    Radeon (vehicle detection and plate search a searched frame): a quiet clip 3.0 → 12.0 crops, 29.1 → 37.5 ms
+    (34.4 → 26.6 frames/s), a busy one 20.4 → 29.4 crops (41 at most), 42.8 → 51.2 ms (23.4 → 19.5 frames/s); on the
+    4090 over all reviewed frames 13.2 → 22.2 crops, 38.3 → 50.0 ms. The whole ring on every frame: 58 regions on no
+    labelled spot (61 new regions, 42 on nothing by eye) and 9–10 ms more again. Skipping ring crops a vehicle crop
+    already shows saves nothing (1.4 % of them lie 90 % inside one). Next if retried: hard negatives from the ring's
+    own hits (their labels are clean, unlike the flags), then measure again.
+  - Unlevelled exports (stabilisation off): the camera's mount tilts the stitch's horizon by about 60° on the rides
+    (8–12° on the walks; from the IMU, not checked on an image), and every crop of the plate search is upright in the
+    pano, so the search there sees vehicles and plates on their side. Searching a levelled stitch and turning the
+    regions into the export's frame would fix the ring and the vehicle crops alike.
   - Tried and dropped: a crop where a live plate track is predicted (`target/crop-scratch/item2-track3.patch`). It
     closes 692 frame 56's gap, but on the reviewed views it trades 3 flagged blurs for 8 new ones (a parking sign's
     logo, bumper corners, a tail light) at +0.95 crops and +1.5 ms a searched frame, and 717's plate has no
