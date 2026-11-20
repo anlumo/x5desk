@@ -127,8 +127,49 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
 
 ## AI features
 
-- [ ] **Audit against the app's AI features** (inventory §9, §11.3, §11.6). Open models in use: tracking
-  (VitTrack), faces (YuNet), plates (YOLOX), seam flow (RAFT-small). List what is still missing.
+Compared with the vendor's apps (2026-11-13). Here: Deep Track (VitTrack, YOLOX-nano, LOMO re-identification), face
+and licence plate blur (YuNet, our YOLOX-nano plate fine-tune), auto edit (heuristic highlights, auto framing), seam
+flow on exports and paused frames (RAFT-small), Shadow Clone and Clone Loop (PP-HumanSeg), voice denoise on editor
+timelines (RNNoise).
+
+- [ ] **Wind noise on every export.** RNNoise runs on editor timelines only, off by default; the vendor's app applies
+  wind reduction by default to recordings the camera marks as AI audio. Offer it on library exports, and score
+  DeepFilterNet 3 (MIT / Apache-2.0, to verify) against RNNoise on ride audio: wind, engine, speech.
+- [ ] **Forward view.** The view along the direction of travel (the vendor's AI Forward), not the camera's heading,
+  which on a helmet is the head's. From the focus of expansion of the image motion left after the gyro's rotation
+  (`stab::vis` tracks), smoothed, horizon lock below walking pace; GPS course where the file has it. A mode for the
+  player, exports and auto edit. No model.
+- [ ] **Highlight marks in auto edit.** Marks set while recording (Capture's highlight mark, the phone app's) in
+  trailer record 10 become highlights auto edit always keeps, and show on the seek bar and the editor's timeline.
+  Needs a marked clip to confirm the record and its layout on X5 files (Camera: "Unconfirmed on X5 firmware"). If X5
+  files carry the camera's own framing (records 18 / 26), read it as a second framing source.
+- [ ] **Overtakes.** Vehicles passing within metres (the vendor's Overtaker): YOLOX vehicle tracks crossing from
+  ahead to behind or back, as a Shot Lab preset that follows the passing vehicle and as a highlight signal for auto
+  edit. Bounded by the vehicle detector missing cars that close (plate item "Plates no vehicle crop holds").
+- [ ] **Music in auto edit.** A music track under the highlights, cuts moved onto its beats (onset strength and
+  dynamic-programming beat tracking, no model), ducked as in the editor.
+- [ ] **Auto framing for a whole clip.** `track::Framer` frames only auto edit's highlights; offer it for the whole
+  clip as a follow view (player, flat export) and as editor keys, with the forward view where no subject wins.
+- [ ] **Pick by click.** The detector's people and animals boxed on the paused frame, a click starting Deep Track
+  (the vendor's Identify Tracking Targets); `Ai::pick` exists, nothing calls it.
+- [ ] **Seam flow while playing.** RAFT runs on paused frames and exports only; the vendor's player keeps its AI
+  seam while playing. RAFT on every n-th frame during playback, the flow held between; cost unmeasured beside two 4K
+  decodes.
+- [ ] **Frame grab denoise.** The vendor denoises stills saved from video, we don't. A GPU non-local-means pass in
+  fx before the JPEG encoder.
+- [ ] **Sky Swap.** Sky segmentation on perspective tiles of the sphere (e.g. SegFormer-B0 on ADE20K, NVIDIA's
+  non-commercial licence, to verify), feathered and smoothed over time, a sky panorama in its place; a Shot Lab pass.
+- [ ] **Library search.** Tags and text search from an image embedding of each clip's thumbnails (e.g. SigLIP,
+  Apache-2.0 per its model card, to verify); near-duplicates from the same embedding.
+- Not worth doing: AI Retouch, AI Warp, AI templates, AI Vlog and 3D Space (generated on the vendor's servers);
+  beauty filter, Bullet Time, Nose Mode, Face Off, Skeleton, Jump / Big Man / Running Planet, Swing Sticky Jump,
+  Similarity, Circle Clone, Parallel World, the TimeShift preset (selfie-stick tricks, pose models or bullet-time
+  files, little use on ride footage; speed ramps cover TimeShift); InstaFrame tracking during capture (only while
+  tethered); AI Director (the camera's own analysis, unconfirmed on the X5); learned colour, automatic underwater
+  detection and model-based defringe (the classical Auto colour, Underwater and fringe controls are in); multi-frame
+  video denoise (the camera denoises); dive-case removal (diving only); freeze-frame plane detection (purpose
+  unknown); a learned highlight scorer (no open model for 360 ride footage; marks, motion and overtakes first); an
+  automatic selfie view (Deep Track on the person does it). Lens guard detection is the Stitch item "Lens guards".
 
 ## Camera
 
