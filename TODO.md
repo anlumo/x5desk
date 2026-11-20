@@ -28,7 +28,15 @@ comparison page <https://claude.ai/artifact/WzKEEXqGvqmLj1ojXMq9p8>). Their figu
 - [ ] **Score colour matching against the app's export.** golblick found lens balancing worse than none against the
   vendor player (error 4.0 with, 2.4 without; near content moved 10–13 levels). Ours (`Opts::colour`, on by default:
   `app/src/export.rs` `colour: true`) was never scored that way. Error against an app export of the same clip, on
-  vs off; turn the default off if off wins.
+  vs off; turn the default off if off wins. No app export of a clip we hold exists yet. Proxy (stab footage test
+  `level`, 2026-11-20), the camera's own stitched thumbnail after alignment, 320 × 160 (low frequencies only),
+  per 15° of seam the step lens 1 − lens 0 over 3°–15° either side: ours off within 0.44 levels (median) of the
+  camera's, on 1.20 (12 handheld clips, on worse on 11); scooter clips, rider and scooter close to the seam, 0.71 /
+  8.18 (35, day and night, on worse on all).
+  Ours off matches the camera's step within 0.2–0.6 levels, i.e. the camera balances nothing in its own stitch;
+  that is all this shows, the app's export runs its own matching. Weak, so the default stays on. Needed: the app's
+  360° exports of v635, v606 and 2026-03-04 `_672` (equirect at the largest size, no filter, colour preset,
+  enhancement or denoise, horizon levelling off), scored with the same alignment against ours, colour on and off.
 - [x] **Decline rule for the flow.** golblick keeps the straight seam unless the alternative cuts the disagreement
   by 10 % (and the straight seam disagrees by 2 grey levels or more). Ours (`Flow::decline`, on in `Flow::RAFT`;
   `post.wgsl` `judge`): per 10° stretch of the seam, on the belt RAFT saw (no lens samples, no readback), the mean grey
@@ -45,9 +53,18 @@ comparison page <https://claude.ai/artifact/WzKEEXqGvqmLj1ojXMq9p8>). Their figu
   bike parts and lights the template leaves whole. Declined: 1–13 % of stretches by day, 32–52 % at night. Export
   speed (v635 5760 Main 10, Radeon) unchanged: 12.74 / 12.80 fps against 12.77 / 13.01. Open: the belt reads 20–30 %
   less disagreement than full resolution, so the floor acts at about 2.5 levels there.
-- [ ] **Levelling check without a rig.** Correlate the stitch with the camera's own stitched preview (trailer
+- [x] **Levelling check without a rig.** Correlate the stitch with the camera's own stitched preview (trailer
   thumbnail) to check the IMU axes and the Mahony gains independently. golblick: FFT correlation, global 256 × 128
-  then 512 × 256, 47 of 48 X5 stills aligned.
+  then 512 × 256, 47 of 48 X5 stills aligned. Done as stab footage test `level` (2026-11-20): the thumbnail is the
+  camera's levelled equirect (NV12 1280 × 640, BT.709, framed on lens 1 like ours) of the frame 2.97 s in where the
+  camera marks `trim_start` 3 s, 1 s into a dash-cam segment, else frame 0; our horizon-levelled stitch of it is
+  aligned by correlation (yaw × tilt ±30° at 160 × 80, then 320 × 160 and 640 × 320; a known turn comes back within
+  0.02°). 47 of 48 clips aligned (`X5_LEVEL`). Handheld / stick (12): residual tilt rms 0.98°, max 1.85°, unrelated
+  to the camera's tilt (−30…77°), so axes and signs hold; the current gains leave the least of four sets. Left:
+  scooter rides (35 dash-cam clips): rms 6.0°, up to 16°; the backward pass starts from one accelerometer sample
+  and the 1 g gate sees raw samples under 0.3–0.7 g of vibration. Seeded from the mean of the last 0.5 s: 3.4°
+  (handheld 0.92°); with the accelerometer averaged over ±50 ms too and a second backward pass: 2.2° (handheld
+  0.93°) (`stab` docs, Measurements). Decide, then re-run `verify` / `gains`, which tuned the gains on the old seed.
 
 ## Plate detector (branch `plates-yolox`, worktree `target/plates-wt`)
 

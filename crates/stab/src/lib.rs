@@ -33,6 +33,15 @@
 //!   are meridians when level), horizon lock, v606 / v627 mean: Kp 0.1 / Ki 0.005 0.78° / 1.12°; 0.5 / 0.05
 //!   1.31° / 1.02°; 0.05 / 0.001 1.73° / 1.52°; gyro only 7.0° / 7.9° (mostly its start attitude). The image measure
 //!   reads 1.23× a known added tilt on these frames. Correction is gated to |a| within 0.1 g of 1 g.
+//! - **Levelling against the camera** (`tests/footage.rs` `level`, 48 clips): the trailer thumbnail is the camera's
+//!   own levelled stitch of one frame; our horizon-levelled stitch of that frame is aligned to it (a known turn comes
+//!   back within 0.02°). Handheld and on a stick (12 clips, camera tilted −30…77°): residual tilt rms 0.98°, max 1.85°
+//!   (v635, 7 s), mean 0.3° / 0.5° about our output X / Y, unrelated to the camera's tilt (slope < 0.01), so axes and
+//!   signs hold; of the gains above, these leave the least (0.5 / 0.05 1.43°, 0.05 / 0.001 1.71°, gyro only 19°).
+//!   On a scooter (35 dash-cam clips, mounted 50–75° off upright, 0.3–0.7 g of vibration, a quarter to a third of the
+//!   samples inside the gate): rms 6.0°, up to 16°. Two causes: the backward pass starts from one accelerometer
+//!   sample (from the mean of the last 0.5 s: 3.4°, better on 30 of 35; handheld 0.92°) and the gate sees raw 1 kHz
+//!   samples (with the accelerometer averaged over ±50 ms too and a second backward pass: 2.2°; handheld 0.93°).
 //! - **Yaw** (not corrected: no magnetometer): gyro minus visual rotation over the clip leaves a bias about body Z
 //!   of 0.075°/s on v627; direction lock turns −1.9° in 22 s there (visual). On v606 (walking past near columns) the
 //!   same measures give 0.63°/s and −22.3° in 31 s, but parallax biases the visual rotation there (that fit also

@@ -95,6 +95,9 @@ pub struct Meta {
     pub flowstate: bool,
     /// #88 1 not split, 2 split recording.
     pub split: u32,
+    /// #154 / #155 trim_start / trim_end, ms: 3000 where the camera marks the first / last 3 s; the trailer
+    /// thumbnail is then the frame 2.97 s in (crate stab, footage test `level`).
+    pub trim: [u32; 2],
 }
 
 /// One IMU sample: µs, acceleration in g, angular rate in rad/s, sensor axes (`stab::AXES` maps them to the lens
@@ -356,6 +359,8 @@ impl Meta {
                 (64, F::Int(x)) => m.pts_type = x as u32,
                 (42, F::Int(x)) => m.flowstate = x != 0,
                 (88, F::Int(x)) => m.split = x as u32,
+                (154, F::Int(x)) => m.trim[0] = x as u32,
+                (155, F::Int(x)) => m.trim[1] = x as u32,
                 _ => {}
             }
         }

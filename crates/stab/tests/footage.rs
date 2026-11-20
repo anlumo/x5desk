@@ -1,6 +1,7 @@
-//! Footage tests: the IMU axes, gyro time offset and rolling shutter measured against the video itself, and the
-//! stabilised output checked visually. They read `X5_SAMPLES` (skip when unset) and write fixtures (cached feature
-//! tracks, preview videos, horizon tilt over time as CSV) to `X5_FIXTURES` (default: the system temp dir). ffmpeg serves as a test tool only: it
+//! Footage tests: the IMU axes, gyro time offset and rolling shutter measured against the video itself, the
+//! stabilised output checked visually, and the levelling against the camera's own stitched thumbnail (`level`). They
+//! read `X5_SAMPLES` (skip when unset) and write fixtures (cached feature tracks, preview videos, horizon tilt over
+//! time and the levelling per clip as CSV) to `X5_FIXTURES` (default: the system temp dir). ffmpeg serves as a test tool only: it
 //! decodes the lens streams to NV12 and encodes the preview videos. Run with `--release`.
 //!
 //! Visual inter-frame rotation: both lenses (scaled to 1920²) stitched to a 2048 × 1024 equirect by crate stitch,
@@ -89,7 +90,10 @@ struct Clip {
 }
 
 fn clip(d: &Path, name: &'static str) -> Clip {
-    let path = d.join(format!("{name}.insv"));
+    clip_at(d.join(format!("{name}.insv")), name)
+}
+
+fn clip_at(path: PathBuf, name: &'static str) -> Clip {
     let t = Trailer::open(&path).unwrap();
     let cal = Calib::parse(&t.meta.offset).unwrap();
     Clip {
@@ -1154,5 +1158,598 @@ fn gains() {
         }
         // the chosen gains beat gyro only
         assert!(r[0].0 < r[3].0, "{name}");
+    }
+}
+
+/// The camera's thumbnail pixel (i, j) shows our equirect position (i + 0.7, j + 0.7) (`vis::ray`): the alignment
+/// score peaks there in both axes on v606, v627 and v635 alike (0.84 → 0.90 on v606).
+const TOFF: f64 = 0.7;
+
+/// Equirect pyramid: 2 × 2 box means per level; high-passed (minus a radius-2 box blur applied twice) for alignment,
+/// so the cameras' tone curves and the lens balance don't pull the fit.
+struct Eq {
+    w: usize,
+    h: usize,
+    lv: Vec<Vec<f32>>,
+}
+
+impl Eq {
+    fn new(px: Vec<f32>, w: usize, h: usize, n: usize, hp: bool) -> Eq {
+        let mut lv = vec![px];
+        for l in 1..=n {
+            let (pw, w2, p) = (w >> (l - 1), w >> l, &lv[l - 1]);
+            let q = (0..w2 * (h >> l))
+                .map(|i| {
+                    let k = 2 * (i / w2) * pw + 2 * (i % w2);
+                    0.25 * (p[k] + p[k + 1] + p[k + pw] + p[k + pw + 1])
+                })
+                .collect();
+            lv.push(q);
+        }
+        if hp {
+            for (l, p) in lv.iter_mut().enumerate() {
+                let (w, h) = (w >> l, h >> l);
+                let b = blur(&blur(p, w, h), w, h);
+                p.iter_mut().zip(b).for_each(|(a, b)| *a -= b);
+            }
+        }
+        Eq { w, h, lv }
+    }
+
+    /// Bilinear value of level `l` at direction `d` (level pixel k covers base pixels 2^l·k ..; wrapped in x).
+    fn at(&self, l: usize, d: DVec3) -> f32 {
+        let (s, w, h) = ((1 << l) as f64, self.w >> l, self.h >> l);
+        let x = ((-d.y).atan2(d.x).rem_euclid(TAU) * self.w as f64 / TAU - (s - 1.0) / 2.0) / s;
+        let y = (d.z.clamp(-1.0, 1.0).acos() * (self.h - 1) as f64 / PI - (s - 1.0) / 2.0) / s;
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = ((x - x0) as f32, (y - y0) as f32);
+        let xa = (x0 as isize).rem_euclid(w as isize) as usize;
+        let xb = (xa + 1) % w;
+        let ya = (y0 as isize).clamp(0, h as isize - 1) as usize * w;
+        let yb = (y0 as isize + 1).clamp(0, h as isize - 1) as usize * w;
+        let p = &self.lv[l];
+        let t = p[ya + xa] + fx * (p[ya + xb] - p[ya + xa]);
+        let b = p[yb + xa] + fx * (p[yb + xb] - p[yb + xa]);
+        t + fy * (b - t)
+    }
+}
+
+/// Box blur of radius 2, wrapped in x, clamped in y.
+fn blur(p: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let a: Vec<f32> = (0..w * h)
+        .map(|i| {
+            (0..5)
+                .map(|k| p[i - i % w + (i % w + w + k - 2) % w])
+                .sum::<f32>()
+                / 5.0
+        })
+        .collect();
+    (0..w * h)
+        .map(|i| {
+            let y = i / w;
+            (0..5)
+                .map(|k| a[(y + k).saturating_sub(2).min(h - 1) * w + i % w])
+                .sum::<f32>()
+                / 5.0
+        })
+        .collect()
+}
+
+/// Thumbnail samples on level `l`: directions, weights (area; latitudes within ±60°, the poles hold the stick and
+/// the camera's nadir patch) and the weighted zero-mean, unit-norm values times their weights.
+struct Grid {
+    w: usize,
+    d: Vec<DVec3>,
+    wt: Vec<f64>,
+    wf: Vec<f64>,
+}
+
+impl Grid {
+    fn new(t: &Eq, l: usize) -> Grid {
+        let (s, w, h) = ((1 << l) as f64, t.w >> l, t.h >> l);
+        let c = (s - 1.0) / 2.0 + TOFF;
+        let d: Vec<DVec3> = (0..w * h)
+            .map(|i| vis::ray(t.w, t.h, [s * (i % w) as f64 + c, s * (i / w) as f64 + c]))
+            .collect();
+        let cap = 60f64.to_radians().sin();
+        let wt = d
+            .iter()
+            .map(|d| (d.z.abs() <= cap) as u8 as f64 * (1.0 - d.z * d.z).sqrt())
+            .collect();
+        let mut g = Grid {
+            w,
+            d,
+            wt,
+            wf: vec![],
+        };
+        let f = g.norm(t.lv[l].iter().map(|&x| x as f64).collect());
+        g.wf = f.iter().zip(&g.wt).map(|(f, w)| f * w).collect();
+        g
+    }
+
+    /// Weighted zero mean, unit weighted norm (the weights are constant along a row, so column shifts keep both).
+    fn norm(&self, mut v: Vec<f64>) -> Vec<f64> {
+        let (sw, sv) =
+            (self.wt.iter().zip(&v)).fold((0.0, 0.0), |(a, b), (w, x)| (a + w, b + w * x));
+        let m = sv / sw;
+        let n = (self.wt.iter().zip(&v))
+            .map(|(w, x)| w * (x - m) * (x - m))
+            .sum::<f64>()
+            .sqrt();
+        v.iter_mut().for_each(|x| *x = (*x - m) / n);
+        v
+    }
+
+    /// Correlation with normalised samples `v` shifted by `s` columns: Σ wf(i, j)·v(i + s, j).
+    fn corr(&self, v: &[f64], s: usize) -> f64 {
+        let w = self.w;
+        self.wf
+            .chunks(w)
+            .zip(v.chunks(w))
+            .map(|(a, b)| {
+                let (a0, a1) = a.split_at(w - s);
+                let dot = |x: &[f64], y: &[f64]| x.iter().zip(y).map(|(x, y)| x * y).sum::<f64>();
+                dot(a0, &b[s..]) + dot(a1, &b[..s])
+            })
+            .sum()
+    }
+}
+
+/// exp(roll·X + pitch·Y)·Rz(yaw), degrees: a tilt about a horizontal axis of our output frame after a yaw.
+fn rot(x: [f64; 3]) -> DQuat {
+    exp(DVec3::new(x[0], x[1], 0.0) * PI / 180.0) * DQuat::from_rotation_z(x[2].to_radians())
+}
+
+/// The rotation R = `rot(x)` with thumbnail(d) = ours(R·d), for our equirect `a` at twice the thumbnail's `t` size:
+/// yaw over the whole circle × tilts within ±30° in 2° steps by correlation at 160 × 80, tilts ±3° in 0.5° steps
+/// (yaw ±3 px) at 320 × 160, then a pattern search down to 0.01° and a parabola per axis at 640 × 320. Returns the
+/// correlation of the high-passed luma at 640 × 320 and x.
+fn align(a: &Eq, t: &Eq) -> (f64, [f64; 3]) {
+    let samp = |g: &Grid, l: usize, r: DQuat| -> Vec<f64> {
+        g.norm(g.d.iter().map(|&d| a.at(l + 1, r * d) as f64).collect())
+    };
+    let mut best = (f64::MIN, [0.0; 3]);
+    for (l, span, step, ds) in [(3, 15, 2.0, None), (2, 6, 0.5, Some(3))] {
+        let (g, x0) = (Grid::new(t, l), best.1);
+        let s0 = (-x0[2] / 360.0 * g.w as f64).round() as isize;
+        best.0 = f64::MIN;
+        for i in -span..=span {
+            for j in -span..=span {
+                let x = [x0[0] + step * i as f64, x0[1] + step * j as f64, 0.0];
+                let v = samp(&g, l, rot(x));
+                let shifts: Vec<usize> = match ds {
+                    None => (0..g.w).collect(),
+                    Some(d) => (-d..=d)
+                        .map(|k| (s0 + k).rem_euclid(g.w as isize) as usize)
+                        .collect(),
+                };
+                for s in shifts {
+                    let c = g.corr(&v, s);
+                    if c > best.0 {
+                        let yaw =
+                            (-360.0 * s as f64 / g.w as f64 + 180.0).rem_euclid(360.0) - 180.0;
+                        best = (c, [x[0], x[1], yaw]);
+                    }
+                }
+            }
+        }
+    }
+    let g = Grid::new(t, 1);
+    let f = |x: [f64; 3]| g.corr(&samp(&g, 1, rot(x)), 0);
+    let (mut x, mut fx, mut st) = (best.1, f(best.1), 0.5);
+    while st > 0.01 {
+        let mut moved = false;
+        for k in 0..6 {
+            let mut y = x;
+            y[k / 2] += if k % 2 == 0 { st } else { -st };
+            let fy = f(y);
+            if fy > fx {
+                (x, fx, moved) = (y, fy, true);
+            }
+        }
+        if !moved {
+            st /= 2.0;
+        }
+    }
+    for k in 0..3 {
+        let (mut lo, mut hi, e) = (x, x, 0.05);
+        (lo[k], hi[k]) = (x[k] - e, x[k] + e);
+        let (fl, fh) = (f(lo), f(hi));
+        let den = fl - 2.0 * fx + fh;
+        if den < 0.0 {
+            x[k] += (0.5 * e * (fl - fh) / den).clamp(-e, e);
+        }
+    }
+    (f(x), x)
+}
+
+/// Tilt part of `q` (output -> body or a residual): x and y of the rotation vector (deg) of the shortest arc from Z
+/// to q·Z, i.e. roll about our output X (the back, lens 0) and pitch about Y (the right).
+fn lean(q: DQuat) -> [f64; 2] {
+    let v = log(DQuat::from_rotation_arc(
+        DVec3::Z,
+        (q * DVec3::Z).normalize(),
+    ));
+    [v.x.to_degrees(), v.y.to_degrees()]
+}
+
+/// Colour against the thumbnail at 320 × 160 (low frequencies only) after alignment `r`, output -> body `q`: per
+/// 15° segment along the seam, mean RGB 3°–15° on either side in ours `o` (base 2560 wide) and the thumbnail `t`.
+/// Returns, in grey levels and averaged over the channels: median over the segments of the error of the step
+/// across the seam |(o1 − o0) − (t1 − t0)| and of the error per side |o − t|, the MAE over the sphere within ±60°,
+/// and the mean steps o1 − o0, t1 − t0 (lens 1 minus lens 0).
+fn colour(o: &[Eq; 3], t: &[Eq; 3], r: DQuat, q: DQuat) -> [f64; 5] {
+    let g = Grid::new(&t[0], 2);
+    let mut seg = [[[0f64; 7]; 2]; 24]; // per segment and side: Σw, Σw·o rgb, Σw·t rgb
+    let (mut mae, mut sw) = (0.0, 0.0);
+    for (i, (&d, &w)) in g.d.iter().zip(&g.wt).enumerate() {
+        if w == 0.0 {
+            continue;
+        }
+        let rd = r * d;
+        let ov = [0, 1, 2].map(|c| o[c].at(3, rd) as f64);
+        let tv = [0, 1, 2].map(|c| t[c].lv[2][i] as f64);
+        (mae, sw) = (
+            mae + w * (0..3).map(|c| (ov[c] - tv[c]).abs()).sum::<f64>() / 3.0,
+            sw + w,
+        );
+        let b = q * rd;
+        let (e, a) = (b.x.asin().to_degrees(), b.y.atan2(b.z).to_degrees());
+        if (3.0..=15.0).contains(&e.abs()) {
+            let s = &mut seg[((a + 180.0) / 15.0) as usize % 24][(e > 0.0) as usize];
+            s[0] += w;
+            for c in 0..3 {
+                s[1 + c] += w * ov[c];
+                s[4 + c] += w * tv[c];
+            }
+        }
+    }
+    let (mut step, mut side, mut os, mut ts) = (vec![], vec![], 0.0, 0.0);
+    for s in seg.iter().filter(|s| s[0][0] > 20.0 && s[1][0] > 20.0) {
+        let m = |k: usize, i: usize| s[k][i] / s[k][0];
+        let (mut e1, mut e2, mut d1, mut d2) = (0.0, 0.0, 0.0, 0.0);
+        for c in 0..3 {
+            let (od, td) = (m(1, 1 + c) - m(0, 1 + c), m(1, 4 + c) - m(0, 4 + c));
+            e1 += (od - td).abs() / 3.0;
+            e2 += ((m(0, 1 + c) - m(0, 4 + c)).abs() + (m(1, 1 + c) - m(1, 4 + c)).abs()) / 6.0;
+            (d1, d2) = (d1 + od / 3.0, d2 + td / 3.0);
+        }
+        step.push(e1);
+        side.push(e2);
+        (os, ts) = (os + d1, ts + d2);
+    }
+    let n = step.len().max(1) as f64;
+    let med = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v.get(v.len() / 2).copied().unwrap_or(f64::NAN)
+    };
+    [med(step), med(side), mae / sw, os / n, ts / n]
+}
+
+/// R, G, B and luma planes of an RGBA8 equirect.
+fn planes(px: &[u8]) -> [Vec<f32>; 4] {
+    let p = px.as_chunks::<4>().0;
+    let ch = |c: usize| p.iter().map(|x| x[c] as f32).collect::<Vec<f32>>();
+    let l = p
+        .iter()
+        .map(|x| 0.2126 * x[0] as f32 + 0.7152 * x[1] as f32 + 0.0722 * x[2] as f32)
+        .collect();
+    [ch(0), ch(1), ch(2), l]
+}
+
+fn ppm(path: &Path, rgb: &[[f32; 3]], w: usize, h: usize) {
+    let mut b = format!("P6\n{w} {h}\n255\n").into_bytes();
+    b.extend(
+        rgb.iter()
+            .flat_map(|p| p.map(|x| x.round().clamp(0.0, 255.0) as u8)),
+    );
+    std::fs::write(path, b).unwrap();
+}
+
+/// Levelling checked against the camera's own stitch, without a rig. The trailer thumbnail (record 2) is the
+/// camera's equirect, NV12 1280 × 640, full-range BT.709 (the video's matrix fits it better than BT.601), levelled by
+/// the camera and framed on lens 1 as we frame (residual yaw ≈ 0), of one frame: 2.97 s in where the camera marks
+/// `trim_start` 3 s (frame 89 at 29.97 fps, 178 at 59.94), 1 s into a dash-cam segment, else frame 0; the best of
+/// the frames within ±0.1 s is taken. Our horizon-levelled stitch of it (σ 0: the frame's own heading), 2560 × 1280,
+/// is aligned to it (`align`): the residual tilt is what our levelling (IMU axes, Mahony filter) gets wrong against
+/// the camera's. Accuracy: the alignment again after a known turn of our stitch; the horizon of both pictures from
+/// their verticals (`tilt`) tells which one leans. Then the residual the other gains and the accelerometer alone
+/// would leave (from their poses), and the colour either side of the seam with colour matching on and off
+/// (`colour`). Files: v606, v627, v635 and any in `X5_LEVEL` (a path list); a CSV and thumbnail-over-stitch pictures
+/// go to the fixtures.
+#[test]
+fn level() {
+    let Some(d) = samples() else { return };
+    let mut files: Vec<PathBuf> = ["v606", "v627", "v635"]
+        .map(|n| d.join(format!("{n}.insv")))
+        .into();
+    if let Some(v) = std::env::var_os("X5_LEVEL") {
+        files.extend(std::env::split_paths(&v).filter(|p| !p.as_os_str().is_empty()));
+    }
+    let out = fixtures().join("level");
+    std::fs::create_dir_all(&out).unwrap();
+    let g = gpu();
+    let (w, h) = (2560, 1280);
+    let known = [3.0, -2.0, 5.0];
+    let gains = [(KP, KI), (0.5, 0.05), (0.05, 0.001), (0.0, 0.0)];
+    let mut csv = String::from(
+        "file,fps,trim_ms,k0,k,score,roll,pitch,yaw,tilt,known_err,img_ours,img_camera,cam_roll,cam_pitch,\
+         kp05_roll,kp05_pitch,kp005_roll,kp005_pitch,gyro_roll,gyro_pitch,acc_roll,acc_pitch,rate_dps,acc_g,\
+         step_off,step_on,side_off,side_on,mae_off,mae_on,ostep_off,ostep_on,tstep\n",
+    );
+    let mut rows = vec![];
+    for p in &files {
+        let name: &'static str =
+            String::leak(p.file_stem().unwrap().to_string_lossy().into_owned());
+        let c = clip_at(p.clone(), name);
+        let mut b = vec![];
+        Trailer::open(p)
+            .unwrap()
+            .get(insv::THUMBNAIL, &mut b)
+            .unwrap();
+        let u = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) as usize;
+        let (tw, th) = (u(16), u(20));
+        assert_eq!(
+            (tw, th, b.len()),
+            (1280, 640, 40 + tw * th * 3 / 2),
+            "{name}: thumbnail"
+        );
+        let rgb: Vec<[f32; 3]> = (0..tw * th)
+            .map(|i| {
+                let (x, y) = (i % tw, i / tw);
+                let l = b[40 + i] as f32;
+                let k = 40 + tw * th + y / 2 * tw + x / 2 * 2;
+                let (cb, cr) = (b[k] as f32 - 128.0, b[k + 1] as f32 - 128.0);
+                [
+                    l + 1.5748 * cr,
+                    l - 0.187324 * cb - 0.468124 * cr,
+                    l + 1.8556 * cb,
+                ]
+                .map(|v| v.clamp(0.0, 255.0))
+            })
+            .collect();
+        let tl = Eq::new(
+            rgb.iter()
+                .map(|p| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2])
+                .collect(),
+            tw,
+            th,
+            3,
+            true,
+        );
+        let tc = [0, 1, 2].map(|k| Eq::new(rgb.iter().map(|p| p[k]).collect(), tw, th, 2, false));
+
+        let fr = Pose::euler(0.0, 0.0, if c.m.stream == 4 { 180.0 } else { 0.0 });
+        let hp: Vec<Vec<Pose>> = gains
+            .iter()
+            .map(|&(kp, ki)| {
+                let tr = Track::new(&c.imu, kp, ki);
+                stab::poses(&tr, &c.ex, &Opts::new(&c.m, Lock::Horizon, 0.0))
+                    .iter()
+                    .map(|p| Pose {
+                        q: p.q * fr.q,
+                        rs: [p.rs; 2],
+                    })
+                    .collect()
+            })
+            .collect();
+        // the thumbnail's time: trim_start, else 1 s into a dash-cam segment (VIDEO_DASH_CAM), else frame 0
+        let ts = match (c.m.trim[0], c.m.group.kind) {
+            (0, 23) => 1.0,
+            (t, _) => t as f64 * 1e-3,
+        };
+        let k0 = ((ts * c.m.fps).round() as usize).min(c.n - 1);
+        let ks: Vec<usize> = (((ts - 0.1) * c.m.fps).max(0.0).ceil() as usize
+            ..=(((ts + 0.1) * c.m.fps) as usize).min(c.n - 1))
+            .collect();
+        // per candidate frame: ours, ours turned by `known`, ours with colour matching (RGBA)
+        let mut px: Vec<[Vec<u8>; 3]> = vec![];
+        let mut st: Option<Stitcher> = None;
+        each(&g, &c, ks[ks.len() - 1] + 1, w, h, |k, rig| {
+            if !ks.contains(&k) {
+                return;
+            }
+            let p = hp[0][k];
+            let st = st.get_or_insert_with(|| {
+                let o = stitch::Opts {
+                    blend: c.m.blend.unwrap_or(6.0),
+                    ..Default::default()
+                };
+                Stitcher::new(&rig.cx, &c.cal, c.fr, w, h, o).unwrap()
+            });
+            // a fresh fit on this frame alone, as an export's first frame
+            st.reset();
+            st.pose(&p);
+            let mut enc = g.dev.create_command_encoder(&Default::default());
+            st.encode(&mut enc, [&rig.src[0], &rig.src[1]]);
+            g.q.submit([enc.finish()]);
+            let pk = Pose {
+                q: p.q * rot(known).as_quat(),
+                ..p
+            };
+            px.push([
+                rig.render(&g, &p),
+                rig.render(&g, &pk),
+                stitch::read_texture(&g.dev, &g.q, &st.out),
+            ]);
+        });
+        let (w, h) = (w as usize, h as usize);
+        let lum = |px: &[u8]| Eq::new(planes(px)[3].clone(), w, h, 4, true);
+        let fits: Vec<(f64, [f64; 3])> = std::thread::scope(|s| {
+            let j: Vec<_> = px
+                .iter()
+                .map(|f| s.spawn(|| align(&lum(&f[0]), &tl)))
+                .collect();
+            j.into_iter().map(|j| j.join().unwrap()).collect()
+        });
+        let i = (0..fits.len())
+            .max_by(|&a, &b| fits[a].0.total_cmp(&fits[b].0))
+            .unwrap();
+        let (k, (score, x)) = (ks[i], fits[i]);
+        let r = rot(x);
+        // turned by K, the residual becomes K⁻¹·R
+        let kx = align(&lum(&px[i][1]), &tl).1;
+        let kerr = log(rot(kx) * (rot(known).inverse() * r).inverse())
+            .length()
+            .to_degrees();
+
+        let qa = hp[0][k].q.as_dquat();
+        let res = |q: DQuat| lean(q.inverse() * qa * r);
+        let gr: Vec<[f64; 2]> = hp[1..].iter().map(|p| res(p[k].q.as_dquat())).collect();
+        // the accelerometer alone (±25 ms): the least turn of our pose that puts its up on the measured one
+        let tf = c.t(k) - 0.5 * c.ex[k].time + OFFSET;
+        let near: Vec<DVec3> = (c.imu.iter())
+            .filter(|s| (s.t as f64 * 1e-6 - tf).abs() < 0.025)
+            .map(|s| AXES * DVec3::new(s.acc[0] as f64, s.acc[1] as f64, s.acc[2] as f64))
+            .collect();
+        let am = near.iter().sum::<DVec3>() / near.len() as f64;
+        let ag = near.iter().map(|a| a.length()).sum::<f64>() / near.len() as f64;
+        let ra = res(DQuat::from_rotation_arc(qa * DVec3::Z, am.normalize()) * qa);
+        let tr = Track::new(&c.imu, KP, KI);
+        let rate = tr.turn(tf - 0.01, tf + 0.01).length().to_degrees() / 0.02;
+        let cam = lean(qa.inverse());
+        let rt = lean(r);
+        // which of the two is level: the horizon tilt of each picture from its verticals (`tilt`; NaN: too few)
+        let tb: Vec<u8> = (rgb.iter())
+            .flat_map(|p| [p[0] as u8, p[1] as u8, p[2] as u8, 255])
+            .collect();
+        let it = [tilt(&px[i][0], w, h), tilt(&tb, tw, th)]
+            .map(|t| t.map_or(f64::NAN, |t| t.0[0].hypot(t.0[1])));
+
+        let col = |px: &[u8]| {
+            let pl = planes(px);
+            colour(
+                &[0, 1, 2].map(|k| Eq::new(pl[k].clone(), w, h, 3, false)),
+                &tc,
+                r,
+                qa,
+            )
+        };
+        let (off, on) = (col(&px[i][0]), col(&px[i][2]));
+
+        // thumbnail over our aligned stitch, 640 × 320 each
+        let gv = Grid::new(&tc[0], 1);
+        let oc = [0, 1, 2].map(|k| Eq::new(planes(&px[i][0])[k].clone(), w, h, 2, false));
+        let mut pic: Vec<[f32; 3]> = (0..gv.d.len())
+            .map(|j| [0, 1, 2].map(|k| tc[k].lv[1][j]))
+            .collect();
+        pic.extend(gv.d.iter().map(|&d| [0, 1, 2].map(|k| oc[k].at(2, r * d))));
+        ppm(&out.join(format!("{name}.ppm")), &pic, 640, 640);
+
+        eprintln!(
+            "{name}: frame {k} (trim {} ms → {k0}), score {score:.3}; residual roll {:.2}° pitch {:.2}° (tilt {:.2}°) \
+             yaw {:.2}°; known turn recovered within {kerr:.3}°; horizon in the pictures ours {:.2}° camera {:.2}°; \
+             camera tilt {:.1}° / {:.1}°; gains 0.5/0.05 \
+             {:.2?}, 0.05/0.001 {:.2?}, gyro only {:.2?}, accelerometer {:.2?} ({rate:.0}°/s, {ag:.2} g); colour \
+             off / on: seam step error {:.2} / {:.2}, side {:.2} / {:.2}, MAE {:.2} / {:.2}, step ours {:.2} / {:.2}, \
+             camera {:.2}",
+            c.m.trim[0],
+            rt[0],
+            rt[1],
+            rt[0].hypot(rt[1]),
+            x[2],
+            it[0],
+            it[1],
+            cam[0],
+            cam[1],
+            gr[0],
+            gr[1],
+            gr[2],
+            ra,
+            off[0],
+            on[0],
+            off[1],
+            on[1],
+            off[2],
+            on[2],
+            off[3],
+            on[3],
+            off[4],
+        );
+        csv += &format!(
+            "{name},{},{},{k0},{k},{score:.4},{:.3},{:.3},{:.3},{:.3},{kerr:.4},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},\
+             {:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{rate:.1},{ag:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},\
+             {:.3}\n",
+            c.m.fps,
+            c.m.trim[0],
+            rt[0],
+            rt[1],
+            x[2],
+            rt[0].hypot(rt[1]),
+            it[0],
+            it[1],
+            cam[0],
+            cam[1],
+            gr[0][0],
+            gr[0][1],
+            gr[1][0],
+            gr[1][1],
+            gr[2][0],
+            gr[2][1],
+            ra[0],
+            ra[1],
+            off[0],
+            on[0],
+            off[1],
+            on[1],
+            off[2],
+            on[2],
+            off[3],
+            on[3],
+            off[4],
+        );
+        std::fs::write(out.join("level.csv"), &csv).unwrap();
+        rows.push((name, score, k.abs_diff(k0), rt, kerr, gr, ra, off, on));
+    }
+    let ok: Vec<_> = rows.iter().filter(|r| r.1 >= 0.5).collect();
+    let n = ok.len() as f64;
+    let rms = |f: &dyn Fn(&&_) -> [f64; 2]| {
+        (ok.iter()
+            .map(f)
+            .map(|v| v[0] * v[0] + v[1] * v[1])
+            .sum::<f64>()
+            / n)
+            .sqrt()
+    };
+    let mean = [0, 1].map(|a| ok.iter().map(|r| r.3[a]).sum::<f64>() / n);
+    let kmax = ok.iter().map(|r| r.4).fold(0.0, f64::max);
+    let rg: Vec<f64> = (0..3).map(|i| rms(&|r| r.5[i])).collect();
+    let won = ok.iter().filter(|r| r.8[0] < r.7[0]).count();
+    eprintln!(
+        "{} of {} files aligned (score ≥ 0.5): residual tilt rms {:.2}° (mean roll {:.2}° pitch {:.2}°), known turn \
+         recovered within {kmax:.3}°; rms with gains 0.5/0.05 {:.2}°, 0.05/0.001 {:.2}°, gyro only {:.2}°, \
+         accelerometer alone {:.2}°; colour matching lowers the seam step error on {won} of them (median off {:.2}, \
+         on {:.2})",
+        ok.len(),
+        rows.len(),
+        rms(&|r| r.3),
+        mean[0],
+        mean[1],
+        rg[0],
+        rg[1],
+        rg[2],
+        rms(&|r| r.6),
+        {
+            let mut v: Vec<f64> = ok.iter().map(|r| r.7[0]).collect();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        },
+        {
+            let mut v: Vec<f64> = ok.iter().map(|r| r.8[0]).collect();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        },
+    );
+    eprintln!("CSV and pictures: {}", out.display());
+    // the samples align at the thumbnail's frame or its neighbour, the method resolves a known turn
+    for r in &rows[..3] {
+        assert!(
+            r.1 > 0.8 && r.2 <= 1 && r.4 < 0.05,
+            "{}: score {} at {} frames from trim, known turn {}°",
+            r.0,
+            r.1,
+            r.2,
+            r.4
+        );
     }
 }
