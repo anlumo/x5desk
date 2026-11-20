@@ -204,7 +204,8 @@ fn guide(p: Page) -> &'static [&'static str] {
              frame rate.",
             "360 exports carry spherical metadata; flat ones follow the view. Options: AI seam (RAFT), colour \
              matching between the lenses, stabilisation, a look and adjustments, privacy blur of faces and license \
-             plates (plates are found on the vehicles the detector sees), and voice denoise of the audio.",
+             plates (plates are found on the vehicles the detector sees), and voice denoise of the audio. Frame \
+             grabs get noise reduction, as strong as the frame is noisy (night footage; daylight stays as it is).",
             "Jobs run one after another; each shows its progress and can be cancelled. Open shows the result in the \
              Library.",
         ],

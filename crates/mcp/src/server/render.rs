@@ -59,7 +59,7 @@ const MEMORY: &str =
     "another x5desk host holds the jobs file: GPU tools need it to clean up after a crash";
 
 /// The fields only one of the tools takes.
-const STILL_ONLY: [&str; 3] = ["time_s", "jpeg_quality", "wait_s"];
+const STILL_ONLY: [&str; 4] = ["time_s", "jpeg_quality", "noise_reduction", "wait_s"];
 const EXPORT_ONLY: [&str; 10] = [
     "preset",
     "start_s",
@@ -160,6 +160,7 @@ struct Ask {
     name: Option<String>,
     time_s: Option<f64>,
     jpeg_quality: Option<u8>,
+    noise_reduction: Option<f32>,
     wait_s: Option<f64>,
     preset: Option<String>,
     start_s: Option<f64>,
@@ -257,6 +258,9 @@ render_args! {
         time_s: Option<f64>,
         /// 50-100 (default 92)
         jpeg_quality: Option<u8>,
+        /// noise reduction of the picture (non-local means, scaled to the frame's own noise: night footage cleaned,
+        /// daylight left as it is), strength 0-1 (catalog: still.noise_reduction for the default; 0: off)
+        noise_reduction: Option<f32>,
         /// how long this call waits, s (default and at most 50: clients end longer calls; 0: answer the job at once)
         wait_s: Option<f64>,
     }
@@ -693,7 +697,11 @@ fn want(kind: RKind, a: &Ask, c: &Catalog) -> Result<Want, String> {
         if let Some(q) = a.jpeg_quality {
             within("jpeg_quality", q, &c.still.jpeg_quality)?
         }
-        (w.time_s, w.jpeg_quality) = (a.time_s, a.jpeg_quality);
+        if let Some(x) = a.noise_reduction {
+            within("noise_reduction", x, &c.still.noise_reduction)?
+        }
+        (w.time_s, w.jpeg_quality, w.noise_reduction) =
+            (a.time_s, a.jpeg_quality, a.noise_reduction);
         return Ok(w);
     }
     for (n, t) in [("start_s", a.start_s), ("end_s", a.end_s)] {
@@ -1212,6 +1220,14 @@ fn shown_catalog(c: &Catalog, gpu: Value, raft: Option<&str>, blur: Option<&str>
             "default_size": { "360": c.still.pano_width, "flat": c.still.flat },
             "max_long_edge": STILL_MAX,
             "jpeg_quality": c.still.jpeg_quality,
+            "noise_reduction": {
+                "min": c.still.noise_reduction.min,
+                "max": c.still.noise_reduction.max,
+                "default": c.still.noise_reduction.default,
+                "note": "non-local means on the picture, scaled to the frame's own noise: night footage gets cleaner \
+                         with its edges kept; frames as clean as daylight footage stay exactly as they are at any \
+                         strength; 1 smooths fine texture; 0: off. Exports are never filtered",
+            },
             "note": "preset-free",
         },
         "export": {
@@ -2743,6 +2759,7 @@ mod tests {
                 pano_width: 7680,
                 flat: [1920, 1080],
                 jpeg_quality: r(50.0, 100.0, 92.0),
+                noise_reduction: r(0.0, 1.0, 0.5),
             },
             blur: vec![
                 Named {
@@ -2955,6 +2972,11 @@ mod tests {
             ),
             (&json!(0.0), &json!(1.0), &json!(0.0))
         );
+        let nr = &v["still"]["noise_reduction"];
+        assert_eq!(
+            (&nr["min"], &nr["max"], &nr["default"]),
+            (&json!(0.0), &json!(1.0), &json!(0.5))
+        );
         // 1. the arguments: a later feature by name before a bad look; a word for blur, a blur of the wrong type; the
         // other tool's fields; a typo
         let e = |r: Result<Value, String>| r.unwrap_err();
@@ -3012,6 +3034,10 @@ mod tests {
         assert!(e(r).contains("expected f32"));
         let r = call(&c, "export", ex(json!({ "time_s": 1 }))).await;
         assert_eq!(e(r), "`time_s` is for render_still only");
+        let r = call(&c, "export", ex(json!({ "noise_reduction": 0.5 }))).await;
+        assert_eq!(e(r), "`noise_reduction` is for render_still only");
+        let r = call(&c, "render_still", ex(json!({ "noise_reduction": "on" }))).await;
+        assert!(e(r).contains("expected f32"));
         let r = call(&c, "export", ex(json!({ "lok": "mono" }))).await;
         assert!(e(r).contains("unknown field `lok`"));
         // 2. the catalog, before the host: a memory-only host says the bad argument first
@@ -3132,6 +3158,11 @@ mod tests {
             ),
             (
                 "render_still",
+                json!({ "noise_reduction": 2 }),
+                "noise_reduction 2: 0 to 1",
+            ),
+            (
+                "render_still",
                 json!({ "name": "x.mp4" }),
                 "name \"x.mp4\": a still is a .jpg, not a .mp4",
             ),
@@ -3241,13 +3272,18 @@ mod tests {
         );
         // a 360 still's height follows its width; no preset
         assert_eq!(
-            e(call(&c, "render_still", ex(json!({ "width": 3840 }))).await),
+            e(call(
+                &c,
+                "render_still",
+                ex(json!({ "width": 3840, "noise_reduction": 0.75 }))
+            )
+            .await),
             "no Insta360 trailer"
         );
         let w = f.asked.lock().unwrap().clone().unwrap();
         assert_eq!(
-            (w.width, w.height, w.preset),
-            (Some(3840), Some(1920), None)
+            (w.width, w.height, w.preset, w.noise_reduction),
+            (Some(3840), Some(1920), None, Some(0.75))
         );
         // blur on both tools: ids, names or aliases, any case, deduplicated in the catalog's order; true both
         for (k, b, w) in [

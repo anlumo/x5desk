@@ -12,7 +12,7 @@ fn want(kind: Kind) -> Want {
 /// display names; the player's projections but the equirect; `gyro::parse`'s modes; the editor's adjustments with
 /// their defaults; Shot Lab's effects; the presets, the 360 video widths without the photos' 11904; the blur targets in
 /// `Set::faces`, `Set::plates` order, searched every `STEP` frames, and no longer later; denoise 0 to 1, off by
-/// default.
+/// default; a still's noise reduction 0 to 1, the screen's by default.
 #[test]
 fn catalog_tables() {
     let c = catalog();
@@ -83,11 +83,13 @@ fn catalog_tables() {
         (c.denoise.min, c.denoise.max, c.denoise.default),
         (0.0, 1.0, Some(0.0))
     );
+    let n = c.still.noise_reduction;
+    assert_eq!((n.min, n.max, n.default), (0.0, 1.0, Some(NR as f64)));
 }
 
-/// Stills start from preset-free defaults whatever the preset, exports from theirs; a changed size or rate clears the
-/// preset as on the screen; looks, adjustments, the view, the rate and the blur's boxes land where the screen keeps
-/// them.
+/// Stills start from preset-free defaults (the screen's noise reduction) whatever the preset, exports from theirs; a
+/// changed size or rate clears the preset as on the screen; looks, adjustments, the view, the rate, the noise
+/// reduction and the blur's boxes land where the screen keeps them.
 #[test]
 fn set_of_wants() {
     let (x, _, p) = set_of(&want(Kind::Still), Kind::Still, true).unwrap();
@@ -95,10 +97,11 @@ fn set_of_wants() {
         (x.preset, x.pano, x.size(), x.jq, x.raft, x.faces, x.plates),
         (None, true, [7680, 3840], 92, true, false, false)
     );
-    assert_eq!(p, "perspective");
+    assert_eq!((p, x.nr), ("perspective", NR));
     let w = Want {
         output: Some(Output::Flat),
         jpeg_quality: Some(70),
+        noise_reduction: Some(0.0),
         view: Some(r::View {
             projection: Some("persp".into()),
             yaw: Some(30.0),
@@ -108,8 +111,8 @@ fn set_of_wants() {
     };
     let (x, v, p) = set_of(&w, Kind::Still, false).unwrap();
     assert_eq!(
-        (x.pano, x.size(), x.jq, x.raft),
-        (false, [1920, 1080], 70, false)
+        (x.pano, x.size(), x.jq, x.raft, x.nr),
+        (false, [1920, 1080], 70, false, 0.0)
     );
     assert_eq!(
         (p, v.yaw, v.fov, v.pitch),
@@ -281,8 +284,8 @@ fn ranges() {
     assert!(range(&part(Some(4.96), None), Kind::Export, fps, 5.0).is_ok());
 }
 
-/// Results show the settings as resolved: a still's time and quality, an export's preset, rate and range, the flat
-/// view, the blur's targets (none: `[]`); the keys the export time guess compares.
+/// Results show the settings as resolved: a still's time, quality and noise reduction, an export's preset, rate and
+/// range, the flat view, the blur's targets (none: `[]`); the keys the export time guess compares.
 #[test]
 fn shown() {
     let w = Want {
@@ -297,8 +300,8 @@ fn shown() {
         (Some(1920), Some(1080))
     );
     assert_eq!(
-        (&s["time_s"], &s["jpeg_quality"]),
-        (&json!(3.0), &json!(92))
+        (&s["time_s"], &s["jpeg_quality"], &s["noise_reduction"]),
+        (&json!(3.0), &json!(92), &json!(NR))
     );
     assert_eq!(s["view"]["projection"], "perspective");
     assert_eq!(s["stabilisation"], "horizon");
@@ -321,7 +324,11 @@ fn shown() {
         (&s["codec"], &s["ten_bit"], &s["width"]),
         (&json!("h265"), &json!(true), &json!(5760))
     );
-    assert!(s.get("view").is_none() && s.get("jpeg_quality").is_none());
+    assert!(
+        s.get("view").is_none()
+            && s.get("jpeg_quality").is_none()
+            && s.get("noise_reduction").is_none()
+    );
     assert_eq!((&s["blur"], &s["denoise"]), (&json!([]), &json!(0.0)));
     let w = Want {
         blur: vec!["faces".into()],

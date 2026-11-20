@@ -541,7 +541,7 @@ fn fields(j: &mut ::export::Job, n: u64) -> String {
 }
 
 /// `span` and `clip_job` build the jobs `Keep::video` built before they were factored out of it: `cases` at 29.97 fps,
-/// compared with what `fields` read from `Keep::video`'s jobs then.
+/// compared with what `fields` read from `Keep::video`'s jobs then (grabs since with the default noise reduction).
 #[test]
 fn parity() {
     const WANT: [&str; 5] = [
@@ -561,9 +561,9 @@ fn parity() {
         "Rate { num: 25, den: 1 } 4.96..5 \"Film\" 0.7 len 1 tl 97f2b9a45f78a9dd files [[\"v.insv\"]] \
          looks [(\"Film\", \"Film\")] over 0 abr 192000 denoise None | flat 1920x1080 \
          Perspective [30.0, -10.0, 0.0, 90.0, 0.0, 1.0] Perspective [30.0, -10.0, 0.0, 90.0, 0.0, 1.0] | \
-         Jpeg(85) raft true colour None stab None flat false fx false path o.mp4 n 1",
+         Jpeg(85, 0.5) raft true colour None stab None flat false fx false path o.mp4 n 1",
         "Rate { num: 30000, den: 1001 } 1..1.0333666666666668 \"\" 1 len 1 tl 330828e57e6f3050 files [[\"v.insv\"]] \
-         looks [] over 0 abr 192000 denoise None | pano 7680 | Jpeg(92) raft true colour Some(0.1) \
+         looks [] over 0 abr 192000 denoise None | pano 7680 | Jpeg(92, 0.5) raft true colour Some(0.1) \
          stab Some((Horizon, 0.5)) flat false fx false path o.mp4 n 1",
     ];
     let src = edit::Rate {

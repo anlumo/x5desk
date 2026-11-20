@@ -10,8 +10,8 @@
 //! `X5DESK_TEST=mcp-noattach` keeps burn off the device, as a failed attach would: RAFT and blur are off.
 
 use super::{
-    ABR, CANCELLED, FLAT, FPS, H264_MAX, H265_MAX, Hold, PANO, PRESETS, STEP, Set, Spec, clip_job,
-    hook, keys, privacy_pass, probe, span, stem_tag,
+    ABR, CANCELLED, FLAT, FPS, H264_MAX, H265_MAX, Hold, NR, PANO, PRESETS, STEP, Set, Spec,
+    clip_job, hook, keys, privacy_pass, probe, span, stem_tag,
 };
 use crate::{editor::doc, gpu, gyro, lab, player};
 use ::export::Dest;
@@ -58,7 +58,8 @@ const ENDED: u32 = u32::MAX;
 /// The X5's lens side (the H.265 check's), the pixel check's side.
 const X5: u32 = 3840;
 const PCM: u32 = 256;
-/// A still's defaults, preset-free: 360 at this width, a flat size, the JPEG quality.
+/// A still's defaults, preset-free: 360 at this width, a flat size, the JPEG quality (the noise reduction: the
+/// screen's `NR`).
 const STILL_360: u32 = 7680;
 const STILL_FLAT: [u32; 2] = [1920, 1080];
 const JQ: u8 = 92;
@@ -1309,6 +1310,7 @@ fn catalog() -> Catalog {
             pano_width: STILL_360,
             flat: STILL_FLAT,
             jpeg_quality: range(50.0, 100.0, Some(JQ as f64)),
+            noise_reduction: range(0.0, 1.0, Some(NR as f64)),
         },
         blur: (BLUR.iter())
             .map(|(id, name, al)| r::Named {
@@ -1334,9 +1336,9 @@ fn catalog() -> Catalog {
 
 /// `w`, every option already checked against the catalog by mcp, as the Export screen's settings and flat view (and
 /// its projection's id) hold them, set as its widgets set them: a still from preset-free defaults (360 at 7680, flat
-/// 1920 × 1080, quality 92), an export from its preset (a changed size, codec, depth or rate clears it, as on the
-/// screen); then the options asked, the blur's boxes too. `raft`: the seam's default. `w.stabilisation` is the
-/// resolved one (`check`).
+/// 1920 × 1080, quality 92, the screen's noise reduction), an export from its preset (a changed size, codec, depth or
+/// rate clears it, as on the screen); then the options asked, the blur's boxes too. `raft`: the seam's default.
+/// `w.stabilisation` is the resolved one (`check`).
 fn set_of(w: &Want, kind: Kind, raft: bool) -> Result<(Set, View, &'static str), String> {
     let bad = |what: &str, v: &str| format!("{what} {v:?}: not in the catalog");
     let flat = w.output == Some(Output::Flat);
@@ -1349,6 +1351,7 @@ fn set_of(w: &Want, kind: Kind, raft: bool) -> Result<(Set, View, &'static str),
                 false => (true, STILL_360, STILL_360 / 2),
             };
             x.jq = w.jpeg_quality.unwrap_or(JQ);
+            x.nr = w.noise_reduction.unwrap_or(NR);
         }
         Kind::Export => {
             let k = w.preset.as_deref().unwrap_or(PRESETS[0].0);
@@ -1498,6 +1501,7 @@ fn settings(x: &Set, v: &View, proj: &str, w: &Want, kind: Kind, ab: [f64; 2], t
         Kind::Still => {
             s["time_s"] = t.into();
             s["jpeg_quality"] = x.jq.into();
+            s["noise_reduction"] = x.nr.into();
         }
         Kind::Export => {
             let fps = (FPS.iter().find(|f| f.0 == x.fps)).map(|f| f.1.to_ascii_lowercase());

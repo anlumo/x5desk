@@ -2519,3 +2519,70 @@ fn defringe_frames() {
         }
     }
 }
+
+/// Non-local means on a synthetic still: a step from 0.3 to 0.6 on a gentle ramp under Gaussian noise (σ 4/255, 8-bit)
+/// comes back with under a fifth of the noise (RMS against the clean picture, 8 px and more from the edge) and the
+/// step's height across its two pixels kept to within 2 %; the same picture almost clean (σ 0.5/255, under the knee)
+/// comes back bit-identical.
+#[test]
+fn nlm() {
+    let g = gpu();
+    let (w, h) = (256u32, 128u32);
+    let clean = |x: u32, y: u32| if x < 128 { 0.3 } else { 0.6 } + 0.1 * y as f32 / h as f32;
+    let hash = |i: u32, k: u32| {
+        let mut v = i.wrapping_mul(0x9e37_79b9) ^ k.wrapping_mul(0x85eb_ca6b);
+        v ^= v >> 15;
+        v = v.wrapping_mul(0x2c1b_3c6d);
+        v ^= v >> 12;
+        (v >> 8) as f32 / (1 << 24) as f32
+    };
+    let noisy = |s: f32| -> Vec<[f32; 4]> {
+        (0..w * h)
+            .map(|i| {
+                let v = clean(i % w, i / w);
+                let n = |k: u32| {
+                    let (a, b) = (hash(i, 2 * k).max(1e-7), hash(i, 2 * k + 1));
+                    s * (-2.0 * a.ln()).sqrt() * (std::f32::consts::TAU * b).cos()
+                };
+                [v + n(0), v + n(1), v + n(2), 1.0]
+            })
+            .collect()
+    };
+    let run = |px: &[[f32; 4]]| {
+        let t = texture(&g, w, h, wgpu::TextureFormat::Rgba8Unorm, Some(px));
+        let n = Nlm::new(&g.dev, &t, false, 0.5);
+        let mut e = g.dev.create_command_encoder(&Default::default());
+        n.run(&mut e);
+        g.q.submit([e.finish()]);
+        (stored(wgpu::TextureFormat::Rgba8Unorm, px), read(&g, &t))
+    };
+    let rms = |px: &[[f32; 4]]| {
+        let (mut s, mut n) = (0.0, 0);
+        for (i, p) in px.iter().enumerate() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            if x.abs_diff(128) >= 8 && x >= 8 && x < w - 8 && (8..h - 8).contains(&y) {
+                s += (0..3).map(|k| (p[k] - clean(x, y)).powi(2)).sum::<f32>();
+                n += 3;
+            }
+        }
+        (s / n as f32).sqrt() * 255.0
+    };
+    let step = |px: &[[f32; 4]]| {
+        (8..h - 8)
+            .map(|y| px[(y * w + 128) as usize][1] - px[(y * w + 127) as usize][1])
+            .sum::<f32>()
+            / (h - 16) as f32
+    };
+    let (a, b) = run(&noisy(4.0 / 255.0));
+    eprintln!(
+        "nlm: noise {:.2} -> {:.2} /255 RMS, step {:.4} -> {:.4}",
+        rms(&a),
+        rms(&b),
+        step(&a),
+        step(&b)
+    );
+    assert!(rms(&b) < rms(&a) / 5.0, "{} -> {}", rms(&a), rms(&b));
+    assert!((step(&b) - 0.3).abs() < 0.006, "step {}", step(&b));
+    let (a, b) = run(&noisy(0.5 / 255.0));
+    assert!(a == b, "a clean picture changed");
+}

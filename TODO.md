@@ -309,8 +309,25 @@ voice denoise on editor timelines and exports (RNNoise).
 - [ ] **Seam flow while playing.** RAFT runs on paused frames and exports only; the vendor's player keeps its AI
   seam while playing. RAFT on every n-th frame during playback, the flow held between; cost unmeasured beside two 4K
   decodes.
-- [ ] **Frame grab denoise.** The vendor denoises stills saved from video, we don't. A GPU non-local-means pass in
-  fx before the JPEG encoder.
+- [x] **Frame grab denoise.** Stills from video (the player's and the Export screen's grabs, the MCP `render_still`)
+  get non-local means in crate fx (`fx::Nlm`; `export::Enc::Jpeg`'s strength) on the stitched frame, before the
+  effects and the JPEG encoder; videos and photos are not filtered (the camera processes photos itself; `Keep::photo`
+  could take it the same way). RGB averaged with weights from 7 × 7 luma patches over a 15 × 15 search, h scaled by
+  the frame's own noise: g = the 10th percentile of a 5 × 5 patch's mean squared luma difference 4 px away (mid-tone
+  patches every 4 px), h² = (4·strength)²·max(g² − (1.5/255)², 0). Strength 0.5 by default: the Export screen's Grabs
+  row (the player's grab takes it too), the MCP's `noise_reduction` (0–1; catalog: still.noise_reduction). Scored
+  against the temporal mean of 6–27 frames from other GOPs of a standing stretch, each aligned onto the grabbed frame
+  per 320² tile, on static pixels (night: 670 at a red light 17–33 s, v627 handheld; day: 689 standing 41–59 s; indoor
+  v635), 5760 and 7680 wide: night +0.9…1.7 dB PSNR at 0.5 (at 1: +1.5…2.2), the reference's edge gradient kept
+  92–98 % (1: 70–92 %), texture 81–93 % (1: 50–78 %); day and indoor bit-identical at any strength (g 0.8–1.4/255
+  under the knee, night 2.7–4.9; without the knee day texture lost 23 % at the default). 7 × 7 patches and a 15 × 15
+  search beat 3, 5, 9 and 9, 21 at the same detail kept, a search every 2nd pixel lost 13 % of the edges; a separate,
+  stronger chroma filter and a two-scale filter came within 0.2 dB. Night noise is blotchy and correlated over
+  several pixels, mostly luma (σ 2.5 against chroma's 0.9/255 on flat night pixels); all our footage is 8-bit HEVC,
+  no 10-bit clip to try. Cost on the Radeon 8060S: 99 ms at 5760 × 2880, 175 at 7680 × 3840, 12 at 1920 × 1080, 51
+  at 3840 × 2160; 4–7 ms under the knee. Contact sheets (100 % crops: input, 0.5, 1 or on day the filter without
+  the knee, the temporal mean): `target/forward-scratch/grab/out/{night_n670_5760,night_v627_7680,day_d689_5760}.jpg`.
+  Not compared with the vendor's own still denoise.
 - [ ] **Sky Swap.** Sky segmentation on perspective tiles of the sphere (e.g. SegFormer-B0 on ADE20K, NVIDIA's
   non-commercial licence, to verify), feathered and smoothed over time, a sky panorama in its place; a Shot Lab pass.
 - [ ] **Library search.** Tags and text search from an image embedding of each clip's thumbnails (e.g. SigLIP,

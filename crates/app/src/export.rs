@@ -195,6 +195,9 @@ const H264_MAX: u32 = 4096;
 const H265_MAX: u32 = 8192;
 /// The exports' AAC, bit/s.
 const ABR: u32 = 192_000;
+/// Grabs' noise reduction (`Set::nr`): on night footage +0.9…1.7 dB against a temporal mean, edges 92–98 % kept;
+/// daylight measures below `fx::Nlm`'s knee and stays bit-identical (TODO.md "Frame grab denoise")
+pub(crate) const NR: f32 = 0.5;
 
 /// Export settings.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -225,6 +228,8 @@ pub struct Set {
     pub denoise: Option<f32>,
     /// JPEG quality of grabs and photos
     pub jq: u8,
+    /// noise reduction of grabs (`fx::Nlm` strength, 0: off): scaled to the frame's noise, daylight stays untouched
+    pub nr: f32,
 }
 
 impl Set {
@@ -287,6 +292,7 @@ impl Default for Set {
             plates: false,
             denoise: None,
             jq: 92,
+            nr: NR,
         };
         s.apply(0);
         s
@@ -844,6 +850,12 @@ impl Exp {
                         x.denoise = on.then_some(s);
                     });
                     ui.end_row();
+                    ui.label("Grabs");
+                    ui.add(egui::Slider::new(&mut x.nr, 0.0..=1.0).text("Noise reduction")).on_hover_text(
+                        "Non-local means on grabbed frames, as strong as the frame is noisy: night footage gets \
+                         cleaner, daylight stays as it is; 0: off. Videos are not touched",
+                    );
+                    ui.end_row();
                 }
                 ui.label("Look");
                 ui.horizontal(|ui| {
@@ -1170,7 +1182,7 @@ pub(crate) fn clip_job(
             },
         },
         enc: match grab {
-            true => export::Enc::Jpeg(x.jq),
+            true => export::Enc::Jpeg(x.jq, x.nr),
             false => export::Enc::Video {
                 codec: x.codec,
                 deep: x.deep && x.codec == Codec::H265,

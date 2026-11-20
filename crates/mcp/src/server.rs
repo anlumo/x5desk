@@ -387,7 +387,8 @@ pub const TOOLS: &[Def] = &[
                answers a job that job_wait finishes with the image. job_cancel stops it and leaves no file. blur: \
                [\"faces\", \"plates\"] blurs faces and licence plates (a detection pass first, on its one frame: \
                the plates it is sure of there, fewer than an export finds; best effort: look at the preview). \
-               Photos (.insp): later.",
+               noise_reduction: 0-1 picture denoise as strong as the frame is noisy (night footage; daylight stays \
+               as it is; default and notes: catalog still.noise_reduction). Photos (.insp): later.",
         schema: input::<render::StillArgs>,
         ann: Some((false, false)),
         gpu: true,

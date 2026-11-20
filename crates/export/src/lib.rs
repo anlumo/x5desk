@@ -5,9 +5,10 @@
 //! its own thread -> MP4 (`media::mux`, `sv3d` / `st3d` for 360). Audio: spans played at 1× copy their source's AAC;
 //! an editor timeline that is more than a plain cut mixes its clips' audio, time-stretched to their speed (and
 //! denoised), with the music and encodes it (`Edit`). Either way the audio ends with the last video frame. Frame grabs
-//! (`Enc::Jpeg`) take the same path into a JPEG (`jpeg`, GPano for 360). `Queue` runs jobs one after another on a
-//! background thread with progress and cancel. `source` reads what a recording holds without the GPU. `Job::pre` runs
-//! once before a job's frames and can hand them a hook of its own, run before `Job::fx`.
+//! (`Enc::Jpeg`) take the same path into a JPEG (`jpeg`, GPano for 360), their noise reduced first if asked (`fx::Nlm`,
+//! right after the stitch). `Queue` runs jobs one after another on a background thread with progress and cancel.
+//! `source` reads what a recording holds without the GPU. `Job::pre` runs once before a job's frames and can hand them
+//! a hook of its own, run before `Job::fx`.
 //!
 //! Output goes to `<path>.part`, made new at the job's start (or reserved by the caller, `Dest`) and known by its
 //! identity from then on (`media::part`); once complete it is published to `path` without replacing anything there.
@@ -197,7 +198,7 @@ pub enum Out {
 }
 
 /// How the frames are stored.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Enc {
     /// MP4: H.265 (`deep`: Main 10 from P010) or H.264 (8-bit, up to 4096²), an IDR every `gop` frames.
     Video {
@@ -206,8 +207,9 @@ pub enum Enc {
         rate: Rate,
         gop: u32,
     },
-    /// The first frame as a JPEG at this quality (1..=100), with GPano XMP for `Out::Pano`.
-    Jpeg(u8),
+    /// The first frame as a JPEG at this quality (1..=100), with GPano XMP for `Out::Pano`, its noise reduced at this
+    /// strength first (`fx::Nlm`, 0..=1, 0: off) on the stitched frame, before the effects.
+    Jpeg(u8, f32),
 }
 
 /// One frame handed to `Job::fx`.
@@ -1626,7 +1628,7 @@ pub fn run_into(
         Some(p) => p,
         None => reserve(&path)?,
     };
-    let (still, strict) = (matches!(job.enc, Enc::Jpeg(_)), d.strict && !d.frozen_ok);
+    let (still, strict) = (matches!(job.enc, Enc::Jpeg(..)), d.strict && !d.frozen_ok);
     let mut size = (0, 0);
     // also a panic while setting up (a damaged clip's parser, the model) ends as an error
     let r = scoped(&g.device, || {
@@ -1741,7 +1743,7 @@ fn render(
             full: false,
             chroma: 0,
         }),
-        Enc::Jpeg(_) => None,
+        Enc::Jpeg(..) => None,
     };
     let format = match cfg {
         Some(Cfg { deep: true, .. }) => wgpu::TextureFormat::Rgba16Float,
@@ -1873,6 +1875,10 @@ fn render(
                 let j = (&job.out, job.enc, job.raft, job.colour);
                 let mut dr = scoped(&g.device, || Draw::new(cx, c, fr, j, flat.as_ref()))?;
                 let io = gfx.as_ref().map(|(f, t)| f.io(t, &dr.tex));
+                let nlm = match job.enc {
+                    Enc::Jpeg(_, s) if s > 0.0 => Some(fx::Nlm::new(&g.device, &dr.tex, sph, s)),
+                    _ => None,
+                };
                 let (tx, rx) = mpsc::sync_channel(OUT);
                 let ks = &run.k[..];
                 sc.spawn(move || {
@@ -1945,6 +1951,9 @@ fn render(
                             }
                             let mut e = g.device.create_command_encoder(&Default::default());
                             dr.draw(&mut e, src, v.as_ref(), fresh);
+                            if let Some(n) = &nlm {
+                                n.run(&mut e);
+                            }
                             if let (Some((fx, tmp)), Some(io), Some(ev), Some(ed)) =
                                 (&mut gfx, &io, ev, ed)
                             {
@@ -1985,7 +1994,9 @@ fn render(
                                     stitch::read_texture(&g.device, &g.queue, &dr.tex)
                                 };
                                 release();
-                                let Enc::Jpeg(q) = job.enc else { return Ok(()) };
+                                let Enc::Jpeg(q, _) = job.enc else {
+                                    return Ok(());
+                                };
                                 let xmp = sph.then(|| jpeg::gpano(w, h));
                                 let b = jpeg::encode(&px, w, h, q, xmp.as_deref())?;
                                 let io = |e: io::Error| format!("{}: {e}", part.display());

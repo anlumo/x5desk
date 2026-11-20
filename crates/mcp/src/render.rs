@@ -313,6 +313,8 @@ pub struct Want {
     // stills
     pub time_s: Option<f64>,
     pub jpeg_quality: Option<u8>,
+    /// the picture's noise reduction strength; None: the catalog's default
+    pub noise_reduction: Option<f32>,
     // exports
     pub start_s: Option<f64>,
     pub end_s: Option<f64>,
@@ -467,6 +469,9 @@ pub struct Still {
     pub pano_width: u32,
     pub flat: [u32; 2],
     pub jpeg_quality: Range,
+    /// the picture's noise reduction (non-local means) strength
+    #[serde(default)]
+    pub noise_reduction: Range,
 }
 
 /// What agents can't do yet, and the argument names that ask for it.

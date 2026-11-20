@@ -622,7 +622,11 @@ fn trim_sync() {
         export(
             &g,
             &cx,
-            job(gp.clone(), [k as f64 * fd, f64::INFINITY], Enc::Jpeg(95)),
+            job(
+                gp.clone(),
+                [k as f64 * fd, f64::INFINITY],
+                Enc::Jpeg(95, 0.0),
+            ),
         );
         let px: Vec<u8> = ff_frame(&gp, 0, "rgb24")
             .chunks(3)
@@ -733,7 +737,7 @@ fn segments() {
         export(
             &g,
             &cx,
-            job(gp.clone(), vec![seg(x, f64::INFINITY)], Enc::Jpeg(95)),
+            job(gp.clone(), vec![seg(x, f64::INFINITY)], Enc::Jpeg(95, 0.0)),
         );
         let px: Vec<u8> = ff_frame(&gp, 0, "rgb24")
             .chunks(3)
@@ -820,7 +824,7 @@ fn queue() {
     let jobs = vec![
         ("q_raft.mp4", pano(), h10, true, None, None),
         ("q_tpl.mp4", pano(), h5, false, None, None),
-        ("q_grab.jpg", pano(), Enc::Jpeg(90), false, None, None),
+        ("q_grab.jpg", pano(), Enc::Jpeg(90, 0.0), false, None, None),
         ("q_flat854.mp4", flat(), h4, false, Some(c8), None),
         ("q_flat854_10.mp4", flat(), h10, true, Some(c10), None),
         ("missing/q.mp4", pano(), h5, false, None, enoent),
@@ -998,7 +1002,7 @@ fn grab() {
                 }]),
                 path: path.clone(),
                 out: o,
-                enc: Enc::Jpeg(92),
+                enc: Enc::Jpeg(92, 0.0),
                 raft: pano,
                 colour: Some(0.1),
                 stab: None,
@@ -1047,6 +1051,127 @@ fn grab() {
     }
 }
 
+/// Noise reduction of 360 grabs at 7680 (`Enc::Jpeg`'s strength, `fx::Nlm`): v627 frame 293 (night) with strength 0.5
+/// against 0: the noise statistic `fx::Nlm` scales by (the 10th percentile of the 5 × 5 mean squared luma difference
+/// 4 px away on mid-tone patches, 30…150° polar) goes down by over half, the strong edges (top 5 % of the 3 × 3
+/// mean's gradient) keep over 90 % of their gradient; v635 frame 100 (indoor, as clean as daylight) is bit-identical.
+#[test]
+fn grab_denoise() {
+    let (Some(night), Some(day)) = (sample("v627.insv"), sample("v635.insv")) else {
+        return;
+    };
+    let (_l, g, cx) = gpu();
+    let (w, h) = (7680usize, 3840usize);
+    let grab = |src: &PathBuf, k: f64, s: f32| {
+        let t = k * 1001.0 / 30000.0;
+        let (fx, got) = capture(&g, &[0]);
+        let (_, secs) = export(
+            &g,
+            &cx,
+            Job {
+                cut: Cut::Segs(vec![Seg {
+                    files: vec![src.clone()],
+                    t: [t, t],
+                }]),
+                path: out(&format!("nr_{k}_{s}.jpg")),
+                out: Out::Pano(w as u32),
+                enc: Enc::Jpeg(92, s),
+                raft: false,
+                colour: Some(0.1),
+                stab: None,
+                flat: false,
+                fx: Some(fx),
+                pre: None,
+            },
+        );
+        eprintln!("grab of frame {k} at strength {s}: {secs:.2} s");
+        stitch::read_texture(&g.device, &g.queue, &got.lock().unwrap()[0].1)
+    };
+    let lum = |px: &[u8]| -> Vec<f64> {
+        (px.chunks(4))
+            .map(|p| (0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64) / 255.0)
+            .collect()
+    };
+    let (r0, r1) = (h / 6, h - h / 6);
+    let stat = |y: &[f64]| {
+        let mut v = vec![];
+        for py in (r0..r1).step_by(4) {
+            for px in (2..w - 6).step_by(4) {
+                let (mut m, mut d) = (0.0, 0.0);
+                for j in py - 2..=py + 2 {
+                    for i in px - 2..=px + 2 {
+                        let a = y[j * w + i];
+                        m += a;
+                        d += (a - y[j * w + i + 4]).powi(2) + (a - y[(j + 4) * w + i]).powi(2);
+                    }
+                }
+                if (0.15..0.85).contains(&(m / 25.0)) {
+                    v.push(d / 50.0);
+                }
+            }
+        }
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 10].sqrt() * 255.0
+    };
+    let mean3 = |y: &[f64]| -> Vec<f64> {
+        let mut o = vec![0.0; w * h];
+        for j in r0..r1 {
+            for i in 1..w - 1 {
+                o[j * w + i] = (j - 1..=j + 1)
+                    .flat_map(|jj| (i - 1..=i + 1).map(move |ii| jj * w + ii))
+                    .map(|k| y[k])
+                    .sum::<f64>()
+                    / 9.0;
+            }
+        }
+        o
+    };
+    let grad = |b: &[f64], k: usize| [b[k + 1] - b[k - 1], b[k + w] - b[k - w]];
+    let [a, b] = [0.0, 0.5].map(|s| grab(&night, 293.0, s));
+    let (ya, yb) = (lum(&a), lum(&b));
+    let (ga, gb) = (stat(&ya), stat(&yb));
+    let (ba, bb) = (mean3(&ya), mean3(&yb));
+    let ks: Vec<usize> = (r0 + 2..r1 - 2)
+        .flat_map(|j| (2..w - 2).map(move |i| j * w + i))
+        .collect();
+    let mut mag: Vec<(f64, usize)> = ks
+        .iter()
+        .map(|&k| {
+            let q = grad(&ba, k);
+            (q[0].hypot(q[1]), k)
+        })
+        .collect();
+    mag.sort_by(|x, y| y.0.total_cmp(&x.0));
+    let (mut num, mut den) = (0.0, 0.0);
+    for &(_, k) in &mag[..mag.len() / 20] {
+        let (p, q) = (grad(&ba, k), grad(&bb, k));
+        num += p[0] * q[0] + p[1] * q[1];
+        den += p[0] * p[0] + p[1] * p[1];
+    }
+    let kept = num / den;
+    eprintln!(
+        "v627 frame 293 (night): noise statistic {ga:.2} -> {gb:.2} /255, strong edges' gradient kept {:.1} %, \
+         PSNR between the grabs {:.2} dB",
+        100.0 * kept,
+        psnr(
+            &a,
+            false,
+            &b.chunks(4)
+                .flat_map(|p| [p[0], p[1], p[2]])
+                .collect::<Vec<_>>(),
+            false
+        )
+    );
+    assert!(gb < ga / 2.0, "{ga} -> {gb}");
+    assert!(kept > 0.9, "{kept}");
+    let [a, b] = [0.0, 0.5].map(|s| grab(&day, 100.0, s));
+    assert!(
+        a == b,
+        "v635 frame 100 (statistic {:.2} /255) changed",
+        stat(&lum(&a))
+    );
+}
+
 /// A narrow flat view (1920 × 1080, 40°, lens 1's axis, far from the seam) of v635 frame 100 with the template seam
 /// and with RAFT: sharpness of each (mean squared luma gradient) and PSNR between them. RAFT views are drawn from the
 /// lenses through the flow (`stitch::Preview::seam`), so away from the seam they equal the template's; an
@@ -1077,7 +1202,7 @@ fn flat_sharpness() {
                         ..Default::default()
                     })),
                 },
-                enc: Enc::Jpeg(92),
+                enc: Enc::Jpeg(92, 0.0),
                 raft,
                 colour: Some(0.1),
                 stab: None,
@@ -1470,7 +1595,13 @@ fn timeline() {
         export(
             &g,
             &cx,
-            edit_job(t, out("timeline_grab.jpg"), flat(), Enc::Jpeg(90), Some(fx)),
+            edit_job(
+                t,
+                out("timeline_grab.jpg"),
+                flat(),
+                Enc::Jpeg(90, 0.0),
+                Some(fx),
+            ),
         );
         stitch::read_texture(&g.device, &g.queue, &got.lock().unwrap()[0].1)
     };
@@ -1877,7 +2008,7 @@ fn flat_flag() {
             out(&format!("flag_{flat}.jpg")),
             out(&format!("flag_{flat}.mp4")),
         );
-        export(&g, &cx, job(&j, Enc::Jpeg(90)));
+        export(&g, &cx, job(&j, Enc::Jpeg(90, 0.0)));
         let enc = Enc::Video {
             codec: Codec::H264,
             deep: false,
@@ -2075,7 +2206,7 @@ fn part_into() {
     let f = p.f.try_clone().unwrap();
     let job = Job {
         out: Out::Pano(512),
-        enc: Enc::Jpeg(90),
+        enc: Enc::Jpeg(90, 0.0),
         ..flat_job(&src, [1.0, 1.0], &jpg)
     };
     run(&g, &cx, job, strict(p), &stop, &mut |_| {}).unwrap();
@@ -2148,7 +2279,7 @@ fn stop_at_end() {
     let (_l, g, cx) = gpu();
     for (name, enc) in [
         ("stop_at_end.mp4", None),
-        ("stop_at_end.jpg", Some(Enc::Jpeg(90))),
+        ("stop_at_end.jpg", Some(Enc::Jpeg(90, 0.0))),
     ] {
         let path = out(name);
         let mut job = flat_job(&src, [0.0, 1.0], &path);
@@ -2716,7 +2847,7 @@ fn two_lanes() {
             let p = out(&format!("lanes_v635_{s}.jpg"));
             let job = Job {
                 out: Out::Pano(3840),
-                enc: Enc::Jpeg(90),
+                enc: Enc::Jpeg(90, 0.0),
                 ..flat_job(&v, [s, s], &p)
             };
             (b.push_into(job, strict()).unwrap(), p)
@@ -2794,7 +2925,7 @@ fn strict_concealed() {
     let stop = AtomicBool::new(false);
     for (name, enc, at) in [
         ("strict_concealed.mp4", None, 45),
-        ("strict_concealed.jpg", Some(Enc::Jpeg(90)), 0),
+        ("strict_concealed.jpg", Some(Enc::Jpeg(90, 0.0)), 0),
     ] {
         let path = out(name);
         let mut job = flat_job(&src, [0.0, 3.0], &path);
@@ -2856,7 +2987,7 @@ fn frozen_ok() {
     }
     let path = out("frozen_ok.jpg");
     let job = Job {
-        enc: Enc::Jpeg(90),
+        enc: Enc::Jpeg(90, 0.0),
         cut: Cut::Segs(vec![Seg {
             files: vec![src.clone()],
             t: [50.0 * 1001.0 / 30000.0; 2],

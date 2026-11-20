@@ -3,7 +3,7 @@ name = "fx"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Image effects on the shared wgpu device: colour adjustments, automatic colour and underwater correction, .cube LUTs and looks, log -> Rec.709, defringe, clarity, overlays"
+description = "Image effects on the shared wgpu device: colour adjustments, automatic colour and underwater correction, .cube LUTs and looks, log -> Rec.709, defringe, clarity, overlays, non-local means for stills"
 
 [dependencies]
 wgpu.workspace = true

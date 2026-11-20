@@ -1,6 +1,7 @@
 //! Image effects on the app's shared wgpu device (PLAN.md groups 7, 12, 14): colour adjustments, automatic colour and
 //! underwater correction, `.cube` LUTs and our own looks, a log → Rec.709 input transform, purple / green / blue
-//! defringe, clarity and sharpening, overlays (stickers, watermarks, text) on flat or equirect frames.
+//! defringe, clarity and sharpening, overlays (stickers, watermarks, text) on flat or equirect frames; non-local means
+//! for stills from video (`Nlm`, a pass of its own).
 //!
 //! Frames are `Rgba8Unorm` or `Rgba16Float` textures holding display-encoded values (sRGB transfer, as the stitcher
 //! writes them; 16-bit float carries 10-bit export precision, values above 1 pass through). Steps that need linear
@@ -19,11 +20,13 @@
 //!    intensity → the overlay layer over it in linear light. Formulas: `Params`.
 
 mod cube;
+mod nlm;
 mod over;
 #[cfg(test)]
 mod tests;
 
 pub use cube::{Cube, Grade, Log, Look, Lut};
+pub use nlm::Nlm;
 pub use over::{Image, Overlay, Place};
 
 use glam::{DMat3, DVec3};

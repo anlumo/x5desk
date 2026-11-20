@@ -473,6 +473,7 @@ fn cat() -> Catalog {
             pano_width: 3200,
             flat: [1920, 1080],
             jpeg_quality: r(50.0, 100.0, 92.0),
+            noise_reduction: r(0.0, 1.0, 0.5),
         },
         blur: vec![
             Named {
