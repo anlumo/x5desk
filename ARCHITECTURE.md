@@ -28,8 +28,8 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 - `media::part`'s `finish_cases` runs in a dir named by `X5_FAT_DIR` too (on FAT or exFAT, where macOS renumbers a
   file as it is written; such an image will do), and mcp's `tests/render.rs` `fat_refused` only there.
 - Tests that make paths in `$XDG_RUNTIME_DIR` name them `<name>-<pid>` and remove them through a drop guard, also
-  when they fail. The test hook's burn cache is the exception: `x5desk-cubecl/<n>`, shared by every hook run on
-  purpose, one process to a slot (`flock`), kept.
+  when they fail. The test hook's burn cache is the exception: `x5desk-cubecl/<vendor>-<device>/<n>`, shared by
+  every hook run on purpose, one process to a slot (`flock`), kept.
 - Concurrent test runs share `X5_FIXTURES`, `X5_OUT` and the temp dir: stitch, fx, the player's proxy and live's
   `tests/rtmp.rs` write a fixture cached under a fixed name under a name of the process (and thread) and rename it into
   place whole, and live's `tests/rtmp.rs` names what its listeners receive `<pid>-<name>`; other fixed-name caches
@@ -79,7 +79,12 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 - Decoded pictures are NV12 (8-bit) or P010 (H.265 Main 10) `wgpu::Texture`s: the first SPS's bit depth decides,
   `texture(f).format()` tells, and a picture of the other depth is `Error::Bad`. Plane views are `R8Unorm` /
   `Rg8Unorm` or `R16Unorm` / `Rg16Unorm`; a view with the plane aspect and no format gets them. A P010 view reads
-  the 10-bit code d as 64·d / 65535. Home state is `RESOURCE`.
+  the 10-bit code d as 64·d / 65535. Home state is `RESOURCE`. Where the driver keeps DPB and output images
+  distinct (RADV; preferred when both are offered), a picture decodes straight into its ring texture. Where they
+  only coincide (NVIDIA: H.264 and H.265 alike), it decodes into its DPB slot and the same decode submit copies it
+  into the ring texture (the decode family must have transfer; `decode::coincide`): DPB images never leave the
+  decode queue, so later pictures reference a slot while wgpu samples its copy, and a slot is reused by reference
+  marking alone, as with distinct images. The consumer's side is the same in both modes.
   Before each wgpu submit that samples picture `f`, call the decoder's `acquire(&gpu, f)` (stages the timeline wait
   `done ≥ f + 1`). After the last submit that samples it, call `release(&gpu, f)` (stages the signal `free = f + 1`).
   wgpu attaches staged semaphores to the next submit on the queue from any thread: a wait taken by an earlier submit
@@ -116,7 +121,11 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   rate control buffer in ms (1000 for files, 100 for low-latency RTMP). The VCN firmware's CBR (RADV and radeonsi alike)
   runs 4 to 10 % over at 100 ms and near the target from about 500 ms on ordinary content (`video` test `cbr`); initial
   occupancy, GOP flags and GOP-remaining hints change nothing. RADV: no B-frames, quality level 3 of H.265 under rate
-  control writes corrupt slices (excluded by `Encoder::levels`).
+  control writes corrupt slices (excluded by `Encoder::levels`). NVIDIA (620.73, RTX 4090): its CBR stays within 2 % at
+  100 to 1000 ms (test `cbr`); it takes rate control only with the codec's layer struct chained
+  (`VkVideoEncodeH26xRateControlLayerInfo`, optional in the spec; without it `vkEndCommandBuffer` returns
+  `ERROR_INVALID_VIDEO_STD_PARAMETERS` for the control command), and writes the encode feedback (offset, size) as 32
+  bits even when asked for 64, so `packet` reads 32-bit results on every driver.
 - DMA-BUF export (`live::dmabuf`): `Image::acquire()` before the first submit that writes an exported image (content
   undefined afterwards), `Image::release()` after the last one; it returns the sync_file and also attaches it to the
   DMA-BUF as its write fence, so implicit-sync consumers (PipeWire clients) are correct too.
@@ -430,20 +439,24 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   its GATE never has a writer; its two lanes' RAFT flows take turns at BURN (a RAFT still waits out an export's first
   kernel compile).
 - burn's cache: burn keeps its device measurements and autotune results (burn feature `persistence`) in a slot of
-  `<cache>/x5desk/cubecl` (`stitch::cache(Option<&Path>)`, which `gpu::open` calls before `stitch::attach`; the first
-  call wins); a real MCP host's in `<cache>/x5desk/cubecl-mcp`, apart from the window's slots (so neither takes the
-  other's warm one) and warm across sessions. Test-hook runs (the app's `X5DESK_TEST`, `x5desk mcp` under `--sim` or
-  `X5DESK_TEST`) share `$XDG_RUNTIME_DIR/x5desk-cubecl` (the temp dir without it), so they start warm too, if it is a
-  dir of this user's, not a symlink, that no other user can write to (`cam::dirs::mine`, made 0700 when missing); any
-  other burn user (tests) gets cubecl's own root from `stitch::attach` (`target/environment` of the outermost Cargo
-  workspace above the working dir, else the user cache dir). A slot is the first `<n>` (made 0700) whose `lock` the
-  process can `flock`, never through a symlink another user planted (the lock made with `O_EXCL`, else taken only if
-  `lstat` shows a plain file): cubecl-environment 0.11's database (turso 0.8, experimental multi-process WAL) loses
-  acknowledged writes, reads corrupt pages and panics when processes share it. The lock goes with the process however
-  it ends, so slots are reused and never outnumber the processes that ran at once (nothing trims them). With no dir (a
-  hook dir refused, neither `XDG_CACHE_HOME` nor `HOME`) or no slot locked (no locks on that file system, no write
-  access), cubecl's root is `/dev/null`, where its database can't be opened, and cubecl keeps it all in memory. Build
-  records are off. With a warm slot RAFT's first job only compiles its kernels (≈ 2 s instead of ≈ 10 s on a quiet
+  `<cache>/x5desk/cubecl/<vendor>-<device>` (`stitch::cache(Option<&Path>, &Adapter)`, which `gpu::open` calls before
+  `stitch::attach`; the first call wins). Apart per GPU model (PCI ids, e.g. `10de-2684`): cubecl 0.11 files autotune
+  picks under the device's index in the process (`device-101-0-wgpu<spirv>` on every GPU), so a shared dir ran the
+  Radeon's picks on the RTX 4090, where its pick for RAFT's f16 convolutions (`simple_sync_cmma`, 90112 bytes of
+  workgroup memory, the 4090 has 49152) panics instead of being tuned away. A real MCP host's in
+  `<cache>/x5desk/cubecl-mcp/<vendor>-<device>`, apart from the window's slots (so neither takes the other's warm one)
+  and warm across sessions. Test-hook runs (the app's `X5DESK_TEST`, `x5desk mcp` under `--sim` or `X5DESK_TEST`) share
+  `$XDG_RUNTIME_DIR/x5desk-cubecl` (the temp dir without it), so they start warm too, if it is a dir of this user's, not
+  a symlink, that no other user can write to (`cam::dirs::mine`, made 0700 when missing); any other burn user (tests)
+  gets cubecl's own root from `stitch::attach` (`target/environment` of the outermost Cargo workspace above the working
+  dir, else the user cache dir), each per GPU model the same way. A slot is the first `<n>` (made 0700) there whose
+  `lock` the process can `flock`, never through a symlink another user planted (the lock made with `O_EXCL`, else taken
+  only if `lstat` shows a plain file): cubecl-environment 0.11's database (turso 0.8, experimental multi-process WAL)
+  loses acknowledged writes, reads corrupt pages and panics when processes share it. The lock goes with the process
+  however it ends, so slots are reused and never outnumber the processes that ran at once (nothing trims them). With no
+  dir (a hook dir refused, neither `XDG_CACHE_HOME` nor `HOME`) or no slot locked (no locks on that file system, no
+  write access), cubecl's root is `/dev/null`, where its database can't be opened, and cubecl keeps it all in memory.
+  Build records are off. With a warm slot RAFT's first job only compiles its kernels (≈ 2 s instead of ≈ 10 s on a quiet
   GPU; 4–9 s instead of 22–46 s under other load). A configure retry (below) that lands in a burn job still waits for
   the job's end, the UI frozen meanwhile.
 - The window owns the device's uncaptured-error handler (`main.rs` `errors`). A `Surface::configure` that fails with
@@ -701,8 +714,8 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   the host and its camera session. Its steps: (1) the device (Linux, with no adapter at all: no render node, a VM's or
   container's; one the user can't open, the `render` group; else the Vulkan driver), (2) the pipelines
   (`stitch::Ctx::new`), (3) the X5's H.265 Main at 3840 × 3840 and the decode caps
-  per profile (`video::check::h265`, `caps`; Intel's coinciding DPB mode refused; the NV12 / P010 output query only
-  logged), (4) the pixels (`check::pcm` at 256 × 256: three H.264 High I_PCM IDRs, luma 16, 128 and 235, each with a
+  per profile (`video::check::h265`, `caps`; a DPB mode the decoder takes: distinct, or coinciding with transfer on
+  the decode queue; the NV12 / P010 output query only logged), (4) the pixels (`check::pcm` at 256 × 256: three H.264 High I_PCM IDRs, luma 16, 128 and 235, each with a
   skipped P picture, more frames than the ring has, every luma sample read back exact, none concealed; skipped when the
   decoder refuses High), (5) the encode caps and one picture through each encoder (one that fails is left out: with
   none, stills only); it never attaches burn, so it takes no cubecl slot. Then in process: `gpu::open` with the

@@ -1068,8 +1068,13 @@ fn gpu_sigterm_compile() {
     let a = json!({ "path": src.to_str().unwrap(), "preset": "pano4k" });
     let (v, _) = k.render("export", a, 60);
     let h = job(&v);
+    // slots per GPU model: x5desk-cubecl/<vendor>-<device>/<n>
     let cc = run.join("x5desk-cubecl");
-    let db = || (names(&cc).iter()).any(|n| cc.join(n).join("default.db").exists());
+    let db = || {
+        (names(&cc).iter()).any(|g| {
+            (names(&cc.join(g)).iter()).any(|n| cc.join(g).join(n).join("default.db").exists())
+        })
+    };
     let v = k.until(&h, 60, |v| v["phase"] == "compiling" && db());
     assert_eq!(v["frames_done"], 0, "{v}");
     let took = term_export(&t, &mut k, &h);

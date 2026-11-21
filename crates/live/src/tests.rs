@@ -879,7 +879,8 @@ fn tiled() {
             all.len(),
             pick.planes
         );
-        assert_eq!(pick.modifier, all[0].0);
+        // RADV picks its first in device order, NVIDIA one by the image's size
+        assert!(pick.modifier != LINEAR && all.iter().any(|m| m.0 == pick.modifier));
         for &(m, n) in &all {
             let img = Image::new(g, fmt, w, h, U, &[m]).unwrap();
             assert_eq!((img.modifier, img.planes.len()), (m, n as usize));
@@ -1012,7 +1013,14 @@ fn obs_mods() {
     s.add(1, "360");
     let (fmt, w, h) = (Fmt::Rgba, 1920, 960);
     let all: Vec<u64> = modifiers(g, fmt, U, w, h).iter().map(|m| m.0).collect();
-    let fewer: Vec<u64> = all[1..].iter().copied().filter(|&m| m != LINEAR).collect();
+    // the driver's pick among a list: RADV takes its first in device order, NVIDIA one by the image's size
+    let pick = |l: &[u64]| Image::new(g, fmt, w, h, U, l).unwrap().modifier;
+    let pk = pick(&all);
+    let fewer: Vec<u64> = all
+        .iter()
+        .copied()
+        .filter(|&m| m != pk && m != LINEAR)
+        .collect();
     // each client and the modifier of the last Format it got
     let mut cl: Vec<(Client, u64)> = vec![];
     let (mut ring, mut mods, mut n) = (None::<Ring>, None, 0u32);
@@ -1032,7 +1040,7 @@ fn obs_mods() {
         let m = s.modifiers(1, fmt.drm());
         if mods.as_ref() != Some(&m) {
             let r = Ring::new(g, fmt, w, h, U, &m, 3).unwrap();
-            assert!(!s.takes(1, fmt.drm(), all[0]) || r.imgs[0].modifier == all[0]);
+            assert!(!s.takes(1, fmt.drm(), pk) || r.imgs[0].modifier == pk);
             s.format(
                 1,
                 Format {
@@ -1050,16 +1058,15 @@ fn obs_mods() {
         let md = r.imgs[0].modifier;
         assert!(s.takes(1, fmt.drm(), md));
         let want = match what {
-            "all" => all[0],
+            "all" => pk,
             "no list" => LINEAR,
-            _ => *fewer.first().unwrap_or(&LINEAR),
+            _ => pick(&fewer),
         };
         println!(
             "{what}: {} clients, common list {:x?}, ring in {md:#x}",
             cl.len(),
             mods.as_ref().unwrap()
         );
-        // the driver's pick among the list: its first in device order
         assert_eq!(md, want, "{what}");
         for _ in 0..3 {
             s.poll();
@@ -1490,7 +1497,10 @@ fn pw_tiled() {
     println!(
         "sent {n}; mode {m:x?} (device order {all:x?}); dequeue + queue {cpu:?} CPU per frame"
     );
-    assert_eq!(m.modifier, Some(all[0]));
+    let pick = Image::new(g, Fmt::Rgba, w, h, pw::USAGE, &all)
+        .unwrap()
+        .modifier;
+    assert_eq!(m.modifier, Some(pick));
     std::thread::sleep(Duration::from_millis(100));
     let fam = match g.ext.contains(&ash::ext::queue_family_foreign::NAME) {
         true => vk::QUEUE_FAMILY_FOREIGN_EXT,
@@ -1503,7 +1513,7 @@ fn pw_tiled() {
             fmt: Fmt::Rgba,
             w,
             h,
-            modifier: all[0],
+            modifier: pick,
             fd: x.fd.as_ref().unwrap().as_raw_fd(),
             planes: x.planes.clone(),
         };

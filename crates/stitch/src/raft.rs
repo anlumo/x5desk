@@ -88,20 +88,26 @@ fn storage(t: &Tensor<4>) -> Result<(Res, [u32; 4]), String> {
 }
 
 /// Keeps what burn learns about the device (its measured throughput, the autotune results) under `base`, so RAFT's
-/// first job on a later start only compiles its kernels (≈ 2 s instead of ≈ 10 s). One process at a time per dir:
+/// first job on a later start only compiles its kernels (≈ 2 s instead of ≈ 10 s). Kept apart per GPU model (`ad`'s
+/// PCI vendor and device, `<base>/<vendor>-<device>`): cubecl 0.11 files its autotune picks under the device's index
+/// in the process, the same on every GPU, so it would run another GPU's picks here, and one that doesn't fit this GPU
+/// panics instead of being tuned away (the Radeon 8060S's pick for RAFT's f16 convolutions, `simple_sync_cmma`, asks
+/// the RTX 4090 for 90112 bytes of workgroup memory, which has 49152). One process at a time per dir:
 /// cubecl's database (cubecl-environment 0.11 on turso 0.8's experimental multi-process WAL) loses acknowledged
-/// writes, reads corrupt pages and panics when processes share it, so this takes the first slot `<base>/<n>` it can
+/// writes, reads corrupt pages and panics when processes share it, so this takes the first slot `<n>` there it can
 /// lock (the kernel unlocks it when the process ends, however it ends). With no `base`, or no slot locked there (no
 /// write access, no locks on that file system, a symlink as a lock), it keeps nothing: cubecl keeps what it learns
 /// in memory. `base` is a dir no other user can write to. No build records (a session per run). The first call wins
 /// (burn reads its configuration once), `attach`'s default (cubecl's own root) included; cubecl.toml files are not
 /// read, the `CUBECL_*` variables are.
-pub fn cache(base: Option<&Path>) {
+pub fn cache(base: Option<&Path>, ad: &wgpu::Adapter) {
     use burn::cubecl::config::{CubeClRuntimeConfig, RuntimeConfig, cache::CacheConfig};
     if CubeClRuntimeConfig::storage().lock().is_some() {
         return;
     }
-    let d = match base.and_then(|b| slot(b, File::try_lock)) {
+    let i = ad.get_info();
+    let gpu = format!("{:04x}-{:04x}", i.vendor, i.device);
+    let d = match base.and_then(|b| slot(&b.join(gpu), File::try_lock)) {
         Some((d, l)) => {
             // held until the process ends
             std::mem::forget(l);
@@ -172,7 +178,7 @@ pub fn attach(
     }
     // for a user that chose no cache dir (tests): cubecl's own root
     let root = burn::cubecl::config::cache::CacheConfig::Target.root();
-    cache(Some(&root));
+    cache(Some(&root), ad);
     let setup = WgpuSetup {
         instance: inst.clone(),
         adapter: ad.clone(),

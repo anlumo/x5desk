@@ -830,8 +830,12 @@ impl Encoder {
             .result()?;
             let mut binds = vec![];
             for r in &reqs {
-                e.mem
-                    .push(g.alloc(r.memory_requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)?);
+                // a bind may allow no device-local type at all; then any type it allows
+                let q = r.memory_requirements;
+                e.mem.push(
+                    g.alloc(q, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                        .or_else(|_| g.alloc(q, vk::MemoryPropertyFlags::empty()))?,
+                );
                 binds.push(
                     vk::BindVideoSessionMemoryInfoKHR::default()
                         .memory_bind_index(r.memory_bind_index)
@@ -1261,7 +1265,7 @@ impl Encoder {
         // no maxFrameSize: RADV (26.2.5, main of 2026-10) hands the spec's bytes to the firmware's max_au_size, which
         // counts bits (radeonsi passes VA-API's bits there), so every frame was clamped to an eighth and CBR padded
         // the rest with filler; scaled to bits it changed no frame (H.264 1080p at 100 and 250 ms, H.265 4K at 1000 ms)
-        let layer = [vk::VideoEncodeRateControlLayerInfoKHR::default()
+        let layer = vk::VideoEncodeRateControlLayerInfoKHR::default()
             .average_bitrate(avg)
             .max_bitrate(match c.rate {
                 Rate::Cbr(b) => b,
@@ -1269,7 +1273,17 @@ impl Encoder {
                 Rate::Qp(_) => 0,
             })
             .frame_rate_numerator(c.fps[0])
-            .frame_rate_denominator(c.fps[1])];
+            .frame_rate_denominator(c.fps[1]);
+        // no QP limits; the spec leaves the codec's layer struct out, but NVIDIA (620.73) then rejects the control
+        // command that sets the layer: vkEndCommandBuffer returns ERROR_INVALID_VIDEO_STD_PARAMETERS
+        let (mut l5, mut l4) = (
+            vk::VideoEncodeH265RateControlLayerInfoKHR::default(),
+            vk::VideoEncodeH264RateControlLayerInfoKHR::default(),
+        );
+        let layer = [match h265 {
+            true => layer.push_next(&mut l5),
+            false => layer.push_next(&mut l4),
+        }];
         let mut r5 = vk::VideoEncodeH265RateControlInfoKHR::default()
             .flags(
                 vk::VideoEncodeH265RateControlFlagsKHR::REGULAR_GOP
@@ -1423,17 +1437,19 @@ impl Encoder {
             return Ok(false);
         }
         let k = (f % SLOTS as u64) as usize;
-        let mut r = [[0u64; 3]];
+        // 32-bit results: NVIDIA (620.73) writes offset and size as 32 bits even when asked for 64, the status at the
+        // third 64-bit slot
+        let mut r = [[0u32; 3]];
         unsafe {
             self.dev.get_query_pool_results(
                 self.query,
                 k as u32,
                 &mut r,
-                vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WITH_STATUS_KHR,
+                vk::QueryResultFlags::WITH_STATUS_KHR,
             )?;
         }
-        let [off, n, st] = r[0];
-        match st as i64 as i32 {
+        let [off, n, st] = r[0].map(|v| v as u64);
+        match st as i32 {
             1 => {}
             -1000299000 => return Err(Bad("picture larger than the bitstream buffer")),
             _ => return Err(Bad("encode failed")),

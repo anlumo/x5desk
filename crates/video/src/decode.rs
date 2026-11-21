@@ -1,7 +1,10 @@
-//! Vulkan Video decode (H.264 / H.265 Main and Main 10) into a ring of NV12 / P010 images that wgpu samples in place
-//! (DPB and output distinct, no copy). Rules from PLAN.md §2.1:
+//! Vulkan Video decode (H.264 / H.265 Main and Main 10) into a ring of NV12 / P010 images that wgpu samples in place.
+//! Where the driver keeps DPB and output images distinct (RADV), a picture decodes into its ring image, no copy; where
+//! they coincide (NVIDIA), into its DPB slot, and the decode queue copies it into the ring image: a DPB image never
+//! leaves the decode queue, so later pictures reference it while wgpu samples the copy. Rules from PLAN.md §2.1:
 //! - An output image's home state is RESOURCE (SHADER_READ_ONLY_OPTIMAL), wgpu's initial state for it. The decode
-//!   queue moves it to VIDEO_DECODE_DST, decodes and moves it back; wgpu only samples it.
+//!   queue moves it to VIDEO_DECODE_DST (coinciding: TRANSFER_DST), decodes (copies) and moves it back; wgpu only
+//!   samples it.
 //! - Output images are CONCURRENT across wgpu's family and the decode family; DPB images are private.
 //! - Timeline `done`: the decode of frame f signals f + 1. Timeline `free`: each wgpu submit that samples f waits for
 //!   `done ≥ f + 1` (`Ring::acquire`), the next submit after the last of them signals f + 1 (`Ring::release`); the
@@ -293,6 +296,7 @@ pub struct Decoder {
     /// index of the next frame
     pub frame: u64,
     deep: bool,
+    co: bool, // DPB and output coincide: a picture decodes into its DPB slot, then is copied into the ring
     st: St,
     refs: Vec<Ref>,
     dpb: Vec<(vk::Image, vk::ImageView)>,
@@ -351,16 +355,27 @@ pub(crate) unsafe fn caps(
     Ok((caps, dc.flags))
 }
 
-/// What a decoder here needs of them: DPB and output images distinct (not only coinciding, Intel's mode) and
-/// reference images apart.
-pub(crate) fn distinct(
+/// The DPB mode a decoder here takes from them, reference images apart either way: Some(false) DPB and output images
+/// distinct, preferred; Some(true) only coinciding (NVIDIA, Intel), which needs transfer on the decode queue for the
+/// copy into the ring; None neither.
+pub(crate) fn coincide(
+    g: &Gpu,
     caps: &vk::VideoCapabilitiesKHR,
     dc: vk::VideoDecodeCapabilityFlagsKHR,
-) -> bool {
-    dc.contains(vk::VideoDecodeCapabilityFlagsKHR::DPB_AND_OUTPUT_DISTINCT)
-        && caps
-            .flags
-            .contains(vk::VideoCapabilityFlagsKHR::SEPARATE_REFERENCE_IMAGES)
+) -> Option<bool> {
+    use vk::VideoDecodeCapabilityFlagsKHR as D;
+    let copy = || {
+        let q = unsafe { g.inst.get_physical_device_queue_family_properties(g.pd) };
+        q[g.dec.family as usize]
+            .queue_flags
+            .contains(vk::QueueFlags::TRANSFER)
+    };
+    match () {
+        _ if !(caps.flags).contains(vk::VideoCapabilityFlagsKHR::SEPARATE_REFERENCE_IMAGES) => None,
+        _ if dc.contains(D::DPB_AND_OUTPUT_DISTINCT) => Some(false),
+        _ if dc.contains(D::DPB_AND_OUTPUT_COINCIDE) && copy() => Some(true),
+        _ => None,
+    }
 }
 
 fn barrier(
@@ -479,9 +494,8 @@ impl Decoder {
             let list = &list as *const _ as *const c_void;
 
             let (caps, dc) = caps(g, &pr[0], h265)?;
-            if !distinct(&caps, dc) {
-                return Err(Bad("the driver lacks distinct DPB / output images"));
-            }
+            let co =
+                coincide(g, &caps, dc).ok_or(Bad("the driver lacks a DPB mode we decode in"))?;
             if w > caps.max_coded_extent.width || h > caps.max_coded_extent.height {
                 return Err(Bad("picture larger than the driver decodes"));
             }
@@ -572,11 +586,13 @@ impl Decoder {
                 height: h,
                 depth_or_array_layers: 1,
             };
+            let dst = match co {
+                true => vk::ImageUsageFlags::TRANSFER_DST,
+                false => vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR,
+            };
             while ring.tex.len() < out {
                 let (img, m) = image(
-                    vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR
-                        | vk::ImageUsageFlags::SAMPLED
-                        | vk::ImageUsageFlags::TRANSFER_SRC,
+                    dst | vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC,
                     vk::ImageCreateFlags::MUTABLE_FORMAT | vk::ImageCreateFlags::EXTENDED_USAGE,
                     &[g.gfx, g.dec.family],
                 )?;
@@ -614,8 +630,9 @@ impl Decoder {
                     wgpu::TextureUses::RESOURCE,
                 ));
                 ring.imgs.push(img);
-                ring.views
-                    .push(iv(img, vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR)?);
+                if !co {
+                    ring.views.push(iv(img, dst)?);
+                }
             }
             ring.shape = Some(shape);
 
@@ -626,6 +643,7 @@ impl Decoder {
                 view,
                 frame: 0,
                 deep,
+                co,
                 st,
                 refs: vec![Ref::default(); slots],
                 dpb: vec![],
@@ -679,8 +697,12 @@ impl Decoder {
             .result()?;
             let mut binds = vec![];
             for r in &reqs {
-                d.mem
-                    .push(g.alloc(r.memory_requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)?);
+                // a bind may allow no device-local type at all; then any type it allows
+                let q = r.memory_requirements;
+                d.mem.push(
+                    g.alloc(q, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                        .or_else(|_| g.alloc(q, vk::MemoryPropertyFlags::empty()))?,
+                );
                 binds.push(
                     vk::BindVideoSessionMemoryInfoKHR::default()
                         .memory_bind_index(r.memory_bind_index)
@@ -690,15 +712,23 @@ impl Decoder {
             }
             (vq.bind_video_session_memory_khr)(dh, d.session, binds.len() as u32, binds.as_ptr())
                 .result()?;
-            for i in 0..slots {
-                let (img, m) = image(
+            // coinciding: a slot is also the decode's output and the copy's source
+            let (u, x) = match co {
+                true => (
+                    vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR
+                        | vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR,
+                    vk::ImageUsageFlags::TRANSFER_SRC,
+                ),
+                false => (
                     vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR,
-                    vk::ImageCreateFlags::empty(),
-                    &[],
-                )?;
+                    vk::ImageUsageFlags::empty(),
+                ),
+            };
+            for i in 0..slots {
+                let (img, m) = image(u | x, vk::ImageCreateFlags::empty(), &[])?;
                 d.mem.push(m);
                 d.dpb.push((img, vk::ImageView::null()));
-                d.dpb[i].1 = iv(img, vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR)?;
+                d.dpb[i].1 = iv(img, u)?;
             }
 
             let mut info = vk::BufferCreateInfo::default()
@@ -970,11 +1000,12 @@ impl Decoder {
             .src_buffer(self.bs)
             .src_buffer_offset((k * self.slot) as u64)
             .src_buffer_range(range as u64)
-            .dst_picture_resource(
-                vk::VideoPictureResourceInfoKHR::default()
+            .dst_picture_resource(match self.co {
+                true => res[n],
+                false => vk::VideoPictureResourceInfoKHR::default()
                     .coded_extent(ext)
                     .image_view_binding(self.ring.views[k]),
-            )
+            })
             .setup_reference_slot(&setup)
             .reference_slots(&sl[..n]);
         dec.p_next = if h265 {
@@ -998,17 +1029,18 @@ impl Decoder {
                 true => vk::ImageLayout::UNDEFINED,
                 false => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             };
+            let (out, s) = (self.ring.imgs[k], self.dpb[pic.setup].0);
+            let (dpb, src) = (
+                vk::ImageLayout::VIDEO_DECODE_DPB_KHR,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            );
+            let to = match self.co {
+                true => vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                false => vk::ImageLayout::VIDEO_DECODE_DST_KHR,
+            };
             let bars = [
-                barrier(
-                    self.ring.imgs[k],
-                    home,
-                    vk::ImageLayout::VIDEO_DECODE_DST_KHR,
-                ),
-                barrier(
-                    self.dpb[pic.setup].0,
-                    vk::ImageLayout::UNDEFINED,
-                    vk::ImageLayout::VIDEO_DECODE_DPB_KHR,
-                ),
+                barrier(out, home, to),
+                barrier(s, vk::ImageLayout::UNDEFINED, dpb),
             ];
             let mem = [vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
@@ -1028,12 +1060,37 @@ impl Decoder {
             }
             (g.vdq.fp().cmd_decode_video_khr)(cb, &dec);
             (vq.cmd_end_video_coding_khr)(cb, &vk::VideoEndCodingInfoKHR::default());
-            let back = [barrier(
-                self.ring.imgs[k],
-                vk::ImageLayout::VIDEO_DECODE_DST_KHR,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            )];
-            d.cmd_pipeline_barrier(cb, all, all, none, &[], &[], &back);
+            if self.co {
+                // the slot goes back to the DPB layout after: layout transitions keep its picture
+                d.cmd_pipeline_barrier(cb, all, all, none, &[], &[], &[barrier(s, dpb, src)]);
+                let cp = [
+                    (vk::ImageAspectFlags::PLANE_0, 1),
+                    (vk::ImageAspectFlags::PLANE_1, 2),
+                ]
+                .map(|(aspect_mask, q)| {
+                    let l = vk::ImageSubresourceLayers {
+                        aspect_mask,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    };
+                    vk::ImageCopy::default()
+                        .src_subresource(l)
+                        .dst_subresource(l)
+                        .extent(vk::Extent3D {
+                            width: pic.w / q,
+                            height: pic.h / q,
+                            depth: 1,
+                        })
+                });
+                d.cmd_copy_image(cb, s, src, out, to, &cp);
+            }
+            let back = [
+                barrier(out, to, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+                barrier(s, src, dpb),
+            ];
+            let nb = 1 + self.co as usize;
+            d.cmd_pipeline_barrier(cb, all, all, none, &[], &[], &back[..nb]);
             d.end_command_buffer(cb)?;
 
             let nw = (f >= r) as usize;

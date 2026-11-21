@@ -157,10 +157,49 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   fresh tracks, 937 s). Open: driver or the 4090's link (ffmpeg's
   Vulkan decode alone against a compute load from a plain process would tell); the validation layers aren't
   installed, so crate video's sync was only read against the spec (no defect found).
-- [ ] **No export on the RTX 4090.** Started on the 4090, the export fails the GPU self-test at step 3: NVIDIA's
-  driver offers H.265 decode only with DPB and output images coinciding, and crate video requires them distinct. On
-  this host the app therefore decodes and runs its networks on the Radeon (`VK_ICD_FILENAMES`). Support coinciding
-  images, or pick the adapter by what it can decode.
+- [x] **No export on the RTX 4090.** NVIDIA's driver offers H.264 and H.265 decode only with DPB and output images
+  coinciding. Crate video now decodes that way too (`decode::coincide`): a picture decodes into its DPB slot and the
+  same decode submit copies it into the ring texture (the decode family needs transfer; NVIDIA's has it), so DPB
+  images never leave the decode queue; distinct images stay preferred. NVIDIA's decoder and encoder each have one
+  session memory bind (16 / 8 KiB) that allows only a host-cached type: they fall back to any type a bind allows (the
+  probe build's `PROBE alloc` lines). Two encoder faults, found by bisecting the encode command (620.73): NVIDIA
+  rejects a rate control layer without the codec's layer struct, which the spec makes optional (`vkEndCommandBuffer`
+  returns `ERROR_INVALID_VIDEO_STD_PARAMETERS` for the control command; FFmpeg chains it), so `Encoder::encode` chains
+  an empty one (no QP limits); and it writes the encode feedback as 32 bits even when asked for 64 (raw
+  `[0x76_0000_0000, 0, 1]` where RADV writes `[0, 0x55, 1]`), so `packet` reads 32-bit results. RAFT's panic on the
+  4090 ("Shared memory budget exceeded: 90112 bytes, 49152 allowed") was the Radeon's autotune picks: cubecl 0.11
+  files them under the device's index in the process, the same on both GPUs, so a shared cache dir ran the Radeon's
+  `simple_sync_cmma` for RAFT's f16 convolutions on the 4090 (a still failed on a copy of that cache and rendered on a
+  fresh one); `stitch::cache` keeps burn's slots per GPU model (`<base>/<vendor>-<device>/<n>`; old `<base>/<n>`
+  slots stay on disk unused, one tuning per GPU). The Radeon is unchanged: v635's exports (flat H.264, pano4k with
+  RAFT, pano4k 10-bit) and stills byte-identical to main with the wip commit (its per-GPU slot seeded with the old
+  picks), the same speed (81.9 fps), crate video's encode figures identical, its tests as before (known: `cbr`,
+  `h265_lens0`, export `segments`). On the RTX 4090 (NVIDIA 620.73.04, kernel 7.3.5; `target/nv-scratch/nvq3.sh`,
+  `nvwide.sh`, `summary3.sh`): the self-test passes with the pixel check and all three encoders; all 21,060 lens
+  frames of v606, v627, v635 equal FFmpeg's, idle and under RAFT; exports and stills run (pano4k with RAFT 12.7 fps,
+  flat 1280 × 720 H.264 109 fps) and match the Radeon's (PSNR mean / min: flat 50.2 / 42.2 dB, 10-bit pano
+  42.4 / 39.5, RAFT pano 41.4 / 34.8, stills 53.8 and 45.0); crates stitch, shotlab, export, live and the app (the
+  player's seam and stabiliser tests, the live outputs' OBS, PipeWire and RTMP tests, the MCP tests) pass but for
+  the points below. The app takes the 4090 whenever Vulkan sees it (`video::Gpu::new`: wgpu's high-performance
+  adapter; `VK_ICD_FILENAMES` picks the Radeon). Left:
+  - This card's decode returns a wrong reference picture now and then (the pictures to the next IDR differ):
+    FFmpeg's own Vulkan decode of one stream, alone, in 9 of 150 runs (the Radeon 0 of 30;
+    `target/nv-scratch/ffdec.sh`), ours in crate video's `sizes` (2 of 4 runs), `x26x_matches_ffmpeg` (1 of 5) and the
+    app's `clip::tests::open_gop` (2 of 5), another frame each time. Driver or the card's link (RTX 4090 PCIe link);
+    another NVIDIA card would tell. Else: decode on the Radeon and run the networks on the 4090.
+  - Encoder differences two tests' thresholds don't allow: export's `queue` (frame 7 of a 0.5 s 854 × 480 H.264
+    export at CBR 20 Mbit/s 35.4 dB against the rendered frame, the Radeon 39.0, the test wants 36: NVIDIA spends
+    15 of the 20 Mbit/s there) and the app's `export::tests::timeline_faces` (blurred vs sharp export away from the
+    faces 0.248, the Radeon 0.014, the test wants under 0.1; guess: NVIDIA's rate control requantises the whole frame).
+  - The exports' quality level 0 (`Cfg.quality`) is RADV's balanced preset but NVIDIA's lowest, by the look of it:
+    `queue`'s frame 7 at levels 0–4 35.4, 36.0, 36.9, 36.9, 36.3 dB. A per-driver level is a decision (speeds not
+    measured).
+  - DMA-BUF: NV12 in NVIDIA's tallest block-linear modifier (`0x300000000606015`) at 1920 × 1080 doesn't survive a
+    re-import (crate live's `tiled`: 65 chroma samples wrong in rows 518–539; the export's chroma plane is 640 rows,
+    5 blocks of 128, not of the modifier's 256: guess, the driver shrinks that plane's blocks). The driver's own pick
+    at that size (`…14`) round-trips, and the outputs fixate the driver's pick among what a consumer takes.
+  - Unchecked: a window on the 4090 (the display is on the Radeon), other NVIDIA generations and drivers, Intel (its
+    video family may lack transfer: then refused, the copy would have to move to another queue).
 - [x] **Blur for the MCP server's agents.** e3e1dfe brought onto main:
   `render_still` and `export` take `blur`, run the Export screen's pass (`export::privacy_pass`: main's `PMIN` 0.1 and
   `Hide::plates`) from `Job::pre` on their lanes, and say what it found. On the Radeon (`x5_blur`, 3 s spans) it

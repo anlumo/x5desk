@@ -191,7 +191,7 @@ fn luma(g: &Gpu, d: &Decoder, side: u32, f: u64) -> Result<Vec<u8>, String> {
 
 /// Whether the X5's H.265 (Main, or Main 10 when `ten_bit`) decodes at `side` × `side`, from the driver's
 /// capabilities and without a session: the decode queue's codecs, the output format, the DPB mode (`Decoder::new`
-/// wants DPB and output images apart) and the coded extent.
+/// wants DPB and output images apart, or coinciding with transfer on the decode queue) and the coded extent.
 #[cfg(target_os = "linux")]
 pub fn h265(g: &Gpu, side: u32, ten_bit: bool) -> Result<(), String> {
     let p = ["Main", "Main 10"][ten_bit as usize];
@@ -210,10 +210,10 @@ pub fn h265(g: &Gpu, side: u32, ten_bit: bool) -> Result<(), String> {
         decode::caps(g, pr, true)
     })
     .map_err(|e| format!("H.265 {p}: {e}"))?;
-    if !decode::distinct(&c, dc) {
+    if decode::coincide(g, &c, dc).is_none() {
         return Err(format!(
-            "H.265 {p}: no distinct DPB and output images (decode {dc:?}, {:?}): Intel's coinciding mode isn't \
-             supported",
+            "H.265 {p}: no DPB mode the decoder takes (decode {dc:?}, {:?}): it wants separate reference images, \
+             and DPB and output images distinct, or coinciding with transfer on the decode queue",
             c.flags
         ));
     }
@@ -249,8 +249,8 @@ pub fn h265(g: &Gpu, side: u32, ten_bit: bool) -> Result<(), String> {
 }
 
 /// What the device decodes and encodes, per profile of `PROFILES` it has: the driver's capabilities, without a
-/// session. Decode lists what `Decoder::new` can use (DPB and output images apart); encode what the encode queue
-/// has, which `encode` then tries.
+/// session. Decode lists what `Decoder::new` can use (`decode::coincide`); encode what the encode queue has, which
+/// `encode` then tries.
 #[cfg(target_os = "linux")]
 pub fn caps(g: &Gpu) -> (Vec<Cap>, Vec<Cap>) {
     use vk::VideoCodecOperationFlagsKHR as Op;
@@ -266,17 +266,22 @@ pub fn caps(g: &Gpu) -> (Vec<Cap>, Vec<Cap>) {
             profile(codec, deep, false, |pr| unsafe {
                 let (c, dc) = decode::caps(g, pr, codec == Codec::H265).ok()?;
                 let want = [vk::Format::G8_B8R8_2PLANE_420_UNORM, P010][deep as usize];
-                decode::distinct(&c, dc).then(|| Cap {
-                    codec,
-                    deep,
-                    min: ext(c.min_coded_extent),
-                    max: ext(c.max_coded_extent),
-                    rate: vec![],
-                    bps: None,
-                    qp: None,
-                    fmt: Some(
-                        formats(g, pr, vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR).contains(&want),
-                    ),
+                decode::coincide(g, &c, dc).map(|co| {
+                    // coinciding: the output is a DPB image
+                    let mut u = vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR;
+                    if co {
+                        u |= vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR;
+                    }
+                    Cap {
+                        codec,
+                        deep,
+                        min: ext(c.min_coded_extent),
+                        max: ext(c.max_coded_extent),
+                        rate: vec![],
+                        bps: None,
+                        qp: None,
+                        fmt: Some(formats(g, pr, u).contains(&want)),
+                    }
                 })
             })
         })

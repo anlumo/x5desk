@@ -67,7 +67,7 @@ pub fn open(
     attach: bool,
 ) -> Result<(Arc<video::Gpu>, Result<(), String>), String> {
     let g = Arc::new(video::Gpu::new().map_err(|e| e.to_string())?);
-    stitch::cache(cache);
+    stitch::cache(cache, &g.adapter);
     let at = || stitch::attach(&g.instance, &g.adapter, &g.device, &g.queue).map(drop);
     let a = match (attach, &p) {
         (false, _) => Err(NOATTACH.into()),
