@@ -2292,3 +2292,116 @@ fn seam_score() {
         }
     }
 }
+
+/// The player's RAFT seam (`app` `player::Seam`): RAFT on every 3rd played frame, its flow held until the next run's
+/// lands 3 frames later (a run takes 75–90 ms on the Radeon 8060S, 30 fps), scored as `seam_score` scores (seam:
+/// grey disagreement over ±3°, wobble: change of the blended ±8° band from the last frame's flows). On v606's first
+/// frames (walking, 1.2° a frame) the seam error stays within 10 % of RAFT on every frame's and 25 % under the template
+/// seam's, the wobble under RAFT on every frame's.
+#[test]
+fn seam_held() {
+    let Some(dir) = samples() else { return };
+    let insv = dir.join("v606.insv");
+    let (meta, n, d, w) = (trailer(&insv), 3, 3, 12);
+    let cal = Calib::parse(&meta.offset).unwrap();
+    let fr = Frame {
+        w: SIDE as u32,
+        h: SIDE as u32,
+        crop: meta.crop,
+        shift: meta.shift,
+    };
+    let blend = meta.blend.unwrap_or(6.0);
+    let g = gpu();
+    let cx = Ctx::new(&g.dev, &g.q);
+    let raft = Raft::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
+    let o = Opts {
+        blend,
+        flow: Some(Flow::RAFT),
+        ..Default::default()
+    };
+    // RAFT on every frame, on every 3rd
+    let mut st = [0, 1].map(|_| Stitcher::new(&cx, &cal, fr, 8, 2, o).unwrap());
+    st.iter().for_each(|s| s.pose(&framing(&meta)));
+    let (seam, wide) = (band_pts(3.0, 2, blend / 2.0), band_pts(8.0, 3, blend / 2.0));
+    let mut dec = [0, 1].map(|t| {
+        Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(&insv)
+            .args(["-map", &format!("0:v:{t}"), "-frames:v", "36"])
+            .args(["-f", "rawvideo", "-pix_fmt", "nv12", "-"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    });
+    let mut pipe = dec.each_mut().map(|c| c.stdout.take().unwrap());
+    let mut nv = [0, 1].map(|_| vec![0u8; SIDE * SIDE * 3 / 2]);
+    let sum = |v: Vec<[f64; 4]>, k: usize| {
+        let s = v
+            .iter()
+            .fold([0.0; 2], |a, x| [a[0] + x[k], a[1] + x[k + 1]]);
+        s[0] / s[1].max(1.0)
+    };
+    // the runs on every 3rd frame (frame, flows); the last frame's flows of both
+    let mut held: Vec<(usize, Vec<[f32; 2]>)> = vec![];
+    let mut prev: [Option<Vec<[f32; 2]>>; 2] = [None, None];
+    let mut t = [0f64; 5];
+    for i in 0..36 {
+        for (k, v) in nv.iter_mut().enumerate() {
+            std::io::Read::read_exact(&mut pipe[k ^ meta.reverse as usize], v).unwrap();
+        }
+        let src = nv
+            .each_ref()
+            .map(|v| upload(&g, &cx, v, SIDE as u32, SIDE as u32));
+        let src = [&src[0], &src[1]];
+        for (m, s) in st.iter_mut().enumerate() {
+            if m == 0 || i % n == 0 {
+                let mut enc = g.dev.create_command_encoder(&Default::default());
+                s.belt(&mut enc, src, &raft);
+                g.q.submit([enc.finish()]);
+                s.flow(&raft).unwrap();
+            }
+            let mut enc = g.dev.create_command_encoder(&Default::default());
+            s.encode(&mut enc, src);
+            g.q.submit([enc.finish()]);
+        }
+        if i % n == 0 {
+            held.push((i, st[1].flows().unwrap()));
+        }
+        let every = st[0].flows().unwrap();
+        // the newest run landed by now
+        let h = held
+            .iter()
+            .rev()
+            .find(|x| x.0 + d <= i)
+            .map(|x| x.1.clone());
+        if i >= w {
+            let e = Eval {
+                cal: &cal,
+                fr,
+                nv: [&nv[0], &nv[1]],
+                fit: st[0].fit().unwrap(),
+            };
+            let (h, ph) = (h.as_deref().unwrap(), prev[1].as_deref());
+            let r = seam_sums(&e, &seam, &wide, Some(&every), prev[0].as_deref());
+            let hs = seam_sums(&e, &seam, &[], Some(h), None);
+            let hw = match ph.filter(|p| p != &h) {
+                Some(p) => sum(seam_sums(&e, &[], &wide, Some(h), Some(p)), 2),
+                None => 0.0,
+            };
+            let ts = seam_sums(&e, &seam, &[], None, None);
+            for (a, b) in
+                t.iter_mut()
+                    .zip([sum(ts, 0), sum(r.clone(), 0), sum(r, 2), sum(hs, 0), hw])
+            {
+                *a += b / (36 - w) as f64;
+            }
+        }
+        prev = [Some(every), h];
+    }
+    eprintln!(
+        "v606 frames {w}–35: seam template {:.3}, RAFT every frame {:.3} (wobble {:.4}), every 3rd held 3 frames late \
+         {:.3} (wobble {:.4})",
+        t[0], t[1], t[2], t[3], t[4]
+    );
+    assert!(t[3] < 1.1 * t[1] && t[3] < 0.75 * t[0] && t[4] < t[2]);
+}

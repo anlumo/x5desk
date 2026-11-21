@@ -29,7 +29,7 @@ use media::{
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering::Relaxed},
         mpsc,
     },
@@ -454,6 +454,130 @@ pub fn still(g: &Arc<Gpu>, cx: &Ctx) -> mpsc::Sender<Job> {
     tx
 }
 
+/// RAFT on played frames (the player's RAFT seam option): a flow stitcher of the source playing, drawn through
+/// `Preview::seam` once it has a flow, and a RAFT worker of its own. A new played frame's draw records the belt (RAFT's
+/// input) when the worker is idle and `n` frames passed since the last run; the flow is held until the next run's
+/// lands (it scored better than carried by the gyro's turn, interpolated or extrapolated: `TODO.md`). A frame late or
+/// dropped doubles `n`, 64 on time take one off; past a second's frames RAFT stops (the template seam) until the source
+/// or the option changes.
+struct Seam {
+    /// the source's id
+    id: u64,
+    st: Arc<Mutex<Stitcher>>,
+    pv: Preview,
+    /// the worker's model once loaded, its jobs, its replies (the model, then a run's end)
+    raft: Option<Arc<Raft>>,
+    go: mpsc::Sender<()>,
+    rx: mpsc::Receiver<Result<Option<Arc<Raft>>, String>>,
+    /// a run out; a flow of this position drawn; frames since the last run, least between runs, on time since a
+    /// late one; a seek since the flow (reset before the next run); before the first run's end (it compiles kernels:
+    /// lateness ignored); given up
+    busy: bool,
+    has: bool,
+    since: usize,
+    n: usize,
+    calm: usize,
+    stale: bool,
+    cold: bool,
+    off: bool,
+}
+
+impl Seam {
+    fn new(g: &Arc<Gpu>, cx: &Ctx, s: &Src) -> Result<Seam, String> {
+        let o = Opts {
+            blend: s.blend,
+            flow: Some(Flow::RAFT),
+            ..Default::default()
+        };
+        // its output stays unused: the preview draws from the lenses through its flow
+        let st = Arc::new(Mutex::new(Stitcher::new(cx, &s.cal, s.fr, 8, 2, o)?));
+        let pv = Preview::seam(&st.lock().unwrap(), FMT);
+        let ((go, jobs), (tx, rx)) = (mpsc::channel::<()>(), mpsc::channel());
+        let (g, w) = (g.clone(), st.clone());
+        thread::Builder::new()
+            .name("raft playing".into())
+            .spawn(move || {
+                let raft = match Raft::new(&g.instance, &g.adapter, &g.device, &g.queue) {
+                    Ok(r) => Arc::new(r),
+                    Err(e) => return drop(tx.send(Err(e))),
+                };
+                let _ = tx.send(Ok(Some(raft.clone())));
+                while jobs.recv().is_ok() {
+                    let r = {
+                        let _b = crate::BURN.lock();
+                        w.lock().unwrap().flow(&raft)
+                    };
+                    if tx.send(r.map(|_| None)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(Seam {
+            id: s.id,
+            st,
+            pv,
+            raft: None,
+            go,
+            rx,
+            busy: false,
+            has: false,
+            since: 0,
+            n: 1,
+            calm: 0,
+            stale: false,
+            cold: true,
+            off: false,
+        })
+    }
+
+    /// The worker's replies; Err when RAFT failed.
+    fn poll(&mut self) -> Result<(), String> {
+        while let Ok(r) = self.rx.try_recv() {
+            match r? {
+                Some(r) => self.raft = Some(r),
+                None => (self.busy, self.has, self.cold) = (false, !self.stale, false),
+            }
+        }
+        Ok(())
+    }
+
+    /// A new played frame (posed): its colour fit and, when a run is due, its belt; true then, and the caller sends
+    /// `go` after submitting `e`.
+    fn frame(&mut self, e: &mut wgpu::CommandEncoder, src: [&stitch::Src; 2]) -> bool {
+        self.pv.colour(e, src);
+        self.since += 1;
+        let Some(r) = self.raft.as_ref().filter(|_| !self.busy && !self.off) else {
+            return false;
+        };
+        let mut st = self.st.lock().unwrap();
+        if self.stale {
+            st.reset();
+            self.stale = false;
+        }
+        if self.since < self.n {
+            return false;
+        }
+        st.belt(e, src, r);
+        (self.busy, self.since) = (true, 0);
+        true
+    }
+
+    /// A played frame shown, `bad` if late or after dropped ones; true when RAFT gives up with it.
+    fn pace(&mut self, bad: bool, fps: f64) -> bool {
+        if self.off || !bad || self.cold {
+            self.calm += 1;
+            if self.calm >= 64 && self.n > 1 {
+                (self.n, self.calm) = (self.n - 1, 0);
+            }
+            return false;
+        }
+        (self.n, self.calm) = (self.n * 2, 0);
+        self.off = self.n as f64 > fps;
+        self.off
+    }
+}
+
 /// Lens picture copies for a RAFT job: luma and chroma per lens, through one staging buffer.
 pub(crate) struct Snap {
     y: [wgpu::Texture; 2],
@@ -744,6 +868,9 @@ pub struct Player {
     raft_off: bool,
     snap: Option<Snap>,
     pano: Option<(Key, stitch::Pano)>,
+    /// the RAFT seam option: RAFT on played frames too; its state for the source playing
+    pub flow: bool,
+    seam: Option<Seam>,
     stats: Stats,
     show_stats: bool,
     /// test hook: measure for this long once playing, then report; repaint period instead of vblank; no
@@ -860,6 +987,8 @@ impl Player {
             raft_off: false,
             snap: None,
             pano: None,
+            flow: true,
+            seam: None,
             stats: Stats::new(),
             show_stats: false,
             measure: None,
@@ -935,6 +1064,9 @@ impl Player {
         }
         self.audio.cmd(Cmd::Seek(t - self.a_off));
         self.want = Some(k);
+        if let Some(f) = &mut self.seam {
+            (f.has, f.stale) = (false, true);
+        }
         self.stats.d = None;
         self.stats.hist = 0;
         self.stats.nh = 0;
@@ -1083,6 +1215,17 @@ impl Player {
                 }
             }
         }
+        // RAFT on played frames: a seam for the source playing, its worker's replies
+        if self.flow && self.playing && self.seam.as_ref().is_none_or(|f| f.id != self.s().id) {
+            self.seam = Seam::new(&self.g, &self.cx, self.s())
+                .map_err(|e| (self.note, self.flow) = (Some(format!("RAFT seam: {e}")), false))
+                .ok();
+        }
+        if let Some(f) = &mut self.seam
+            && let Err(e) = f.poll()
+        {
+            (self.note, self.flow, self.seam) = (Some(format!("RAFT seam: {e}")), false, None);
+        }
         let gap = ui
             .then(|| self.stats.last.replace(now_i))
             .flatten()
@@ -1110,6 +1253,7 @@ impl Player {
         }
         let (p, skip) = s.v.take(now, false);
         let d = clip::frame_at(&s.v.times, now);
+        let (id, fps) = (s.id, s.v.times.len() as f64 / s.v.end.max(1e-3));
         let measuring = self.playing && self.want.is_none();
         if let Some(p) = p {
             s.v.release_before(&self.g, &p);
@@ -1131,6 +1275,11 @@ impl Player {
                     st.bad(true);
                 }
                 st.bad(late);
+                if let Some(f) = self.seam.as_mut().filter(|f| f.id == id)
+                    && f.pace(late || skip > 0, fps)
+                {
+                    self.note = Some("RAFT seam: the GPU can't keep up while playing".into());
+                }
             }
             (self.held, self.held_at, self.fresh, self.tinted) = (Some(p), now_i, true, false);
         }
@@ -1365,24 +1514,32 @@ impl Player {
             let v = t.create_view(&Default::default());
             bt = Some((t, v, crate::export::Blur::new(&g.device, FMT)));
         }
-        let ((o, key), s, t) = (self.pose(&p), self.s(), self.tgt.as_ref().unwrap());
+        let ((o, key), t) = (self.pose(&p), self.tgt.as_ref().unwrap());
+        let s = self.src[self.cur].as_ref().unwrap();
         let dst = match (regs, &bt) {
             (Some(_), Some(b)) => &b.1,
             _ => &t.view,
         };
         // the lenses take orientation and rolling shutter, the RAFT stitch (body frame) the orientation
         s.pv.pose(&o);
+        let mut seam = self.seam.as_mut().filter(|f| self.playing && f.id == s.id);
         let mut e = g.device.create_command_encoder(&Default::default());
-        let mut tint = self.tinted;
+        let (mut tint, mut run) = (self.tinted, false);
         match self.pano.as_ref().filter(|x| !self.playing && x.0 == key) {
             Some((_, pano)) => s.pv.render(&mut e, dst, size, &self.view, pano),
             None => {
                 let src = s.src(&p);
+                if let Some(f) = &seam {
+                    f.pv.pose(&o);
+                }
                 if !tint {
                     s.pv.colour(&mut e, src);
+                    run = seam.as_mut().is_some_and(|f| f.frame(&mut e, src));
                     tint = true;
                 }
-                s.pv.render(&mut e, dst, size, &self.view, src);
+                let pv = seam.as_ref().filter(|f| f.has && !f.off);
+                pv.map_or(&s.pv, |f| &f.pv)
+                    .render(&mut e, dst, size, &self.view, src);
                 s.v.acquire(g, &p);
             }
         }
@@ -1390,6 +1547,9 @@ impl Player {
             b.2.run(&g.device, &g.queue, &mut e, &b.1, &t.view, &self.view, r);
         }
         g.queue.submit([e.finish()]);
+        if let (true, Some(f)) = (run, seam) {
+            let _ = f.go.send(());
+        }
         self.bt = bt;
         (self.fresh, self.dirty, self.tinted) = (false, false, tint);
     }
@@ -1490,6 +1650,16 @@ impl Player {
                 .changed()
             {
                 self.use_src(proxy as usize);
+            }
+            if ui
+                .checkbox(&mut self.flow, "RAFT seam")
+                .on_hover_text(
+                    "Optical flow at the seam while playing too, every few frames as the GPU allows (paused frames \
+                     always have it); off: the template seam while playing",
+                )
+                .changed()
+            {
+                (self.seam, self.dirty) = (None, true);
             }
             ui.separator();
             for (l, name) in Look::ALL {
@@ -1722,6 +1892,16 @@ impl Player {
                 _ => "Template seam".into(),
             });
         }
+        if self.playing && self.flow {
+            lines.push(
+                match &self.seam {
+                    Some(f) if f.off => "Template seam: RAFT can't keep up",
+                    Some(f) if f.has => "RAFT seam",
+                    _ => "RAFT seam starting…",
+                }
+                .into(),
+            );
+        }
         if let Some(s) = &self.stab.stage {
             lines.push(format!("Stabilising: {s}…"));
         }
@@ -1770,8 +1950,13 @@ impl crate::live::Source for Player {
 
     fn draw(&mut self, t: &wgpu::TextureView, [w, h]: [u32; 2], pano: bool) {
         let Some(p) = self.held else { return };
-        let (g, (o, key), s) = (&self.g, self.pose(&p), self.s());
+        let (g, (o, key)) = (&self.g, self.pose(&p));
+        let s = self.src[self.cur].as_ref().unwrap();
         s.pv.pose(&o);
+        let mut seam = self.seam.as_mut().filter(|f| self.playing && f.id == s.id);
+        if let Some(f) = &seam {
+            f.pv.pose(&o);
+        }
         let (w, h) = (w as f32, h as f32);
         let (v, r) = match (pano, self.look) {
             (true, _) => (
@@ -1792,10 +1977,14 @@ impl crate::live::Source for Player {
         let src = s.src(&p);
         let tint = raft.is_none() && !self.tinted;
         let mut e = g.device.create_command_encoder(&Default::default());
+        let mut run = false;
         if tint {
             s.pv.colour(&mut e, src);
+            run = seam.as_mut().is_some_and(|f| f.frame(&mut e, src));
         }
-        s.pv.set(&v, r);
+        let pv = seam.as_ref().filter(|f| f.has && !f.off);
+        let pv = pv.map_or(&s.pv, |f| &f.pv);
+        pv.set(&v, r);
         {
             let mut rp = e.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("live"),
@@ -1812,14 +2001,17 @@ impl crate::live::Source for Player {
             });
             rp.set_viewport(r[0], r[1], r[2], r[3], 0.0, 1.0);
             match raft {
-                Some((_, x)) => s.pv.draw(&mut rp, x),
-                None => s.pv.draw(&mut rp, src),
+                Some((_, x)) => pv.draw(&mut rp, x),
+                None => pv.draw(&mut rp, src),
             }
         }
         if raft.is_none() {
             s.v.acquire(g, &p);
         }
         g.queue.submit([e.finish()]);
+        if let (true, Some(f)) = (run, seam) {
+            let _ = f.go.send(());
+        }
         self.tinted |= tint;
     }
 
@@ -1979,5 +2171,179 @@ mod tests {
             thread::yield_now();
         };
         assert!((2.0..2.01).contains(&x), "after seek {x}");
+    }
+
+    /// A readback target of the viewer's format.
+    fn target(g: &Gpu, w: u32, h: u32) -> (wgpu::Texture, wgpu::TextureView) {
+        let t = g.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FMT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let v = t.create_view(&Default::default());
+        (t, v)
+    }
+
+    /// RAFT on played frames holds its flow between runs: on a static scene (v635's frame 0 shown again and again,
+    /// a run every 3rd time) the flow drawn at every frame is that of a fresh RAFT run on the frame.
+    #[test]
+    fn seam_static() {
+        let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+            eprintln!("X5_SAMPLES not set: skipping");
+            return;
+        };
+        let g = Arc::new(Gpu::new().unwrap());
+        let cx = Ctx::new(&g.device, &g.queue);
+        let ctx = egui::Context::default();
+        let f = d.join("v635.insv");
+        let m = Trailer::open(&f).unwrap().meta;
+        let mut s = Src::open(&g, &cx, std::slice::from_ref(&f), &m, 3840.0, &ctx).unwrap();
+        s.v.seek(&g, 0, None);
+        let t0 = Instant::now();
+        let p = loop {
+            if let (Some(p), _) = s.v.take(s.v.times[0], false) {
+                break p;
+            }
+            assert!(t0.elapsed().as_secs() < 10, "no frame");
+            thread::sleep(Duration::from_millis(1));
+        };
+        let o = Pose::euler(0.0, 0.0, if m.stream == 4 { 180.0 } else { 0.0 });
+        let src = s.src(&p);
+        // fresh: a stitcher of its own, one colour fit and one run
+        let raft = Raft::new(&g.instance, &g.adapter, &g.device, &g.queue).unwrap();
+        let opts = Opts {
+            blend: s.blend,
+            flow: Some(Flow::RAFT),
+            ..Default::default()
+        };
+        let mut st = Stitcher::new(&cx, &s.cal, s.fr, 8, 2, opts).unwrap();
+        st.pose(&o);
+        let mut e = g.device.create_command_encoder(&Default::default());
+        st.encode(&mut e, src);
+        st.belt(&mut e, src, &raft);
+        s.v.acquire(&g, &p);
+        g.queue.submit([e.finish()]);
+        st.flow(&raft).unwrap();
+        let fresh = st.flows().unwrap();
+        let mut f = Seam::new(&g, &cx, &s).unwrap();
+        while f.raft.is_none() {
+            f.poll().unwrap();
+            assert!(t0.elapsed().as_secs() < 60, "no model");
+            thread::sleep(Duration::from_millis(1));
+        }
+        f.n = 3;
+        let mut runs = 0;
+        for k in 0..10 {
+            f.pv.pose(&o);
+            let mut e = g.device.create_command_encoder(&Default::default());
+            let run = f.frame(&mut e, src);
+            s.v.acquire(&g, &p);
+            g.queue.submit([e.finish()]);
+            if run {
+                f.go.send(()).unwrap();
+                runs += 1;
+            }
+            while f.busy {
+                f.poll().unwrap();
+                thread::sleep(Duration::from_millis(1));
+            }
+            if !f.has {
+                continue;
+            }
+            let fl = f.st.lock().unwrap().flows().unwrap();
+            let dev = (fl.iter().flatten())
+                .zip(fresh.iter().flatten())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            eprintln!("frame {k}: run {run}, flow drawn vs fresh: max |Δ| {dev:e} px");
+            assert!(dev < 1e-3, "frame {k}: {dev} px");
+        }
+        assert_eq!(runs, 3);
+        s.v.release(&g, &p);
+    }
+
+    /// The RAFT seam option while playing v635 (drawn as the live output draws, 640 × 360, across the seam): off, a
+    /// played frame is the template preview's picture, as before the option; on, once its first flow is in, the seam
+    /// preview's.
+    #[test]
+    fn seam_option() {
+        let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+            eprintln!("X5_SAMPLES not set: skipping");
+            return;
+        };
+        let g = Arc::new(Gpu::new().unwrap());
+        let cx = Ctx::new(&g.device, &g.queue);
+        let ctx = egui::Context::default();
+        let w = crate::library::pair(&d.join("v635.insv"));
+        let mut p = Player::open(&g, &cx, w, &ctx, &still(&g, &cx), &gyro::worker(), None).unwrap();
+        // looking along the seam
+        (p.looping, p.flow, p.view.yaw) = (true, false, 90.0);
+        p.play();
+        let (tex, tv) = target(&g, 640, 360);
+        // the next new frame drawn, and the same frame through the template preview and through the seam's
+        let shot = |p: &mut Player| {
+            let t0 = Instant::now();
+            while !p.fresh || p.want.is_some() {
+                p.tick(false);
+                assert!(t0.elapsed().as_secs() < 60, "no frame");
+                thread::sleep(Duration::from_millis(1));
+            }
+            p.fresh = false;
+            crate::live::Source::draw(p, &tv, [640, 360], false);
+            let a = stitch::read_texture(&g.device, &g.queue, &tex);
+            let h = p.held.unwrap();
+            let (o, _) = p.pose(&h);
+            let s = p.s();
+            let r = |pv: &Preview| {
+                pv.pose(&o);
+                let mut e = g.device.create_command_encoder(&Default::default());
+                pv.render(&mut e, &tv, [640, 360], &p.view, s.src(&h));
+                s.v.acquire(&g, &h);
+                g.queue.submit([e.finish()]);
+                stitch::read_texture(&g.device, &g.queue, &tex)
+            };
+            let tpl = r(&s.pv);
+            let flow = (p.seam.as_ref().filter(|f| f.has && !f.off)).map(|f| r(&f.pv));
+            (a, tpl, flow)
+        };
+        for _ in 0..5 {
+            let (a, tpl, flow) = shot(&mut p);
+            assert!(
+                flow.is_none() && a == tpl,
+                "off: the template preview's picture"
+            );
+        }
+        p.flow = true;
+        let t0 = Instant::now();
+        // once a flow is in no run starts, and a frame is compared with none out; the pacing left out (this loop,
+        // reading pictures back, drops frames of its own)
+        loop {
+            let ready = p.seam.as_mut().is_some_and(|f| {
+                // a late frame doubles `n`, and a run still out ends `cold`
+                (f.n, f.off) = (if f.has { 1 << 32 } else { 1 }, false);
+                f.cold |= f.has;
+                f.has && !f.busy
+            });
+            let (a, tpl, flow) = shot(&mut p);
+            if let (true, Some(flow)) = (ready, flow) {
+                let n = a.iter().zip(&tpl).filter(|(x, y)| x != y).count();
+                eprintln!(
+                    "on, {:.1} s in: the seam preview's picture, {n} bytes from the template's",
+                    t0.elapsed().as_secs_f64()
+                );
+                assert!(a == flow && n > 0);
+                break;
+            }
+            assert!(t0.elapsed().as_secs() < 120, "no flow");
+        }
     }
 }

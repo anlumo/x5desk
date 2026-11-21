@@ -366,9 +366,35 @@ voice denoise on editor timelines and exports (RNNoise).
   tick, the button, the labels) are untested by hand.
 - [ ] **Pick by click.** The detector's people and animals boxed on the paused frame, a click starting Deep Track
   (the vendor's Identify Tracking Targets); `Ai::pick` exists, nothing calls it.
-- [ ] **Seam flow while playing.** RAFT runs on paused frames and exports only; the vendor's player keeps its AI
-  seam while playing. RAFT on every n-th frame during playback, the flow held between; cost unmeasured beside two 4K
-  decodes.
+- [x] **Seam flow while playing.** The player's RAFT seam (a checkbox by Proxy, on by default; paused frames and exports
+  unchanged) draws played frames from the lenses through a flow stitcher's flow (`player::Seam`, `Preview::seam`): RAFT
+  runs on a worker of its own on the belt that a new frame's draw records whenever the worker is idle, the flow held
+  until the next run's lands, the decline rule judging each run. A late or dropped frame doubles the least frames
+  between runs (64 on time take one off); past a second's frames RAFT stops for that source (template seam, a note). On
+  the Radeon 8060S a run takes 75–90 ms, mostly burn recording on the worker's CPU, so it runs every 3.2 frames at 30
+  fps and every 5 at 60 fps and lands about as many frames after its frame. That takes burn submitting at most 4 kernels
+  a command buffer (`stitch::attach`; cubecl's default 32): beside a run, a 1920 × 1080 draw waited up to 30 ms (16
+  kernels: 22, 8: 14, 4: 9, 1: 3.9 ms) and the run took 74.7 ms (75.0, 75.4, 80.1, 87.7). Headless playback
+  (`player::verify::seam_cost`, ignored: frames taken on the wall clock at the clip's rate, drawn at 1920 × 1080, due to
+  GPU done, 15 s), v606 (3840², 30 fps): template p50 0.7 ms, max 2.1; RAFT with 32 kernels 223 of 420 frames over 16.7
+  ms (p50 17), a run every 10th frame still one each; with 4: p50 3.3, max 6.1 ms. Rides 2026-04-13 `_717` and 03-04
+  `_670` (2880², 60 fps): 32 kernels 551 of 840 frames over 16.7 ms (`_717`), 4 kernels max 5.9 and 6.1 ms. No frame
+  dropped, none over 8.3 ms with 4. A RAFT export (v635 5760 Main 10) 12.70 fps with 32 kernels, 12.32 and 12.42 with 4
+  (8: 11.94: run to run noise), its video the same (MD5). Quality (`seam_score`'s measures on the flows the player
+  draws, 60 frames after 20 of warm-up, two windows a clip; rides at 60 fps; `seam_hold` in
+  `target/forward-scratch/play/harness`), seam: template / RAFT every frame / every 3rd held, landing 3 frames late (the
+  player at 30 fps) / every 5th landing 6 late (60 fps), and wobble of the last three: v606 (walking, 1.2° a frame) 9.09
+  / 5.77 / 6.16 / 6.39, 0.378 / 0.178 / 0.131; v635 12.95 / 8.11 / 8.20 / 8.31, 0.402 / 0.167 / 0.111; v627 (night) 5.16
+  / 3.85 / 3.97 / 3.99, 0.214 / 0.091 / 0.057; `_717` 73.2 / 65.0 / 65.5 / 66.7, 1.83 / 0.84 / 0.51; `_670` 20.5 / 17.1
+  / 17.3 / 17.3, 1.30 / 0.51 / 0.30. Held at the player's pace the seam stays within 0.7–6.7 % of RAFT on every frame
+  (60 fps: 1.3–10.9 %) and 11–37 % under the template (9–36 %), every 10th frame still 6–35 % under; the wobble halves
+  (a step every 3rd frame, none between). Also tried at every 3rd landing 3 late: carried by the gyro's turn, smoothed
+  over time as per frame (1 − 0.7ⁿ) and extrapolated from the last two runs came within 2 % of holding on the seam at
+  1.3–2.6× its wobble; interpolated, one run late, lost on both. Tests: `player::tests::seam_static` (v635's frame 0
+  again and again: the flow drawn at every frame is a fresh run's), `seam_option` (off: a played frame is the template
+  preview's picture, on: the flow's), stitch `seam_held` (v606: within 10 % of RAFT on every frame, 25 % under the
+  template, less wobble). Not verified: playback in the window (vsync, egui's paint, the compositor); a GPU slower than
+  the 8060S, where the pacing should give up.
 - [x] **Frame grab denoise.** Stills from video (the player's and the Export screen's grabs, the MCP `render_still`)
   get non-local means in crate fx (`fx::Nlm`; `export::Enc::Jpeg`'s strength) on the stitched frame, before the
   effects and the JPEG encoder; videos and photos are not filtered (the camera processes photos itself; `Keep::photo`

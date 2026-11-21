@@ -123,7 +123,8 @@ fn guide(p: Page) -> &'static [&'static str] {
              (on a helmet, where the head turns); it first analyses the whole clip's motion (the line says how far), \
              and keeps the horizon lock's heading while standing.",
             "When the full resolution falls behind, playback switches to the proxy. Paused, the frame shows with the \
-             AI seam (RAFT).",
+             AI seam (RAFT); while playing too, every few frames as the GPU allows (RAFT seam, below the viewer; the \
+             template seam once the GPU can't keep up).",
             "Export… takes the file and the current view to the Export screen; Grab 360 and Grab view make a JPEG of \
              the frame shown there. A file's menu in the lists exports it or adds it to the editor.",
             "Deep Track: turn it on and draw a box around a subject in the perspective view. It is tracked from that \

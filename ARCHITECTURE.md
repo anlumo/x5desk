@@ -349,7 +349,8 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   selected clip through edit's log without `changed()` (playback goes on). Denoise runs in the export
   (`export::Edit::denoise`) as in the preview: `media::denoise::Stereo` after the time-stretch, its delay dropped.
   The undo history interleaves edit's log with steps for those extras; a drag that ends where it started leaves
-  both as they were, the steps undone included. The player and the editor share one RAFT worker (`player::still`).
+  both as they were, the steps undone included. The player and the editor share one RAFT worker for paused frames
+  (`player::still`); the player's RAFT seam on played frames has a worker of its own per source (`player::Seam`).
 - `clip::Video` (the player's, the editor decks' and the movie viewer's video) numbers frames in presentation order
   (`times` ascending, `Pic::k`). With B-frames the media thread holds a decoded frame back until those shown before
   it are queued, and a frame's release stops below the lowest decoder frame of the frames after it (`Pic::r`): a
@@ -426,7 +427,9 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   callbacks a failed configure collected, so a `map_async` user treats a dropped callback as a finished map.
   Everything else panics. burn attaches once per device through `stitch::attach`, which installs cubecl's handler
   (and device-lost callback) on first attach only; `gpu::open` calls it before installing the policy's own, and RAFT,
-  shotlab's segmentation and the one `track::Ai` in `ai::MODELS` reuse that attachment.
+  shotlab's segmentation and the one `track::Ai` in `ai::MODELS` reuse that attachment. It submits at most 4 kernels
+  a command buffer (cubecl's default 32 held the shared queue up to 30 ms on the Radeon 8060S: a played frame's draw
+  waited behind RAFT).
 - Test hooks: `X5DESK_SHOT=<file.png>` (plus `X5DESK_SHOT_AFTER=<s>`) saves a screenshot of the window through egui's
   `ViewportCommand::Screenshot` and exits; the Capture screen is ready for it once the capture worker reported on the
   camera's session (after its `/CONF` attempt, which may fail). `X5DESK_TEST=<tokens>` drives the app; under it

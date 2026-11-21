@@ -661,3 +661,116 @@ fn stab_raft() {
     );
     assert!(res[0].0.length().to_degrees() < 0.1 && res[0].1 < res[1].1);
 }
+
+/// Playback cost of the RAFT seam option, without a window: `X5_PLAY` = files (comma separated, absolute or relative
+/// to `X5_SAMPLES`; default v606.insv), `X5_PLAY_N` = the least frames between RAFT runs (`Seam::n`, held, not paced;
+/// 0: the option off; default 0,1,3,10), `X5_PLAY_S` = seconds per run (default 15). Frames taken on the wall clock at
+/// the clip's rate, each new one drawn as the player draws it (perspective, 1920 × 1080, framing only), its GPU work
+/// timed from the frame's due time to done; the first second warms up. Run with `--release`.
+#[test]
+#[ignore]
+fn seam_cost() {
+    let Some(d) = samples() else { return };
+    let env = |k: &str, v: &str| std::env::var(k).unwrap_or(v.into());
+    let secs: f64 = env("X5_PLAY_S", "15").parse().unwrap();
+    let r = Rig::new();
+    let (t, size) = (r.target(1920, 1080), [1920, 1080]);
+    let tv = t.create_view(&Default::default());
+    for f in env("X5_PLAY", "v606.insv").split(',').map(|f| d.join(f)) {
+        let m = Trailer::open(&f).unwrap().meta;
+        for n in env("X5_PLAY_N", "0,1,3,10")
+            .split(',')
+            .map(|n| n.parse().unwrap())
+        {
+            let s = r.src(std::slice::from_ref(&f), &m, 3840.0, 0);
+            let o = Pose::euler(0.0, 0.0, if m.stream == 4 { 180.0 } else { 0.0 });
+            let mut seam = (n > 0).then(|| Seam::new(&r.g, &r.cx, &s).unwrap());
+            let t0 = Instant::now();
+            while seam.as_ref().is_some_and(|f| f.raft.is_none()) || !s.v.queued() {
+                if let Some(f) = &mut seam {
+                    f.poll().unwrap();
+                }
+                assert!(t0.elapsed().as_secs() < 60);
+                thread::sleep(Duration::from_millis(1));
+            }
+            // its GPU work's end per drawn frame, waited for on a thread of its own
+            let (tx, rx) = mpsc::channel::<(wgpu::SubmissionIndex, Instant)>();
+            let g = r.g.clone();
+            let ends = thread::spawn(move || {
+                (rx.into_iter())
+                    .map(|(i, due)| {
+                        let w = wgpu::PollType::Wait {
+                            submission_index: Some(i),
+                            timeout: None,
+                        };
+                        g.device.poll(w).unwrap();
+                        (Instant::now() - due).as_secs_f64() * 1e3
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let (ts, per) = (s.v.times[0], (s.v.times[1] - s.v.times[0]) * 1e3);
+            let len = secs.min(s.v.end - ts - 0.2);
+            let (t0, mut held) = (Instant::now(), None);
+            let (mut shown, mut dropped, mut runs, mut flows) = (0, 0, 0, 0);
+            while t0.elapsed().as_secs_f64() < len {
+                if let Some(f) = &mut seam {
+                    f.poll().unwrap();
+                    f.n = n;
+                }
+                if let (Some(p), skip) = s.v.take(ts + t0.elapsed().as_secs_f64(), false) {
+                    s.v.release_before(&r.g, &p);
+                    let warm = s.v.times[p.k] - ts < 1.0;
+                    let src = s.src(&p);
+                    let mut e = r.g.device.create_command_encoder(&Default::default());
+                    s.pv.pose(&o);
+                    s.pv.colour(&mut e, src);
+                    let run = seam.as_mut().is_some_and(|f| {
+                        f.pv.pose(&o);
+                        f.frame(&mut e, src)
+                    });
+                    let pv = seam.as_ref().filter(|f| f.has);
+                    pv.map_or(&s.pv, |f| &f.pv).render(
+                        &mut e,
+                        &tv,
+                        size,
+                        &Look::Perspective.view(),
+                        src,
+                    );
+                    s.v.acquire(&r.g, &p);
+                    let i = r.g.queue.submit([e.finish()]);
+                    if run {
+                        seam.as_ref().unwrap().go.send(()).unwrap();
+                    }
+                    if !warm {
+                        let due = t0 + Duration::from_secs_f64(s.v.times[p.k] - ts);
+                        tx.send((i, due)).unwrap();
+                        (shown, dropped) = (shown + 1, dropped + skip);
+                        (runs, flows) = (runs + run as usize, flows + pv.is_some() as usize);
+                    }
+                    held = Some(p);
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            drop((tx, seam));
+            let mut l = ends.join().unwrap();
+            if let Some(h) = held {
+                s.v.release(&r.g, &h);
+            }
+            l.sort_by(f64::total_cmp);
+            let q = |p: f64| l[((l.len() - 1) as f64 * p) as usize];
+            let over = |x: f64| l.iter().filter(|&&v| v > x).count();
+            eprintln!(
+                "{} n {n}: {len:.1} s, {shown} frames ({flows} through a flow), {dropped} dropped, {runs} RAFT runs \
+                 (every {:.1}); due to done ms p50 {:.2} p99 {:.2} max {:.2}; over 8.3 ms {}, 16.7 ms {}, {per:.1} ms {}",
+                f.file_stem().unwrap().to_string_lossy(),
+                shown as f64 / runs.max(1) as f64,
+                q(0.5),
+                q(0.99),
+                l[l.len() - 1],
+                over(8.33),
+                over(16.67),
+                over(per),
+            );
+        }
+    }
+}

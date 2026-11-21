@@ -157,7 +157,9 @@ static BURN: Mutex<Vec<(wgpu::Instance, wgpu::Device, Device)>> = Mutex::new(Vec
 /// `Raft::new` leaves its ≈ 150 ms model load with cubecl's handler, which panics on any error). Attaching alone takes
 /// ≈ 0.2 ms (`tests/stitch.rs` `errors`). `ad`, `inst`: what `dev` was opened from; burn shares the
 /// queue, so its submits interleave with the caller's (safe around a decoder's `acquire` / `release`: staged ops stay
-/// ordered).
+/// ordered), at most 4 kernels each: with cubecl's 32 a RAFT run held the queue up to 30 ms on the Radeon 8060S, and
+/// a played frame's draw waited behind it (9 ms with 4; a run 80 instead of 75 ms, a 5.7K RAFT export 12.3 instead of
+/// 12.7 fps, its output the same).
 pub fn attach(
     inst: &wgpu::Instance,
     ad: &wgpu::Adapter,
@@ -180,6 +182,7 @@ pub fn attach(
     };
     let d = Device::wgpu_options()
         .setup(setup)
+        .tasks_max(4)
         .init()
         .map_err(|e| format!("burn on the shared device: {e:?}"))?;
     b.push((inst.clone(), dev.clone(), d.clone()));
