@@ -139,31 +139,43 @@ pub fn sphere() -> Vec<Cam> {
     t
 }
 
-impl Ai {
-    /// The subject the user tapped at direction `d`: of the detections (score ≥ 0.3) in crops of 90° and 30° around
-    /// it, the smallest box that holds `d` (a person before a bus is the person); None if no box holds it. Boxes of
-    /// one object under two classes (a person at night also as a fire hydrant) keep the higher score.
-    pub fn pick(&mut self, p: &Pano, d: Vec3) -> Option<Det> {
-        let tiles = [1.0, 0.268].map(|t| Cam::new(d, Vec3::Z, Vec2::splat(t)));
-        let mut c = self.detect(p, &tiles, 0.3);
-        c.retain(|x| {
-            let h = (x.size / 2.0).to_array().map(|a| a.to_radians().tan());
-            Cam::new(x.dir, Vec3::Z, Vec2::from(h))
+/// Whether COCO class `c` is a person or an animal (bird to giraffe): what a tap picks.
+pub fn alive(c: u32) -> bool {
+    matches!(c, 0 | 14..=23)
+}
+
+/// The person or animal (`alive`) of detections `c` the user tapped at direction `d`: the smallest box that holds `d`
+/// (a child before a grown-up is the child; never the bag or the bike there); None if no box holds it. Boxes of one
+/// object under two classes keep the higher score.
+pub fn at(mut c: Vec<Det>, d: Vec3) -> Option<Det> {
+    c.retain(|x| {
+        let h = (x.size / 2.0).to_array().map(|a| a.to_radians().tan());
+        alive(x.cls)
+            && Cam::new(x.dir, Vec3::Z, Vec2::from(h))
                 .px(d)
                 .is_some_and(|q| q.abs().max_element() <= 1.0)
-        });
-        c.sort_by(|a, b| b.score.total_cmp(&a.score));
-        let mut keep: Vec<Det> = vec![];
-        for x in c {
-            if keep.iter().all(|k| iou(k.on(), x.on(), false) <= 0.6) {
-                keep.push(x);
-            }
+    });
+    c.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let mut keep: Vec<Det> = vec![];
+    for x in c {
+        if keep.iter().all(|k| iou(k.on(), x.on(), false) <= 0.6) {
+            keep.push(x);
         }
-        keep.into_iter().min_by(|a, b| {
-            a.size
-                .element_product()
-                .total_cmp(&b.size.element_product())
-        })
+    }
+    keep.into_iter().min_by(|a, b| {
+        a.size
+            .element_product()
+            .total_cmp(&b.size.element_product())
+    })
+}
+
+impl Ai {
+    /// The person or animal the user tapped at direction `d` (`at`) of those detected (score ≥ 0.3) in crops of 90° and
+    /// 30° around it. The 90° crop of one low down reaches into the nadir zone `sphere` keeps out of, where a box over
+    /// the subject and the camera's carrier can win (v627, frame 300).
+    pub fn pick(&mut self, p: &Pano, d: Vec3) -> Option<Det> {
+        let tiles = [1.0, 0.268].map(|t| Cam::new(d, Vec3::Z, Vec2::splat(t)));
+        at(self.detect(p, &tiles, 0.3), d)
     }
 
     /// Detections with score ≥ `min` over `tiles` (square crops at `SIDE`², `MAX` per network run): per tile and

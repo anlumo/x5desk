@@ -404,8 +404,28 @@ voice denoise on editor timelines and exports (RNNoise).
   reached at 40 °/s; the editor analyses the clip's whole file, not its span; the player's forward view and auto
   framing run the travel twice when started together (`export::travel` keeps a finished one only); the GUI paths (the
   tick, the button, the labels) are untested by hand.
-- [ ] **Pick by click.** The detector's people and animals boxed on the paused frame, a click starting Deep Track
-  (the vendor's Identify Tracking Targets); `Ai::pick` exists, nothing calls it.
+- [x] **Pick by click.** The detector's people and animals boxed on the paused frame, a click starting Deep Track
+  (the vendor's Identify Tracking Targets). With Deep Track armed (the toggle now in every view; drawing a box stays
+  the perspective view's) and the player paused, `ai::pick` finds the frame's people and animals (`track::alive`)
+  over `track::sphere()` on a thread of its own, as the privacy preview does, keyed by frame and stabilisation; they
+  show as yellow boxes in any projection (`ai::outline`: each side a great circle through the preview's projection,
+  `export::proj` / `px`, cut where it leaves the view, on both sides of the equirect's edge; Deep Track's own box now
+  shows in every view too). A click (`export::ray`, the preview's ray, moved out of the export tests) takes the
+  smallest box that holds it (`track::at`, `Ai::pick`'s rule, now people and animals only) and starts the run
+  through `Player::track` as a drawn box does (its class known, the run skips the class detection); off the boxes
+  `Ai::pick` searches crops of 90° and 30° around the click. A boxed subject is taken as shown, not searched again:
+  on v627's frame 300 `Ai::pick` at the box of the woman close by returned a 65° box over her and the camera's
+  carrier down to the nadir (its 90° crop reaches into the zone the sphere keeps out of), IoU 0.40 against her box;
+  elsewhere it refines the box (0.62–0.83, the sphere's box of a close person often cut at the hips).
+  `player::tests::pick` (v606 frame 0; `X5_PICK` for more): a person or more found, a click on the biggest person's
+  box centre starts a run from that frame whose first box is that box (IoU 1.000), `Ai::pick`'s there printed; the
+  views with the boxes into `X5_FIXTURES`. Run on v606 0 and 450, v627 300, v635 90, the ride 2026-03-04 `_670`
+  1500, `_631` 3000 and `_605` 900 (Radeon 8060S, test profile): all pass in 28 s, the boxes in 0.4–1.4 s after the
+  seek (6.3 s with the models' load), sitting on their subjects in perspective, Panini, equirect (also across its
+  edge), tiny planet and a view on the box nearest a pole (`target/forward-scratch/pick/fx`). Open: people below
+  about −63° (the companion beside the camera, the carrier) are never boxed, as the sphere leaves the nadir out; the
+  carrier is boxed like anyone (the ride's rider, and at 0.51 what looks like the rider's arm and gear); the click
+  itself and the drawing through egui are untested by hand.
 - [x] **Seam flow while playing.** The player's RAFT seam (a checkbox by Proxy, on by default; paused frames and exports
   unchanged) draws played frames from the lenses through a flow stitcher's flow (`player::Seam`, `Preview::seam`): RAFT
   runs on a worker of its own on the belt that a new frame's draw records whenever the worker is idle, the flow held

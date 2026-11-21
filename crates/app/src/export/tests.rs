@@ -1,33 +1,6 @@
 use super::*;
 pub(super) use crate::ai::tests::no_cf_home;
 
-/// The preview's ray of pixel `p` on an `s` target (`blur.wgsl` `ray`, `stitch.wgsl`), in the view camera frame.
-fn ray(p: Vec2, mode: u32, f: f32, d: f32, s: Vec2) -> Vec3 {
-    let u = p / s;
-    let x = Vec2::new(2.0 * u.x - 1.0, (1.0 - 2.0 * u.y) * s.y / s.x) * f;
-    let pi = std::f32::consts::PI;
-    let r = match mode {
-        1 => {
-            let (lon, lat) = ((2.0 * u.x - 1.0) * pi, (0.5 - u.y) * pi);
-            Vec3::new(lat.cos() * lon.sin(), lat.sin(), lat.cos() * lon.cos())
-        }
-        2 => {
-            let p = x.length();
-            let k = p * p / ((d + 1.0) * (d + 1.0));
-            let e = (d + (k * (1.0 - d * d) + 1.0).sqrt()) / (k + 1.0);
-            (p * e / (d + 1.0) * (x + Vec2::new(1e-12, 0.0)).normalize()).extend(e - d)
-        }
-        _ => {
-            let k = x.x * x.x / ((d + 1.0) * (d + 1.0));
-            let cl = (-k * d + (k * k * d * d - (k + 1.0) * (k * d * d - 1.0)).sqrt()) / (k + 1.0);
-            let s = (d + 1.0) / (d + cl);
-            let (lon, lat) = (x.x.atan2(s * cl), x.y.atan2(s));
-            Vec3::new(lat.cos() * lon.sin(), lat.sin(), lat.cos() * lon.cos())
-        }
-    };
-    r.normalize()
-}
-
 /// `px` inverts the preview's ray in every projection (perspective, Panini, planet, equirect) within 0.05 px, and the
 /// view matrix is the preview's: the view's forward direction lands on the centre.
 #[test]

@@ -190,9 +190,10 @@ fn keys_follow() {
     );
 }
 
-/// A box drawn on a perspective view is the subject seen there: its outline in that view comes back on the box's
-/// corners (a centred box within a point; the tall one of the follow-view run within 6 % of the height, the box
-/// being upright on the sphere, not in the view).
+/// A box drawn on a perspective view is the subject seen there: its outline in that view, one closed line, comes back
+/// on the box's corners (a centred box within a point; the tall one of the follow-view run within 6 % of the height,
+/// the box being upright on the sphere, not in the view). In the equirect a box behind the view's direction shows at
+/// both edges of the picture, nowhere else.
 #[test]
 fn box_round_trip() {
     let v = View {
@@ -207,13 +208,27 @@ fn box_round_trip() {
         ([0.41, 0.16, 0.58, 0.95], 0.06 * 735.0),
     ] {
         let s = subject(&v, r.aspect_ratio(), b);
-        let o = outline(&v, r, s.dir, s.size).unwrap();
+        let o = outline(&v, r, s.dir, s.size);
+        assert!(o.len() == 1 && o[0].first() == o[0].last(), "{o:?}");
         let want = [(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])]
             .map(|(x, y)| r.min + egui::vec2(x * r.width(), y * r.height()));
-        for (a, w) in o.iter().zip(want) {
-            assert!(a.distance(w) < tol, "{b:?}: {a:?} vs {w:?}");
+        for w in want {
+            let a = o[0].iter().map(|a| a.distance(w)).fold(f32::MAX, f32::min);
+            assert!(a < tol, "{b:?}: {a} from {w:?}");
         }
     }
+    let e = View {
+        mode: stitch::Mode::Equirect,
+        yaw: 30.0,
+        ..View::default()
+    };
+    let o = outline(&e, r, track::dir(210.0, 0.0), Vec2::splat(10.0));
+    let x: Vec<f32> = (o.iter().flatten())
+        .filter(|p| r.contains(**p))
+        .map(|p| p.x - r.left())
+        .collect();
+    assert!(x.iter().any(|&x| x < 26.0) && x.iter().any(|&x| x > 1802.0 - 26.0));
+    assert!(x.iter().all(|&x| !(26.0..=1802.0 - 26.0).contains(&x)));
 }
 
 /// Deep Track from the UI's path on v606 (`X5_SAMPLES`): the woman in the purple coat boxed in the player's view

@@ -1805,7 +1805,7 @@ fn hook(
 
 /// The preview's projection of `v` (crate stitch, `Preview::set`): view camera → world, mode (0 perspective / Panini,
 /// 1 equirect, 2 planet), plane half-width, Panini or planet distance.
-fn proj(v: &View) -> (Mat3, u32, f32, f32) {
+pub(crate) fn proj(v: &View) -> (Mat3, u32, f32, f32) {
     let c = track::Cam::view(v.yaw, v.pitch, v.roll, 90.0, 1.0);
     let m = Mat3::from_cols(c.r, c.u, c.f);
     let r = f32::to_radians;
@@ -1830,7 +1830,7 @@ fn proj(v: &View) -> (Mat3, u32, f32, f32) {
 
 /// Target pixel of camera-frame direction `c` (x right, y up, z forward) on a `s` target under `proj`'s mode, plane
 /// half-width and distance; None behind the projection. `blur.wgsl` `uv` times the size.
-fn px(c: Vec3, mode: u32, f: f32, d: f32, s: Vec2) -> Option<Vec2> {
+pub(crate) fn px(c: Vec3, mode: u32, f: f32, d: f32, s: Vec2) -> Option<Vec2> {
     let x = match mode {
         1 => {
             let u = Vec2::new(
@@ -1856,6 +1856,34 @@ fn px(c: Vec3, mode: u32, f: f32, d: f32, s: Vec2) -> Option<Vec2> {
         }
     };
     Some(Vec2::new(x.x / f + 1.0, 1.0 - x.y * s.x / (f * s.y)) * 0.5 * s)
+}
+
+/// The preview's ray of pixel `p` on an `s` target (`blur.wgsl` `ray`, `stitch.wgsl`), in the view camera frame:
+/// `px` inverted.
+pub(crate) fn ray(p: Vec2, mode: u32, f: f32, d: f32, s: Vec2) -> Vec3 {
+    let u = p / s;
+    let x = Vec2::new(2.0 * u.x - 1.0, (1.0 - 2.0 * u.y) * s.y / s.x) * f;
+    let pi = std::f32::consts::PI;
+    let r = match mode {
+        1 => {
+            let (lon, lat) = ((2.0 * u.x - 1.0) * pi, (0.5 - u.y) * pi);
+            Vec3::new(lat.cos() * lon.sin(), lat.sin(), lat.cos() * lon.cos())
+        }
+        2 => {
+            let p = x.length();
+            let k = p * p / ((d + 1.0) * (d + 1.0));
+            let e = (d + (k * (1.0 - d * d) + 1.0).sqrt()) / (k + 1.0);
+            (p * e / (d + 1.0) * (x + Vec2::new(1e-12, 0.0)).normalize()).extend(e - d)
+        }
+        _ => {
+            let k = x.x * x.x / ((d + 1.0) * (d + 1.0));
+            let cl = (-k * d + (k * k * d * d - (k + 1.0) * (k * d * d - 1.0)).sqrt()) / (k + 1.0);
+            let s = (d + 1.0) / (d + cl);
+            let (lon, lat) = (x.x.atan2(s * cl), x.y.atan2(s));
+            Vec3::new(lat.cos() * lon.sin(), lat.sin(), lat.cos() * lon.cos())
+        }
+    };
+    r.normalize()
 }
 
 /// `blur.wgsl` `Reg`: forward, right, up, ellipse half extents and blur radius, quad.

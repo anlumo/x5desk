@@ -1979,12 +1979,10 @@ impl Editor {
             && let Some(h) = self.decks[i].held
             && self.decks[i].path == t.path
             && let Some(s) = t.t.at(h.k)
-            && let Some(o) = ai::outline(&v, r, s.raw, s.size)
         {
-            p.add(egui::Shape::closed_line(
-                o.to_vec(),
-                egui::Stroke::new(2.0, ai::colour(s.state)),
-            ));
+            for l in ai::outline(&v, r, s.raw, s.size) {
+                p.line(l, egui::Stroke::new(2.0, ai::colour(s.state)));
+            }
         }
         let tl = self.pj.tl();
         let mut lines = vec![format!("{} / {}", mmss(self.t), mmss(tl.dur()))];

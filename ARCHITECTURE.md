@@ -329,7 +329,15 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   detector at every batch size, one network call at a time under BURN; re-identification runs no network), shared by
   Deep Track, auto edit and every privacy pass. Deep Track sets `Tracker::fps` from the clip
   (`shotlab::Clip::meta.fps`); its directions are in the frame of the track's stabilisation and are turned into any
-  other frame with `Track::turn` / `ai::rots`. Auto framing (`Track::framing`) is auto edit's pass (`ai::scan`: the
+  other frame with `Track::turn` / `ai::rots`. The player's pick (`ai::pick`, on a thread per search like the privacy
+  preview): armed on a paused frame, the detector's people and animals (`track::alive`) over `track::sphere()`, keyed
+  by frame and stabilisation and boxed in any projection (`ai::outline` through `export::proj` / `px`, cut where a box
+  leaves the projection, on both sides of the equirect's edge). A click's direction (`export::ray`) takes the smallest
+  of those boxes that holds it (`track::at`, `Ai::pick`'s rule); off them `Ai::pick` searches crops of 90° and 30°
+  around it (a far person the sphere's 100° tiles miss; its 90° crop of a subject low down reaches into the nadir
+  zone, where a box over the subject and the camera's carrier can win, which is why a boxed one is taken as shown).
+  The detection, class and all, is the subject `Player::track` starts, as a drawn box's is (a known class skips the
+  run's class detection). Auto framing (`Track::framing`) is auto edit's pass (`ai::scan`: the
   direction of travel, then the detector over the sphere every 10th frame into `track::Framer`, with the stitch
   rotations as the camera body's frame, which tells the camera's carrier, and where the travel estimates move) over
   the whole clip, its path a `Track` of its own (`auto`, no samples) that the player's follow view, `Spec::follow` and

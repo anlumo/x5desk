@@ -371,17 +371,21 @@ impl Track {
                         match &mut tr {
                             Some(t) => Ok(t.step(ai, p)),
                             None => {
-                                // the detector's class at the box narrows re-detection to it (the box stays the
-                                // user's)
-                                let e = ((1.5 * s.size.max_element()).clamp(20.0, 120.0) / 2.0)
-                                    .to_radians()
-                                    .tan();
-                                let cam = track::Cam::new(s.dir, Vec3::Z, Vec2::splat(e));
-                                let cls = (ai.detect(p, &[cam], 0.3).into_iter())
-                                    .map(|d| (track::iou((s.dir, s.size), d.on(), false), d.cls))
-                                    .filter(|x| x.0 >= 0.3)
-                                    .max_by(|a, b| a.0.total_cmp(&b.0))
-                                    .map(|x| x.1);
+                                // the detector's class at a drawn box narrows re-detection to it (the box stays the
+                                // user's); a pick's is the detector's already
+                                let cls = s.cls.or_else(|| {
+                                    let e = ((1.5 * s.size.max_element()).clamp(20.0, 120.0) / 2.0)
+                                        .to_radians()
+                                        .tan();
+                                    let cam = track::Cam::new(s.dir, Vec3::Z, Vec2::splat(e));
+                                    (ai.detect(p, &[cam], 0.3).into_iter())
+                                        .map(|d| {
+                                            (track::iou((s.dir, s.size), d.on(), false), d.cls)
+                                        })
+                                        .filter(|x| x.0 >= 0.3)
+                                        .max_by(|a, b| a.0.total_cmp(&b.0))
+                                        .map(|x| x.1)
+                                });
                                 track::Tracker::new(ai, p, Subject { cls, ..s }).map(|mut t| {
                                     // every frame is stepped: the subject's reach is per second of the clip
                                     t.fps = c.meta.fps as f32;
@@ -656,27 +660,81 @@ pub fn subject(v: &View, aspect: f32, b: [f32; 4]) -> Subject {
     Subject::boxed(&track::Cam::view(v.yaw, v.pitch, v.roll, v.fov, aspect), b)
 }
 
-/// The outline of a box (centre, angular size) in perspective view `v` shown in picture rect `r`; None when a
-/// corner is behind the view.
-pub fn outline(v: &View, r: egui::Rect, dir: Vec3, size: Vec2) -> Option<[egui::Pos2; 4]> {
-    let cam = track::Cam::view(v.yaw, v.pitch, v.roll, v.fov, r.aspect_ratio());
-    let e = Vec2::new(
-        (size.x / 2.0).to_radians().tan(),
-        (size.y / 2.0).to_radians().tan(),
-    );
-    let b = track::Cam::new(dir, Vec3::Z, e);
-    let mut o = [egui::Pos2::ZERO; 4];
-    for (i, c) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
-        .into_iter()
-        .enumerate()
-    {
-        let p = cam.px(b.ray(Vec2::new(c.0, c.1)))?;
-        o[i] = egui::pos2(
-            r.left() + (p.x + 1.0) / 2.0 * r.width(),
-            r.top() + (p.y + 1.0) / 2.0 * r.height(),
-        );
+/// The outline of a box (centre, angular size; its sides great circles) in view `v` of any projection shown in
+/// picture rect `r`, clockwise from the top left corner: polylines, cut where it leaves the projection; in the
+/// equirect also a picture width left and right, so that clipped to `r` it shows on both sides of the edge.
+pub fn outline(v: &View, r: egui::Rect, dir: Vec3, size: Vec2) -> Vec<Vec<egui::Pos2>> {
+    const N: usize = 16;
+    let (m, mode, f, d) = crate::export::proj(v);
+    let s = Vec2::new(r.width(), r.height());
+    let b = track::Cam::new(dir, Vec3::Z, (size / 2.0).map(|a| a.to_radians().tan()));
+    let c = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].map(Vec2::from);
+    let (mut o, mut last) = (vec![vec![]], None::<Vec2>);
+    for i in 0..=4 * N {
+        let t = (i % N) as f32 / N as f32;
+        let w = b.ray(c[i / N % 4].lerp(c[(i / N + 1) % 4], t));
+        match crate::export::px(m.transpose() * w, mode, f, d, s) {
+            Some(mut q) => {
+                // the equirect's columns wrap: the side goes on past the edge
+                if let Some(l) = last {
+                    q.x += ((l.x - q.x) / s.x).round() * s.x;
+                }
+                o.last_mut().unwrap().push(r.min + egui::vec2(q.x, q.y));
+                last = Some(q);
+            }
+            None => {
+                o.push(vec![]);
+                last = None;
+            }
+        }
     }
-    Some(o)
+    o.retain(|l| l.len() > 1);
+    if mode == 1 {
+        for l in o.clone() {
+            for x in [-s.x, s.x] {
+                o.push(l.iter().map(|p| *p + egui::vec2(x, 0.0)).collect());
+            }
+        }
+    }
+    o
+}
+
+/// Deep Track's pick on frame `k` of `file` stitched with `stab` (the viewer's frame): the people and animals over the
+/// sphere to box (`track::sphere`, `track::alive`), or with `at` the one at that direction, if any (`Ai::pick`).
+pub fn pick(
+    g: &Arc<Gpu>,
+    cx: &stitch::Ctx,
+    file: &Path,
+    stab: (gyro::Mode, f64),
+    k: usize,
+    at: Option<Vec3>,
+) -> Result<Vec<track::Det>, String> {
+    let c = shotlab::Clip::open(file)?;
+    let poses = poses(&c, stab)?;
+    MODELS.with(g, false, None, |ai| {
+        let (mut out, mut gate) = (vec![], Some(GATE.read()));
+        c.frames(
+            g,
+            cx,
+            W,
+            false,
+            &[k],
+            |k| c.pose(k, poses.as_deref()),
+            |tex, _| {
+                gate.take();
+                let _b = BURN.lock();
+                let p = ai.pano(&tex.create_view(&Default::default()));
+                out = match at {
+                    Some(d) => ai.pick(&p, d).into_iter().collect(),
+                    None => (ai.detect(&p, &track::sphere(), 0.3).into_iter())
+                        .filter(|d| track::alive(d.cls))
+                        .collect(),
+                };
+                Ok(())
+            },
+        )?;
+        Ok(out)
+    })
 }
 
 /// The faces and licence plates (`find`: faces, plates) on frame `k` of `file` stitched with `stab` (the viewer's

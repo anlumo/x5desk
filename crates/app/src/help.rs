@@ -55,7 +55,7 @@ macro_rules! cmd {
 }
 
 /// Where, keys, what.
-const KEYS: [(&str, &str, &str); 20] = [
+const KEYS: [(&str, &str, &str); 21] = [
     ("Viewers", "Drag", "Look around (360 views)"),
     (
         "Viewers",
@@ -66,6 +66,11 @@ const KEYS: [(&str, &str, &str); 20] = [
     ("Viewers", "Double-click", "Reset the view"),
     ("Player", "Space", "Play / pause"),
     ("Player", "← / →", "One frame back / forward"),
+    (
+        "Player",
+        "Click (Deep Track on, paused)",
+        "Track the person or animal there (those found are boxed)",
+    ),
     ("Plain videos", "Space", "Play / pause"),
     ("Editor", "Space", "Play / pause"),
     ("Editor", "S", "Split the clip at the playhead"),
@@ -127,7 +132,9 @@ fn guide(p: Page) -> &'static [&'static str] {
              template seam once the GPU can't keep up).",
             "Export… takes the file and the current view to the Export screen; Grab 360 and Grab view make a JPEG of \
              the frame shown there. A file's menu in the lists exports it or adds it to the editor.",
-            "Deep Track: turn it on and draw a box around a subject in the perspective view. It is tracked from that \
+            "Deep Track: turn it on and draw a box around a subject in the perspective view, or pause on a frame: \
+             its people and animals show boxed in any view, and a click on one picks it (a click elsewhere looks \
+             closer around it for a person or animal the boxes missed). It is tracked from that \
              frame to the end on the AI models (loaded on first use, a minute's warm-up the first time); the bar \
              under the seek bar shows where it was tracked (green), checked by the detector (teal), missing (amber), \
              lost (red) and found again (blue). Then the view follows it, and a flat export takes that follow view.",

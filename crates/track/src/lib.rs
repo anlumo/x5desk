@@ -26,7 +26,7 @@ mod tests;
 mod vit;
 
 pub use blur::Blur;
-pub use det::{CLASSES, Det, SIDE, ring, sphere};
+pub use det::{CLASSES, Det, SIDE, alive, at, ring, sphere};
 pub use frame::{Framer, LOW, Pass, Shot};
 pub use high::{BIN, Highlight, Scorer, Sig, fit, timeline};
 pub use plates::{VEHICLES, plate_crops};

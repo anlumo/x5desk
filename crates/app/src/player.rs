@@ -5,10 +5,12 @@
 //! applies the rolling shutter and the preview turns the resulting body-frame equirect.
 //!
 //! Deep Track (`ai`): with Deep Track armed, a box dragged around a subject in the perspective view starts a run from
-//! the frame shown; the run's states show under the seek bar, the box on the picture, and once it is over the view
-//! follows the subject (the follow view the export takes). Auto framing follows the clip's auto framing the same way,
-//! its analysis run on first use and kept. Privacy preview: the faces and licence plates of the paused frame blurred
-//! as the export blurs them. Auto edit hands the clip to the editor.
+//! the frame shown, or on a paused frame a click in any view: its people and animals show boxed (found on a thread,
+//! `ai::pick`), and the one clicked is tracked (off the boxes, `Ai::pick` searches around the click). The run's states
+//! show under the seek bar, the box on the picture, and once it is over the view follows the subject (the follow view
+//! the export takes). Auto framing follows the clip's auto framing the same way, its analysis run on first use and
+//! kept. Privacy preview: the faces and licence plates of the paused frame blurred as the export blurs them. Auto edit
+//! hands the clip to the editor.
 //!
 //! The library shares the player with the live output thread (`Arc<Mutex<Player>>`), which takes the frame due and
 //! draws it on its own clock while the UI may not run (a hidden window); the audio player sits on a thread of its own
@@ -372,6 +374,10 @@ impl Src {
 
 /// Source id, frame, rolling-shutter term on.
 pub(crate) type Key = (u64, usize, bool);
+/// A frame of the main file under a stabilisation (lock, σ bits).
+type PickKey = (usize, gyro::Mode, u64);
+/// Deep Track's pick: the people and animals found, or a click's subject.
+type Picks = Result<Vec<track::Det>, String>;
 /// The faces and plates (as asked: faces, plates) of a frame of the main file under a stabilisation (lock, σ bits).
 type FaceKey = (usize, gyro::Mode, u64, [bool; 2]);
 /// The regions, the faces first, and how many of them are faces.
@@ -888,6 +894,10 @@ pub struct Player {
     arm: bool,
     pub follow: bool,
     from: Option<egui::Pos2>,
+    /// Deep Track's pick (armed, paused): the frame's people and animals, boxed; a search out (with a click's
+    /// direction: for its subject, which starts a run)
+    dets: Option<(PickKey, Vec<track::Det>)>,
+    dq: Option<(PickKey, Option<glam::Vec3>, mpsc::Receiver<Picks>)>,
     /// auto framing: the clip's run (kept while the player is open); the view follows it (Deep Track's or this one)
     pub frm: Option<Arc<ai::Track>>,
     pub framing: bool,
@@ -1001,6 +1011,8 @@ impl Player {
             arm: false,
             follow: false,
             from: None,
+            dets: None,
+            dq: None,
             frm: None,
             framing: false,
             blur: false,
@@ -1138,24 +1150,53 @@ impl Player {
         (self.stab.mode, self.stab.smooth)
     }
 
-    fn fkey(&self) -> Option<FaceKey> {
+    fn pkey(&self) -> Option<PickKey> {
         let p = self.held?;
-        Some((
-            self.main_k(&p),
-            self.stab.mode,
-            self.stab.smooth.to_bits(),
-            [self.blur, self.plates],
-        ))
+        Some((self.main_k(&p), self.stab.mode, self.stab.smooth.to_bits()))
     }
 
-    /// Deep Track of subject `s` (`ai::subject` of a box in the perspective view), from the frame shown to the clip's
-    /// end; the view follows it once the run is over.
+    fn fkey(&self) -> Option<FaceKey> {
+        let (k, m, s) = self.pkey()?;
+        Some((k, m, s, [self.blur, self.plates]))
+    }
+
+    /// Deep Track's search on frame `k`: its people and animals, or with `at` the subject at that direction
+    /// (`ai::pick`), on a thread of its own; it replaces one out.
+    fn find(&mut self, k: PickKey, at: Option<glam::Vec3>) {
+        let Some(f) = self.work.main.first() else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        let (g, cx, ctx, f) = (self.g.clone(), self.cx.clone(), self.ctx.clone(), f.clone());
+        thread::spawn(move || {
+            let st = (k.1, f64::from_bits(k.2));
+            let _ = tx.send(crate::export::scoped(&g.device, || {
+                ai::pick(&g, &cx, &f, st, k.0, at)
+            }));
+            ctx.request_repaint();
+        });
+        self.dq = Some((k, at, rx));
+    }
+
+    /// A click on direction `d` of frame `k`, Deep Track armed: the person or animal boxed there is tracked
+    /// (`track::at`); off the boxes `Ai::pick` searches around it.
+    fn click(&mut self, k: PickKey, d: glam::Vec3) {
+        let x = (self.dets.as_ref()).filter(|x| x.0 == k);
+        match x.and_then(|x| track::at(x.1.clone(), d)) {
+            Some(s) => {
+                if let Err(e) = self.track(s.into()) {
+                    self.note = Some(e);
+                }
+            }
+            None => self.find(k, Some(d)),
+        }
+    }
+
+    /// Deep Track of subject `s` (`ai::subject` of a box in the perspective view, or a pick's), from the frame shown to
+    /// the clip's end; the view follows it once the run is over.
     pub fn track(&mut self, s: track::Subject) -> Result<(), String> {
         let f = (self.work.main.first().cloned())
             .ok_or("Deep Track needs the main file, not the proxy alone")?;
-        if self.look != Look::Perspective {
-            return Err("Deep Track: draw the box in the perspective view".into());
-        }
         let p = self.held.ok_or("no frame shown yet")?;
         if let Some(t) = &self.trk {
             t.stop.store(true, Relaxed);
@@ -1392,6 +1433,38 @@ impl Player {
             });
             self.fq = Some((k, rx));
         }
+        // Deep Track armed on a paused frame: its people and animals boxed, a click's subject tracked (if it is still
+        // the frame shown)
+        if let Some((k, at, r)) = &self.dq
+            && let Ok(x) = r.try_recv()
+        {
+            let (k, at) = (*k, *at);
+            (self.dq, self.dirty) = (None, true);
+            match (x, at) {
+                (Ok(v), None) => self.dets = Some((k, v)),
+                (Ok(v), Some(_)) if self.arm && Some(k) == self.pkey() => {
+                    let r = match v.first() {
+                        Some(d) => self.track((*d).into()),
+                        None => Err("Deep Track: no person or animal there".into()),
+                    };
+                    if let Err(e) = r {
+                        self.note = Some(e);
+                    }
+                }
+                (Ok(_), _) => {}
+                (Err(e), _) => (self.note, self.arm) = (Some(format!("Deep Track: {e}")), false),
+            }
+        }
+        if self.arm
+            && !self.playing
+            && self.want.is_none()
+            && self.dq.is_none()
+            && self.stab.ready()
+            && let Some(k) = self.pkey()
+            && self.dets.as_ref().is_none_or(|x| x.0 != k)
+        {
+            self.find(k, None);
+        }
         // the hook's box is 0..1 of the view at 16:9 (a flat 1080p export's frame of it), whatever the window: the
         // picture changes shape while the window's layout settles and with its size, and the box with it
         if self.tbox.is_some() && self.held.is_some() && self.want.is_none() && self.stab.ready() {
@@ -1401,7 +1474,11 @@ impl Player {
                 "x5desk: box: subject at yaw {y:.2}°, pitch {x:.2}°, {:.2}° × {:.2}°",
                 s.size.x, s.size.y
             );
-            if let Err(e) = self.track(s) {
+            let r = match self.look {
+                Look::Perspective => self.track(s),
+                _ => Err("Deep Track: draw the box in the perspective view".into()),
+            };
+            if let Err(e) = r {
                 eprintln!("x5desk: box: {e}");
                 self.note = Some(e);
             }
@@ -1453,6 +1530,10 @@ impl Player {
         let faces = !(self.blur || self.plates)
             || self.playing
             || (self.fkey()).is_some_and(|k| self.regs.as_ref().is_some_and(|r| r.0 == k));
+        let pick = self.dq.is_none()
+            && (!self.arm
+                || self.playing
+                || (self.pkey()).is_some_and(|k| self.dets.as_ref().is_some_and(|x| x.0 == k)));
         self.want.is_none()
             && self.held.is_some()
             && self.stab.ready()
@@ -1463,6 +1544,7 @@ impl Player {
             && self.trk.as_ref().is_none_or(|t| t.st().over())
             && self.frm.as_ref().is_none_or(|t| t.st().over())
             && faces
+            && pick
     }
 
     /// What the export screen takes: the main files, the frame shown, the view, the stabilisation; None while only the
@@ -1681,10 +1763,13 @@ impl Player {
                     }
                 }
                 over => {
-                    ui.add_enabled_ui(main && self.look == Look::Perspective, |ui| {
+                    ui.add_enabled_ui(main, |ui| {
                         ui.toggle_value(&mut self.arm, "Deep Track")
-                            .on_hover_text("Drag a box around a subject in the view: it is tracked from this frame on")
-                            .on_disabled_hover_text("Deep Track needs the main file and the perspective view");
+                            .on_hover_text(
+                                "Paused, click a person or animal (those found are boxed), or drag a box around a \
+                                 subject in the perspective view: it is tracked from this frame on",
+                            )
+                            .on_disabled_hover_text("Deep Track needs the main file");
                     });
                     if over.is_some() {
                         if ui
@@ -1817,6 +1902,22 @@ impl Player {
             self.framing &= !resp.dragged();
             self.dirty = true;
         }
+        if self.arm
+            && !self.playing
+            && self.want.is_none()
+            && resp.clicked()
+            && let (Some(q), Some(k)) = (
+                resp.interact_pointer_pos().filter(|q| r.contains(*q)),
+                self.pkey(),
+            )
+        {
+            let (m, mode, f, d) = crate::export::proj(&self.view);
+            let (u, s) = (q - r.min, glam::Vec2::new(r.width(), r.height()));
+            self.click(
+                k,
+                m * crate::export::ray(glam::Vec2::new(u.x, u.y), mode, f, d, s),
+            );
+        }
         let ppp = ui.ctx().pixels_per_point();
         let size = [r.width(), r.height()].map(|x| ((x * ppp).round() as u32).max(1));
         if self.fresh || self.dirty || size != self.size {
@@ -1831,22 +1932,47 @@ impl Player {
         if let Some(b) = live {
             ai::paint_box(&p, b);
         }
-        if let (Some(t), Some(h), Look::Perspective) = (&self.trk, self.held, self.look)
+        // clipped to the picture: a box across the equirect's edge shows on both sides
+        let pr = p.with_clip_rect(r);
+        if self.arm
+            && !self.playing
+            && let Some((k, v)) = &self.dets
+            && Some(*k) == self.pkey()
+        {
+            for d in v {
+                for l in ai::outline(&self.view, r, d.dir, d.size) {
+                    pr.line(l, egui::Stroke::new(2.0, egui::Color32::YELLOW));
+                }
+            }
+        }
+        if let (Some(t), Some(h)) = (&self.trk, self.held)
             && let k = self.main_k(&h)
             && let Some((s, q)) = t.at(k).zip(t.turn(k, self.pose(&h).0.q))
-            && let Some(o) = ai::outline(&self.view, r, q * s.raw, s.size)
         {
-            p.add(egui::Shape::closed_line(
-                o.to_vec(),
-                egui::Stroke::new(2.0, ai::colour(s.state)),
-            ));
+            for l in ai::outline(&self.view, r, q * s.raw, s.size) {
+                pr.line(l, egui::Stroke::new(2.0, ai::colour(s.state)));
+            }
         }
         let mut lines = vec![];
         if self.held.is_none() || self.want.is_some() {
             lines.push("Decoding…".to_string());
         }
         if self.arm {
-            lines.push("Deep Track: drag a box around the subject".into());
+            let drag = match self.look {
+                Look::Perspective => ", or drag a box around one",
+                _ => "",
+            };
+            let n = (self.dets.as_ref())
+                .filter(|x| Some(x.0) == self.pkey())
+                .map(|x| x.1.len());
+            lines.push(match (self.playing, &self.dq, n) {
+                (true, ..) => format!("Deep Track: pause to pick a subject{drag}"),
+                (_, Some((_, Some(_), _)), _) => "Deep Track: picking…".into(),
+                (_, _, Some(n)) => {
+                    format!("Deep Track: click a subject ({n} people and animals found){drag}")
+                }
+                _ => format!("Deep Track: finding people and animals…{drag}"),
+            });
         }
         if let Some(t) = &self.trk {
             lines.push(match t.st() {
@@ -2191,6 +2317,164 @@ mod tests {
         });
         let v = t.create_view(&Default::default());
         (t, v)
+    }
+
+    /// Deep Track's pick on v606's frame 0 (`X5_SAMPLES`; `X5_PICK` = `<file>:<frame>` entries, `;` between them,
+    /// instead): armed on the paused frame the player finds its people and animals (on v606 a person or more); a click
+    /// on the centre of the biggest person's box starts a run from that frame whose first box is that box. What
+    /// `Ai::pick` finds there (a click off the boxes searches so) is printed, with its IoU against the box. The paused
+    /// view with the boxes as the viewer draws them (yellow; the click's run's first box green, the search's blue)
+    /// goes to `X5_FIXTURES` as `pick-<file>-<frame>-<view>.jpg`: perspective and Panini on that person (else the
+    /// first found), the equirect, the equirect with them on its edge, the tiny planet, a perspective view on the box
+    /// nearest a pole.
+    #[test]
+    fn pick() {
+        let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+            eprintln!("X5_SAMPLES not set: skipping");
+            return;
+        };
+        let out = std::env::var_os("X5_FIXTURES").map_or_else(std::env::temp_dir, PathBuf::from);
+        let g = Arc::new(Gpu::new().unwrap());
+        let cx = Ctx::new(&g.device, &g.queue);
+        let ctx = egui::Context::default();
+        let (st, gw) = (still(&g, &cx), gyro::worker());
+        let v606 = format!("{}:0", d.join("v606.insv").display());
+        let list = std::env::var("X5_PICK").unwrap_or(v606.clone());
+        // every entry's pictures first
+        let mut bad = vec![];
+        for e in list.split(';') {
+            let (f, k) = e.rsplit_once(':').unwrap();
+            let w = crate::library::pair(Path::new(f));
+            let mut p = Player::open(&g, &cx, w, &ctx, &st, &gw, None).unwrap();
+            p.seek(k.parse().unwrap());
+            p.arm = true;
+            let t0 = Instant::now();
+            let run = |p: &mut Player, done: &dyn Fn(&Player) -> bool| {
+                while !done(p) {
+                    p.tick(false);
+                    assert!(t0.elapsed().as_secs() < 600, "{e}: stuck");
+                    thread::sleep(Duration::from_millis(5));
+                }
+            };
+            run(&mut p, &|p| p.idle());
+            let (k0, v) = p.dets.clone().unwrap();
+            let name = |c: u32| track::CLASSES[c as usize];
+            eprintln!(
+                "{e}: frame {} found in {:.1} s: {:?}",
+                k0.0,
+                t0.elapsed().as_secs_f64(),
+                (v.iter())
+                    .map(|x| (name(x.cls), track::yaw_pitch(x.dir), x.size, x.score))
+                    .collect::<Vec<_>>()
+            );
+            let b = (v.iter().filter(|x| x.cls == 0)).max_by(|a, b| {
+                a.size
+                    .element_product()
+                    .total_cmp(&b.size.element_product())
+            });
+            assert!(b.is_some() || e != v606, "{e}: no person");
+            let s = b.map(|b| {
+                // the run's start frame and first box, and its IoU against the box
+                let go = |p: &mut Player, click: bool| {
+                    (p.trk, p.arm) = (None, true);
+                    match click {
+                        true => p.click(k0, b.dir),
+                        false => p.find(k0, Some(b.dir)),
+                    }
+                    run(p, &|p| (p.trk.as_ref()).is_some_and(|t| t.at(k0.0).is_some()));
+                    let t = p.trk.clone().unwrap();
+                    t.stop.store(true, Relaxed);
+                    crate::ai::tests::wait(|| t.st(), 60);
+                    let s = t.at(k0.0).unwrap();
+                    (t.k0, s, track::iou((b.dir, b.size), (s.raw, s.size), false))
+                };
+                let ((k1, s1, i1), (k2, s2, i2)) = (go(&mut p, true), go(&mut p, false));
+                eprintln!(
+                    "{e}: clicked at {:?} {:?}: the run's first box IoU {i1:.3}; Ai::pick's there {:?} {:?}, \
+                     IoU {i2:.3}",
+                    track::yaw_pitch(b.dir),
+                    b.size,
+                    track::yaw_pitch(s2.raw),
+                    s2.size
+                );
+                if k1 != k0.0 || k2 != k0.0 || i1 < 0.999 {
+                    bad.push(format!("{e}: from frames {k1}, {k2}, IoU {i1}"));
+                }
+                [s1, s2]
+            });
+            let [yaw, pitch] = (b.or(v.first())).map_or([0.0; 2], |x| track::yaw_pitch(x.dir));
+            let [py, pp] = (v.iter().map(|x| track::yaw_pitch(x.dir)))
+                .max_by(|a, b| a[1].abs().total_cmp(&b[1].abs()))
+                .unwrap_or([0.0; 2]);
+            let stem = Path::new(f).file_stem().unwrap().to_string_lossy();
+            for (name, l, yaw, pitch) in [
+                ("perspective", Look::Perspective, yaw, pitch),
+                ("panini", Look::Panini, yaw, pitch),
+                ("equirect", Look::Equirect, 0.0, 0.0),
+                ("wrap", Look::Equirect, yaw + 180.0, 0.0),
+                ("planet", Look::Planet, yaw, -90.0),
+                // the box nearest a pole, the view on it
+                ("pole", Look::Perspective, py, pp),
+            ] {
+                (p.look, p.view) = (
+                    l,
+                    View {
+                        yaw,
+                        pitch,
+                        ..l.view()
+                    },
+                );
+                let (w, h) = if l == Look::Equirect {
+                    (1600, 800)
+                } else {
+                    (1280, 720)
+                };
+                let (tex, tv) = target(&g, w, h);
+                crate::live::Source::draw(&mut p, &tv, [w, h], false);
+                let mut px = stitch::read_texture(&g.device, &g.queue, &tex);
+                let r = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w as f32, h as f32));
+                let runs = (s.iter().flatten()).zip([[0, 230, 60], [40, 120, 255]]);
+                let boxes = (v.iter().map(|x| (x.dir, x.size, [255, 230, 0])))
+                    .chain(runs.map(|(s, c)| (s.raw, s.size, c)));
+                for (dir, size, c) in boxes {
+                    for l in crate::ai::outline(&p.view, r, dir, size) {
+                        for ab in l.windows(2) {
+                            // the side clipped to 1 px inside the picture (Liang–Barsky), then 3 px thick
+                            let (a, d) = (ab[0], ab[1] - ab[0]);
+                            let (mut u0, mut u1) = (0f32, 1f32);
+                            let (x1, y1) = (w as f32 - 2.0, h as f32 - 2.0);
+                            for (p, q) in [
+                                (-d.x, a.x - 1.0),
+                                (d.x, x1 - a.x),
+                                (-d.y, a.y - 1.0),
+                                (d.y, y1 - a.y),
+                            ] {
+                                if p == 0.0 {
+                                    u1 = if q < 0.0 { -1.0 } else { u1 };
+                                } else if p < 0.0 {
+                                    u0 = u0.max(q / p);
+                                } else {
+                                    u1 = u1.min(q / p);
+                                }
+                            }
+                            let n = (d.length() * (u1 - u0)).ceil().max(1.0) as usize;
+                            for i in (0..=n).filter(|_| u0 <= u1) {
+                                // a far end's rounding can land a hair outside
+                                let q = (a + d * (u0 + (u1 - u0) * i as f32 / n as f32))
+                                    .clamp(egui::pos2(1.0, 1.0), egui::pos2(x1, y1));
+                                for j in 0..9 {
+                                    let (x, y) = (q.x as u32 + j % 3 - 1, q.y as u32 + j / 3 - 1);
+                                    px[(y * w + x) as usize * 4..][..3].copy_from_slice(&c);
+                                }
+                            }
+                        }
+                    }
+                }
+                let o = out.join(format!("pick-{stem}-{}-{name}.jpg", k0.0));
+                std::fs::write(&o, media::jpeg::encode(&px, w, h, 90, None).unwrap()).unwrap();
+            }
+        }
+        assert!(bad.is_empty(), "{bad:?}");
     }
 
     /// RAFT on played frames holds its flow between runs: on a static scene (v635's frame 0 shown again and again,
