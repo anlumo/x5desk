@@ -205,6 +205,17 @@ pub fn center_stage(
     Ok(c)
 }
 
+/// Overtake: source `a..b` of `file` turned onto a passing vehicle (`track::Pass::path`) at a fixed horizontal field of
+/// view `fov` (fitting its height would zoom from a few degrees to over 100 as it comes abeam), keys every `every` s.
+pub fn overtake(file: u32, a: f64, b: f64, s: &[Subj], fov: f32, every: f64) -> Result<Clip> {
+    if !(fov > 0.0 && fov < 170.0) {
+        return bad("overtake");
+    }
+    let mut c = Clip::new(file, a, b);
+    c.view = follow(s, a, b, every, |x, _| look(x.dir, 0.0, fov, Proj::Persp))?;
+    Ok(c)
+}
+
 /// Spin Me Around: Center Stage while the picture turns `turns` full turns about the subject.
 pub fn spin(
     file: u32,

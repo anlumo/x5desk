@@ -303,6 +303,11 @@ impl Library {
         self.player.as_ref()?.lock().unwrap().trk.clone()
     }
 
+    /// The open player's auto framing run.
+    pub fn framing(&self) -> Option<Arc<crate::ai::Track>> {
+        self.player.as_ref()?.lock().unwrap().frm.clone()
+    }
+
     /// The open player, for the live outputs.
     pub fn source(&self) -> Option<crate::live::Src> {
         self.player.clone().map(|p| p as _)

@@ -1,11 +1,12 @@
-//! Highlights and auto edit: a clip is scored in `BIN` s bins by four signals, each scaled within the clip between
+//! Highlights and auto edit: a clip is scored in `BIN` s bins by five signals, each scaled within the clip between
 //! its 10th and 90th percentile (with a floor on that spread, so a flat signal's noise stays small) and weighted:
 //! - camera motion: angular speed of the camera from the trailer gyro (`stab::Track`) over 0.5 s, so pans and
 //!   turns count and shake mostly averages out;
 //! - visual change: mean difference of consecutive thumbnails of the stabilised sphere ([`Ai::thumb`]): things
 //!   moving, new places;
 //! - people: the persons the detector sees (weighted by size, so near ones count most) and the faces;
-//! - audio: loudness (RMS in dB) of the file's AAC track.
+//! - audio: loudness (RMS in dB) of the file's AAC track;
+//! - overtakes: vehicles overtaking close by ([`crate::Pass`]), 1 over each one from the rear quarter to the front.
 //!
 //! The score is smoothed (Gaussian, σ 1 s); highlights grow from the best bins while the score stays above the median,
 //! 2 to 8 s each, until they fill the duration asked for. [`fit`] moves their cuts onto a music track's beats;
@@ -30,11 +31,14 @@ pub enum Sig {
     People,
     /// Loudness, dB (RMS, full scale 0).
     Audio,
+    /// A vehicle overtaking close by (`Scorer::passes`).
+    Pass,
 }
 
-/// Weights and the floors of the 10–90 % spread, per `Sig`.
-const W: [f32; 4] = [0.2, 0.25, 0.35, 0.2];
-const FLOOR: [f32; 4] = [0.3, 0.02, 1.0, 6.0];
+/// Weights and the floors of the 10–90 % spread, per `Sig`. The first four keep their ratios of before overtakes
+/// counted (0.2, 0.25, 0.35, 0.2), so a clip without one scores in proportion and gets the same highlights.
+const W: [f32; 5] = [0.16, 0.2, 0.28, 0.16, 0.2];
+const FLOOR: [f32; 5] = [0.3, 0.02, 1.0, 6.0, 1.0];
 /// Highlight length, s; the shortest [`fit`] trims one to.
 const MIN: f64 = 2.0;
 const MAX: f64 = 8.0;
@@ -55,7 +59,7 @@ pub struct Scorer {
     /// Clip duration, s.
     pub dur: f64,
     /// Per bin and signal: sum, count.
-    acc: Vec<[(f32, u32); 4]>,
+    acc: Vec<[(f32, u32); 5]>,
     /// The last thumbnail and its time.
     last: Option<(f64, Vec<f32>)>,
 }
@@ -64,7 +68,7 @@ impl Scorer {
     pub fn new(dur: f64) -> Self {
         Self {
             dur,
-            acc: vec![[(0.0, 0); 4]; (dur / BIN).ceil().max(1.0) as usize],
+            acc: vec![[(0.0, 0); 5]; (dur / BIN).ceil().max(1.0) as usize],
             last: None,
         }
     }
@@ -146,12 +150,25 @@ impl Scorer {
         Ok(())
     }
 
+    /// Overtakes: 1 in the bins of each pass's span `a..b` (clip s), 0 in every other bin (a bin without a value
+    /// would take its nearest's); none without passes.
+    pub fn passes(&mut self, p: &[[f64; 2]]) {
+        if p.is_empty() {
+            return;
+        }
+        for i in 0..self.acc.len() {
+            let (a, b) = (i as f64 * BIN, (i + 1) as f64 * BIN);
+            let on = p.iter().any(|x| x[0] < b && x[1] > a);
+            self.push(Sig::Pass, a, on as u8 as f32);
+        }
+    }
+
     /// Per bin: each signal's mean, filled across bins without samples from the nearest that has one, then scaled
     /// 0..1 between its 10th and 90th percentile.
-    pub fn signals(&self) -> Vec<[f32; 4]> {
+    pub fn signals(&self) -> Vec<[f32; 5]> {
         let n = self.acc.len();
-        let mut out = vec![[0.0; 4]; n];
-        for s in 0..4 {
+        let mut out = vec![[0.0; 5]; n];
+        for s in 0..5 {
             let have: Vec<usize> = (0..n).filter(|&i| self.acc[i][s].1 > 0).collect();
             if have.is_empty() {
                 continue;
@@ -182,7 +199,7 @@ impl Scorer {
         let s: Vec<f32> = self
             .signals()
             .iter()
-            .map(|x| (0..4).map(|i| W[i] * x[i]).sum())
+            .map(|x| (0..5).map(|i| W[i] * x[i]).sum())
             .collect();
         let r = (2.0 / BIN) as isize;
         (0..s.len() as isize)

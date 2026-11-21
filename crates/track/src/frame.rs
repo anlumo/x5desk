@@ -8,7 +8,7 @@
 //! view looks along `Framer::ahead` (the forward view) if given.
 
 use crate::Det;
-use glam::{Quat, Vec3};
+use glam::{Quat, Vec2, Vec3};
 
 /// The view of one frame: direction (equirect frame, `yaw_pitch` for `stitch::View`), horizontal field of view in
 /// degrees for the output aspect, and the tracklet it frames.
@@ -17,6 +17,21 @@ pub struct Shot {
     pub dir: Vec3,
     pub fov: f32,
     pub subject: Option<usize>,
+}
+
+/// A vehicle overtaking us close by (`Framer::passes`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pass {
+    /// Frames of its last detection in the rear quarter and its first in the front one, and where it came abeam.
+    pub a: usize,
+    pub b: usize,
+    pub at: usize,
+    /// On the right of the travel, else the left.
+    pub right: bool,
+    /// Its lateral distance between the quarters, camera heights.
+    pub near: f32,
+    /// Its detections from the first to the last: frame, direction (equirect frame), angular size (degrees).
+    pub path: Vec<(usize, Vec3, Vec2)>,
 }
 
 /// Seconds: a challenger has to win this long; a subject gone this long is given up; a tracklet unseen this long
@@ -51,6 +66,22 @@ const SAME: f32 = 30.0;
 const TALL: f32 = 20.0;
 const ROUND: f32 = 15.0;
 const PRESENT: f32 = 0.2;
+/// Passes (`passes`): the vehicles (COCO bicycle, car, motorcycle, bus, truck); a quarter's half width (degrees); key
+/// frames a track goes unseen at most; the most a track's lateral distances differ (ratio); the farthest lateral
+/// distance (camera heights); the fastest a vehicle passes (camera heights a second) and the longest it takes from
+/// quarter to quarter (s); seconds between two tracks of one vehicle coming abeam. On the 36 scooter rides of five
+/// days, the seven vehicles overtaking within `CLOSE` passed 1.8–2.8 away at 0.6–6.8 a second in 1.2–5.0 s, those in
+/// the next lane 3.1–6.0 away at up to 8.9; a track hopping along a parked row passed at 39 a second, a moped waiting
+/// beside us at the lights took 30 s; with a ratio of 1.75 two of the seven were lost, while 1.5 keeps a car passing
+/// 2.2 away apart from the parked one 5.5 away it crosses.
+const VEHICLE: [u32; 5] = [1, 2, 3, 5, 7];
+const QUARTER: f32 = 45.0;
+const GAP: usize = 2;
+const RATIO: f32 = 1.5;
+const CLOSE: f32 = 3.0;
+const FAST: f32 = 12.0;
+const LONG: f32 = 8.0;
+const TWICE: f32 = 0.4;
 /// Lowest pitch (degrees) a view's lower edge reaches: below it is the nadir zone, the operator and the stick (on
 /// v627 the operator's head is at about −78°). A view onto a close subject far below the horizon is raised until its
 /// edge is clear, the subject lower in the frame.
@@ -68,6 +99,9 @@ pub struct Framer {
     pub body: Vec<Quat>,
     /// Per frame, whether the camera travels (the forward view's analysis); empty: it stands.
     pub moving: Vec<bool>,
+    /// Per frame, the rotation from the equirect frame into the travel's: level, the direction of travel at yaw 0
+    /// (`ahead`); empty: no passes are found.
+    pub fwd: Vec<Quat>,
 }
 
 /// Tracklet: detections linked over key frames (key index, detection).
@@ -83,6 +117,7 @@ impl Framer {
             ahead: vec![],
             body: vec![],
             moving: vec![],
+            fwd: vec![],
         }
     }
 
@@ -315,6 +350,133 @@ impl Framer {
             .collect()
     }
 
+    /// The vehicles overtaking us close by, in the order they come abeam (none without `fwd`). Their detections in the
+    /// travel's frame are linked apart from the framer's tracklets: a box whose centre lies inside a wider one's on the
+    /// same side is part of that vehicle (cut at a tile's edge), and a vehicle track takes, on its side, the detection
+    /// nearest where its last motion puts it (as `link` does, any vehicle class) whose lateral distance is within
+    /// `RATIO` of its own (the median of its last three): its box's lower edge on the ground, in camera heights. A
+    /// track unseen for more than `GAP` key frames ends. One that goes from the rear quarter (within `QUARTER`° of
+    /// straight behind) to the front one overtakes us, `CLOSE` away or nearer (the median between the quarters), at
+    /// `FAST` or slower (the median rate of the cotangent of its azimuth off the travel, on the ground along / lateral
+    /// distance, by that distance), within `LONG` s: a parked car only ever goes the other way, one we pass is not told
+    /// from it, a track that hops along a parked row jumps, and one that waits beside us at the lights takes longer. A
+    /// vehicle seen twice passes once (the longer track).
+    pub fn passes(&self, fps: f32) -> Vec<Pass> {
+        // key, frame, azimuth off the travel (degrees, right +), pitch, lateral distance, detection
+        type V = (usize, usize, f32, f32, f32, Det);
+        let (mut tr, mut live): (Vec<Vec<V>>, Vec<usize>) = (vec![], vec![]);
+        for (i, (k, ds)) in self.keys.iter().enumerate() {
+            let Some(q) = self.fwd.get(*k) else { continue };
+            let mut v: Vec<V> = (ds.iter())
+                .filter(|d| VEHICLE.contains(&d.cls))
+                .filter_map(|d| {
+                    let [a, p] = crate::yaw_pitch(*q * d.dir);
+                    let e = (d.size.y / 2.0 - p).to_radians();
+                    (e > 0.02).then(|| (i, *k, a, p, a.to_radians().sin().abs() / e.tan(), *d))
+                })
+                .collect();
+            v.sort_by(|a, b| b.5.size.x.total_cmp(&a.5.size.x));
+            let mut m: Vec<V> = vec![];
+            for x in v {
+                let part = |w: &V| {
+                    w.2.signum() == x.2.signum()
+                        && (w.2 - x.2).abs() <= w.5.size.x / 2.0
+                        && (w.3 - x.3).abs() <= w.5.size.y / 2.0
+                };
+                if !m.iter().any(part) {
+                    m.push(x);
+                }
+            }
+            m.sort_by(|a, b| b.5.score.total_cmp(&a.5.score));
+            live.retain(|&t| i - tr[t][tr[t].len() - 1].0 <= GAP);
+            let mut used = vec![];
+            for x in m {
+                let best = (live.iter().filter(|t| !used.contains(*t)))
+                    .filter_map(|&t| {
+                        let s = &tr[t];
+                        let l = s[s.len() - 1];
+                        let y = med(s[s.len().saturating_sub(3)..].iter().map(|w| w.4).collect());
+                        let a = match s.len() {
+                            1 => l.2,
+                            n => {
+                                l.2 + (l.2 - s[n - 2].2) / (l.0 - s[n - 2].0) as f32
+                                    * (i - l.0).min(2) as f32
+                            }
+                        };
+                        let da = (x.2 - a).abs();
+                        (l.2.signum() == x.2.signum()
+                            && y.max(x.4) <= RATIO * y.min(x.4)
+                            && da <= (0.75 * x.5.size.max_element()).max(6.0))
+                        .then_some((t, da))
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1));
+                let t = best.map_or_else(
+                    || {
+                        tr.push(vec![]);
+                        live.push(tr.len() - 1);
+                        tr.len() - 1
+                    },
+                    |b| b.0,
+                );
+                used.push(t);
+                tr[t].push(x);
+            }
+        }
+        // 0 the front quarter, 2 the rear one, 1 between; the cotangent of the azimuth, through 0 abeam
+        let q = |x: &V| match x.2.abs() {
+            a if a <= QUARTER => 0,
+            a if a >= 180.0 - QUARTER => 2,
+            _ => 1,
+        };
+        let c = |x: &V| 1.0 / x.2.abs().to_radians().tan();
+        let mut all: Vec<(usize, f32, Pass)> = vec![];
+        for s in &tr {
+            // from the last detection in the rear quarter before the first in the front one
+            let Some(b) = (s.iter().position(|x| q(x) == 2))
+                .and_then(|a| s[a..].iter().position(|x| q(x) == 0).map(|b| a + b))
+            else {
+                continue;
+            };
+            let a = (0..b).rev().find(|&x| q(&s[x]) == 2).unwrap();
+            let m = &s[a..=b];
+            let mut y: Vec<f32> = m.iter().filter(|x| q(x) == 1).map(|x| x.4).collect();
+            if y.len() < 2 {
+                y = m.iter().map(|x| x.4).collect();
+            }
+            let near = med(y);
+            // how fast it passes, camera heights a second: the cotangent's median rate over lateral distance
+            let fast = near
+                * med((m.windows(2))
+                    .map(|w| (c(&w[1]) - c(&w[0])) / (w[1].1 - w[0].1) as f32 * fps)
+                    .collect());
+            let w = m.windows(2).find(|w| c(&w[0]) * c(&w[1]) <= 0.0).unwrap();
+            let at = w[0].1 as f32 + (w[1].1 - w[0].1) as f32 * c(&w[0]) / (c(&w[0]) - c(&w[1]));
+            if near <= CLOSE && fast <= FAST && (m[m.len() - 1].1 - m[0].1) as f32 / fps <= LONG {
+                all.push((
+                    s.len(),
+                    at,
+                    Pass {
+                        a: m[0].1,
+                        b: m[m.len() - 1].1,
+                        at: at.round() as usize,
+                        right: m[0].2 > 0.0,
+                        near,
+                        path: s.iter().map(|x| (x.1, x.5.dir, x.5.size)).collect(),
+                    },
+                ));
+            }
+        }
+        all.sort_by_key(|x| std::cmp::Reverse(x.0));
+        let mut out: Vec<(f32, Pass)> = vec![];
+        for (_, at, p) in all {
+            if !(out.iter()).any(|x| (x.0 - at).abs() / fps < TWICE && x.1.right == p.right) {
+                out.push((at, p));
+            }
+        }
+        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        out.into_iter().map(|x| x.1).collect()
+    }
+
     /// Which tracklets are the camera's carrier. A seed is fixed to the camera body (`FIXED`) for `SEED` s at least and
     /// `UNDER` the horizon (median: the hand on the stick, the vehicle) or, mostly seen travelling, `NEAR` tall (median:
     /// the rider) or `TALL` where people are seen in the body frame (within `ROUND`) in `PRESENT` of the clip's
@@ -416,4 +578,10 @@ impl Framer {
             .map_or(1.0, |l| (l.0 - ks[0].0) as f32 / fps / n as f32)
             .max(1.0 / fps)
     }
+}
+
+/// The median of `v` (the upper one of an even count), 0 for none.
+fn med(mut v: Vec<f32>) -> f32 {
+    v.sort_by(f32::total_cmp);
+    v.get(v.len() / 2).copied().unwrap_or(0.0)
 }

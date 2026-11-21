@@ -334,6 +334,9 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   rotations as the camera body's frame, which tells the camera's carrier, and where the travel estimates move) over
   the whole clip, its path a `Track` of its own (`auto`, no samples) that the player's follow view, `Spec::follow` and
   the editor's keys take as they take Deep Track's; the agents' lanes run it from `Job::pre` (`Hold::Frame`). The
+  same detections, turned into the travel's frame (`Framer::fwd`, from the forward view's poses), give the vehicles
+  overtaking close by (`Framer::passes`, linked on their own): the run keeps them (`Track::passes`) for Shot Lab's
+  Overtake (the player's run, as the subject effects take its Deep Track run), auto edit scores them (`Sig::Pass`). The
   privacy blur also covers editor timelines (one face pass per clip) and Shot Lab passes (before the effect). The
   privacy pass (the export's `Keep::privacy` over `export::privacy_pass`, the player's preview `ai::privacy`) finds
   faces and/or licence plates every 3rd frame, each linked by a `Hide` of its own; with plates it stitches 7680 wide

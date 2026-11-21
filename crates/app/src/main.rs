@@ -627,7 +627,8 @@ impl eframe::App for App {
         self.cap.tick();
         self.exp.tick();
         self.ed.tick(self.tab == Tab::Editor);
-        self.lab.tick(self.lib.spec(), self.lib.track());
+        self.lab
+            .tick(self.lib.spec(), self.lib.track(), self.lib.framing());
         if std::mem::take(&mut self.lab.show) {
             self.tab = Tab::Lab;
         }

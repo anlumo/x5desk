@@ -1,5 +1,7 @@
 use super::*;
 use crate::ai::tests::{gpu, made, samples, wait};
+use glam::Vec2;
+use std::sync::OnceLock;
 
 /// The effects' table: keys unique and parsed back, the passes and the editing presets apart, what needs a still
 /// camera or a subject.
@@ -9,24 +11,26 @@ fn table() {
         assert_eq!(Fx::parse(k), Some(f));
         assert_eq!(FXS.iter().filter(|x| x.2 == k).count(), 1);
     }
-    assert_eq!(FXS.iter().filter(|x| x.0.cut()).count(), 7);
+    assert_eq!(FXS.iter().filter(|x| x.0.cut()).count(), 8);
     assert!(FXS[..7].iter().all(|x| !x.0.cut()) && FXS[7..].iter().all(|x| x.0.cut()));
     assert!(
         Fx::Passerby.still() && Fx::Shadow.still() && !Fx::Planets.still() && !Fx::Delay.still()
     );
     assert!(Fx::Center.subject() && Fx::Loop.subject() && !Fx::Trails.subject());
+    assert!(Fx::Overtake.cut() && !Fx::Overtake.subject() && !Fx::Overtake.still());
 }
 
 /// A Lab on clip `f` (its whole range), the library's spec of it.
 fn lab(g: &Arc<Gpu>, cx: &stitch::Ctx, f: &std::path::Path) -> Lab {
     let mut l = Lab::new(g, cx, &egui::Context::default(), None);
-    l.tick(Some(Spec::of(f).unwrap()), None);
+    l.tick(Some(Spec::of(f).unwrap()), None, None);
     l
 }
 
 /// The editing presets on v635 (`X5_SAMPLES`): Fly Lapse and Stop Motion over 0.5–4.5 s are timelines crate edit
 /// checks, at the source's frame rate, in the source's stabilisation; Center Stage wants the Deep Track subject, and
-/// with one (made up, on this file) its keys follow it inside the range; a pass is no editing preset. "Add to
+/// with one (made up, on this file) its keys follow it inside the range; Overtake wants the auto framing run's passes,
+/// and with one (made up) its keys follow the vehicle at a fixed field of view; a pass is no editing preset. "Add to
 /// timeline": the clips go onto an empty editor timeline as one undo step, which takes their stabilisation.
 #[test]
 fn presets_v635() {
@@ -52,7 +56,7 @@ fn presets_v635() {
     assert!(l.timeline().unwrap_err().contains("Deep Track"));
     let mut t = made();
     t.file = f.clone();
-    l.tick(Some(Spec::of(&f).unwrap()), Some(Arc::new(t)));
+    l.tick(Some(Spec::of(&f).unwrap()), Some(Arc::new(t)), None);
     l.range = [0.5, 2.0];
     let (cs, _) = l.timeline().unwrap();
     let c = &cs.clips[0];
@@ -69,6 +73,41 @@ fn presets_v635() {
             (y - want).abs() < 4.0 && (p - 10.0).abs() < 1.0,
             "{} {y} {p}",
             k.t
+        );
+    }
+    // Overtake wants the player's auto framing run; with one (made up: a vehicle on the right from 1 to 2 s, sweeping
+    // from 45° to 135° in yaw, seen every 10th frame from 0.67 to 2.33 s) the range is its pass and a second either
+    // side, and the keys turn onto it at the field of view chosen
+    l.fx = Fx::Overtake;
+    assert!(l.timeline().unwrap_err().contains("Auto framing"));
+    let mut a = made();
+    (a.file, a.auto) = (f.clone(), true);
+    let yaw = |k: usize| 45.0 + 3.0 * (k as f32 - 30.0);
+    a.passes = OnceLock::from(vec![track::Pass {
+        a: 30,
+        b: 60,
+        at: 45,
+        right: true,
+        near: 2.0,
+        path: (20..=70)
+            .step_by(10)
+            .map(|k| (k, track::dir(yaw(k), -5.0), Vec2::new(30.0, 15.0)))
+            .collect(),
+    }]);
+    l.tick(Some(Spec::of(&f).unwrap()), None, Some(Arc::new(a)));
+    l.around(0);
+    l.p.fov = 70.0;
+    let (ot, st) = l.timeline().unwrap();
+    let c = &ot.clips[0];
+    assert_eq!((l.range, st, c.view.len()), ([0.0, 3.0], (None, 0.0), 6));
+    for k in &c.view {
+        let [y, p, _] = k.v.ypr();
+        let want = yaw((k.t * 30.0).round() as usize);
+        assert!(
+            (y - want).abs() < 0.5 && (p + 5.0).abs() < 0.5 && (k.v.fov - 70.0).abs() < 1e-3,
+            "{} {y} {p} {}",
+            k.t,
+            k.v.fov
         );
     }
     l.fx = Fx::Trails;
@@ -161,7 +200,7 @@ fn clones_burn() {
     let mut l = lab(&g, &cx, &f);
     let mut t = made();
     t.file = f.clone();
-    l.tick(Some(Spec::of(&f).unwrap()), Some(Arc::new(t)));
+    l.tick(Some(Spec::of(&f).unwrap()), Some(Arc::new(t)), None);
     l.fx = Fx::Shadow;
     let (w, h) = (512, 256);
     let fmt = wgpu::TextureFormat::Rgba8Unorm;

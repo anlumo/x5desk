@@ -274,9 +274,49 @@ voice denoise on editor timelines and exports (RNNoise).
   trailer record 10 become highlights auto edit always keeps, and show on the seek bar and the editor's timeline.
   Needs a marked clip to confirm the record and its layout on X5 files (Camera: "Unconfirmed on X5 firmware"). If X5
   files carry the camera's own framing (records 18 / 26), read it as a second framing source.
-- [ ] **Overtakes.** Vehicles passing within metres (the vendor's Overtaker): YOLOX vehicle tracks crossing from
-  ahead to behind or back, as a Shot Lab preset that follows the passing vehicle and as a highlight signal for auto
-  edit. Bounded by the vehicle detector missing cars that close (plate item "Plates no vehicle crop holds").
+- [x] **Overtakes.** Vehicles overtaking within metres (the vendor's Overtaker): `track::Framer::passes` on the
+  detections of the one pass auto framing and auto edit share (`ai::scan`, no second detection loop), in the travel's
+  frame (`Framer::fwd`: the forward view's level poses turned into the pass's stitch frame; `ahead` is its centre).
+  Vehicle boxes (bicycle, car, motorcycle, bus, truck; a box whose centre lies inside a wider one's on the same side is
+  part of it, cut at a tile's edge) are linked into tracks of their own, any vehicle class, on one side: the box
+  nearest where the last motion puts the track, within 1.5× of its lateral distance (the box's lower edge on the
+  ground, in camera heights; the median of its last three); a track unseen for more than 2 key frames ends (the
+  framer's tracklets, per class and by angle only, hop from a passing car onto the parked one it crosses). An
+  overtake is a track going from the rear quarter (within 45° of straight behind) to the front one, its median
+  lateral distance between them 3 camera heights or less, at 12 camera heights a second or slower (the median rate of
+  the cotangent of its azimuth, on the ground along / lateral distance, by that distance), within 8 s; a vehicle seen
+  twice passes once. `Pass`: its frames (last behind, first ahead, abeam), side, distance, the track's detections.
+  Parked cars cannot do that (they only ever go front to rear), so an overtake needs no speed. We-pass events are not
+  counted: from the same rate, the lateral distance and our speed over the camera's height (`stab::fwd::Est::ground`)
+  a parked car's speed came out at −0.2 to 0.5 of ours (0.2–0.5 along a close row parked at an angle), the ground
+  speed's per-pair estimates are bimodal (a low median made parked cars look oncoming), and no moving vehicle we
+  passed turned up to set a threshold against. Auto edit: `Sig::Pass`, 1 over each pass's span, weight 0.2 with the
+  other four scaled by 0.8 (their ratios kept: a clip without passes gets the same picks). Shot Lab: Overtake, an
+  editing preset (`shotlab::cut::overtake`: keys on every detection of the vehicle at a fixed field of view, 80° by
+  default, as fitting its height would zoom from a few degrees to over 100), offered (enabled in the list) once the
+  player's Auto framing run on the clip (`ai::Track::passes`, `Library::framing`) found one: a Vehicle list, the range
+  its pass and a second either side, the run's stabilisation. Measured on all 36 scooter rides (five days, 35 min,
+  60 fps, horizon lock; dumps, contact sheets and scripts in `target/wind-scratch/overtake`): 7 overtakes, 2026-03-11
+  one (night), 04-16 two, 04-29 four (691 one, 693 three), 03-04 (night) and 04-13 none; by eye all 7 true (cars and
+  vans overtaking on the left 1.8–2.8 camera heights away in 1.2–5.0 s, one a van creeping past in queued traffic).
+  Left out by the rules: a track hopping along a parked row (743, "passing" at 39 camera heights a second), a moped
+  that waited 30 s beside us at the lights (669). Within 6 camera heights 8 more (cars in the next lane, 3.1–6.0
+  away): the 7 viewed true. Misses, from sheets of a frame a second (the band from +35° to −55°, the travel in the
+  middle): 738 none of 2, 692 none (no overtake), 693 2 of 5 (a coach bus and a van passing within about a metre while
+  we waited: the bus unseen abeam for 1.2 s, the van's boxes broke into parts whose distances jumped by over 1.5×).
+  The detector misses close vehicles: of the tracks of vehicles within 3 camera heights that come onto the side from
+  the front quarter, 25 of 49 on the left reach the rear one (most lost 45–80° off the travel), 7 of 217 on the right,
+  where the rider's legs hide the right rear (about +100° to +170° on the stem mount): overtakes on the right are not
+  seen. Auto edit with and without the signal (30 % of the ride): 738 adds the second overtake (the first was in
+  already), 691 and 03-11 718 cover theirs (691 half before), 693 keeps one of three (its 18 s are full: the other
+  two lose to its start); 717 (none) picks the same. Cost: 0.06–2.6 ms a ride in release (median 1.1 ms), nothing
+  beside the pass's ~60 s a minute. Tried and dropped: crossing abeam on the framer's tracklets (9 events on 717 alone,
+  all parked cars or hops), a speed share for we-pass events (above). Tests: `track::tests::passes` (synthetic:
+  overtaking on the left past a parked row and on the right; a parked row, a car we pass, oncoming, 5 away, waiting
+  8 s beside us; two classes pass once; nothing without the travel's frame), `track::tests::pass_signal`,
+  `lab::tests::table` and `presets_v635` (Overtake's range and keys), `ai::tests::overtakes_ride` (738's two;
+  `X5_RIDES`). Open: overtakes on the right; very close big vehicles; 3 camera heights or 6 (the next lane); Shot Lab
+  needs the player's Auto framing run first; the GUI (the list entry, the Vehicle list) untested by hand.
 - [x] **Music in auto edit.** The editor's Media panel picks it (Auto edit music: Choose…, the editor's music
   formats; the player's Auto edit uses it too; not in the MCP, which has no auto edit). It plays from its start under
   the highlights as the timeline's music, gain 1 and ducked as the editor's import puts it on (`edit::Music`, the

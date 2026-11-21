@@ -4,7 +4,7 @@
 //! presets, "Add to timeline" (their clips onto the editor's timeline) or "Export" (flat). The effects that need a
 //! still camera check the gyro over the range and warn; they stitch with the direction lock (every frame into the
 //! same world directions). The subject effects take the player's Deep Track run, re-expressed in the frame the effect
-//! stitches with.
+//! stitches with; Overtake takes the vehicles overtaking close by that the player's auto framing run found.
 
 use crate::{
     BURN, GATE, ai,
@@ -32,6 +32,9 @@ use video::Gpu;
 const PW: u32 = 2048;
 const SPAN: usize = 300;
 const TURN: f64 = 10.0;
+/// Why Overtake has no pass to follow.
+const NO_PASSES: &str =
+    "Tick Auto framing in the player first: its analysis finds the vehicles overtaking close by";
 /// The editing presets' preview: cells of a 2 × 2 grid.
 const CW: u32 = 640;
 const CH: u32 = 360;
@@ -52,11 +55,12 @@ pub enum Fx {
     Spin,
     FlyOut,
     Dolly,
+    Overtake,
 }
 
 /// Effects: kind, name, key (test hook, file names), what it does.
 #[rustfmt::skip]
-pub const FXS: [(Fx, &str, &str, &str); 14] = [
+pub const FXS: [(Fx, &str, &str, &str); 15] = [
     (Fx::Passerby,   "Remove Passerby", "passerby", "The median of frames across the range: whoever passes by is gone (a still camera)"),
     (Fx::Trails,     "Light Trails",    "trails",   "Bright lights leave trails (Night Road, Flash Neon; a still camera)"),
     (Fx::Stars,      "Star Lapse",      "stars",    "Frames stacked: the noise settles, or with Maximum the stars draw trails (a still camera)"),
@@ -71,6 +75,7 @@ pub const FXS: [(Fx, &str, &str, &str); 14] = [
     (Fx::Spin,       "Spin Me Around",  "spin",     "Framed on the tracked subject while the picture turns"),
     (Fx::FlyOut,     "Fly Out",         "flyout",   "Framed on the tracked subject, pulling out into a tiny planet"),
     (Fx::Dolly,      "Dolly Zoom",      "dolly",    "The tracked subject keeps its size while the background moves"),
+    (Fx::Overtake,   "Overtake",        "overtake", "Follows a vehicle overtaking close by (found by the player's Auto framing)"),
 ];
 
 impl Fx {
@@ -97,6 +102,7 @@ impl Fx {
                 | Fx::Spin
                 | Fx::FlyOut
                 | Fx::Dolly
+                | Fx::Overtake
         )
     }
 
@@ -140,13 +146,14 @@ pub struct P {
     /// Parallel Planet: stacked instead of side by side
     pub tall: bool,
     /// editing presets: hyperlapse speed, turns, Stop Motion's step (s), the subject's share of the frame height,
-    /// Fly Out's pull (s), Dolly Zoom's first field of view (°)
+    /// Fly Out's pull (s), Dolly Zoom's first field of view and Overtake's (°), the pass Overtake follows
     pub speed: f64,
     pub turns: f32,
     pub step: f64,
     pub fill: f32,
     pub out: f64,
     pub fov: f32,
+    pub pass: usize,
 }
 
 impl Default for P {
@@ -173,6 +180,7 @@ impl Default for P {
             fill: 0.45,
             out: 2.0,
             fov: 80.0,
+            pass: 0,
         }
     }
 }
@@ -211,9 +219,10 @@ pub struct Lab {
     ctx: egui::Context,
     pub fx: Fx,
     pub p: P,
-    /// the library's clip, the player's Deep Track run (over), the source span (s)
+    /// the library's clip, the player's Deep Track run and auto framing run (over), the source span (s)
     src: Option<Spec>,
     trk: Option<Arc<ai::Track>>,
+    frm: Option<Arc<ai::Track>>,
     pub range: [f64; 2],
     /// the gyro's turn over the range (degrees) for (file, range), a check out
     turn: Option<Turn>,
@@ -240,6 +249,7 @@ impl Lab {
             p: P::default(),
             src: None,
             trk: None,
+            frm: None,
             range: [0.0; 2],
             turn: None,
             tq: None,
@@ -268,8 +278,14 @@ impl Lab {
         }
     }
 
-    /// Every frame: the library's clip and the player's finished Deep Track run; replies; the test hook's steps.
-    pub fn tick(&mut self, src: Option<Spec>, trk: Option<Arc<ai::Track>>) {
+    /// Every frame: the library's clip, the player's finished Deep Track and auto framing runs; replies; the test
+    /// hook's steps.
+    pub fn tick(
+        &mut self,
+        src: Option<Spec>,
+        trk: Option<Arc<ai::Track>>,
+        frm: Option<Arc<ai::Track>>,
+    ) {
         let src = src.filter(|s| !s.photo && s.files.len() == 1);
         if src.as_ref().map(|s| &s.files) != self.src.as_ref().map(|s| &s.files) {
             self.range = src.as_ref().map_or([0.0; 2], |s| [0.0, s.dur]);
@@ -280,6 +296,7 @@ impl Lab {
         }
         self.src = src;
         self.trk = trk.filter(|t| t.st() == ai::St::Done);
+        self.frm = frm.filter(|t| t.st() == ai::St::Done);
         if let Some(r) = &self.tq
             && let Ok(x) = r.try_recv()
         {
@@ -330,6 +347,7 @@ impl Lab {
         if let Some(h) = &mut self.hook
             && self.src.is_some()
             && (!self.fx.subject() || self.trk.is_some())
+            && (self.fx != Fx::Overtake || self.frm.is_some())
             && self.pre.is_none()
         {
             if h.pre {
@@ -361,6 +379,24 @@ impl Lab {
     /// Nothing pending (test hook): no preview being made, the hook's steps done.
     pub fn idle(&self) -> bool {
         self.pre.is_none() && self.hook.is_none() && self.ask.is_none()
+    }
+
+    /// The player's auto framing run of the clip and its passes (none while it is not there).
+    fn passes(&self) -> Option<(&ai::Track, &[track::Pass])> {
+        let s = self.src.as_ref()?;
+        let t = self.frm.as_deref().filter(|t| t.file == s.files[0])?;
+        Some((t, t.passes.get()?))
+    }
+
+    /// Overtake's range: pass `i` from a second before its last detection behind to a second after its first ahead.
+    fn around(&mut self, i: usize) {
+        let r = (self.passes()).and_then(|(t, p)| {
+            let (x, ts) = (p.get(i)?, t.times.get()?);
+            Some([(ts[x.a] - 1.0).max(0.0), ts[x.b] + 1.0])
+        });
+        if let (Some(r), Some(s)) = (r, &self.src) {
+            (self.p.pass, self.range) = (i, [r[0], r[1].min(s.dur)]);
+        }
     }
 
     /// The tracked subject per frame from the track's first frame, in the frame of `s` stitched with `st`, with the
@@ -511,6 +547,23 @@ impl Lab {
                     _ => shotlab::cut::dolly(0, a, b, &x, p.fov, 0.5),
                 };
                 (vec![c.map_err(e)?], st)
+            }
+            Fx::Overtake => {
+                let (t, ps) = self.passes().ok_or(NO_PASSES)?;
+                let x = ps
+                    .get(p.pass)
+                    .ok_or("Auto framing found no vehicle overtaking close by")?;
+                let ts = t.times.get().ok_or("no auto framing")?;
+                let v: Vec<shotlab::cut::Subj> = (x.path.iter())
+                    .map(|&(k, dir, size)| shotlab::cut::Subj {
+                        t: ts[k],
+                        dir,
+                        size,
+                    })
+                    .collect();
+                // a key at every detection: the vehicle sweeps 100° and more past abeam within a second
+                let c = shotlab::cut::overtake(0, a, b, &v, p.fov, 0.1);
+                (vec![c.map_err(e)?], t.stab)
             }
             _ => return Err(format!("{} is a pass on the frames", self.fx.name())),
         };
@@ -790,13 +843,27 @@ impl Lab {
                         ui.separator();
                         ui.label("Editing presets");
                     }
+                    // offered once the player's auto framing found a vehicle overtaking close by
+                    let found = self.passes().map_or(0, |p| p.1.len());
                     if ui
-                        .selectable_label(self.fx == *f, *n)
+                        .add_enabled(
+                            *f != Fx::Overtake || found > 0,
+                            egui::Button::selectable(self.fx == *f, *n),
+                        )
                         .on_hover_text(*d)
+                        .on_disabled_hover_text(match self.passes() {
+                            Some(_) => {
+                                "Auto framing found no vehicle overtaking close by in this clip"
+                            }
+                            None => NO_PASSES,
+                        })
                         .clicked()
                         && self.fx != *f
                     {
                         (self.fx, self.err) = (*f, None);
+                        if *f == Fx::Overtake {
+                            self.around(if self.p.pass < found { self.p.pass } else { 0 });
+                        }
                     }
                 }
             });
@@ -826,6 +893,22 @@ impl Lab {
             );
             ui.label(format!("{:.2} s", s.dur));
         });
+        // Overtake's passes: when, which side
+        let pl: Vec<String> = (self.passes().and_then(|(t, p)| Some((t.times.get()?, p)))).map_or(
+            vec![],
+            |(ts, p)| {
+                (p.iter())
+                    .map(|x| {
+                        format!(
+                            "{:.1} s on the {}",
+                            ts[x.at],
+                            ["left", "right"][x.right as usize]
+                        )
+                    })
+                    .collect()
+            },
+        );
+        let mut chosen = None;
         let p = &mut self.p;
         egui::Grid::new("lab set")
             .num_columns(2)
@@ -967,6 +1050,24 @@ impl Lab {
                         "First field of view",
                         egui::Slider::new(&mut p.fov, 20.0..=150.0).suffix("°"),
                     ),
+                    Fx::Overtake => {
+                        ui.label("Vehicle");
+                        egui::ComboBox::from_id_salt("lab pass")
+                            .selected_text(pl.get(p.pass).map_or("", |x| x.as_str()))
+                            .show_ui(ui, |ui| {
+                                for (i, x) in pl.iter().enumerate() {
+                                    if ui.selectable_label(p.pass == i, x).clicked() {
+                                        chosen = Some(i);
+                                    }
+                                }
+                            });
+                        ui.end_row();
+                        sl(
+                            ui,
+                            "Field of view",
+                            egui::Slider::new(&mut p.fov, 20.0..=150.0).suffix("°"),
+                        );
+                    }
                 }
                 ui.label("Output");
                 let pick = if fx.cut() {
@@ -983,6 +1084,9 @@ impl Lab {
                     });
                 ui.end_row();
             });
+        if let Some(i) = chosen {
+            self.around(i);
+        }
         let warn = ui.visuals().warn_fg_color;
         if fx.still() {
             match &self.turn {
@@ -1023,6 +1127,26 @@ impl Lab {
                 }
                 None => {
                     ui.colored_label(warn, "Track a subject in the player first (Deep Track)");
+                }
+            }
+        }
+        if fx == Fx::Overtake {
+            match self.passes() {
+                Some((_, p)) if !p.is_empty() => {
+                    ui.label(format!(
+                        "{} vehicles overtaking close by (the player's Auto framing): the range is the chosen \
+                         one's pass.",
+                        p.len()
+                    ));
+                }
+                Some(_) => {
+                    ui.colored_label(
+                        warn,
+                        "Auto framing found no vehicle overtaking close by in this clip",
+                    );
+                }
+                None => {
+                    ui.colored_label(warn, NO_PASSES);
                 }
             }
         }

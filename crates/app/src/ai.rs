@@ -3,7 +3,9 @@
 //! view, followed through the clip on a background thread (the player's follow view, the editor's reframing keys,
 //! Shot Lab's subject). Auto framing (`Track::framing`): the auto framer's path over the whole clip as a run of its own
 //! for the same three (Shot Lab aside). Auto edit ([`Auto`]): highlights cut along that path into an editor timeline,
-//! with a music track under them their cuts on its beats. Both analyse the clip in one pass ([`scan`]).
+//! with a music track under them their cuts on its beats. Both analyse the clip in one pass ([`scan`]), whose
+//! detections also give the vehicles overtaking close by (`track::Framer::passes`): an auto framing run keeps them for
+//! Shot Lab's Overtake (`Track::passes`), auto edit scores them.
 //! [`privacy`]: the faces and licence plates of one frame for the viewers' privacy preview.
 //!
 //! Frames come from `shotlab::Clip` (decoded and stitched on the shared device) with the stabilisation the result is
@@ -277,6 +279,9 @@ pub struct Track {
     pub times: OnceLock<Vec<f64>>,
     pub smp: Mutex<Vec<Sample>>,
     path: OnceLock<Vec<Vec3>>,
+    /// auto framing: the vehicles overtaking close by (`track::Framer::passes`, directions in the run's frame), once
+    /// done
+    pub passes: OnceLock<Vec<track::Pass>>,
     /// the stitch rotation of every frame of the clip under `stab` (set as the run starts)
     qs: OnceLock<Vec<Quat>>,
     st: Mutex<St>,
@@ -412,6 +417,7 @@ impl Track {
             times: OnceLock::new(),
             smp: Mutex::new(vec![]),
             path: OnceLock::new(),
+            passes: OnceLock::new(),
             qs: OnceLock::new(),
             st: Mutex::new(St::Wait),
             stop: AtomicBool::new(false),
@@ -474,6 +480,7 @@ impl Track {
         let _ = self.qs.set(qs);
         let p = fm.path(c.times.len(), c.meta.fps as f32);
         let _ = self.path.set(p.into_iter().map(|s| s.dir).collect());
+        let _ = self.passes.set(fm.passes(c.meta.fps as f32));
         Ok(())
     }
 
@@ -720,9 +727,10 @@ pub fn privacy(
 /// The pass of auto framing and auto edit over clip `c` (`file`) stitched with `stab`: the direction of travel first
 /// (`export::travel`, kept for the process; with an IMU record), then on every `STEP`th frame the detections over the
 /// sphere into a framer for a picture `aspect` wide that looks along the forward view where no subject wins, with the
-/// camera body's frame (its carrier never wins) and where it travels (a subject has to earn the view there); with `sc`
-/// (auto edit) the frame's people, faces and thumbnail into it too. The models held as `hold` says, progress (frames
-/// done of all: the travel's, then the detections') to `say`. Also returns the stitch rotation of every frame (`rots`).
+/// camera body's frame (its carrier never wins), where it travels (a subject has to earn the view there) and the
+/// travel's frame (for the vehicles overtaking); with `sc` (auto edit) the frame's people, faces and thumbnail into it
+/// too. The models held as `hold` says, progress (frames done of all: the travel's, then the detections') to `say`.
+/// Also returns the stitch rotation of every frame (`rots`).
 #[allow(clippy::too_many_arguments)]
 fn scan(
     g: &Arc<Gpu>,
@@ -747,10 +755,13 @@ fn scan(
     let n = c.times.len();
     let qs: Vec<Quat> = (0..n).map(|k| c.pose(k, poses.as_deref()).q).collect();
     let mut fm = track::Framer::new(aspect);
-    // the forward view's centre, turned into the frame this pass stitches in
+    // the travel's frame (the forward view's, level) from the frame this pass stitches in, and its centre in that
     if let Some(f) = c.poses(stab::Lock::Forward, gyro::SMOOTH) {
-        fm.ahead = (0..n)
-            .map(|k| qs[k].inverse() * c.pose(k, Some(&f)).q * track::dir(0.0, 0.0))
+        fm.fwd = (0..n)
+            .map(|k| c.pose(k, Some(&f)).q.inverse() * qs[k])
+            .collect();
+        fm.ahead = (fm.fwd.iter())
+            .map(|q| q.inverse() * track::dir(0.0, 0.0))
             .collect();
     }
     // the stitch rotation takes a direction into the frame of the clip unstabilised: the camera body's, up to the
@@ -839,11 +850,11 @@ pub struct Auto {
 }
 
 impl Auto {
-    /// Analyses `file` stitched with `stab` (every `STEP`th frame: detections over the sphere for the framer and the
-    /// people, faces, a thumbnail for visual change; camera motion from the gyro, loudness from the AAC track; the
-    /// direction of travel, `export::travel`, where no subject wins), picks highlights filling `SHARE` of it and cuts
-    /// them into a timeline of views framed for `aspect`, on a thread. With `music`, the music plays from its start
-    /// under them, ducked as the editor's music, and the cuts move onto its beats (`track::fit`).
+    /// Analyses `file` stitched with `stab` (every `STEP`th frame: detections over the sphere for the framer, the
+    /// vehicles overtaking and the people, faces, a thumbnail for visual change; camera motion from the gyro, loudness
+    /// from the AAC track; the direction of travel, `export::travel`, where no subject wins), picks highlights filling
+    /// `SHARE` of it and cuts them into a timeline of views framed for `aspect`, on a thread. With `music`, the music
+    /// plays from its start under them, ducked as the editor's music, and the cuts move onto its beats (`track::fit`).
     pub fn start(
         g: &Arc<Gpu>,
         cx: &stitch::Ctx,
@@ -914,6 +925,10 @@ impl Auto {
             &mut say,
             Some(&mut sc),
         )?;
+        let ps: Vec<[f64; 2]> = (fm.passes(c.meta.fps as f32).iter())
+            .map(|p| [c.times[p.a], c.times[p.b]])
+            .collect();
+        sc.passes(&ps);
         if let Some((tr, ex)) = &c.imu {
             sc.gyro(tr, ex[0].t as f64 * 1e-6 - 0.5 * ex[0].time + stab::OFFSET);
         }

@@ -9,7 +9,7 @@
 //!   `export::Hook` (`hook`), which the exporter calls on every frame before it encodes it. They are meant for 360
 //!   output (`export::Out::Pano`); `Median`, `Trails` and `Delay` with `Map::Cols` / `Map::Rows` work on flat frames too.
 //! - Editor timelines the exporter renders (`export::Cut::Edit`): [`cut`] (Stop Motion, Fly Lapse, Flip My Day, Spin
-//!   Me Around, Fly Out, Center Stage, Dolly Zoom).
+//!   Me Around, Fly Out, Center Stage, Dolly Zoom, Overtake).
 //!
 //! [`Clip`] decodes and stitches the frames of a clip for the effects that look at a whole clip first (a clean plate,
 //! a star series, a subject's track) and checks with the gyro that a shot is locked off.

@@ -725,6 +725,85 @@ fn framing_ride() {
     );
 }
 
+/// Overtakes on synthetic rides (30 fps, detections every 10th frame, the travel along yaw 0 at 4 camera heights a
+/// second): vehicles 1.3 camera heights tall on the ground at (x ahead, y right) in camera heights. A car overtaking on
+/// the left 1.5 away (at 8 a second) is one pass, abeam at 2 s, also past a row of parked cars 4 away on that side, and
+/// on the right; a row of five parked cars 2 away, a car we pass 2 away at half our speed (not told from a parked one),
+/// an oncoming car 2 away, a car overtaking 5 away and one that waits 8 s beside us aren't any; a car detected as a car
+/// and as a truck passes once; without the travel's frame nothing passes.
+#[test]
+fn passes() {
+    use crate::{Det, Framer};
+    use glam::Quat;
+    let (fps, n) = (30.0, 450);
+    let car = |x: f32, y: f32, cls| {
+        let r = x.hypot(y);
+        let (lo, hi) = (
+            (-1.0 / r).atan().to_degrees(),
+            (0.3 / r).atan().to_degrees(),
+        );
+        Det {
+            dir: dir(y.atan2(x).to_degrees(), (lo + hi) / 2.0),
+            size: Vec2::new((2.0 * (2.0 / r).atan()).to_degrees(), hi - lo),
+            cls,
+            score: 0.8,
+        }
+    };
+    // vehicles: x at 0 s, x a second (relative to us), y, class, seconds it waits abeam
+    let ride = |vs: &[(f32, f32, f32, u32, f32)], fwd: bool| {
+        let mut f = Framer::new(16.0 / 9.0);
+        if fwd {
+            f.fwd = vec![Quat::IDENTITY; n];
+        }
+        for k in (0..n).step_by(10) {
+            let t = k as f32 / fps;
+            let d = (vs.iter())
+                .map(|&(x, v, y, c, w)| car(x + v * (t - (t + x / v).clamp(0.0, w)), y, c))
+                .filter(|d| d.size.y > 1.5)
+                .collect();
+            f.push(k, d);
+        }
+        f.passes(fps)
+    };
+    let row = |y: f32| (0..5).map(move |i| (6.0 + 5.0 * i as f32, -4.0, y, 2, 0.0));
+    let p = ride(&[(-8.0, 4.0, -1.5, 2, 0.0)], true);
+    assert_eq!(p.len(), 1);
+    let x = &p[0];
+    eprintln!(
+        "overtaking car: frames {}–{}, abeam {}, near {}, {} detections",
+        x.a,
+        x.b,
+        x.at,
+        x.near,
+        x.path.len()
+    );
+    assert!(
+        !x.right && (x.near - 1.5).abs() < 0.05 && x.at.abs_diff(60) <= 1 && x.a < 60 && x.b > 60
+    );
+    let v: Vec<_> = row(-4.0).chain([(-8.0, 4.0, -1.5, 2, 0.0)]).collect();
+    let p = ride(&v, true);
+    assert!(
+        p.len() == 1 && p[0].at.abs_diff(60) <= 1,
+        "past a parked row: {p:?}"
+    );
+    let p = ride(&[(-8.0, 4.0, 1.5, 2, 0.0)], true);
+    assert!(p.len() == 1 && p[0].right);
+    assert!(
+        ride(&row(2.0).collect::<Vec<_>>(), true).is_empty(),
+        "a parked row"
+    );
+    assert!(ride(&[(6.0, -2.0, 2.0, 2, 0.0)], true).is_empty(), "passed");
+    assert!(
+        ride(&[(20.0, -8.0, -2.0, 2, 0.0)], true).is_empty(),
+        "oncoming"
+    );
+    assert!(ride(&[(-8.0, 4.0, -5.0, 2, 0.0)], true).is_empty(), "far");
+    assert!(ride(&[(-8.0, 4.0, -1.5, 2, 8.0)], true).is_empty(), "waits");
+    let two = [(-8.0, 4.0, -1.5, 2, 0.0), (-8.0, 4.0, -1.5, 7, 0.0)];
+    assert_eq!(ride(&two, true).len(), 1);
+    assert!(ride(&two, false).is_empty());
+}
+
 /// Every direction up to 2° from the poles lies well inside a face tile (|x|, |y| ≤ 0.85), in one where a face upright
 /// to the world stands within 30° of upright.
 #[test]
@@ -1003,6 +1082,28 @@ fn highlights() {
     let [y, _, _] = e.view.ypr();
     let want = (e.src * 30.0) as f32 * 0.2;
     assert!((y - want).abs() < 2.0, "{x:?}: yaw {y}, path {want}");
+}
+
+/// The overtakes signal: none (no passes) leaves `scorer`'s picks as they are; a pass from 26 to 27 s, where nothing
+/// else happens, is 1 in its bins and 0 elsewhere, and becomes a highlight of 16 s picked (12 s hold the other three,
+/// which stay).
+#[test]
+fn pass_signal() {
+    let h0 = scorer().pick(12.0);
+    let mut s = scorer();
+    s.passes(&[]);
+    assert_eq!(s.pick(12.0), h0);
+    s.passes(&[[26.0, 27.0]]);
+    let sig = s.signals();
+    assert!((0..sig.len()).all(|i| sig[i][4] == ((52..54).contains(&i) as u8 as f32)));
+    let h = s.pick(16.0);
+    eprintln!("with a pass at 26–27 s: {h:?}");
+    for c in [26.5, 12.0, 21.5, 5.0] {
+        assert!(
+            h.iter().any(|x| x.a <= c && c <= x.b),
+            "{c} s not picked: {h:?}"
+        );
+    }
 }
 
 /// Cuts onto beats: `scorer`'s picks (12 s) fitted to beats at 70, 120 and 180 BPM over 40 s of music (every second

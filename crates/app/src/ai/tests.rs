@@ -137,6 +137,7 @@ pub(crate) fn made() -> Track {
         auto: false,
         times: OnceLock::from(times),
         path: OnceLock::from(track::smooth(&smp, 7.5)),
+        passes: OnceLock::new(),
         qs: OnceLock::from(vec![Quat::IDENTITY; 100]),
         smp: Mutex::new(smp),
         st: Mutex::new(St::Done),
@@ -370,6 +371,41 @@ fn framing_v635() {
     let v = edit::View::look(0.0, 0.0, 0.0, 100.0, edit::Proj::Persp);
     let k = keys(&t, 0.0, 10.0, 0.5, &v);
     assert!(k.len() >= 11 && k[0].t == ts[0] && (k[k.len() - 1].t - ts[n - 1]).abs() < 1e-9);
+}
+
+/// Overtakes on a ride (`X5_RIDES`, the rides' folder: 2026-04-16 16:52, 60 s at 60 fps, horizon lock): auto framing
+/// finds the two cars that overtake on the left, abeam at 3.85 and 34.03 s (by eye: a silver saloon as we roll off, a
+/// dark hatchback while we wait), each 1–3 camera heights away, and nothing else, past rows of parked cars on both
+/// sides.
+#[test]
+fn overtakes_ride() {
+    if no_cf_home() {
+        return;
+    }
+    let Some(f) = std::env::var_os("X5_RIDES")
+        .map(|d| PathBuf::from(d).join("VID_20260416_165209_00_738.insv"))
+    else {
+        eprintln!("X5_RIDES unset: skipped");
+        return;
+    };
+    let (_l, g, cx) = gpu();
+    let t0 = Instant::now();
+    let st = (Some(stab::Lock::Horizon), gyro::SMOOTH);
+    let t = Track::framing(&g, &cx, &egui::Context::default(), f, st, 16.0 / 9.0);
+    let r = wait(|| t.st(), 1800);
+    assert_eq!(r, St::Done, "{r:?}");
+    let (ts, p) = (t.times.get().unwrap(), t.passes.get().unwrap());
+    eprintln!(
+        "ride overtakes in {:.1} s: {:?}",
+        t0.elapsed().as_secs_f64(),
+        (p.iter())
+            .map(|x| (ts[x.at], x.right, x.near, ts[x.a], ts[x.b], x.path.len()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(p.len(), 2);
+    for (x, at) in p.iter().zip([3.85, 34.03]) {
+        assert!(!x.right && (ts[x.at] - at).abs() < 0.3 && (1.0..3.0).contains(&x.near));
+    }
 }
 
 /// A 16-bit stereo 48 kHz WAV of a drum loop at `bpm`, `secs` long, the first beat 0.23 s in: a kick (a falling sine)
