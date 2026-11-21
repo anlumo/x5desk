@@ -117,7 +117,10 @@ const TRIM: Duration = Duration::from_secs(1);
 const PROBE: Duration = Duration::from_secs(30);
 
 /// What an export failed at a picture that could not be decoded ([`CONCEALED`]) adds: the way out.
-const FROZEN: &str = "; pass allow_frozen: true to export it with repeated frames";
+#[cfg(target_os = "macos")]
+pub(crate) const FROZEN: &str = "; pass allow_frozen: true to export it with repeated frames";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const FROZEN: &str = "; pass allow_frozen: true to export it with the damaged frames";
 
 /// Outcomes of asked capture commands kept.
 const OUTS: usize = 32;

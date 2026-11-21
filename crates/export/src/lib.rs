@@ -62,7 +62,12 @@ const EPS: f64 = 1e-3;
 const CANCELLED: &str = part::CANCELLED;
 /// What a strict job's error says of a source picture that could not be decoded (`Dest::frozen_ok` unset): callers
 /// that offer a way out look for it.
-pub const CONCEALED: &str = "could not be decoded and would repeat the one before";
+#[cfg(target_os = "macos")]
+pub const CONCEALED: &str =
+    "could not be decoded and would repeat the one before (did the computer sleep?)";
+/// Vulkan: a decode the driver signalled done unfinished; the pictures that reference it show it too.
+#[cfg(not(target_os = "macos"))]
+pub const CONCEALED: &str = "could not be decoded and would show damaged up to the next key frame (the GPU driver left a decode unfinished)";
 /// The soundtrack's rate (the mixer's; the X5 records at it) and mixing block, frames.
 const R: f64 = mix::RATE;
 const BLOCK: u64 = 1024;
@@ -1903,7 +1908,7 @@ fn render(
                     if strict && p.concealed > 0 {
                         let s = if p.concealed == 1 { "" } else { "s" };
                         return Err(format!(
-                            "frame {n}: {} source picture{s} {CONCEALED} (did the computer sleep?)",
+                            "frame {n}: {} source picture{s} {CONCEALED}",
                             p.concealed
                         ));
                     }

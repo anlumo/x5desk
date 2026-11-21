@@ -154,9 +154,20 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   60 fps, 604 at 30 fps; `Keep::video`, on the Radeon 8060S) gave the same regions and the same video every time, and
   all 9,600 lens frames hashed match ffmpeg's software decode (`target/dec-scratch`, probe hooks in
   `probe-hooks.patch`). `crates/stab/tests/footage.rs` decoded the same way and got the same fix (bc5725e; its four tests pass on
-  fresh tracks, 937 s). Open: driver or the 4090's link (ffmpeg's
-  Vulkan decode alone against a compute load from a plain process would tell); the validation layers aren't
-  installed, so crate video's sync was only read against the spec (no defect found).
+  fresh tracks, 937 s). The cause (2026-11-21, `target/level-scratch/dec`): NVIDIA's Vulkan Video decode on the RTX
+  4090 (620.73.04) now and then stops a picture at some CTU, leaves the rest unwritten (zero in our DPB) and still
+  signals the decode done; its result status query then never becomes available, while every right picture reports
+  complete (68,620 decodes: 133 unavailable, all of them wrong, every wrong stretch starting with one). FFmpeg's own
+  Vulkan decode does it too; NVDEC through CUDA on the same card, streams and time never (`-hwaccel cuda`,
+  `hevc_cuvid`: 0 of 176 runs). Not crate video's doing: the same with each decode waited for before the next is
+  submitted, with the bitstream in device-local or cached memory, with 1, 2 or 4 decoders, under compute or copy
+  load; its sync, DPB slots and coinciding copy read against the spec again, no defect. H.265 of 960 × 540 to
+  1920 × 1088: 1.3–9 per 1000 pictures at full speed; H.264 1916 × 1076: 0 of 2,400; H.265 3840 × 2160 and the X5's
+  3840²: 0 of 2,140. One picture per 20–30 ms: 0 of 4,800 while the card idles (P8, PCIe gen 1, no replays), 6 of
+  4,800 with a copy load holding it at P2 and gen 4 (replays). Crate video now asks for that status where the decode
+  family reports it (NVIDIA's; RADV's doesn't) and counts the failures in `Decoder::failed` (export's concealed
+  pictures; a strict export fails): on the 4090 41 for 39 wrong stretches in 34 passes, none in the right passes.
+  Open: a driver bug the card's link triggers, or one of its own (see the 4090 item).
 - [x] **No export on the RTX 4090.** NVIDIA's driver offers H.264 and H.265 decode only with DPB and output images
   coinciding. Crate video now decodes that way too (`decode::coincide`): a picture decodes into its DPB slot and the
   same decode submit copies it into the ring texture (the decode family needs transfer; NVIDIA's has it), so DPB
@@ -182,11 +193,14 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   player's seam and stabiliser tests, the live outputs' OBS, PipeWire and RTMP tests, the MCP tests) pass but for
   the points below. The app takes the 4090 whenever Vulkan sees it (`video::Gpu::new`: wgpu's high-performance
   adapter; `VK_ICD_FILENAMES` picks the Radeon). Left:
-  - This card's decode returns a wrong reference picture now and then (the pictures to the next IDR differ):
-    FFmpeg's own Vulkan decode of one stream, alone, in 9 of 150 runs (the Radeon 0 of 30;
-    `target/nv-scratch/ffdec.sh`), ours in crate video's `sizes` (2 of 4 runs), `x26x_matches_ffmpeg` (1 of 5) and the
-    app's `clip::tests::open_gop` (2 of 5), another frame each time. Driver or the card's link (RTX 4090 PCIe link);
-    another NVIDIA card would tell. Else: decode on the Radeon and run the networks on the 4090.
+  - This card's Vulkan decode now and then stops a picture partway and signals it done; the pictures after it are
+    wrong to the next IDR ("Corrupt frames from the hardware decoder"). FFmpeg's Vulkan decode too, NVDEC through
+    CUDA never. `Decoder::failed` counts them; nothing recovers them. Driver or link: the OcuLink link runs x4 at gen
+    4 under load (gen 1 idle) with 5–45 replay rollovers a second, and of about 900 GiB copied and checked each way
+    one 256 MiB upload came back with 7,968 words wrong; at a low decode rate the failures came only with the card
+    held loaded (P2, gen 4). Another NVIDIA card or slot, another cable, or the port held at gen 3 would tell. Report
+    for NVIDIA drafted, not sent (`target/level-scratch/dec/nvidia-report.txt`; FFmpeg-only `repro.sh`). Else: decode
+    on the Radeon and run the networks on the 4090, or decode through NVDEC with CUDA (a second backend).
   - Encoder differences two tests' thresholds don't allow: export's `queue` (frame 7 of a 0.5 s 854 × 480 H.264
     export at CBR 20 Mbit/s 35.4 dB against the rendered frame, the Radeon 39.0, the test wants 36: NVIDIA spends
     15 of the 20 Mbit/s there) and the app's `export::tests::timeline_faces` (blurred vs sharp export away from the

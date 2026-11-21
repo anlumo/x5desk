@@ -3899,16 +3899,10 @@ mod tests {
         let fz = call(&c, "export", json!({ "path": p, "name": "frozen" }))
             .await
             .unwrap();
-        let why = format!(
-            "frame 4: 2 source pictures {} (did the computer sleep?)",
-            crate::render::CONCEALED
-        );
+        let why = format!("frame 4: 2 source pictures {}", crate::render::CONCEALED);
         f.run(3).set(RunSt::Failed(why.clone()));
         let x = reads(&c, &fz["job"], "failed").await;
-        assert_eq!(
-            x["error"],
-            format!("{why}; pass allow_frozen: true to export it with repeated frames")
-        );
+        assert_eq!(x["error"], format!("{why}{}", crate::host::FROZEN));
         let cv = call(&c, "export", json!({ "path": p, "name": "cancel" }))
             .await
             .unwrap();

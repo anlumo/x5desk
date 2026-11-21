@@ -24,7 +24,11 @@ pub const NO_GPU: &str = "this x5desk has no GPU tools (Windows: later)";
 
 /// What a strict export's failure says of a source picture that could not be decoded (crate export's words, which
 /// the app's tests hold to): mcp names `allow_frozen` after it.
-pub const CONCEALED: &str = "could not be decoded and would repeat the one before";
+#[cfg(target_os = "macos")]
+pub const CONCEALED: &str =
+    "could not be decoded and would repeat the one before (did the computer sleep?)";
+#[cfg(not(target_os = "macos"))]
+pub const CONCEALED: &str = "could not be decoded and would show damaged up to the next key frame (the GPU driver left a decode unfinished)";
 
 /// What the app hands `mcp::main`. None: catalog, render_still and export are not listed (Windows, mcp's tests).
 #[derive(Clone, Default)]
