@@ -3,7 +3,7 @@ name = "track"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AI tracking, framing, re-identification (LOMO), face privacy blur and highlights for 360 video with open models (VitTrack, YOLOX, YuNet) on the shared wgpu device"
+description = "AI tracking, framing, re-identification (LOMO), face privacy blur, highlights and library search for 360 video with open models (VitTrack, YOLOX, YuNet, TinyCLIP) on the shared wgpu device"
 
 [dependencies]
 wgpu.workspace = true

@@ -68,6 +68,14 @@ impl Clip {
         })
     }
 
+    /// The frames both lenses have as sync samples (X5: every 2 s): `frames` decodes one of them alone.
+    pub fn keys(&self) -> Vec<usize> {
+        let tr = self.lens.map(|t| &self.mp4.tracks[t]);
+        (0..self.times.len())
+            .filter(|&k| tr.iter().all(|t| t.samples[k].sync))
+            .collect()
+    }
+
     /// Camera orientation (body -> world) when frame `k`'s centre row was exposed.
     pub fn orient(&self, k: usize) -> Option<DQuat> {
         let (tr, ex) = self.imu.as_ref()?;

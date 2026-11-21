@@ -144,6 +144,11 @@ fn guide(p: Page) -> &'static [&'static str] {
              untick it and tick it again without a new analysis. A flat export takes it too.",
             "Blur faces and Blur license plates preview the export's privacy blur on the paused frame. Auto edit makes \
              an editor timeline of the clip's highlights, framed automatically.",
+            "Search pictures (above the lists) ranks the recordings of both lists by how well their pictures match the \
+             words, best first, with the match beside each; Any tag keeps only those with a tag (night, ride, road, \
+             city, forest, water, snow, indoor, people). The first search looks at a few frames of every recording on \
+             the AI models (under a second each, once: the result is kept in the cache); from then on the lists show \
+             each recording's tags, and ≈ marks one that looks like another (hover for which).",
         ],
         Page::Editor => &[
             "Drag recordings from the media list onto the timeline. Trim clips at their edges, split them at the \
@@ -233,9 +238,10 @@ fn guide(p: Page) -> &'static [&'static str] {
             "Graphics shows the shared device (Vulkan on Linux, Metal on macOS): decode, encode and DMA-BUF export \
              capabilities. The client id is what the camera remembers when you allow this computer on it.",
             #[cfg(not(target_os = "macos"))]
-            "Settings are kept in ~/.config/x5desk; thumbnails in ~/.cache/x5desk.",
+            "Settings are kept in ~/.config/x5desk; thumbnails and what the library search saw in ~/.cache/x5desk.",
             #[cfg(target_os = "macos")]
-            "Settings are kept in ~/Library/Application Support/x5desk; thumbnails in ~/Library/Caches/x5desk.",
+            "Settings are kept in ~/Library/Application Support/x5desk; thumbnails and what the library search saw in \
+             ~/Library/Caches/x5desk.",
         ],
         Page::Keys | Page::About => &[],
     }
@@ -252,7 +258,7 @@ struct Model(
     &'static str,
 );
 
-const MODELS: [Model; 9] = [
+const MODELS: [Model; 11] = [
     Model(
         "RAFT-small",
         "seam flow (stitch)",
@@ -324,6 +330,25 @@ const MODELS: [Model; 9] = [
          research and education); the weights are published under Apache-2.0 by their authors. Check the datasets' \
          terms before any commercial use.",
         include_str!("../../shotlab/models/LICENSE-efficientvit"),
+    ),
+    Model(
+        "TinyCLIP ViT-39M/16 Text-19M",
+        "library search: pictures and words (track)",
+        "MIT",
+        "Microsoft's TinyCLIP (wkcn/TinyCLIP-ViT-39M-16-Text-19M-YFCC15M) as ONNX (onnx-community), its two towers \
+         with the weights stored as int8 and float16; Copyright (c) Microsoft Corporation",
+        "⚠ Trained on YFCC-15M (Flickr photos under Creative Commons licences, some of them non-commercial), distilled \
+         from and started with OpenCLIP ViT-B/16, which was trained on LAION-2B (web images whose rights stay with \
+         their owners). The weights are published under MIT. Check the datasets' terms before any commercial use.",
+        include_str!("../../track/models/LICENSE-tinyclip"),
+    ),
+    Model(
+        "CLIP vocabulary",
+        "library search: the text model's tokenizer (track)",
+        "MIT",
+        "OpenAI CLIP's bpe_simple_vocab_16e6.txt, its first 48,894 merges; Copyright (c) 2021 OpenAI",
+        "A byte-pair table, not a trained model.",
+        include_str!("../../track/models/LICENSE-clip"),
     ),
     Model(
         "RNNoise 0.2",

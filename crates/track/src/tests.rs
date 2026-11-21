@@ -2,7 +2,7 @@
 //! crops of a real frame (`X5_SAMPLES`): both see the same input tensors, read back from the GPU. Scratch files (a
 //! 19 MB frame among them) go to `X5_FIXTURES` (default: the system temp dir).
 
-use crate::{Ai, Cam, Crops, In, Job, SIDE, det, dir, plates, privacy, read, reid, vit};
+use crate::{Ai, Cam, Crops, In, Job, SIDE, det, dir, plates, privacy, read, reid, search, vit};
 use glam::{Vec2, Vec3};
 use std::{path::PathBuf, process::Command, sync::OnceLock};
 
@@ -14,6 +14,9 @@ feed = {}
 for a in ins:
     name, path, shape = a.split(":")
     feed[name] = np.fromfile(path, np.float32).reshape([int(v) for v in shape.split(",")])
+    # token ids and masks come as floats (exact below 2^24)
+    if name in ("input_ids", "attention_mask"):
+        feed[name] = feed[name].astype(np.int64)
 for i, o in enumerate(s.run(None, feed)):
     o.astype(np.float32).tofile(f"{outd}/ort{i}.f32")
 "#;
@@ -345,6 +348,95 @@ fn vs_onnxruntime() {
         );
         assert!(e < 1e-3 * m.max(1.0) && es < 1e-4, "plates crop {t}");
     }
+
+    // TinyCLIP: the equirect's halves in one batch against one run each, three texts in one
+    let n = 3 * search::SIDE as usize * search::SIDE as usize;
+    let e = ai.pics(&p).unwrap();
+    let nets = ai.se.take().unwrap();
+    let xi = read(nets.inp.t.clone());
+    for (t, v) in xi.chunks(n).enumerate() {
+        let r = ort(
+            &py,
+            "tinyclip_39m_image.onnx",
+            &d,
+            &[("pixel_values", v, &[1, 3, 224, 224])],
+        );
+        let (x, m) = diff(&e[t * search::DIM..][..search::DIM], &unit(&r[0]));
+        eprintln!(
+            "TinyCLIP picture {t}: max |burn − ort| {x:.2e} on unit vectors (max |ort| {m:.3})"
+        );
+        assert!(x < 1e-4, "TinyCLIP picture {t}");
+    }
+    ai.se = Some(nets);
+    let ts = [
+        "a night ride through the city",
+        "people standing on a square",
+        "trees",
+    ];
+    let ids: Vec<f32> = ts
+        .iter()
+        .flat_map(|t| search::tokens(t).map(|i| i as f32))
+        .collect();
+    let ones = vec![1.0; ids.len()];
+    let r = ort(
+        &py,
+        "tinyclip_39m_text.onnx",
+        &d,
+        &[
+            ("input_ids", &ids, &[3, search::CTX]),
+            ("attention_mask", &ones, &[3, search::CTX]),
+        ],
+    );
+    let o = ai.text(&ts).unwrap();
+    for (t, (a, b)) in o
+        .chunks(search::DIM)
+        .zip(r[0].chunks(search::DIM))
+        .enumerate()
+    {
+        let (x, m) = diff(a, &unit(b));
+        eprintln!("TinyCLIP text {t}: max |burn − ort| {x:.2e} on unit vectors (max |ort| {m:.3})");
+        assert!(x < 1e-4, "TinyCLIP text {t}");
+    }
+}
+
+fn unit(v: &[f32]) -> Vec<f32> {
+    let l = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    v.iter().map(|x| x / l).collect()
+}
+
+/// CLIP's tokenizer: the ids OpenAI CLIP gives a prompt; case, spaces, contractions, digits, punctuation and bytes
+/// outside ASCII as open_clip's `SimpleTokenizer` (without ftfy) gives them (its regex and BPE ported to Python with
+/// tokenizer.json's merges); a long text cut to 75 tokens between start and end.
+#[test]
+fn tokens() {
+    let t = |s: &str| {
+        search::tokens(s)
+            .into_iter()
+            .take_while(|&i| i != 0)
+            .collect::<Vec<i64>>()
+    };
+    assert_eq!(
+        t("a photo of a cat"),
+        [49406, 320, 1125, 539, 320, 2368, 49407]
+    );
+    assert_eq!(
+        t("A  Photo of a DOG."),
+        [49406, 320, 1125, 539, 320, 1929, 269, 49407]
+    );
+    assert_eq!(
+        t("it's 2026!"),
+        [49406, 585, 568, 273, 271, 273, 277, 256, 49407]
+    );
+    assert_eq!(t("don't!'s"), [49406, 847, 713, 13222, 338, 49407]);
+    assert_eq!(t("Straße"), [49406, 1894, 127, 253, 324, 49407]);
+    assert_eq!(
+        t("Ünïcödé café ☕ 😀"),
+        [
+            49406, 6522, 77, 35689, 66, 7255, 67, 4166, 15304, 26561, 7334, 49407
+        ]
+    );
+    let l = search::tokens(&"cat ".repeat(100));
+    assert_eq!((l[0], l[1], l[75], l[76]), (49406, 2368, 2368, 49407));
 }
 
 /// LOMO on synthetic crops (a figure 24 px wide, red over blue, in the middle of the box, on grey, a noise texture):

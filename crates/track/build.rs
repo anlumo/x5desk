@@ -7,6 +7,8 @@ fn main() {
         "yolox_nano",
         "face_detection_yunet_2023mar",
         "plates-yolox-nano-256",
+        "tinyclip_39m_image",
+        "tinyclip_39m_text",
     ] {
         println!("cargo::rerun-if-changed=models/{m}.onnx");
         burn_onnx::ModelGen::new()

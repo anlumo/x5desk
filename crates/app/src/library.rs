@@ -2,7 +2,8 @@
 //! entry whose file is not there, such as one on a card that is not mounted, is greyed out until it is back);
 //! pairing of a recording's files by name (`cam::work`: lens files `_00_` / `_10_`, proxies `_01_` / `_11_`); the
 //! player of the open work, shared with the live output thread, the viewer of the open photo, or of a plain video (an
-//! export). Export jobs start here: from the player or the photo (its view), or from a file's menu in the lists.
+//! export). Export jobs start here: from the player or the photo (its view), or from a file's menu in the lists. The
+//! lists' recordings can be searched by what their pictures show, tagged and their near-duplicates marked (`find`).
 
 use crate::{
     Test,
@@ -21,6 +22,8 @@ use std::{
     time::{Duration, Instant},
 };
 use video::Gpu;
+
+mod find;
 
 /// How often the lists' files are looked for.
 const LOOK: Duration = Duration::from_secs(2);
@@ -101,6 +104,12 @@ pub struct Library {
     err: Option<String>,
     test: Option<Test>,
     side: bool,
+    /// the search, made on first use (the search box or the tag filter); its cache dir (none in a test-hook run)
+    find: Option<find::Find>,
+    fdir: Option<PathBuf>,
+    query: String,
+    /// the tag filter, `find::TAGS`
+    tag: Option<usize>,
 }
 
 impl Library {
@@ -112,10 +121,13 @@ impl Library {
         still: mpsc::Sender<player::Job>,
         test: Option<Test>,
     ) -> Library {
-        // a test-hook run neither reads nor writes the user's list
-        let recent = match test {
-            Some(_) => Recent::at(None),
-            None => Recent::load(),
+        // a test-hook run neither reads nor writes the user's list or search cache
+        let (recent, fdir) = match test {
+            Some(_) => (Recent::at(None), None),
+            None => (
+                Recent::load(),
+                crate::xdg("XDG_CACHE_HOME", ".cache").map(|d| d.join("x5desk").join("search")),
+            ),
         };
         Library {
             g: g.clone(),
@@ -138,6 +150,10 @@ impl Library {
             err: None,
             test,
             side: true,
+            find: None,
+            fdir,
+            query: String::new(),
+            tag: None,
         }
     }
 
@@ -273,6 +289,9 @@ impl Library {
         if let Some(m) = &mut self.movie {
             m.tick(&self.ctx);
         }
+        if let Some(f) = &mut self.find {
+            f.tick();
+        }
     }
 
     /// The open work or photo as the export screen takes it (None: nothing open, or a proxy without its main file).
@@ -397,16 +416,76 @@ impl Library {
             egui::Panel::left("recent")
                 .default_size(240.0)
                 .show(ui, |ui| {
-                    for (h, l) in [("Recent", &self.recent.list), ("Downloaded", &self.down)] {
-                        ui.heading(h);
+                    let mut used = false;
+                    ui.horizontal(|ui| {
+                        let t = egui::TextEdit::singleline(&mut self.query)
+                            .hint_text("Search pictures")
+                            .desired_width(ui.available_width() - 90.0);
+                        let r = ui.add(t).on_hover_text(
+                            "Ranks the recordings of the lists by how well their pictures match the words (an AI \
+                             image-text model; the first search looks at every recording once)",
+                        );
+                        used = r.changed() || r.gained_focus();
+                        egui::ComboBox::from_id_salt("tag")
+                            .selected_text(self.tag.map_or("Any tag", |i| find::TAGS[i].0))
+                            .show_ui(ui, |ui| {
+                                used |= ui.selectable_value(&mut self.tag, None, "Any tag").clicked();
+                                for (i, t) in find::TAGS.iter().enumerate() {
+                                    used |= ui.selectable_value(&mut self.tag, Some(i), t.0).clicked();
+                                }
+                            });
+                    });
+                    if used && self.find.is_none() {
+                        self.find = Some(find::Find::new(&self.g, &self.cx, &self.ctx, self.fdir.clone()));
+                    }
+                    let mut ls = vec![("Recent", self.recent.list.clone()), ("Downloaded", self.down.clone())];
+                    let vs = self.videos();
+                    if let Some(f) = &mut self.find {
+                        vs.iter().for_each(|p| f.ask(p));
+                        f.text(&self.query);
+                        if !f.wait.is_empty() {
+                            ui.weak(format!("Looking at the pictures of {} recordings…", f.wait.len()));
+                        }
+                        if !self.query.trim().is_empty() || self.tag.is_some() {
+                            let t = self.tag.map_or(0, |t| 1 << t);
+                            let mut m: Vec<(f32, PathBuf)> = (vs.into_iter())
+                                .filter(|p| f.tag.get(p).map_or(0, |m| m & t) == t)
+                                .map(|p| (f.score(&p).unwrap_or(-1.0), p))
+                                .collect();
+                            m.sort_by(|a, b| b.0.total_cmp(&a.0));
+                            ls = vec![("Matches", m.into_iter().map(|x| x.1).collect())];
+                        }
+                    }
+                    // beside each: the match, the tags and a near-duplicate, once known
+                    let info = |p: &PathBuf| {
+                        let f = self.find.as_ref()?;
+                        let m = f.tag.get(p).copied().unwrap_or(0);
+                        let t: Vec<String> = (f.score(p).map(|x| format!("{x:.2}")).into_iter())
+                            .chain((0..find::TAGS.len()).filter(|i| m >> i & 1 == 1).map(|i| find::TAGS[i].0.into()))
+                            .collect();
+                        Some((t.join(" "), f.dup.get(p).map(|d| format!("Looks like {}", name(d)))))
+                    };
+                    let k = ls.len() as f32;
+                    for (h, l) in &ls {
+                        ui.heading(*h);
                         egui::ScrollArea::vertical()
                             .id_salt(h)
-                            .max_height(ui.available_height() / 2.0)
+                            .max_height(ui.available_height() / k)
                             .show(ui, |ui| {
                                 for p in l {
                                     let b = egui::Button::selectable(false, name(p));
                                     let r = ui
-                                        .add_enabled(!self.gone.contains(p), b)
+                                        .horizontal(|ui| {
+                                            let r = ui.add_enabled(!self.gone.contains(p), b);
+                                            if let Some((t, d)) = info(p) {
+                                                ui.weak(t);
+                                                if let Some(d) = d {
+                                                    ui.weak("≈").on_hover_text(d);
+                                                }
+                                            }
+                                            r
+                                        })
+                                        .inner
                                         .on_hover_text(p.to_string_lossy())
                                         .on_disabled_hover_text(format!(
                                             "{}: not there (on a card that is not mounted?)",

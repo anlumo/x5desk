@@ -1,17 +1,19 @@
 // Perspective crops of an equirect in the stitcher's layout (column x at θ = 2πx/W, centre = −X; row y at
-// φ = πy/(H − 1); Z up), written as planar (NCHW) f32 network input. One invocation per output pixel, z = job.
+// φ = πy/(H − 1); Z up), or windows of it (longitude and latitude linear), written as planar (NCHW) f32 network
+// input. One invocation per output pixel, z = job.
 
 struct Job {
-    // camera forward, right, up (unit, equirect frame)
+    // camera forward, right, up (unit, equirect frame); a window: f.x its centre longitude (radians from the centre
+    // column, rightwards)
     f: vec4f,
     r: vec4f,
     u: vec4f,
-    // tangent-plane half extents x, y; output width, height
+    // tangent-plane half extents x, y (a window: half its longitudes and latitudes, radians); output width, height
     e: vec4f,
     // channel c = colour[c] · a[c] + b[c], colour in network order
     a: vec4f,
     b: vec4f,
-    // first element in dst, supersampling taps per axis, BGR order
+    // first element in dst, supersampling taps per axis, BGR order, a window
     o: vec4u,
 }
 
@@ -33,8 +35,13 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     // a k × k box over the output pixel: a crop that shrinks the equirect would alias with one tap
     for (var t = 0u; t < k * k; t++) {
         let p = (vec2f(id.xy) + (vec2f(f32(t % k), f32(t / k)) + 0.5) / f32(k)) / vec2f(s) * 2.0 - 1.0;
-        let w = normalize(j.f.xyz + p.x * j.e.x * j.r.xyz - p.y * j.e.y * j.u.xyz);
-        let q = vec2f(atan2(-w.y, w.x) / (2.0 * PI) * n.x, acos(clamp(w.z, -1.0, 1.0)) / PI * (n.y - 1.0)) + 0.5;
+        var q: vec2f;
+        if j.o.w != 0u {
+            q = vec2f((0.5 + (j.f.x + p.x * j.e.x) / (2.0 * PI)) * n.x, (0.5 + p.y * j.e.y / PI) * (n.y - 1.0)) + 0.5;
+        } else {
+            let w = normalize(j.f.xyz + p.x * j.e.x * j.r.xyz - p.y * j.e.y * j.u.xyz);
+            q = vec2f(atan2(-w.y, w.x) / (2.0 * PI) * n.x, acos(clamp(w.z, -1.0, 1.0)) / PI * (n.y - 1.0)) + 0.5;
+        }
         c += textureSampleLevel(pano, smp, q / n, 0.0).rgb;
     }
     c /= f32(k * k);

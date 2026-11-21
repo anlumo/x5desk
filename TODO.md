@@ -225,7 +225,7 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
 Compared with the vendor's apps (2026-11-13). Here: Deep Track (VitTrack, YOLOX-nano, LOMO re-identification), face
 and licence plate blur (YuNet, our YOLOX-nano plate fine-tune), auto edit (heuristic highlights, auto framing, cuts on
 the music's beats), seam flow on exports and paused frames (RAFT-small), Shadow Clone and Clone Loop (PP-HumanSeg),
-voice denoise on editor timelines and exports (RNNoise).
+voice denoise on editor timelines and exports (RNNoise), library search (TinyCLIP).
 
 - [x] **Wind noise on every export.** Library exports take the editor's RNNoise (`Set::denoise` into
   `export::Edit::denoise`): the Export screen's Audio row, the MCP `export` tool's `denoise` (0–1; catalog: denoise).
@@ -508,8 +508,47 @@ voice denoise on editor timelines and exports (RNNoise).
   skies, the far end of a bridge and the glass dome only in part or not at all; on a ride the mask is a frame late
   before the filter snaps it to the picture; the colour match is a ratio of means (no sun, the ground not relit); the
   picked picture faces the first frame's heading (no control); a large panorama is sampled without mips.
-- [ ] **Library search.** Tags and text search from an image embedding of each clip's thumbnails (e.g. SigLIP,
-  Apache-2.0 per its model card, to verify); near-duplicates from the same embedding.
+- [x] **Library search.** The Library's Files panel: Search pictures ranks the recordings of the Recent and Downloaded
+  lists by how well their pictures match the words (best first, the match beside each); a tag filter (Any tag, night,
+  ride, road, city, forest, water, snow, indoor, people); each recording's tags beside it, ≈ on a near-duplicate
+  (hover: of which). TinyCLIP ViT-39M/16 Text-19M (`track::search`; Microsoft, MIT; trained on YFCC-15M, Creative
+  Commons photos, some of them non-commercial, distilled from OpenCLIP ViT-B/16 on LAION-2B; models/README), the
+  onnx-community export cut into its two towers with the weights stored as int8 (`models/q8.py`: 39.2 + 45.1 MB
+  embedded; embeddings within a cosine of 0.9989 of float32), through burn-onnx like the other networks; CLIP's
+  byte-level BPE in Rust from OpenAI's merges (`models/clip_merges.txt`, MIT): no new dependency. A recording is 8
+  sync frames at the middles of equal parts, each stitched level (horizon lock, no smoothing) 2048 wide, its two
+  equirect halves squeezed into 224² by the crop pass (`crop.wgsl` now also cuts equirect windows), the 16 pictures
+  averaged; a query scores by its cosine with that mean. Tags: a prompt per tag against "a photo", with a margin each
+  (`find::TAGS`); near-duplicates: every frame of either clip has one in the other at 0.94 (a clip standing still
+  scores 0.95–0.98 against itself at other moments, one on the move 0.73–0.92, the next minute of a ride 0.89 at
+  most). The search starts on the first use of the box or the filter (`library/find.rs`): a worker of its own embeds
+  the lists' recordings one at a time on the app's models, a query first, and keeps them in `<cache>/x5desk/search`
+  (32 kB a recording, by path, size and time). Measured on 46 clips (the samples, 7 walks and indoor clips, 36 ride
+  minutes) with 11 queries labelled by eye (models/README): mean average precision 0.938 in the app (0.953 for the
+  float32 model under onnxruntime); TinyCLIP ViT-8M/16 (the only one that fits in float16 under 50 MB a file) 0.829,
+  ViT-40M/32 0.846, ViT-61M/32 0.864; SigLIP B/16 (Apache-2.0, 400 MB in float16) 0.911; four horizon views instead of
+  the halves about 0.13 worse (models/README), the best picture instead of the mean 0.863 (onnxruntime). Tags on those
+  clips, none wrong: night 18 of 18, ride 36 of 36, water 2 of 2 (the zoo hall and the sea lion pool), indoor 3 of 3,
+  people 1 of 1, road 33 of 38, city 20 of 41 (both loose labels), no forest or snow (none there). No near-duplicates
+  among them; a copy is one. Cost on the Radeon 8060S (release): the first run after the switch (burn compiling
+  TinyCLIP's kernels) took 2.3 s for the models' load with the tags' prompts, 2.0 s for the first recording, 0.15 s
+  for the first query; then a recording takes 0.34–0.37 s (a ride minute, 2880² at 60 fps), 0.43–0.53 s (5.7K clips of
+  one to five minutes), 0.74–0.91 s (17 and 30 minutes: the horizon lock over the whole gyro track first), a query
+  8–10 ms. GPU memory (the device's VRAM + GTT, the lock held): +427 MB once the models are loaded and the tags
+  embedded, +1.1 GB at most with a recording's decoders and stitcher on top; the process's peak RSS 475 MB. The app's
+  embeddings agree with onnxruntime's float32 ones on the same stitched frames (halves resized by PIL instead of the
+  crop's box filter) to a cosine of 0.967 at worst, 0.978 typically. Contact sheet, each query's top 6 by their best
+  half: `target/bands-scratch/search/out/sheet-tinyclip.jpg`. Right: night, a city street at night with shop lights, a
+  sunny day with blue sky, riding a scooter on a road, a man in an orange hat (the one clip, by a margin), concrete
+  blocks (the memorial field first), a historic gate with columns (all three in the top 4), parked cars (5 of 6),
+  graffiti on a wall (5 of 6, the clearest mural first), trees and green grass 5 of 6; a crowd of people and a glass
+  dome right at the top only (then clips with a few people, or none); water finds the zoo hall first and the sea lion
+  pool third; snow, which no clip shows, returns night rides on pale roads at scores as high as real matches
+  elsewhere: a score ranks, it does not say whether anything matches. Tests: track `tokens`, `vs_onnxruntime`
+  (TinyCLIP's pictures and texts), app `library::find::tests::samples_ranked` (seven queries over the samples, their
+  tags, a copy as a near-duplicate, the cache). The MCP has no library (its album tools are the camera's, `catalog`
+  the render options): no tool. Open: photos are not searched; the cache is never trimmed; queries in English only
+  (CLIP's vocabulary); the GUI is untested by hand.
 - Not worth doing: AI Retouch, AI Warp, AI templates, AI Vlog and 3D Space (generated on the vendor's servers);
   beauty filter, Bullet Time, Nose Mode, Face Off, Skeleton, Jump / Big Man / Running Planet, Swing Sticky Jump,
   Similarity, Circle Clone, Parallel World, the TimeShift preset (selfie-stick tricks, pose models or bullet-time

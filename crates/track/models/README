@@ -3,7 +3,8 @@ this file, but for the plate detector: its repository is MIT, its weights have n
 with GPL-3.0 code (plate-detector-licensing.md). Checked against onnxruntime on crops of a real frame, two crops per
 batch against one run each: src/tests.rs `vs_onnxruntime`, largest output differences 1.6e-6 (VitTrack), 2.2e-4
 (YOLOX-nano, outputs up to 3.2), 8.8e-6 (YuNet, up to 8.4), 6.7e-4 on the plate detector's boxes (pixels, up to 554)
-and 2.1e-6 on its scores (up to 0.91). Person re-identification uses no network (last section).
+and 2.1e-6 on its scores (up to 0.91), 5.2e-7 on TinyCLIP's image embeddings (an equirect's two halves in one batch,
+unit length) and 4.2e-7 on its text ones (three texts). Person re-identification uses no network (last section).
 
 object_tracking_vittrack_2023sep.onnx
   What: VitTrack, single-object tracker (OSTrack-style one-stream ViT), template 1x3x128x128 + search 1x3x256x256 ->
@@ -245,6 +246,83 @@ yolo-v9-t-256-license-plates.onnx
     model licence page, TorchScript Faster R-CNN) as the accuracy reference: not evaluated, as their only documented
     source is a form at https://www.projectaria.com/tools/egoblur that takes an e-mail address and the acceptance of
     the model licence. LPD-YuNet: see YuNet above.
+
+tinyclip_39m_image.onnx, tinyclip_39m_text.onnx
+  Git: both files are in Git LFS (.gitattributes); without `git lfs` a checkout holds pointer files and the build
+       fails in burn-onnx.
+  What: TinyCLIP ViT-39M/16 Text-19M, YFCC-15M (Wu, Peng, Zhou, Xiao, Liu, Yuan, Xuan, Valenzuela, Chen, Wang, Chao, Hu,
+        "TinyCLIP: CLIP Distillation via Affinity Mimicking and Weight Inheritance", ICCV 2023,
+        https://arxiv.org/abs/2309.12314), the library search's image-text embedding (src/search.rs): image tower a
+        ViT of width 512, patch 16 (39 M parameters), 1x3x224x224 RGB as (c - mean) / std with CLIP's mean and std ->
+        1x512; text tower 6 layers of width 512 (19 M, and 25.3 M in the 49408 x 512 token table), 1x77 CLIP BPE ids
+        (start 49406, end 49407, then zeros) and an attention mask (all ones: the causal mask keeps the padding from
+        the end token) -> 1x512, pooled at the end token (ArgMax). Both outputs are scaled to length 1 in the graph.
+  Source: https://huggingface.co/wkcn/TinyCLIP-ViT-39M-16-Text-19M-YFCC15M, as ONNX from
+          https://huggingface.co/onnx-community/TinyCLIP-ViT-39M-16-Text-19M-YFCC15M-ONNX, onnx/model.onnx (one
+          CLIPModel graph exported by Transformers through the onnx-community convert-to-onnx Space, opset 11, pytorch
+          2.8.0; sha256 1fceb2a58ec3bfb7c75e7313571b5abc2c54a23d71a3039af92033480c7f098a, 332.8 MB). Cut into its towers
+          by onnx.utils.Extractor (pixel_values -> image_embeds; input_ids, attention_mask -> text_embeds), then q8.py
+          (next to this file): weights of two or more dimensions as int8 with a float scale per first-axis slice (38.5
+          M and 44.5 M weights), the others as float16, each cast back to float32 in the graph: 39.2 and 45.1 MB,
+          which burn-onnx keeps as they are in the embedded weights. Under onnxruntime the int8 weights move the
+          embeddings by a cosine of 0.9998 (image) and 0.9989 (text) at most, on a test picture and three texts.
+  Licence: MIT. The model card's licence field ("license: mit", huggingface.co/wkcn/TinyCLIP-ViT-39M-16-Text-19M-YFCC15M
+           README.md; the uploader wkcn is the paper's first author) and the code's licence
+           (https://github.com/microsoft/Cream/blob/main/TinyCLIP/LICENSE: "MIT License / Copyright (c) Microsoft
+           Corporation", listing CLIP, CoFi and OpenCLIP as MIT, PyTorch as BSD-style) -> LICENSE-tinyclip. The
+           weights carry no licence file of their own.
+  Training data: YFCC-15M (the paper, §4.1: "We train our models on two public datasets, namely LAION-400M [50] and
+           YFCC-15M"), the subset of YFCC100M with English captions, Flickr photos "published under a CC commercial or
+           non-commercial license" (Thomee et al., https://arxiv.org/abs/1503.01817), so some only for non-commercial
+           use. Distilled from, and its weights inherited from, OpenCLIP ViT-B/16 (§4.2: "When performing training on
+           YFCC-15M, we use affinity mimicking and manual weight inheritance to distill OpenCLIP ViT-B/16"), which
+           was trained on LAION-2B (§4.1), web images whose rights stay with their owners; LAION's own terms not
+           verified here.
+  sha256: tinyclip_39m_image.onnx b6a6a5687e316c0cd62a4d5a035b411005b5aecf05f870c9823d02616f45c3c7
+          tinyclip_39m_text.onnx b5622353df7719be73c39cd1ddf4c47a67a224a3d5473521d90e37774bd074b8
+  No published scores to check against (the model card prints none); under onnxruntime the float32 export ranks
+  "a photo of a cat" over "a photo of a dog" for the COCO picture the card uses (cosine 0.254 against 0.141). The
+  app's own embeddings (int8 towers on the GPU, the crop pass's box filter) agree with onnxruntime's float32 ones on
+  the same stitched frames (halves resized by PIL) to a cosine of 0.967 at worst, 0.978 typically.
+  Chosen 2026-11-21 (app/src/library/find.rs), on 46 clips: the samples, seven of 2026-01-16/17 and 10-31 (walks,
+  a glass dome, a zoo's sea lion pool, caves and a market at night) and 36 scooter-ride minutes of five days (night,
+  dusk, overcast, sunny), with 11 queries labelled by eye ("night" 18 clips, "a sunny day with blue sky" 19, "an
+  overcast grey sky" 8, "riding an electric scooter" 36, "indoors" 3, "water" 2, "a historic gate with columns" 3,
+  "a glass dome" 2, "a field of concrete blocks", "high-rise buildings", "a crowd of people" 1 each), asked as "a
+  photo of <query>.". Mean average precision, each frame stitched level (horizon lock, no smoothing) 2048 wide, 8
+  sync frames a clip at the middles of equal parts, the equirect's two halves of each, the clip's pictures averaged:
+  - Models, onnxruntime on float32: TinyCLIP ViT-39M/16 0.953, ViT-8M/16 Text-3M (YFCC-15M, 23 M parameters, 16.8 +
+    30.4 MB in float16) 0.829, ViT-40M/32 Text-19M (LAION-400M) 0.846, ViT-61M/32 Text-29M (LAION-400M) 0.864 (all
+    MIT, onnx-community / twn39 exports); SigLIP base patch16 224 (Apache-2.0, WebLI, 203 M, 813 MB in float32, 407 MB
+    in float16) 0.911. The app itself, int8 towers on the GPU: 0.938.
+  - Pictures (measured with MobileCLIP-S0, see Considered; TinyCLIP alike): the halves 0.902, the whole equirect
+    squeezed square 0.875 (TinyCLIP 0.939 against its 0.953), four 90° views around the horizon 0.769, those and the
+    poles (cube faces) 0.849; the best picture instead of the mean 0.815 (TinyCLIP 0.863). The views miss what tells
+    places apart most: the sky, a ceiling, the ground, the rider and the scooter.
+  Limits: one person's labels on 46 clips, most queries with few relevant clips; the layout, pooling and the tags'
+  prompts and margins (find.rs `TAGS`) were chosen on the clips they are judged on.
+  Considered:
+  - MobileCLIP-S0 (Apple; Xenova/mobileclip_s0, 11.4 + 42.4 M parameters, 22.9 + 84.9 MB in float16; 0.902, its tags
+    as right; twice as fast here, 0.18-0.20 s against 0.34-0.37 s a ride minute), used first and dropped 2026-11-21:
+    its weights are under the Apple Machine Learning Research Model License Agreement, "exclusively for Research
+    Purposes" ("non-commercial scientific research and academic development activities"), which the user ruled too
+    narrow for this project; its training data, DataCompDR, is CC-BY-NC-ND. MobileCLIP-S2 (0.833) and MobileCLIP2
+    are under the same licence.
+  - SigLIP base (0.911, Apache-2.0): its float16 towers (186 and 221 MB) are past GitHub's 100 MB per file, and it is
+    no better here.
+  - TinyCLIP ViT-8M/16 fits in float16 (16.8 + 30.4 MB) but retrieves clearly worse (0.829); the LAION-400M
+    ViT-40M/32 and ViT-61M/32 retrieve worse than ViT-39M/16 (0.846, 0.864) at its size or more.
+  - OpenCLIP's smallest pretrained checkpoints (ViT-B-32, RN50: 100-151 M parameters) are SigLIP's size class: not
+    measured.
+
+clip_merges.txt
+  What: CLIP's byte-pair merges for the text tower's tokenizer (src/search.rs `tokens`): the vocabulary is the 256
+        bytes, the 256 bytes ending a word, one token per merge in this order, then start and end (49408).
+  Source: OpenAI CLIP, clip/bpe_simple_vocab_16e6.txt.gz (sha256
+          924691ac288e54409236115652ad4aa250f48203de50a9e4722a6ecd48d6804a), lines 2 to 48895 as open_clip's
+          SimpleTokenizer reads them; the same as the merges of TinyCLIP's tokenizer.json (onnx-community export).
+  Licence: MIT, Copyright (c) 2021 OpenAI -> LICENSE-clip
+  sha256: d308b7377a8ceaa9707a21614fe8c831b9196e197b7aeb69833359362907af02
 
 No model: person re-identification (src/reid.rs)
   What: LOMO, the local maximal occurrence feature of Liao, Hu, Zhu, Li, "Person Re-identification by Local Maximal

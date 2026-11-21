@@ -3,11 +3,12 @@
 //! ([`Hide`], [`Blur`]) YuNet (OpenCV zoo) finds faces and our fine-tune of YOLOX-nano finds licence plates on crops
 //! around YOLOX's vehicles; people are told apart by LOMO (Liao et al.), a hand-made appearance feature with no model,
 //! so the tracker finds its subject again; [`Scorer`] picks highlights and [`timeline`] cuts them into an editor
-//! timeline. The networks are Apache-2.0 or MIT (`models/README`). They are compiled in by burn-onnx (`build.rs`) and
-//! run by burn.
+//! timeline; [`search`] embeds pictures and words for the library (TinyCLIP). The networks are Apache-2.0 or MIT
+//! (`models/README`). They are compiled in by burn-onnx (`build.rs`) and run by burn.
 //!
 //! Everything happens on the sphere: a network only ever sees a perspective crop of the stitched equirect, centred
-//! where it should look and written straight into its input tensor by `crop.wgsl`, so seams and poles never reach it.
+//! where it should look and written straight into its input tensor by `crop.wgsl`, so seams and poles never reach it
+//! (the library search alone takes the equirect's halves, whole: the sky and the ground say where a clip was).
 //! Directions are unit vectors in the equirect's frame (stitch layout: centre −X, Z up); [`yaw_pitch`] turns one into
 //! `stitch::View` angles. Feed the equirect stitched with the pose the player shows, and those angles are the view
 //! onto the subject.
@@ -21,6 +22,7 @@ mod high;
 mod plates;
 mod privacy;
 mod reid;
+pub mod search;
 #[cfg(test)]
 mod tests;
 mod vit;
@@ -316,6 +318,8 @@ pub struct Ai {
     pl: Option<Box<plates::Nets>>,
     /// Thumbnail crops, made on first use.
     th: Option<(Crops, In)>,
+    /// Library search, made on first use.
+    se: Option<Box<search::Nets>>,
     /// Wait for each crop pass and sum the times into `times` (a GPU sync per crop).
     pub timing: bool,
     pub times: Times,
@@ -390,6 +394,7 @@ impl Ai {
             pv: None,
             pl: None,
             th: None,
+            se: None,
             dev: bd,
             wd: dev.clone(),
             q: q.clone(),
