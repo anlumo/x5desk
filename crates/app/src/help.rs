@@ -130,6 +130,10 @@ fn guide(p: Page) -> &'static [&'static str] {
              frame to the end on the AI models (loaded on first use, a minute's warm-up the first time); the bar \
              under the seek bar shows where it was tracked (green), checked by the detector (teal), missing (amber), \
              lost (red) and found again (blue). Then the view follows it, and a flat export takes that follow view.",
+            "Auto framing: the view follows the clip's main subject (people first, then animals, sports gear, \
+             vehicles; never the rider or whoever holds the camera; while riding, only people close by), and where \
+             none wins the direction of travel. The first time it analyses the whole clip (the line says how far); \
+             untick it and tick it again without a new analysis. A flat export takes it too.",
             "Blur faces and Blur license plates preview the export's privacy blur on the paused frame. Auto edit makes \
              an editor timeline of the clip's highlights, framed automatically.",
         ],
@@ -145,7 +149,8 @@ fn guide(p: Page) -> &'static [&'static str] {
              screen's queue.",
             "AI: on the Reframe tab, Track a subject and draw a box around it in the viewer; it is followed from the \
              playhead to the clip's end and the clip gets keys that keep it in view (its tracking states show along \
-             the clip). A media file's menu (right click) has Auto edit: its highlights, framed automatically, onto \
+             the clip). Auto framing keys the whole clip at the playhead along its auto framing instead (its main \
+             subject, else the direction of travel). A media file's menu (right click) has Auto edit: its highlights, framed automatically, onto \
              the timeline. With Auto edit music chosen under Media, the music plays under them, ducked under their \
              audio, and the cuts land on its beats.",
         ],

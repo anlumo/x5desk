@@ -1,8 +1,9 @@
 //! AI features (PLAN.md milestone 9, group 11) on crate track's open models. [`MODELS`]: the networks, loaded once
 //! per app run on first use and warmed up off the UI thread. Deep Track ([`Track`]): a subject the user boxes in a
 //! view, followed through the clip on a background thread (the player's follow view, the editor's reframing keys,
-//! Shot Lab's subject). Auto edit ([`Auto`]): highlights cut along the auto framer's path into an editor timeline,
-//! with a music track under them their cuts on its beats.
+//! Shot Lab's subject). Auto framing (`Track::framing`): the auto framer's path over the whole clip as a run of its own
+//! for the same three (Shot Lab aside). Auto edit ([`Auto`]): highlights cut along that path into an editor timeline,
+//! with a music track under them their cuts on its beats. Both analyse the clip in one pass ([`scan`]).
 //! [`privacy`]: the faces and licence plates of one frame for the viewers' privacy preview.
 //!
 //! Frames come from `shotlab::Clip` (decoded and stitched on the shared device) with the stabilisation the result is
@@ -10,11 +11,11 @@
 //! Locks: the models' mutex first; around each network call `BURN` (burn submits throughout), never inside `GATE`,
 //! which the decode and stitch submits hold shared in between (the UI's retry takes BURN, then GATE).
 
-use crate::{BURN, GATE, gyro};
+use crate::{BURN, GATE, export::Hold, gyro};
 use eframe::egui;
 use glam::{Quat, Vec2, Vec3};
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, OnceLock, TryLockError, Weak,
         atomic::{AtomicBool, Ordering::Relaxed},
@@ -31,8 +32,13 @@ pub const CANCELLED: &str = "cancelled";
 const W: u32 = 3072;
 /// Smoothing of a finished track for views and keys, s (`track::smooth`'s σ).
 const SIGMA: f64 = 0.25;
-/// Auto edit: every this many frames analysed; the share of the clip the highlights fill (at least `MIN_AUTO` s).
+/// Auto framing and auto edit: every this many frames analysed; auto edit: the share of the clip the highlights fill
+/// (at least `MIN_AUTO` s).
 const STEP: usize = 10;
+/// Auto framing: a frame travels where `COVER` of the direction-of-travel estimates within `HOLD` s move
+/// (`stab::fwd::moving`, the forward view's share), so a stop of a few seconds stays part of the ride.
+const HOLD: f64 = 2.0;
+const COVER: f64 = 0.3;
 const SHARE: f64 = 0.3;
 const MIN_AUTO: f64 = 2.0;
 
@@ -258,13 +264,15 @@ impl St {
 /// A subject's box (centre, angular size) per frame where it was tracked.
 pub type Boxes = Vec<Option<(Vec3, Vec2)>>;
 
-/// A Deep Track run: the subject's samples from frame `k0` on as they come, the smoothed path once done.
+/// A Deep Track run: the subject's samples from frame `k0` on as they come, the smoothed path once done. Or auto
+/// framing's (`auto`, `framing`): the framer's path of the whole clip, no samples.
 #[derive(Debug)]
 pub struct Track {
     /// the clip (an `.insv` with both lenses) and the stabilisation it was stitched with: the directions' frame
     pub file: PathBuf,
     pub stab: (gyro::Mode, f64),
     pub k0: usize,
+    pub auto: bool,
     /// the clip's frame times, s (set as the run starts)
     pub times: OnceLock<Vec<f64>>,
     pub smp: Mutex<Vec<Sample>>,
@@ -289,17 +297,7 @@ impl Track {
         k1: usize,
         s: Subject,
     ) -> Arc<Track> {
-        let t = Arc::new(Track {
-            file,
-            stab,
-            k0,
-            times: OnceLock::new(),
-            smp: Mutex::new(vec![]),
-            path: OnceLock::new(),
-            qs: OnceLock::new(),
-            st: Mutex::new(St::Wait),
-            stop: AtomicBool::new(false),
-        });
+        let t = Track::new(file, stab, k0, false);
         let (g, cx, ctx, t2) = (g.clone(), cx.clone(), ctx.clone(), t.clone());
         thread::Builder::new()
             .name("deep track".into())
@@ -405,6 +403,80 @@ impl Track {
         })
     }
 
+    pub(crate) fn new(file: PathBuf, stab: (gyro::Mode, f64), k0: usize, auto: bool) -> Arc<Track> {
+        Arc::new(Track {
+            file,
+            stab,
+            k0,
+            auto,
+            times: OnceLock::new(),
+            smp: Mutex::new(vec![]),
+            path: OnceLock::new(),
+            qs: OnceLock::new(),
+            st: Mutex::new(St::Wait),
+            stop: AtomicBool::new(false),
+        })
+    }
+
+    /// Auto framing of the whole of `file` stitched with `stab` on a thread of its own: the framer's path (`scan`, for
+    /// a picture `aspect` wide; the forward view where no subject wins) as a run from frame 0 without samples.
+    pub fn framing(
+        g: &Arc<Gpu>,
+        cx: &stitch::Ctx,
+        ctx: &egui::Context,
+        file: PathBuf,
+        stab: (gyro::Mode, f64),
+        aspect: f32,
+    ) -> Arc<Track> {
+        let t = Track::new(file, stab, 0, true);
+        let (g, cx, ctx, t2) = (g.clone(), cx.clone(), ctx.clone(), t.clone());
+        thread::Builder::new()
+            .name("auto framing".into())
+            .spawn(move || {
+                let _a = crate::awake::hold();
+                let t = &t2;
+                let r = crate::export::scoped(&g.device, || {
+                    t.framed(&g, &cx, aspect, Hold::Pass, &t.stop, Some(&ctx))
+                });
+                *lock(&t.st) = match r {
+                    Ok(()) => St::Done,
+                    Err(_) if t.stop.load(Relaxed) => St::Cancelled,
+                    Err(e) => St::Failed(e),
+                };
+                ctx.request_repaint();
+            })
+            .expect("auto framing thread");
+        t
+    }
+
+    /// `framing`'s work on this thread, the models held as `hold` says, ended by `stop` (an agent's lane runs it before
+    /// its job's frames): the frame times, the rotations, then the path.
+    pub(crate) fn framed(
+        &self,
+        g: &Arc<Gpu>,
+        cx: &stitch::Ctx,
+        aspect: f32,
+        hold: Hold,
+        stop: &AtomicBool,
+        ctx: Option<&egui::Context>,
+    ) -> Result<(), String> {
+        let c = shotlab::Clip::open(&self.file)?;
+        let _ = self.times.set(c.times.clone());
+        let mut say = |i, n| {
+            *lock(&self.st) = St::Run(i, n);
+            if let Some(c) = ctx {
+                c.request_repaint();
+            }
+        };
+        let (fm, qs) = scan(
+            g, cx, &c, &self.file, self.stab, aspect, hold, stop, ctx, &mut say, None,
+        )?;
+        let _ = self.qs.set(qs);
+        let p = fm.path(c.times.len(), c.meta.fps as f32);
+        let _ = self.path.set(p.into_iter().map(|s| s.dir).collect());
+        Ok(())
+    }
+
     pub fn st(&self) -> St {
         lock(&self.st).clone()
     }
@@ -473,10 +545,10 @@ pub fn rots(c: &shotlab::Clip, stab: (gyro::Mode, f64)) -> Result<Vec<Quat>, Str
         .collect())
 }
 
-/// Reframing keys that follow the track over source times `a..b` (clip content time), evenly spaced about `every` s
-/// apart: view `v` (projection, roll, field of view) turned onto the smoothed direction.
+/// Reframing keys that follow the finished track over source times `a..b` (clip content time), evenly spaced about
+/// `every` s apart: view `v` (projection, roll, field of view) turned onto the smoothed direction.
 pub fn keys(t: &Track, a: f64, b: f64, every: f64, v: &edit::View) -> Vec<edit::Key> {
-    let (Some(ts), n) = (t.times.get(), lock(&t.smp).len()) else {
+    let (Some(ts), Some(n)) = (t.times.get(), t.path.get().map(Vec::len)) else {
         return vec![];
     };
     let (Some(&t0), Some(&t1)) = (ts.get(t.k0), ts.get((t.k0 + n).saturating_sub(1))) else {
@@ -645,6 +717,116 @@ pub fn privacy(
     })
 }
 
+/// The pass of auto framing and auto edit over clip `c` (`file`) stitched with `stab`: the direction of travel first
+/// (`export::travel`, kept for the process; with an IMU record), then on every `STEP`th frame the detections over the
+/// sphere into a framer for a picture `aspect` wide that looks along the forward view where no subject wins, with the
+/// camera body's frame (its carrier never wins) and where it travels (a subject has to earn the view there); with `sc`
+/// (auto edit) the frame's people, faces and thumbnail into it too. The models held as `hold` says, progress (frames
+/// done of all: the travel's, then the detections') to `say`. Also returns the stitch rotation of every frame (`rots`).
+#[allow(clippy::too_many_arguments)]
+fn scan(
+    g: &Arc<Gpu>,
+    cx: &stitch::Ctx,
+    c: &shotlab::Clip,
+    file: &Path,
+    stab: (gyro::Mode, f64),
+    aspect: f32,
+    hold: Hold,
+    stop: &AtomicBool,
+    ctx: Option<&egui::Context>,
+    say: &mut dyn FnMut(usize, usize),
+    mut sc: Option<&mut track::Scorer>,
+) -> Result<(track::Framer, Vec<Quat>), String> {
+    let es = match &c.imu {
+        Some(_) => Some(export::travel(g, cx, &[file.into()], stop, &mut |i, n| {
+            say(i as usize, n as usize)
+        })?),
+        None => None,
+    };
+    let poses = poses(c, stab)?;
+    let n = c.times.len();
+    let qs: Vec<Quat> = (0..n).map(|k| c.pose(k, poses.as_deref()).q).collect();
+    let mut fm = track::Framer::new(aspect);
+    // the forward view's centre, turned into the frame this pass stitches in
+    if let Some(f) = c.poses(stab::Lock::Forward, gyro::SMOOTH) {
+        fm.ahead = (0..n)
+            .map(|k| qs[k].inverse() * c.pose(k, Some(&f)).q * track::dir(0.0, 0.0))
+            .collect();
+    }
+    // the stitch rotation takes a direction into the frame of the clip unstabilised: the camera body's, up to the
+    // X5's fixed framing
+    fm.body = qs.clone();
+    if let (Some(es), Some((_, ex))) = (&es, &c.imu) {
+        fm.moving = (0..n)
+            .map(|k| {
+                let e = &ex[k.min(ex.len() - 1)];
+                let t = e.t as f64 * 1e-6 - 0.5 * e.time + stab::OFFSET;
+                let w = &es[es.partition_point(|e| e.t < t - HOLD)
+                    ..es.partition_point(|e| e.t <= t + HOLD)];
+                let on = w.iter().filter(|e| stab::fwd::moving(e)).count();
+                !w.is_empty() && on as f64 >= COVER * w.len() as f64
+            })
+            .collect();
+    }
+    let ks: Vec<usize> = (0..n).step_by(STEP).collect();
+    let (m, st, ft, edit) = (ks.len(), track::sphere(), track::face_tiles(), sc.is_some());
+    type Found = (Vec<track::Det>, Option<(Vec<track::Region>, Vec<f32>)>);
+    let det = |ai: &mut track::Ai, p: &track::Pano| -> Result<Found, String> {
+        let _b = BURN.lock();
+        let ds = ai.detect(p, &st, 0.3);
+        match edit {
+            true => ai
+                .faces(p, &ft, 0.6)
+                .and_then(|fs| Ok((ds, Some((fs, ai.thumb(p)?))))),
+            false => Ok((ds, None)),
+        }
+    };
+    let mut keep = |k: usize, (ds, x): Found| {
+        if let (Some(sc), Some((fs, th))) = (sc.as_deref_mut(), x) {
+            sc.people(c.times[k], &ds, &fs);
+            sc.frame(c.times[k], th);
+        }
+        fm.push(k, ds);
+        say(k / STEP + 1, m);
+    };
+    let pose = |k| c.pose(k, poses.as_deref());
+    // decode and stitch submit on this thread between the network calls, which run under BURN, never inside GATE
+    match hold {
+        Hold::Pass => MODELS.with(g, false, ctx, |ai| {
+            let (mut gate, mut pano) = (Some(GATE.read()), None);
+            c.frames(g, cx, W, false, &ks, pose, |tex, k| {
+                if stop.load(Relaxed) {
+                    return Err(CANCELLED.into());
+                }
+                let p = pano.get_or_insert_with(|| ai.pano(&tex.create_view(&Default::default())));
+                gate.take();
+                let r = det(ai, p);
+                gate = Some(GATE.read());
+                keep(k, r?);
+                Ok(())
+            })
+        }),
+        Hold::Frame => {
+            let mut gate = Some(GATE.read());
+            c.frames(g, cx, W, false, &ks, pose, |tex, k| {
+                if stop.load(Relaxed) {
+                    return Err(CANCELLED.into());
+                }
+                gate.take();
+                // the frame bound afresh: the models may have been loaded again since the last
+                let r = MODELS.with_stop(g, stop, ctx, |ai| {
+                    let p = ai.pano(&tex.create_view(&Default::default()));
+                    det(ai, &p)
+                });
+                gate = Some(GATE.read());
+                keep(k, r?);
+                Ok(())
+            })
+        }
+    }?;
+    Ok((fm, qs))
+}
+
 /// An auto edit run: highlights of a clip cut along the auto framer's path, the editor timeline once done.
 pub struct Auto {
     pub file: PathBuf,
@@ -712,61 +894,26 @@ impl Auto {
         aspect: f32,
     ) -> Result<edit::Timeline, String> {
         let c = shotlab::Clip::open(&self.file)?;
-        let file = std::slice::from_ref(&self.file);
-        if c.imu.is_some() {
-            export::travel(g, cx, file, &self.stop, &mut |i, n| {
-                *lock(&self.st) = St::Run(i as usize, n as usize);
-                ctx.request_repaint();
-            })?;
-        }
-        let poses = poses(&c, self.stab)?;
         let (fps, dur) = crate::export::probe(&self.file)?;
         let n = c.times.len();
-        let ks: Vec<usize> = (0..n).step_by(STEP).collect();
-        let (mut sc, mut fm) = (track::Scorer::new(dur), track::Framer::new(aspect));
-        // the forward view's centre, turned into the frame this edit stitches in
-        if let Some(f) = c.poses(stab::Lock::Forward, gyro::SMOOTH) {
-            fm.ahead = (0..n)
-                .map(|k| c.pose(k, poses.as_deref()).q.inverse() * c.pose(k, Some(&f)).q)
-                .map(|q| q * track::dir(0.0, 0.0))
-                .collect();
-        }
-        let (st, ft) = (track::sphere(), track::face_tiles());
-        MODELS.with(g, false, Some(ctx), |ai| {
-            let mut pano = None;
-            let mut gate = Some(GATE.read());
-            c.frames(
-                g,
-                cx,
-                W,
-                false,
-                &ks,
-                |k| c.pose(k, poses.as_deref()),
-                |tex, k| {
-                    if self.stop.load(Relaxed) {
-                        return Err(CANCELLED.into());
-                    }
-                    let p =
-                        pano.get_or_insert_with(|| ai.pano(&tex.create_view(&Default::default())));
-                    gate.take();
-                    let r = {
-                        let _b = BURN.lock();
-                        let ds = ai.detect(p, &st, 0.3);
-                        ai.faces(p, &ft, 0.6)
-                            .and_then(|fs| Ok((ds, fs, ai.thumb(p)?)))
-                    };
-                    gate = Some(GATE.read());
-                    let (ds, fs, th) = r?;
-                    let t = c.times[k];
-                    sc.people(t, &ds, &fs);
-                    sc.frame(t, th);
-                    fm.push(k, ds);
-                    *lock(&self.st) = St::Run(k / STEP + 1, ks.len());
-                    ctx.request_repaint();
-                    Ok(())
-                },
-            )
-        })?;
+        let mut sc = track::Scorer::new(dur);
+        let mut say = |i, n| {
+            *lock(&self.st) = St::Run(i, n);
+            ctx.request_repaint();
+        };
+        let (fm, _) = scan(
+            g,
+            cx,
+            &c,
+            &self.file,
+            self.stab,
+            aspect,
+            Hold::Pass,
+            &self.stop,
+            Some(ctx),
+            &mut say,
+            Some(&mut sc),
+        )?;
         if let Some((tr, ex)) = &c.imu {
             sc.gyro(tr, ex[0].t as f64 * 1e-6 - 0.5 * ex[0].time + stab::OFFSET);
         }

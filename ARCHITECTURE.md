@@ -329,14 +329,19 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   detector at every batch size, one network call at a time under BURN; re-identification runs no network), shared by
   Deep Track, auto edit and every privacy pass. Deep Track sets `Tracker::fps` from the clip
   (`shotlab::Clip::meta.fps`); its directions are in the frame of the track's stabilisation and are turned into any
-  other frame with `Track::turn` / `ai::rots`. The privacy blur also covers editor timelines (one face pass per clip)
-  and Shot Lab passes (before the effect). The privacy pass (the export's `Keep::privacy` over `export::privacy_pass`,
-  the player's preview `ai::privacy`) finds faces and/or licence plates every 3rd frame, each linked by a `Hide` of its
-  own; with plates it stitches 7680 wide and finds faces there too, else 3072. `Keep::privacy` holds `ai::MODELS` for
-  the whole pass (`Hold::Pass`); the agents' lanes run the same pass from `Job::pre` (Agents) and hold the models per
-  searched frame (`Hold::Frame`, through `Models::with_stop`, whose wait for them sees the job's stop), so the other
-  lane waits out one detection, not a pass. `Models::trim` drops them when nobody holds them (an idle MCP host's trim).
-  The player's Blur faces and Blur license plates previews carry into the export (`Spec::faces`, `Spec::plates`).
+  other frame with `Track::turn` / `ai::rots`. Auto framing (`Track::framing`) is auto edit's pass (`ai::scan`: the
+  direction of travel, then the detector over the sphere every 10th frame into `track::Framer`, with the stitch
+  rotations as the camera body's frame, which tells the camera's carrier, and where the travel estimates move) over
+  the whole clip, its path a `Track` of its own (`auto`, no samples) that the player's follow view, `Spec::follow` and
+  the editor's keys take as they take Deep Track's; the agents' lanes run it from `Job::pre` (`Hold::Frame`). The
+  privacy blur also covers editor timelines (one face pass per clip) and Shot Lab passes (before the effect). The
+  privacy pass (the export's `Keep::privacy` over `export::privacy_pass`, the player's preview `ai::privacy`) finds
+  faces and/or licence plates every 3rd frame, each linked by a `Hide` of its own; with plates it stitches 7680 wide
+  and finds faces there too, else 3072. `Keep::privacy` holds `ai::MODELS` for the whole pass (`Hold::Pass`); the
+  agents' lanes run the same pass from `Job::pre` (Agents) and hold the models per searched frame (`Hold::Frame`,
+  through `Models::with_stop`, whose wait for them sees the job's stop), so the other lane waits out one detection,
+  not a pass. `Models::trim` drops them when nobody holds them (an idle MCP host's trim). The player's Blur faces and
+  Blur license plates previews carry into the export (`Spec::faces`, `Spec::plates`).
 - Editor projects are edit's JSON plus a top-level `"x5desk"` object (overlays, denoise, stabilisation). A clip's
   look (one of fx's looks by name or a `.cube` path) and colour adjustments (per clip `"adjust"`: the `fx::Params`
   fields that differ from the defaults) live in edit's clips; a file from before per-clip adjustments holds the

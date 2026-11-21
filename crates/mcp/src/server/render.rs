@@ -60,7 +60,7 @@ const MEMORY: &str =
 
 /// The fields only one of the tools takes.
 const STILL_ONLY: [&str; 4] = ["time_s", "jpeg_quality", "noise_reduction", "wait_s"];
-const EXPORT_ONLY: [&str; 10] = [
+const EXPORT_ONLY: [&str; 11] = [
     "preset",
     "start_s",
     "end_s",
@@ -70,6 +70,7 @@ const EXPORT_ONLY: [&str; 10] = [
     "qp",
     "fps",
     "denoise",
+    "auto_framing",
     "allow_frozen",
 ];
 
@@ -171,6 +172,7 @@ struct Ask {
     qp: Option<u8>,
     fps: Option<FpsArg>,
     denoise: Option<f32>,
+    auto_framing: Option<bool>,
     allow_frozen: Option<bool>,
 }
 
@@ -287,6 +289,11 @@ render_args! {
         /// voice denoise of the audio (RNNoise: wind, hiss, hum, rumble, engines down, speech kept), strength 0-1;
         /// default 0, off: the source's audio copied (catalog: denoise)
         denoise: Option<f32>,
+        /// output flat only: the view turns onto the recording's main subject (people first, then animals, sports
+        /// gear, vehicles), along the direction of travel where none wins; view keeps its projection, roll and fov.
+        /// An analysis pass over the whole recording runs first, before the first frame (about as long as the
+        /// recording on a Radeon 8060S; catalog: export); default false
+        auto_framing: Option<bool>,
         /// export even when pictures can't be decoded (they repeat the one before); default false
         allow_frozen: Option<bool>,
     }
@@ -728,6 +735,9 @@ fn want(kind: RKind, a: &Ask, c: &Catalog) -> Result<Want, String> {
     if let Some(x) = a.denoise {
         within("denoise", x, &c.denoise)?
     }
+    if a.auto_framing == Some(true) && out != Output::Flat {
+        return Err("auto_framing: for output flat only (360 is the whole sphere)".into());
+    }
     let given = match &a.codec {
         Some(x) => Some(
             (c.codecs.iter())
@@ -782,6 +792,7 @@ fn want(kind: RKind, a: &Ask, c: &Catalog) -> Result<Want, String> {
     };
     (w.start_s, w.end_s, w.codec) = (a.start_s, a.end_s, given.map(|k| k.id.clone()));
     (w.ten_bit, w.mbps, w.qp, w.denoise) = (a.ten_bit, a.mbps, a.qp, a.denoise);
+    w.auto_framing = a.auto_framing.unwrap_or(false);
     w.allow_frozen = a.allow_frozen.unwrap_or(false);
     Ok(w)
 }
@@ -1235,6 +1246,13 @@ fn shown_catalog(c: &Catalog, gpu: Value, raft: Option<&str>, blur: Option<&str>
             "audio": "the source's AAC, copied; denoised (denoise above 0): decoded, denoised and encoded again \
                       (AAC 192 kbit/s), in step with the video and as long",
             "allow_frozen": "false: a picture that can't be decoded fails the export",
+            "auto_framing": "flat only: the view follows the main subject the detector picks (people first, then \
+                             animals, sports gear, vehicles; a new one only once it clearly wins for a while), along \
+                             the direction of travel where none wins, smoothed; an analysis pass over the whole \
+                             recording first (the direction of travel's, kept while the server runs, and a detection \
+                             on every 10th frame: 50-60 s a minute of recording on a Radeon 8060S); never the rider \
+                             or the one holding the camera; while the camera travels only a person or an animal about \
+                             5 m away or closer, seen for 1.5 s, wins over the direction of travel; turns at most 40°/s",
         },
         "denoise": {
             "min": c.denoise.min,
@@ -3032,6 +3050,10 @@ mod tests {
         assert_eq!(e(r), "`denoise` is for export only");
         let r = call(&c, "export", ex(json!({ "denoise": true }))).await;
         assert!(e(r).contains("expected f32"));
+        let r = call(&c, "render_still", ex(json!({ "auto_framing": true }))).await;
+        assert_eq!(e(r), "`auto_framing` is for export only");
+        let r = call(&c, "export", ex(json!({ "auto_framing": "yes" }))).await;
+        assert!(e(r).contains("expected a boolean"));
         let r = call(&c, "export", ex(json!({ "time_s": 1 }))).await;
         assert_eq!(e(r), "`time_s` is for render_still only");
         let r = call(&c, "export", ex(json!({ "noise_reduction": 0.5 }))).await;
@@ -3095,6 +3117,11 @@ mod tests {
                 "export",
                 json!({ "view": { "fov": 90 } }),
                 "view: for output flat only (360 is the whole sphere)",
+            ),
+            (
+                "export",
+                json!({ "auto_framing": true }),
+                "auto_framing: for output flat only (360 is the whole sphere)",
             ),
             (
                 "export",
@@ -3240,7 +3267,7 @@ mod tests {
         }));
         assert_eq!(e(call(&c, "export", a).await), "no Insta360 trailer");
         let w = f.asked.lock().unwrap().clone().unwrap();
-        assert_eq!(w.denoise, Some(0.25));
+        assert_eq!((w.denoise, w.auto_framing), (Some(0.25), false));
         assert_eq!(
             (
                 w.preset.as_deref(),
@@ -3261,14 +3288,19 @@ mod tests {
             (w.colour_match, w.codec.as_deref(), w.adjust["exposure"]),
             (Some(false), Some("h265"), 0.5)
         );
-        let a = ex(
-            json!({ "fps": "29.97", "output": "flat", "preset": "flat", "view": { "projection": "persp" } }),
-        );
+        let a = ex(json!({
+            "fps": "29.97", "output": "flat", "preset": "flat", "view": { "projection": "persp" },
+            "auto_framing": true,
+        }));
         assert_eq!(e(call(&c, "export", a).await), "no Insta360 trailer");
         let w = f.asked.lock().unwrap().clone().unwrap();
         assert_eq!(
-            (w.fps.as_deref(), w.view.unwrap().projection.as_deref()),
-            (Some("29.97"), Some("perspective"))
+            (
+                w.fps.as_deref(),
+                w.view.unwrap().projection.as_deref(),
+                w.auto_framing
+            ),
+            (Some("29.97"), Some("perspective"), true)
         );
         // a 360 still's height follows its width; no preset
         assert_eq!(

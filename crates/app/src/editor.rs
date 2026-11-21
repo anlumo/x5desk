@@ -8,8 +8,8 @@
 //! frame's RAFT stitch from the app's worker (`player::still`). Thumbnails come from a worker (`thumbs`).
 //!
 //! AI (`ai`): Deep Track from a box drawn in the viewer follows the subject from the playhead to the clip's end and
-//! becomes the clip's reframing keys (its states on the clip in the timeline); auto edit puts a clip's highlights,
-//! framed automatically, on the timeline.
+//! becomes the clip's reframing keys (its states on the clip in the timeline); auto framing's path keys the whole clip
+//! the same way; auto edit puts a clip's highlights, framed automatically, on the timeline.
 
 mod deck;
 pub mod doc;
@@ -104,7 +104,8 @@ pub struct Hook {
     pub tbox: Option<[f32; 4]>,
 }
 
-/// A Deep Track run for clip `k` (of file `path`, source `a..b`), keyed as view `v` turned onto the subject.
+/// A Deep Track or auto framing run for clip `k` (of file `path`, source `a..b`), keyed as view `v` turned onto the
+/// subject.
 struct Trk {
     t: Arc<ai::Track>,
     k: usize,
@@ -716,25 +717,69 @@ impl Editor {
         Ok(())
     }
 
-    /// A finished run's keys onto its clip (one undo step): keys every 0.5 s from where the run started to the clip's
-    /// end replace the clip's keys there.
+    /// Auto framing of the clip at the playhead (`ai::Track::framing` over its whole file): the result becomes the clip's
+    /// reframing keys over all of it, the viewer's view turned onto it.
+    pub fn frame(&mut self) -> Result<(), String> {
+        let v = self.shown();
+        if self.pano || !matches!(look_of(&v), Look::Perspective | Look::Panini) {
+            return Err(
+                "Auto framing keys a perspective or Panini view (not the 360 frame)".into(),
+            );
+        }
+        let tl = self.pj.tl();
+        let k = (tl.at(self.t.min(tl.dur() - 1e-6).max(0.0)))
+            .ok_or("Auto framing: no clip at the playhead")?
+            .k;
+        let c = tl.clips[k].clone();
+        if c.hold > 0.0 || c.rev {
+            return Err("Auto framing frames clips that play forwards".into());
+        }
+        let path = tl.files[c.file as usize].path.clone();
+        let f = self
+            .info(&path)
+            .and_then(|i| i.files.first().cloned())
+            .ok_or("no main file")?;
+        if let Some(t) = &self.trk {
+            t.t.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let st = (self.x.stab, self.x.smooth);
+        let t = ai::Track::framing(&self.g, &self.cx, &self.ctx, f, st, self.aspect());
+        self.trk = Some(Trk {
+            t,
+            k,
+            path,
+            a: c.a,
+            b: c.b,
+            v: to_edit(&v),
+            keyed: false,
+        });
+        (self.arm, self.err) = (false, None);
+        Ok(())
+    }
+
+    /// A finished run's keys onto its clip (one undo step): keys every 0.5 s from where the run started (auto framing:
+    /// the clip's start) to the clip's end replace the clip's keys there.
     fn rekey(&mut self) {
         let Some(t) = self.trk.as_mut().filter(|t| !t.keyed && t.t.st().over()) else {
             return;
         };
         t.keyed = true;
+        let w = ["Deep Track", "Auto framing"][t.t.auto as usize];
         match t.t.st() {
             ai::St::Done => {}
             ai::St::Failed(e) => {
-                self.err = Some(format!("Deep Track: {e}"));
+                self.err = Some(format!("{w}: {e}"));
                 return;
             }
             _ => return,
         }
         let (k, path, a, b) = (t.k, t.path.clone(), t.a, t.b);
-        let s0 = (t.t.times.get())
-            .and_then(|v| v.get(t.t.k0).copied())
-            .unwrap_or(a);
+        let s0 = match t.t.auto {
+            true => a,
+            false => (t.t.times.get())
+                .and_then(|v| v.get(t.t.k0).copied())
+                .unwrap_or(a),
+        };
         let keys = ai::keys(&t.t, s0.max(a), b, 0.5, &t.v);
         let tl = self.pj.tl();
         if tl
@@ -742,11 +787,11 @@ impl Editor {
             .get(k)
             .is_none_or(|c| tl.files[c.file as usize].path != path || c.a > s0 || c.b < s0)
         {
-            self.err = Some("Deep Track: the clip changed while it was tracked".into());
+            self.err = Some(format!("{w}: the clip changed while it was tracked"));
             return;
         }
         if keys.len() < 2 {
-            self.err = Some("Deep Track: too short a track for keys".into());
+            self.err = Some(format!("{w}: too short a track for keys"));
             return;
         }
         let (lo, hi) = (keys[0].t, keys[keys.len() - 1].t);
@@ -1947,7 +1992,10 @@ impl Editor {
             lines.push("Deep Track: drag a box around the subject".into());
         }
         if let Some(t) = self.trk.as_ref().filter(|t| !t.keyed) {
-            lines.push(t.t.st().line("Deep Track"));
+            lines.push(
+                t.t.st()
+                    .line(["Deep Track", "Auto framing"][t.t.auto as usize]),
+            );
         }
         if let Some(a) = &self.auto {
             lines.push(a.st().line("Auto edit"));
@@ -3077,11 +3125,12 @@ impl Editor {
             None => {}
         }
         ui.separator();
-        ui.label("Deep Track");
+        ui.label("Deep Track and auto framing");
         ui.horizontal_wrapped(|ui| {
             match self.trk.as_ref().map(|t| t.t.st()) {
                 Some(st) if !st.over() => {
-                    ui.label(st.line("Tracking"));
+                    let auto = self.trk.as_ref().is_some_and(|t| t.t.auto);
+                    ui.label(st.line(if auto { "Auto framing" } else { "Tracking" }));
                     if ui.button("Cancel").clicked() {
                         (self.trk.as_ref().unwrap().t.stop).store(true, std::sync::atomic::Ordering::Relaxed);
                     }
@@ -3096,6 +3145,17 @@ impl Editor {
                             )
                             .on_disabled_hover_text("Deep Track needs the perspective view (not the 360 frame)");
                     });
+                    if ui
+                        .button("Auto framing")
+                        .on_hover_text(
+                            "The clip at the playhead gets keys over all of it that follow its main subject, else the \
+                             direction of travel (its whole recording is analysed first)",
+                        )
+                        .clicked()
+                        && let Err(e) = self.frame()
+                    {
+                        self.err = Some(e);
+                    }
                     if let Some(st) = st {
                         ui.label(st.line("Last track"));
                     }

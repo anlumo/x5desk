@@ -1,11 +1,14 @@
 //! Auto framing: detections every few frames over the whole horizon are linked into tracklets, each scored per key
 //! frame by class, confidence, size, motion, height above or below the horizon and persistence; the main subject
-//! changes only when another one clearly wins for a while. The view follows it and fits its height, then the path is
-//! smoothed over time in yaw and pitch, so that it stays level when it pans from one subject to another. Where no
-//! subject wins (none yet, or the subject gone), the view looks along `Framer::ahead` (the forward view) if given.
+//! changes only when another one clearly wins for a while. The camera's carrier (the rider, the hand on the stick, the
+//! vehicle), told by the camera body's frame (`Framer::body`), is never a subject, and while the camera travels
+//! (`Framer::moving`) a subject has to earn the view over the direction of travel. The view follows the subject and
+//! fits its height, pans to the next at most `TURN` °/s, then the path is smoothed over time in yaw and pitch, so that
+//! it stays level when it pans from one subject to another. Where no subject wins (none yet, or the subject gone), the
+//! view looks along `Framer::ahead` (the forward view) if given.
 
 use crate::Det;
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 /// The view of one frame: direction (equirect frame, `yaw_pitch` for `stitch::View`), horizontal field of view in
 /// degrees for the output aspect, and the tracklet it frames.
@@ -22,9 +25,32 @@ const SWITCH: f32 = 1.5;
 const GONE: f32 = 1.0;
 const END: f32 = 2.0;
 const SIGMA: f32 = 0.6;
+/// Fastest turn of the view, °/s: a still scene crosses a 100° view in 2.5 s; a hand-over of 90° takes 2.3 s, of 180°
+/// 4.5 s (the hand-overs of auto edit's first framer peaked at 84–110 °/s).
+const TURN: f32 = 40.0;
+/// While the camera travels a challenger has to earn the view over the direction of travel: a person or an animal
+/// (class weight 0.8 or more) `PROM` degrees tall (about 5 m away) at every detection for `EARN` s; the subject stays
+/// while `PROM / 2` tall, and once the forward view is back the next one earns it afresh.
+const PROM: f32 = 20.0;
+const EARN: f32 = 1.5;
 /// The subject fills this share of the frame height; the view's horizontal field of view stays within `FOV`.
 const FILL: f32 = 0.45;
 const FOV: [f32; 2] = [60.0, 110.0];
+/// The camera's carrier (`carriers`), degrees unless said: tall or low (medians over a tracklet's detections), fixed to
+/// the body (median over its detections of the rms angle from their mean of its body-frame directions within a second),
+/// seconds a seed is seen at least, the reach of a seed in the body frame, the least height of a carrier not close,
+/// the radius and share of travelling keys of its presence. On 3 sample clips and 4 rides: the rider's tracklets
+/// 46–97° tall (medians; the head 26–38°), at 1–22°; the hand on the stick and the scooter's parts at −42° to −58°,
+/// at 1–9°; people filmed on purpose 15–33° tall at −14° to −32°, the cyclist at a crossing 37°; people seen where the
+/// rider's head is in 26–60 % of a ride's travelling keys, where the cyclist and a walking companion are in 10–15 %.
+const NEAR: f32 = 40.0;
+const UNDER: f32 = -40.0;
+const FIXED: f32 = 25.0;
+const SEED: f32 = 2.0;
+const SAME: f32 = 30.0;
+const TALL: f32 = 20.0;
+const ROUND: f32 = 15.0;
+const PRESENT: f32 = 0.2;
 /// Lowest pitch (degrees) a view's lower edge reaches: below it is the nadir zone, the operator and the stick (on
 /// v627 the operator's head is at about −78°). A view onto a close subject far below the horizon is raised until its
 /// edge is clear, the subject lower in the frame.
@@ -37,6 +63,11 @@ pub struct Framer {
     /// The direction of travel per frame (equirect frame), the view where no subject wins; empty: the last
     /// subject's direction holds (the front before the first).
     pub ahead: Vec<Vec3>,
+    /// Per frame, the rotation from the equirect frame into the camera body's (up to a fixed one); empty: no
+    /// tracklet is taken for the camera's carrier.
+    pub body: Vec<Quat>,
+    /// Per frame, whether the camera travels (the forward view's analysis); empty: it stands.
+    pub moving: Vec<bool>,
 }
 
 /// Tracklet: detections linked over key frames (key index, detection).
@@ -50,6 +81,8 @@ impl Framer {
             keys: vec![],
             aspect,
             ahead: vec![],
+            body: vec![],
+            moving: vec![],
         }
     }
 
@@ -69,10 +102,9 @@ impl Framer {
         }
     }
 
-    /// One view per frame for `n` frames at `fps`.
-    pub fn path(&self, n: usize, fps: f32) -> Vec<Shot> {
+    /// The tracklets: each detection linked to the nearest live tracklet of its class, predicted by its last motion.
+    fn link(&self, fps: f32) -> Vec<Tl> {
         let ks = &self.keys;
-        // link: each detection to the nearest live tracklet of its class, predicted by its last motion
         let mut tl: Vec<Tl> = vec![];
         for (i, (k, ds)) in ks.iter().enumerate() {
             let mut ds = ds.clone();
@@ -101,6 +133,14 @@ impl Framer {
                 }
             }
         }
+        tl
+    }
+
+    /// One view per frame for `n` frames at `fps`.
+    pub fn path(&self, n: usize, fps: f32) -> Vec<Shot> {
+        let ks = &self.keys;
+        let tl = self.link(fps);
+        let (carrier, seeds) = self.carriers(&tl, fps);
         // score per key, pick with hysteresis; per key: frame, view (yaw unwrapped against the last key, pitch, log
         // field of view), subject
         let mut keys: Vec<(usize, Vec3, Option<usize>)> = vec![];
@@ -112,12 +152,41 @@ impl Framer {
             } else {
                 0.0
             };
+            let tr = self.moving.get(*k) == Some(&true);
             let sc: Vec<(usize, f32, Det)> = tl
                 .iter()
                 .enumerate()
+                .filter(|(j, _)| !carrier[*j])
                 .filter_map(|(j, t)| {
                     let p = t.hits.iter().position(|h| h.0 == i)?;
                     let d = t.hits[p].1;
+                    // nor is a detection, close, where a person's seed sits: a tracklet that hopped onto the rider
+                    let at = |q: &Quat| {
+                        seeds
+                            .iter()
+                            .any(|s| s.angle_between(*q * d.dir).to_degrees() <= SAME)
+                    };
+                    let close = d.size.y >= NEAR || crate::yaw_pitch(d.dir)[1] <= UNDER;
+                    if close && self.body.get(*k).is_some_and(at) {
+                        return None;
+                    }
+                    // travelling: a challenger has earned it at every detection for `EARN` s (no gap of `GONE`), the
+                    // subject stays while `PROM / 2` tall
+                    let earns = |q: usize| {
+                        Self::class(t.hits[q].1.cls) >= 0.8 && t.hits[q].1.size.y >= PROM
+                    };
+                    let mut q = p;
+                    while q > 0
+                        && earns(q - 1)
+                        && (ks[t.hits[q].0].0 - ks[t.hits[q - 1].0].0) as f32 / fps <= GONE
+                    {
+                        q -= 1;
+                    }
+                    let earned = earns(p) && (k - ks[t.hits[q].0].0) as f32 / fps >= EARN;
+                    if tr && (cur == Some(j) && d.size.y < PROM / 2.0 || cur != Some(j) && !earned)
+                    {
+                        return None;
+                    }
                     // motion over the last second, in subject heights per second
                     let q = t.hits[..p]
                         .iter()
@@ -173,6 +242,10 @@ impl Framer {
                 .flatten();
             if let Some(&a) = ahead {
                 dir = a;
+                // travelling, the next subject has to earn the view from the direction of travel
+                if tr {
+                    cur = None;
+                }
             }
             let v = (h / FILL).clamp(1.0, 170.0).to_radians() / 2.0;
             let fov = (2.0 * (v.tan() * self.aspect).atan())
@@ -215,6 +288,13 @@ impl Framer {
             };
             raw.push((v0.lerp(v1, t), s0));
         }
+        // hand-overs pan: each view moved from the last by at most TURN / fps in yaw and pitch (never before the switch,
+        // which comes `GONE` after a subject was lost or `SWITCH` after a challenger began to win), before the
+        // smoothing, which never turns faster; every view a convex combination of the raw ones, so clear of `LOW` too
+        for i in 1..n {
+            let d = raw[i].0 - raw[i - 1].0;
+            raw[i].0 = raw[i - 1].0 + d * (TURN / fps / d.truncate().length()).min(1.0);
+        }
         let s = SIGMA * fps;
         let r = (3.0 * s).ceil() as isize;
         (0..n as isize)
@@ -233,6 +313,89 @@ impl Framer {
                 }
             })
             .collect()
+    }
+
+    /// Which tracklets are the camera's carrier. A seed is fixed to the camera body (`FIXED`) for `SEED` s at least and
+    /// `UNDER` the horizon (median: the hand on the stick, the vehicle) or, mostly seen travelling, `NEAR` tall (median:
+    /// the rider) or `TALL` where people are seen in the body frame (within `ROUND`) in `PRESENT` of the clip's
+    /// travelling keys (the rider's head is there all ride, people passing are not); standing, someone close is not
+    /// told from the carrier. The carrier too is a tracklet close (`UNDER` or `NEAR`), or travelling, fixed and `TALL`,
+    /// where a person's seed sits in the body frame (within `SAME`): the rider's detections hop between legs, hands,
+    /// torso and head, and the rider stands at the lights where it rode. None without `body`. Also returns the person
+    /// seeds' mean body-frame directions.
+    fn carriers(&self, tl: &[Tl], fps: f32) -> (Vec<bool>, Vec<Vec3>) {
+        let ks = &self.keys;
+        let mv = |k: usize| self.moving.get(k) == Some(&true);
+        let med = |mut v: Vec<f32>| {
+            v.sort_by(f32::total_cmp);
+            v[v.len() / 2]
+        };
+        let tk: Vec<&(usize, Vec<Det>)> = ks
+            .iter()
+            .filter(|x| mv(x.0) && x.0 < self.body.len())
+            .collect();
+        // share of the travelling keys with a person within `ROUND` of body-frame direction `m`
+        let present = |m: Vec3| {
+            let on = |x: &&&(usize, Vec<Det>)| {
+                (x.1.iter()).any(|d| {
+                    d.cls == 0 && (self.body[x.0] * d.dir).angle_between(m).to_degrees() <= ROUND
+                })
+            };
+            tk.iter().filter(on).count() as f32 / tk.len().max(1) as f32
+        };
+        // per tracklet: close, fixed and tall, a seed, its mean body-frame direction
+        let st: Vec<_> = (tl.iter())
+            .map(|t| {
+                let k = |i: usize| ks[t.hits[i].0].0;
+                let b = (0..t.hits.len())
+                    .map(|i| Some(*self.body.get(k(i))? * t.hits[i].1.dir))
+                    .collect::<Option<Vec<Vec3>>>()?;
+                let h = med(t.hits.iter().map(|h| h.1.size.y).collect());
+                let low = med(t
+                    .hits
+                    .iter()
+                    .map(|h| crate::yaw_pitch(h.1.dir)[1])
+                    .collect())
+                    <= UNDER;
+                // rms angle from their mean of the body-frame directions within a second
+                let spread = |i: usize| {
+                    let w: Vec<Vec3> = (0..b.len())
+                        .filter(|&j| k(j).abs_diff(k(i)) as f32 <= fps)
+                        .map(|j| b[j])
+                        .collect();
+                    let m = w.iter().sum::<Vec3>().normalize();
+                    let s = w.iter().map(|d| d.angle_between(m).powi(2)).sum::<f32>();
+                    (s / w.len() as f32).sqrt().to_degrees()
+                };
+                let fixed = med((0..b.len()).map(spread).collect()) <= FIXED;
+                let m = b.iter().sum::<Vec3>().normalize();
+                let long = (k(b.len() - 1) - k(0)) as f32 / fps >= SEED;
+                let travels = 2 * (0..b.len()).filter(|&i| mv(k(i))).count() >= b.len();
+                let seed = fixed
+                    && long
+                    && (low || travels && (h >= NEAR || h >= TALL && present(m) >= PRESENT));
+                // a person's: other classes (a near arm taken for a refrigerator) don't hop
+                Some((
+                    low || h >= NEAR,
+                    travels && fixed && h >= TALL,
+                    seed,
+                    seed && t.hits[0].1.cls == 0,
+                    m,
+                ))
+            })
+            .collect();
+        let seeds: Vec<Vec3> = st.iter().flatten().filter(|x| x.3).map(|x| x.4).collect();
+        let c = (st.iter())
+            .map(|x| {
+                x.is_some_and(|(near, tall, seed, _, m)| {
+                    seed || (near || tall)
+                        && seeds
+                            .iter()
+                            .any(|s| s.angle_between(m).to_degrees() <= SAME)
+                })
+            })
+            .collect();
+        (c, seeds)
     }
 
     /// Where tracklet `t` should be at frame `k`: its last direction moved on by its last motion.

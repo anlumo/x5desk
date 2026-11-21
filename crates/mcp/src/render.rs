@@ -326,6 +326,8 @@ pub struct Want {
     pub fps: Option<String>,
     /// RNNoise strength; None or 0: off
     pub denoise: Option<f32>,
+    /// a flat output follows the recording's auto framing
+    pub auto_framing: bool,
     pub allow_frozen: bool,
 }
 

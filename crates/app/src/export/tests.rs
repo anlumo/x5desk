@@ -239,6 +239,113 @@ fn player_spec() {
         let s = p.spec().unwrap();
         assert_eq!((s.faces, s.plates), (faces, plates));
     }
+    // a finished auto framing is its follow view while followed
+    let mut fr = crate::ai::tests::made();
+    fr.auto = true;
+    let fr = Arc::new(fr);
+    (p.frm, p.framing) = (Some(fr.clone()), true);
+    assert!(
+        p.spec()
+            .unwrap()
+            .follow
+            .is_some_and(|f| Arc::ptr_eq(&f, &fr))
+    );
+    p.framing = false;
+    assert!(p.spec().unwrap().follow.is_none());
+}
+
+/// A flat export following auto framing (v635, `X5_SAMPLES`, 0–1 s, 320 × 180 H.264 QP 18, template seam, horizon lock):
+/// the run (`ai::Track::framing`) as the spec's follow view, as the player hands it over. It runs, and its first frame
+/// is the one a fixed view along the path's first direction shows, not the unframed view's (turned 90° from it).
+#[test]
+fn follow_framing() {
+    if no_cf_home() {
+        return;
+    }
+    let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+        eprintln!("X5_SAMPLES unset: skipped");
+        return;
+    };
+    let (_l, g, cx) = gpu();
+    let f = d.join("v635.insv");
+    let st = (Some(stab::Lock::Horizon), gyro::SMOOTH);
+    let ctx = egui::Context::default();
+    let fr = crate::ai::Track::framing(&g, &cx, &ctx, f.clone(), st, 16.0 / 9.0);
+    let r = crate::ai::tests::wait(|| fr.st(), 600);
+    assert_eq!(r, crate::ai::St::Done, "{r:?}");
+    let [yaw, pitch] = track::yaw_pitch(fr.dir(0).unwrap());
+    let (_, dur) = probe(&f).unwrap();
+    let view = View {
+        yaw: yaw + 90.0,
+        fov: 90.0,
+        ..View::default()
+    };
+    let spec = Spec {
+        files: vec![f],
+        photo: false,
+        dur,
+        t: 0.0,
+        view,
+        look: Look::Perspective,
+        stab: st.0,
+        smooth: st.1,
+        follow: None,
+        faces: false,
+        plates: false,
+    };
+    let set = Set {
+        preset: None,
+        pano: false,
+        w: 320,
+        h: 180,
+        codec: Codec::H264,
+        deep: false,
+        qp: Some(18),
+        raft: false,
+        colour: false,
+        stab: st.0,
+        smooth: st.1,
+        ..Set::default()
+    };
+    let mut k = Keep::default();
+    let mut run = |name: &str, s: Spec| {
+        let t = task(s, set, fixture(name), [0.0, 1.0], false);
+        let p = k.video(&g, &cx, &t, &ctx).unwrap();
+        (t.it.path.clone(), p)
+    };
+    let follow = Some(fr.clone());
+    let (fol, p) = run(
+        "autoframe.mp4",
+        Spec {
+            follow,
+            ..spec.clone()
+        },
+    );
+    let (fixed, _) = run("fixed.mp4", spec.clone());
+    let view = View { yaw, pitch, ..view };
+    let (along, _) = run("along.mp4", Spec { view, ..spec });
+    let diff = |a: &[u8], b: &[u8]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| x.abs_diff(*y) as f64)
+            .sum::<f64>()
+            / a.len() as f64
+    };
+    let a = ff_frame(&fol, 0);
+    let (dx, da) = (
+        diff(&a, &ff_frame(&fixed, 0)),
+        diff(&a, &ff_frame(&along, 0)),
+    );
+    eprintln!(
+        "auto framed export: {} of {} frames; frame 0 off the unframed view's by {dx:.2}, off the path's by {da:.2} \
+         (mean per channel)",
+        p.done, p.total
+    );
+    assert!(p.done == p.total && p.total >= 29);
+    assert!(da < 1.0 && dx > 10.0, "{da} {dx}");
+    for p in [fol, fixed, along] {
+        std::fs::remove_file(p).unwrap();
+    }
 }
 
 /// Licence plates on v606 (`X5_SAMPLES`) through the privacy pass as a frame grab runs it (one frame, no
@@ -949,7 +1056,7 @@ fn photo() {
 }
 
 /// Frame `k` of a video as RGB24, decoded by FFmpeg (a test tool).
-fn ff_frame(p: &Path, k: usize) -> Vec<u8> {
+pub(super) fn ff_frame(p: &Path, k: usize) -> Vec<u8> {
     let o = std::process::Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(p)

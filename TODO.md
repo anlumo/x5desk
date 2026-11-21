@@ -302,8 +302,68 @@ voice denoise on editor timelines and exports (RNNoise).
   per clip), `ai::tests::auto_v635_music` (v635 to a 100 BPM drum loop: its cut 4.9 ms off a beat),
   `editor::tests::put_music`. Open: a music fade at the edit's end (the editor has none); appended to a timeline at
   another frame rate than the clip's, each clip's frame rounding can move the cuts after it by up to half a frame.
-- [ ] **Auto framing for a whole clip.** `track::Framer` frames only auto edit's highlights; offer it for the whole
-  clip as a follow view (player, flat export) and as editor keys, with the forward view where no subject wins.
+- [x] **Auto framing for a whole clip.** `ai::Track::framing`: auto edit's pass (`ai::scan`, factored out of
+  `Auto::run`, one detection loop for both: the direction of travel, then YOLOX over the sphere every 10th frame into
+  `track::Framer`, the forward view as its `ahead`) over the whole clip, the framer's path as a Deep Track run of its
+  own (`Track::auto`: from frame 0, no samples), so it reaches Deep Track's three consumers through the same
+  mechanism: the player's Auto framing tick beside Deep Track (the analysis on the first tick, its progress on the
+  view, kept while the clip is open: unticked and ticked again it follows at once; one follow view at a time, a drag
+  on the view ends it); the follow view a flat export takes (Export screen: `autoframe_` name, "framed automatically";
+  MCP `export`'s `auto_framing`, flat only, catalog and docs: the agents' lanes run the pass in the job's `pre` with
+  the models held per frame, `autoframe_` name); the editor's Auto framing (Reframe tab, beside Track a subject): keys
+  every 0.5 s over the whole clip at the playhead, one undo step. Like Deep Track's, the follow view and the keys take
+  the path's direction and keep the view's field of view, roll and projection; the framer's own field of view (subject
+  height to 45 %, 60–110°: 60° on the forward view) is unused. Nothing changes without it. The framer, fixed after a
+  first measurement that framed the rider's legs for a whole ride and never showed the forward view (contact sheets
+  `out/*.sheet-before.jpg`): the camera's carrier is never a subject (`Framer::carriers`, on the camera body's frame
+  `Framer::body`: the stitch rotations). A seed is fixed to the body (median over its detections of the rms angle of
+  its body-frame directions within a second, 25° at most) for 2 s and 40° below the horizon (median: the hand on the
+  stick, the scooter's parts, −42° to −58° at 1–9°) or, mostly seen travelling, 40° tall (median: the rider's legs and
+  torso, 46–97° at 1–22°) or 20° tall where people are seen in the body frame (within 15°) in 20 % of the ride's
+  travelling keys (the rider's head: 26–60 %; the cyclist at a crossing and a walking companion: 10–15 %); standing,
+  someone close is not told from the carrier. A close tracklet, or a travelling fixed one 20° tall, within 30° of a
+  person's seed is the carrier too (the rider's detections hop between legs, hands, torso and head), and so is a close
+  detection there (a cyclist's tracklet that hopped onto the rider). People filmed on purpose are 15–33° tall at −14°
+  to −32°: none is dropped on v606, v627, v635 (dropped there: the selfie operator, low, its hands, a bench, an arm
+  taken for a refrigerator). While travelling (30 % of the travel estimates within 2 s moving, `stab::fwd::moving`) a
+  challenger earns the view over the direction of travel only as a person or animal 20° tall (about 5 m away) at every
+  detection for 1.5 s; the subject stays while 10° tall; once the forward view is back the next one earns it afresh;
+  standing, as before. The view turns at most 40 °/s from the switch on (a still scene crosses a 100° view in 2.5 s):
+  a hand-over of 90° arrives 2.3 s after the switch, of 180° 4.5 s (before: about 1 s, the σ 0.6 s smoothing alone, at
+  up to 84–110 °/s). Measured (Radeon 8060S, release; `target/wind-scratch/framing`: `logs/measure-release-*.log`
+  before, `logs/measure-final.log` after, sheets `out/*.sheet.jpg`, a frame of the flat view at 100° every 1/20 of the
+  clip, FORWARD / SUBJECT marked, the old ones of the first five beside as `*.sheet-before.jpg`; the measuring test in
+  `scripts/framing_measure.rs`, the dumps and the lab the criterion came from in `dump/`, `scripts/framing_dump.rs`,
+  `scripts/track_tests_with_lab.rs`): cost 50–52 s a minute of 30 fps footage (v606, v627, v635: the travel 25–27, the
+  detections 24–25) and 59–64 s at 60 fps (rides 717, 670, 738, 692 of 2026-04-13, 03-04, 04-16, 04-29: 30–35 and
+  29–31; the decode runs every frame, the detector every 10th, so twice at 60 fps), the models' first load 4–9 s more,
+  the carrier test nothing measurable; the test profile (opt-level 0) is 3.7–6.2 times slower in the travel. Before →
+  after, forward share, hand-overs, mean / p95 / max turn (°/s): v635 0 → 0 %, 1 → 1,
+  6.4 / 9.4 / 9.4 → 5.6 / 9.4 / 9.4; v627 0 → 0 %, 3 → 2, 17.2 / 71.5 / 110 → 12.5 / 39.0 / 39.1; v606 0 → 33 %,
+  4 → 5, 21.6 / 61.4 / 84.4 → 15.7 / 36.1 / 39.3; 717 0 → 100 %, 8 → 0, 7.3 / 32.0 / 43.4 → 0.1 / 1.2 / 1.7; 670
+  0 → 62 %, 11 → 2, 11.9 / 40.4 / 84.4 → 5.8 / 37.6 / 39.7; 738 0 → 100 %, 6 → 0, 7.0 / 31.8 / 39.8 → 0.1 / 0.0 / 1.7;
+  692 0 → 100 %, 10 → 0, 10.0 / 40.4 / 92.3 → 0.4 / 2.1 / 6.5; jitter (rms of the angular velocity off its 1 s mean,
+  1 s clear of hand-overs) 0.04–0.96 °/s. Who wins: v606 the people walking with the camera (0–15.7 s), the forward
+  view while walking on (15.7–26 s, where a woman a few degrees tall far off won before), people far off standing at
+  the end as before; v627 the three people standing about, no longer the operator crouching at the end; v635 as
+  before; 670 the forward view but for the cyclist waiting at the crossing (16–38.9 s, 37° tall, the rider standing
+  too); 717, 738, 692 the forward view all ride (no one else near: checked on lens frames). Tests:
+  `track::tests::framing` (expectations changed where the cap is meant: its turns at most 40 °/s, were under 80; the
+  person 114° away for 3 s is neared within 7.3°, framed before; the A-to-B scene runs 12 s so B is reached),
+  `track::tests::framing_ride` (a ride: the rider and its bag fixed to the body never win, the view looks ahead; a
+  person 8° tall far off does not earn the view, one 30° tall passing does from 1.5 s after it came until a second
+  after it went; standing the far one wins; without the body frame the rider wins), `ai::tests::framing_v635` (the
+  path covers the clip, at most 9.4 °/s there; keys span it), `export::tests::follow_framing` (the followed export's
+  first frame is the path's view's to the bit, 79.7 off the unframed one per channel), `export::tests::player_spec`,
+  `editor::tests::auto_framing` (13 keys over 0–5.81 s on the path), `export::agent::tests::auto_framing_run` (refused
+  on a lens pair and without burn; the pass on the lane, 30 frames, frame 0 77.7 off the fixed view's), mcp's argument
+  tests; auto edit's (`ai::tests::auto_v635`, `auto_v635_music`) pass unchanged. Open: a companion riding alongside at
+  one place for a fifth of a ride would be taken for the carrier, and standing a person posing close is kept (both
+  look like the carrier in the body frame); standing, tiny far people still win (v606's end, as before); a hand-over
+  pans over the rider when it sits between (670 at 39 s); a subject 90° or more away for a few seconds is barely
+  reached at 40 °/s; the editor analyses the clip's whole file, not its span; the player's forward view and auto
+  framing run the travel twice when started together (`export::travel` keeps a finished one only); the GUI paths (the
+  tick, the button, the labels) are untested by hand.
 - [ ] **Pick by click.** The detector's people and animals boxed on the paused frame, a click starting Deep Track
   (the vendor's Identify Tracking Targets); `Ai::pick` exists, nothing calls it.
 - [ ] **Seam flow while playing.** RAFT runs on paused frames and exports only; the vendor's player keeps its AI

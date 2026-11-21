@@ -6,8 +6,9 @@
 //!
 //! Deep Track (`ai`): with Deep Track armed, a box dragged around a subject in the perspective view starts a run from
 //! the frame shown; the run's states show under the seek bar, the box on the picture, and once it is over the view
-//! follows the subject (the follow view the export takes). Privacy preview: the faces and licence plates of the
-//! paused frame blurred as the export blurs them. Auto edit hands the clip to the editor.
+//! follows the subject (the follow view the export takes). Auto framing follows the clip's auto framing the same way,
+//! its analysis run on first use and kept. Privacy preview: the faces and licence plates of the paused frame blurred
+//! as the export blurs them. Auto edit hands the clip to the editor.
 //!
 //! The library shares the player with the live output thread (`Arc<Mutex<Player>>`), which takes the frame due and
 //! draws it on its own clock while the UI may not run (a hidden window); the audio player sits on a thread of its own
@@ -760,6 +761,9 @@ pub struct Player {
     arm: bool,
     pub follow: bool,
     from: Option<egui::Pos2>,
+    /// auto framing: the clip's run (kept while the player is open); the view follows it (Deep Track's or this one)
+    pub frm: Option<Arc<ai::Track>>,
+    pub framing: bool,
     /// privacy preview: the paused frame's faces, plates blurred; the regions found (and how many are faces), a search
     /// out, the unblurred picture and the pass
     pub blur: bool,
@@ -868,6 +872,8 @@ impl Player {
             arm: false,
             follow: false,
             from: None,
+            frm: None,
+            framing: false,
             blur: false,
             plates: false,
             regs: None,
@@ -1034,8 +1040,13 @@ impl Player {
             usize::MAX,
             s,
         ));
-        (self.follow, self.arm) = (true, false);
+        (self.follow, self.framing, self.arm) = (true, false, false);
         Ok(())
+    }
+
+    /// The run the view follows: Deep Track's or auto framing's.
+    fn followed(&self) -> Option<&Arc<ai::Track>> {
+        (self.trk.as_ref().filter(|_| self.follow)).or(self.frm.as_ref().filter(|_| self.framing))
     }
 
     /// The stitch pose of `p` (a frame of the current source) and the key of its RAFT stitch.
@@ -1185,9 +1196,9 @@ impl Player {
             self.stab.ask();
             self.dirty = true;
         }
-        // the view follows the tracked subject, turned from the track's frame into the frame shown (the stabilisation
-        // may have changed since)
-        if let (true, Some(t), Some(p)) = (self.follow, &self.trk, self.held)
+        // the view follows the tracked subject or the auto framing, turned from the run's frame into the frame shown
+        // (the stabilisation may have changed since)
+        if let (Some(t), Some(p)) = (self.followed(), self.held)
             && let k = self.main_k(&p)
             && let Some((d, r)) = t.dir(k).zip(t.turn(k, self.pose(&p).0.q))
         {
@@ -1301,6 +1312,7 @@ impl Player {
             && self.tbox.is_none()
             && self.restab.is_none()
             && self.trk.as_ref().is_none_or(|t| t.st().over())
+            && self.frm.as_ref().is_none_or(|t| t.st().over())
             && faces
     }
 
@@ -1318,7 +1330,7 @@ impl Player {
             look: self.look,
             stab: self.stab.mode,
             smooth: self.stab.smooth,
-            follow: (self.trk.clone()).filter(|t| self.follow && t.st() == ai::St::Done),
+            follow: (self.followed().cloned()).filter(|t| t.st() == ai::St::Done),
             faces: self.blur,
             plates: self.plates,
         })
@@ -1510,13 +1522,34 @@ impl Player {
                             .on_hover_text("The view follows the tracked subject (and so does a flat export)")
                             .changed()
                         {
-                            self.dirty = true;
+                            (self.framing, self.dirty) = (self.framing && !self.follow, true);
                         }
                         if ui.button("Clear track").clicked() {
                             (self.trk, self.follow) = (None, false);
                         }
                     }
                 }
+            }
+            if ui
+                .add_enabled(main, egui::Checkbox::new(&mut self.framing, "Auto framing"))
+                .on_hover_text(
+                    "The view follows the clip's main subject, else the direction of travel (and so does a flat \
+                     export); the whole clip is analysed first, once",
+                )
+                .on_disabled_hover_text("Auto framing needs the main file")
+                .changed()
+            {
+                // the analysis once, again after a failure; it runs on while unticked
+                if self.framing
+                    && (self.frm.as_ref())
+                        .is_none_or(|t| matches!(t.st(), ai::St::Failed(_) | ai::St::Cancelled))
+                    && let Some(f) = self.work.main.first()
+                {
+                    // framed for a flat 1080p export, as the hook's box
+                    let (f, st) = (f.clone(), self.stab());
+                    self.frm = Some(ai::Track::framing(&self.g, &self.cx, &self.ctx, f, st, 16.0 / 9.0));
+                }
+                (self.follow, self.dirty) = (self.follow && !self.framing, true);
             }
             if ui
                 .toggle_value(&mut self.blur, "Blur faces")
@@ -1611,6 +1644,7 @@ impl Player {
         } else if self.look.steer(ui, &resp, r, &mut self.view) {
             // a hand on the view takes over from the follow view
             self.follow &= !resp.dragged();
+            self.framing &= !resp.dragged();
             self.dirty = true;
         }
         let ppp = ui.ctx().pixels_per_point();
@@ -1649,6 +1683,11 @@ impl Player {
                 ai::St::Done if self.follow => "Deep Track: following the subject".into(),
                 st => st.line("Deep Track"),
             });
+        }
+        match self.frm.as_ref().map(|t| t.st()) {
+            Some(ai::St::Done) if self.framing => lines.push("Auto framing: following".into()),
+            Some(ai::St::Done) | None => {}
+            Some(st) => lines.push(st.line("Auto framing")),
         }
         if self.blur || self.plates {
             let n = (self.regs.as_ref())
@@ -1805,7 +1844,7 @@ impl Drop for Player {
             s.v.release(&self.g, &h);
         }
         // a run on this clip would hold the models to its end
-        if let Some(t) = &self.trk {
+        for t in self.trk.iter().chain(&self.frm) {
             t.stop.store(true, Relaxed);
         }
     }

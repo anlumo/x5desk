@@ -1816,6 +1816,73 @@ fn deep_track() {
     assert!(e.pj.tl().clips[0].view.is_empty());
 }
 
+/// Auto framing in the editor (`X5_SAMPLES`, v635, 5.8 s): the clip at the playhead gets keys over all of it from the
+/// run's path, one undo step: about every 0.5 s from its start to its end, the viewer's field of view kept, each
+/// aimed along the path at its time; the viewer then follows the keys.
+#[test]
+fn auto_framing() {
+    let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+        eprintln!("X5_SAMPLES unset: skipped");
+        return;
+    };
+    let g = Arc::new(Gpu::new().unwrap());
+    let cx = stitch::Ctx::new(&g.device, &g.queue);
+    let mut e = Editor::new(
+        &g,
+        &cx,
+        &egui::Context::default(),
+        player::still(&g, &cx),
+        None,
+    );
+    e.add(&d.join("v635.insv"), None).unwrap();
+    e.free = Some(View {
+        fov: 100.0,
+        ..View::default()
+    });
+    let t = Instant::now();
+    while e.cur().is_none() || !e.posed() {
+        assert!(t.elapsed().as_secs() < 60, "no frame");
+        e.tick(true);
+        thread::sleep(Duration::from_millis(5));
+    }
+    e.sync();
+    let h0 = e.history().0;
+    e.frame().unwrap();
+    while e.trk.as_ref().is_some_and(|t| !t.keyed) {
+        assert!(t.elapsed().as_secs() < 600, "no keys");
+        e.tick(true);
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(e.err.is_none(), "{:?}", e.err);
+    e.sync();
+    assert_eq!(e.history().0, h0 + 1, "one undo step");
+    let tr = e.trk.as_ref().unwrap().t.clone();
+    let c = &e.pj.tl().clips[0];
+    let n = c.view.len();
+    eprintln!(
+        "{n} keys over {:.2}–{:.2} s of the clip's {:.2}–{:.2} s in {:.1} s (GPU shared: noisy)",
+        c.view[0].t,
+        c.view[n - 1].t,
+        c.a,
+        c.b,
+        t.elapsed().as_secs_f64()
+    );
+    assert!(tr.auto && n >= 11 && c.view[0].t - c.a < 0.05 && c.b - c.view[n - 1].t < 0.05);
+    for k in &c.view {
+        let [y, p, _] = k.v.ypr();
+        let a = track::dir(y, p).angle_between(tr.dir(tr.frame(k.t)).unwrap());
+        assert!(
+            a.to_degrees() < 0.5 && (k.v.fov - 100.0).abs() < 1e-3,
+            "{}: {:.2}° off",
+            k.t,
+            a.to_degrees()
+        );
+    }
+    assert!(e.free.is_none(), "the viewer follows the keys");
+    e.undo();
+    assert!(e.pj.tl().clips[0].view.is_empty());
+}
+
 /// An auto edit's timeline onto the editor's (no samples needed): onto an empty timeline it brings its frame rate,
 /// clips and music as they are; onto one with clips its music moves with its clips (the offset less where they start,
 /// so the music's beats stay on their cuts) and replaces the timeline's, one step undoing it; one without music leaves

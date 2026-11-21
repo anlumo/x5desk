@@ -917,6 +917,86 @@ fn blur_run() {
     std::fs::remove_dir_all(&d).unwrap();
 }
 
+/// Auto framing through the agents' engine: refused at check on a recording in a file per lens and with burn kept off
+/// (the synthetic recording); on v635 (`X5_SAMPLES`) named in the plan (`_autoframe_`, its setting), and a flat export
+/// (0–1 s, 320 × 180 H.264) runs its pass on the lane, the models held per frame, then turns onto the path: its first
+/// frame is not the fixed view's.
+#[test]
+fn auto_framing_run() {
+    if super::super::tests::no_cf_home() {
+        return;
+    }
+    let d = std::env::temp_dir().join(format!("x5-agent-autoframe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let w = |f: bool| Want {
+        output: Some(Output::Flat),
+        width: Some(320),
+        height: Some(180),
+        codec: Some("h264".into()),
+        qp: Some(18),
+        raft: Some(false),
+        stabilisation: None,
+        end_s: Some(1.0),
+        auto_framing: f,
+        ..want(Kind::Export)
+    };
+    let src = d.join("VID_20260117_141148_00_635.insv");
+    ::export::synth::insv(&src, 60, 64).unwrap();
+    let ten = d.join("VID_20260117_141148_10_635.insv");
+    std::fs::copy(&src, &ten).unwrap();
+    let (one, pair) = ([src.clone()], [src, ten]);
+    assert_eq!(
+        Agent::new(false)
+            .check(&req(Kind::Export, &pair, w(true)))
+            .unwrap_err(),
+        "auto_framing: a recording in a file per lens (_00_ + _10_) is not supported yet; leave out auto_framing"
+    );
+    let e = Agent::new(true)
+        .check(&req(Kind::Export, &one, w(true)))
+        .unwrap_err();
+    assert!(
+        e.starts_with("auto_framing is unavailable on this GPU"),
+        "{e}"
+    );
+    let Some(s) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+        eprintln!("X5_SAMPLES unset: v635 skipped");
+        return std::fs::remove_dir_all(&d).unwrap();
+    };
+    let v = [s.join("v635.insv")];
+    let (_l, g, cx) = super::super::tests::gpu();
+    let a = engine(&g, &cx, None);
+    let (p, seen, fol) = run_on(&a, req(Kind::Export, &v, w(true)), &d, Lane::Export);
+    assert!(
+        matches!(seen.last(), Some(RunSt::Done { frames: 30, .. })),
+        "{:?}",
+        seen.last()
+    );
+    assert!(
+        p.stem.contains("_autoframe_") && p.settings["auto_framing"] == json!(true),
+        "{}",
+        p.stem
+    );
+    let (q, _, fixed) = run_on(&a, req(Kind::Export, &v, w(false)), &d, Lane::Export);
+    assert!(!q.stem.contains("autoframe") && q.settings["auto_framing"] == json!(false));
+    let (x, y) = (
+        super::super::tests::ff_frame(&fol, 0),
+        super::super::tests::ff_frame(&fixed, 0),
+    );
+    let dx = x
+        .iter()
+        .zip(&y)
+        .map(|(a, b)| a.abs_diff(*b) as f64)
+        .sum::<f64>()
+        / x.len() as f64;
+    eprintln!(
+        "agent auto framing: {:?}; frame 0 off the fixed view's by {dx:.2} (mean per channel)",
+        seen.last()
+    );
+    assert!(dx > 10.0, "{dx}");
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
 /// A lane wedged while it is in a detection (`ai::MODELS` held in `with_stop`, as a driver call that never returns
 /// would) keeps the detectors and BURN: blur is refused at check, at submit and in the GPU's info (mcp's device check),
 /// on the other lane too, while unblurred jobs check (without RAFT by default; asked for, it is refused at submit);

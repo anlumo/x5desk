@@ -403,7 +403,9 @@ pub const TOOLS: &[Def] = &[
                that can't be decoded fails the export unless allow_frozen. blur: [\"faces\", \"plates\"] blurs faces \
                and licence plates (a detection pass over the span first, about 2 to 2.5 times the span's length on \
                a Radeon 8060S; best effort; job_status shows its progress under blur). denoise: 0-1 voice denoise of \
-               the audio (default 0, off; catalog: denoise).",
+               the audio (default 0, off; catalog: denoise). auto_framing: true turns a flat view onto the main \
+               subject, else the direction of travel (an analysis pass over the whole recording first; catalog: \
+               export).",
         schema: input::<render::ExportArgs>,
         ann: Some((false, false)),
         gpu: true,

@@ -6,7 +6,8 @@
 //! `export::Queue` on the one device: stills, and exports, so a still never waits behind an export. A job is the one
 //! the Export screen would queue (`set_of` sets what its widgets would, `span` and `clip_job` build it), written into
 //! the `.part` mcp reserved and strict: a picture that could not be decoded fails an export unless `allow_frozen`.
-//! A blurred job runs the screen's privacy pass first on its lane (`Job::pre`), the models held per searched frame.
+//! A blurred job runs the screen's privacy pass first on its lane (`Job::pre`), the models held per searched frame;
+//! an auto framed one its auto framing before that, its flat view then along the path.
 //! `X5DESK_TEST=mcp-noattach` keeps burn off the device, as a failed attach would: RAFT and blur are off.
 
 use super::{
@@ -560,6 +561,19 @@ impl Render for Agent {
                 None => Some(shotlab::Clip::open(&q.files[0]).map_err(|e| format!("blur: {e}"))?),
             },
         };
+        // auto framing's pass reads the clip as the blur's does
+        if q.want.auto_framing && q.files.len() > 1 {
+            return Err("auto_framing: a recording in a file per lens (_00_ + _10_) is not supported yet; leave out \
+                        auto_framing"
+                .into());
+        }
+        if q.want.auto_framing && self.noattach {
+            return Err(format!(
+                "auto_framing is unavailable on this GPU: its detector runs on burn, which did not attach ({}); \
+                 leave out auto_framing",
+                gpu::NOATTACH
+            ));
+        }
         // the pass stabilises with shotlab's reading of the IMU
         let no_imu = clip.as_ref().is_some_and(|c| c.imu.is_none());
         // horizon when the recording can be stabilised, unless asked otherwise
@@ -622,10 +636,12 @@ impl Render for Agent {
         let stem = (q.files[0].file_stem()).map_or("x5".into(), |n| n.to_string_lossy());
         let [pw, ph] = x.size();
         let secs = ab[1] - ab[0];
-        // a blurred file is never taken for the sharp one
-        let pre = match x.faces || x.plates {
-            true => "blur_",
-            false => "",
+        // a blurred file is never taken for the sharp one, nor an auto framed one for the fixed view
+        let pre = match (x.faces || x.plates, w.auto_framing) {
+            (true, true) => "blur_autoframe_",
+            (true, false) => "blur_",
+            (false, true) => "autoframe_",
+            (false, false) => "",
         };
         Ok(Plan {
             frames,
@@ -849,9 +865,32 @@ impl Render for Agent {
         if let (true, Some(l)) = (x.raft, rd.stuck()) {
             return Err(r::stuck_raft(l));
         }
+        if let (true, Some(why)) = (w.auto_framing, &rd.info.raft) {
+            return Err(format!(
+                "auto_framing is unavailable on this GPU: its detector runs on burn, which did not attach ({why}); \
+                 leave out auto_framing"
+            ));
+        }
+        if let (true, Some(l)) = (w.auto_framing, rd.stuck()) {
+            return Err(format!(
+                "auto_framing is unavailable while the GPU's {} lane is stuck in a detection, which holds the \
+                 detector: if it never ends, this MCP server must restart; leave out auto_framing",
+                l.name()
+            ));
+        }
         let fps = x.rate(rate);
         let ab = span(range(&w, q.kind, fps, dur)?, still, fps, dur);
-        let at = move |_| v;
+        // auto framing: its pass first (`pre`), stitched as the job stitches (no turn), then each frame along its path
+        let fr = (w.auto_framing)
+            .then(|| crate::ai::Track::new(q.files[0].clone(), (x.stab, x.smooth), 0, true));
+        let f2 = fr.clone();
+        let at = move |t: f64| {
+            let d = f2.as_ref().and_then(|f| f.dir(f.frame(ab[0] + t)));
+            d.map_or(v, |d| {
+                let [yaw, pitch] = track::yaw_pitch(d);
+                View { yaw, pitch, ..v }
+            })
+        };
         let (mut job, n) = clip_job(
             &q.files,
             dur,
@@ -859,7 +898,7 @@ impl Render for Agent {
             &x,
             ab,
             still,
-            at,
+            at.clone(),
             dst.into(),
             None,
             false,
@@ -872,8 +911,8 @@ impl Render for Agent {
         }
         // its blur pass, at the source's rate (`rate`: `Hide` links and pads by it, not by the output's `fps`)
         let scan = (x.faces || x.plates).then(|| Arc::new(Scan::default()));
-        if let Some(s) = &scan {
-            job.pre = Some(pre(&rd.g, &q.files, &x, ab, rate, v, s.clone()));
+        if scan.is_some() || fr.is_some() {
+            job.pre = Some(pre(&rd.g, &q.files, &x, ab, rate, at, scan.clone(), fr));
         }
         let d = Dest {
             part: Some(part),
@@ -1075,21 +1114,36 @@ struct Scan {
     found: Mutex<Option<r::Found>>,
 }
 
-/// Job `x`'s blur pass (`Job::pre`): the Export screen's privacy pass over `ab` of `files` with `x`'s stabilisation
-/// and targets, the models held per searched frame; then its hook for `x`'s output in view `v`. `src`: the source's
+/// Job `x`'s passes (`Job::pre`): with `fr` its auto framing (`ai::Track::framed`, the models held per frame); with
+/// `s` its blur: the Export screen's privacy pass over `ab` of `files` with `x`'s stabilisation and targets, the
+/// models held per searched frame, then its hook for `x`'s output in view `at(t)` at output time t. `src`: the source's
 /// rate (`probe`), not the output's `x.rate(src)`: `Hide` links and pads by it.
+#[allow(clippy::too_many_arguments)]
 fn pre(
     g: &Arc<Gpu>,
     files: &[PathBuf],
     x: &Set,
     ab: [f64; 2],
     src: edit::Rate,
-    v: View,
-    s: Arc<Scan>,
+    at: impl Fn(f64) -> View + Send + 'static,
+    s: Option<Arc<Scan>>,
+    fr: Option<Arc<crate::ai::Track>>,
 ) -> ::export::Pre {
     let (g, files) = (g.clone(), files.to_vec());
     let (stab, kinds, flat) = (x.stab.map(|l| (l, x.smooth)), [x.faces, x.plates], !x.pano);
+    let [w, h] = x.size();
     Box::new(move |cx: &stitch::Ctx, stop: &AtomicBool| {
+        let named = |what: &str, e: String| match e == CANCELLED {
+            true => e,
+            false => format!("the {what} pass: {e}"),
+        };
+        if let Some(f) = &fr {
+            ::export::scoped(&g.device, || {
+                f.framed(&g, cx, w as f32 / h as f32, Hold::Frame, stop, None)
+            })
+            .map_err(|e| named("auto framing", e))?;
+        }
+        let Some(s) = s else { return Ok(None) };
         let t0 = Instant::now();
         let mut say = |i: usize, _| {
             if i == 1 {
@@ -1113,10 +1167,7 @@ fn pre(
                 &mut say,
             )
         })
-        .map_err(|e| match e == CANCELLED {
-            true => e,
-            false => format!("the blur pass: {e}"),
-        })?;
+        .map_err(|e| named("blur", e))?;
         let [ff, fp, n, tf, tp, on, all] = c.map(|n| n as u64);
         *lock(&s.found) = Some(r::Found {
             faces: ff,
@@ -1129,9 +1180,9 @@ fn pre(
             secs: t0.elapsed().as_secs_f64(),
         });
         s.over.store(true, Release);
-        // as `Keep::video`'s: output time t shows source ab[0] + t, in the job's fixed view
+        // as `Keep::video`'s: output time t shows source ab[0] + t, in the job's view then
         Ok(Some(hook(&g, flat, vec![(times, regs)], move |_, t| {
-            Some((0, ab[0] + t, v))
+            Some((0, ab[0] + t, at(t)))
         })))
     })
 }
@@ -1515,6 +1566,7 @@ fn settings(x: &Set, v: &View, proj: &str, w: &Want, kind: Kind, ab: [f64; 2], t
                 ("start_s", json!(ab[0])),
                 ("end_s", json!(ab[1])),
                 ("denoise", json!(x.denoise.unwrap_or(0.0))),
+                ("auto_framing", json!(w.auto_framing)),
                 ("allow_frozen", json!(w.allow_frozen)),
             ] {
                 s[k] = v

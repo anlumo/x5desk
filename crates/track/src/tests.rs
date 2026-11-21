@@ -536,10 +536,10 @@ fn tried() {
     assert!(vit::hit(x, (0.9, off, tan(z)), 0.25).is_none());
 }
 
-/// Synthetic detections, all 15° below the horizon: A (a person, 20° tall) walks from yaw 0 to 60° and leaves after
-/// 6 s; B (a person, 10° tall) stands at yaw −132° (168° on from A's end); C (a chair, larger) at yaw 90°. The path
-/// follows A without jumping, then turns to B once A has been gone a while, level: the great-circle arc from A to B
-/// dips to 69° below the horizon.
+/// Synthetic detections, all 15° below the horizon, over 12 s: A (a person, 20° tall) walks from yaw 0 to 60° and
+/// leaves after 6 s; B (a person, 10° tall) stands at yaw −132° (168° on from A's end); C (a chair, larger) at yaw 90°.
+/// The path follows A without jumping, then turns to B once A has been gone a while (a pan of 4.2 s at the cap),
+/// level: the great-circle arc from A to B dips to 69° below the horizon.
 #[test]
 fn framing() {
     use crate::{Det, Framer, yaw_pitch};
@@ -551,7 +551,7 @@ fn framing() {
         score: 0.8,
     };
     let mut f = Framer::new(16.0 / 9.0);
-    for k in (0..n).step_by(10) {
+    for k in (0..360).step_by(10) {
         let t = k as f32 / fps;
         let mut d = vec![det(-132.0, 10.0, 0), det(90.0, 30.0, 56)];
         if t < 6.0 {
@@ -559,7 +559,7 @@ fn framing() {
         }
         f.push(k, d);
     }
-    let p = f.path(n, fps);
+    let p = f.path(360, fps);
     for k in [60, 120, 150] {
         let y = yaw_pitch(p[k].dir)[0];
         assert!(
@@ -567,7 +567,7 @@ fn framing() {
             "frame {k}: yaw {y}"
         );
     }
-    let y = yaw_pitch(p[n - 1].dir)[0];
+    let y = yaw_pitch(p[359].dir)[0];
     assert!((y + 132.0).abs() < 2.0, "the end frames B: yaw {y}");
     let low = p.iter().map(|s| yaw_pitch(s.dir)[1]).fold(0f32, f32::min);
     assert!(low > -15.5, "the path stays level: lowest pitch {low}");
@@ -605,7 +605,7 @@ fn framing() {
     }
 
     // with the direction of travel (turning from yaw −30° at 2°/s): no subject for 3 s, then a person at yaw 90°
-    // until 6 s: the view looks ahead, frames the person, and looks ahead again once the person has been gone a while
+    // until 6 s: the view looks ahead, turns to the person, and looks ahead again once the person has been gone a while
     let mut f = Framer::new(16.0 / 9.0);
     let ahead = |k: usize| -30.0 + 2.0 * k as f32 / fps;
     f.ahead = (0..n).map(|k| dir(ahead(k), 0.0)).collect();
@@ -620,15 +620,109 @@ fn framing() {
         );
     }
     let p = f.path(n, fps);
-    for (k, want, sub) in [
-        (30, ahead(30), None),
-        (135, 90.0, Some(0)),
-        (270, ahead(270), None),
-    ] {
+    for (k, want, sub) in [(30, ahead(30), None), (290, ahead(290), None)] {
         let y = yaw_pitch(p[k].dir)[0];
         assert!((y - want).abs() < 3.0, "frame {k}: yaw {y}, want {want}");
         assert_eq!(p[k].subject, sub, "frame {k}");
     }
+    // a view for every frame, both hand-overs pans at the 40 °/s cap from the switch on (114° onto the person at 3 s,
+    // about 100° back at 6.7 s): the person, there for 3 s only, is neared within 10°
+    let fast = (p.windows(2))
+        .map(|w| w[0].dir.angle_between(w[1].dir).to_degrees() * fps)
+        .fold(0f32, f32::max);
+    let near = (90..200)
+        .map(|k| (yaw_pitch(p[k].dir)[0] - 90.0).abs())
+        .fold(f32::MAX, f32::min);
+    eprintln!(
+        "auto framing hand-overs: fastest turn {fast:.1}°/s, the person neared within {near:.1}°"
+    );
+    assert!(p.len() == n && fast <= 40.5 && near < 10.0 && p[165].subject == Some(0));
+}
+
+/// A ride (stem mount, 20 s at 30 fps, travelling, the camera swaying ±10°): the rider, a person 90° tall, and the
+/// vehicle's bag 45° below the horizon, both fixed to the camera body, are never the subject: the view looks ahead. A
+/// person 8° tall far off does not earn the view; one 30° tall passed from 3 to 9 s (yaw 60° to 120°) does once seen
+/// 1.5 s, and the view looks ahead again once it has gone. Standing, the far one wins as it does without travel;
+/// without the body frame the rider wins.
+#[test]
+fn framing_ride() {
+    use crate::{Det, Framer, Shot, yaw_pitch};
+    use glam::Quat;
+    let (fps, n) = (30.0, 600);
+    let body: Vec<Quat> = (0..n)
+        .map(|k| Quat::from_rotation_z((10.0 * (k as f32 / fps * 1.5).sin()).to_radians()))
+        .collect();
+    let fixed = |k: usize, y: f32, p: f32, h: f32, cls| Det {
+        dir: body[k].inverse() * dir(y, p),
+        size: Vec2::new(h / 2.0, h),
+        cls,
+        score: 0.8,
+    };
+    let det = |y: f32, h: f32| Det {
+        dir: dir(y, 0.0),
+        size: Vec2::new(h / 3.0, h),
+        cls: 0,
+        score: 0.8,
+    };
+    let ahead = |k: usize| -30.0 + 2.0 * k as f32 / fps;
+    // travelling, the rider and its bag there, the passer-by there, the body frame given
+    let ride = |moving: bool, rider: bool, near: bool, frame: bool| {
+        let mut f = Framer::new(16.0 / 9.0);
+        f.ahead = (0..n).map(|k| dir(ahead(k), 0.0)).collect();
+        f.moving = vec![moving; n];
+        if frame {
+            f.body = body.clone();
+        }
+        for k in (0..n).step_by(10) {
+            let t = k as f32 / fps;
+            let mut d = vec![det(-120.0, 8.0)];
+            if rider {
+                d.extend([
+                    fixed(k, 160.0, -10.0, 90.0, 0),
+                    fixed(k, 60.0, -45.0, 30.0, 28),
+                ]);
+            }
+            if near && (3.0..9.0).contains(&t) {
+                d.push(det(60.0 + 10.0 * (t - 3.0), 30.0));
+            }
+            f.push(k, d);
+        }
+        f.path(n, fps)
+    };
+    let yaw = |p: &[Shot], k: usize| yaw_pitch(p[k].dir)[0];
+    // the rider and the bag left out, the far one not earning it: ahead all along
+    let p = ride(true, true, false, true);
+    assert!(p.iter().all(|s| s.subject.is_none()));
+    for k in [15, 300, 585] {
+        assert!(
+            (yaw(&p, k) - ahead(k)).abs() < 3.0,
+            "frame {k}: yaw {}",
+            yaw(&p, k)
+        );
+    }
+    // the passer-by earns it at the first key 1.5 s after it came (4.67 s) and keeps it until gone a second
+    let p = ride(true, true, true, true);
+    let won: Vec<usize> = (0..n).filter(|&k| p[k].subject.is_some()).collect();
+    let (a, b) = (won[0] as f32 / fps, won[won.len() - 1] as f32 / fps);
+    eprintln!("ride: the passer-by framed {a:.2}–{b:.2} s");
+    assert!(
+        (a - 4.67).abs() < 0.05 && (b - 9.63).abs() < 0.05,
+        "{a} {b}"
+    );
+    assert!((yaw(&p, 255) - 115.0).abs() < 3.0 && (yaw(&p, 540) - ahead(540)).abs() < 3.0);
+    // standing, the far one wins; without the body frame the rider does (its tracklet is the second)
+    assert!(
+        ride(false, false, false, true)
+            .iter()
+            .skip(15)
+            .all(|s| s.subject == Some(0))
+    );
+    assert!(
+        ride(true, true, false, false)
+            .iter()
+            .skip(60)
+            .all(|s| s.subject == Some(1))
+    );
 }
 
 /// Every direction up to 2° from the poles lies well inside a face tile (|x|, |y| ≤ 0.85), in one where a face upright

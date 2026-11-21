@@ -134,6 +134,7 @@ pub(crate) fn made() -> Track {
         file: "x.insv".into(),
         stab: (None, 0.0),
         k0: 10,
+        auto: false,
         times: OnceLock::from(times),
         path: OnceLock::from(track::smooth(&smp, 7.5)),
         qs: OnceLock::from(vec![Quat::IDENTITY; 100]),
@@ -334,6 +335,41 @@ fn auto_v635() {
             assert!(k.t >= c.a - 1e-9 && k.t <= c.b + 1e-9 && k.v.proj == edit::Proj::Persp);
         }
     }
+}
+
+/// Auto framing of v635 (`X5_SAMPLES`, 5.8 s, horizon lock): a run from frame 0 without samples whose path covers every
+/// frame and turns smoothly: between frames at most what the framer's smoothing leaves of a 180° hand-over (120°/s at
+/// σ 0.6 s); keys from it span the whole clip.
+#[test]
+fn framing_v635() {
+    if no_cf_home() {
+        return;
+    }
+    let Some(d) = samples() else { return };
+    let (_l, g, cx) = gpu();
+    let t0 = Instant::now();
+    let st = (Some(stab::Lock::Horizon), gyro::SMOOTH);
+    let ctx = egui::Context::default();
+    let t = Track::framing(&g, &cx, &ctx, d.join("v635.insv"), st, 16.0 / 9.0);
+    let r = wait(|| t.st(), 600);
+    assert_eq!(r, St::Done, "{r:?}");
+    let (ts, p) = (t.times.get().unwrap(), t.path.get().unwrap());
+    let n = ts.len();
+    let fps = (n - 1) as f32 / (ts[n - 1] - ts[0]) as f32;
+    let fast = (p.windows(2))
+        .map(|w| w[0].angle_between(w[1]).to_degrees() * fps)
+        .fold(0f32, f32::max);
+    let [y, x] = track::yaw_pitch(p[0]);
+    eprintln!(
+        "v635 auto framing in {:.1} s (GPU shared: noisy): {n} frames, from yaw {y:.1}° pitch {x:.1}°, fastest turn \
+         {fast:.1}°/s",
+        t0.elapsed().as_secs_f64()
+    );
+    assert!(t.auto && t.k0 == 0 && lock(&t.smp).is_empty() && p.len() == n);
+    assert!(fast < 120.0);
+    let v = edit::View::look(0.0, 0.0, 0.0, 100.0, edit::Proj::Persp);
+    let k = keys(&t, 0.0, 10.0, 0.5, &v);
+    assert!(k.len() >= 11 && k[0].t == ts[0] && (k[k.len() - 1].t - ts[n - 1]).abs() < 1e-9);
 }
 
 /// A 16-bit stereo 48 kHz WAV of a drum loop at `bpm`, `secs` long, the first beat 0.23 s in: a kick (a falling sine)

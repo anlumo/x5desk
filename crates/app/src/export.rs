@@ -9,8 +9,8 @@
 //! source span, each output frame blurred with its clip's regions in its view). The pass ([`privacy_pass`]) is the
 //! agents' too: their lanes run it from `Job::pre`, the models held per searched frame ([`Hold`]), the screen's for
 //! the whole pass. Photos (the camera's equirect JPEGs)
-//! render here too: the view through the preview, the effects, the blur, a JPEG. A Deep Track follow view
-//! (`Spec::follow`) turns a flat output onto the subject, the track's directions turned into the frame the export
+//! render here too: the view through the preview, the effects, the blur, a JPEG. A Deep Track or auto framing follow
+//! view (`Spec::follow`) turns a flat output onto the subject, the run's directions turned into the frame the export
 //! stitches in; a Shot Lab job ([`Lab`]) brings its effect's hook maker, run on the export thread for the output's
 //! frame size and format.
 
@@ -62,7 +62,7 @@ pub struct Spec {
     pub look: Look,
     pub stab: gyro::Mode,
     pub smooth: f64,
-    /// a flat output follows this Deep Track subject instead of `view`'s direction
+    /// a flat output follows this Deep Track subject or auto framing instead of `view`'s direction
     pub follow: Option<Arc<crate::ai::Track>>,
     /// the player previews the face or plate blur: the export starts with it on
     pub faces: bool,
@@ -517,6 +517,7 @@ impl Exp {
         std::fs::create_dir_all(&self.dest).map_err(|e| format!("{}: {e}", self.dest.display()))?;
         let pre = match (&lab, &s.follow) {
             (Some(l), _) => format!("{}_", l.key),
+            (_, Some(f)) if !x.pano && f.auto => "autoframe_".into(),
             (_, Some(_)) if !x.pano => "follow_".into(),
             _ => String::new(),
         };
@@ -537,6 +538,7 @@ impl Exp {
         };
         let what = match (&lab, &s.follow) {
             (Some(l), _) => format!("{} · {what}", l.name),
+            (_, Some(f)) if !x.pano && f.auto => format!("{what}, framed automatically"),
             (_, Some(_)) if !x.pano => format!("{what}, following the tracked subject"),
             _ => what,
         };
@@ -710,8 +712,11 @@ impl Exp {
                     v.pitch,
                     v.fov
                 ));
-                if s.follow.is_some() {
-                    ui.label("· following the tracked subject");
+                if let Some(f) = &s.follow {
+                    ui.label(match f.auto {
+                        true => "· framed automatically",
+                        false => "· following the tracked subject",
+                    });
                 }
             }
         });
@@ -1222,7 +1227,7 @@ impl Keep {
             false => None,
         };
         let v = s.view;
-        // a followed subject: its directions turned into the frame this export stitches in
+        // a followed subject or auto framing: its directions turned into the frame this export stitches in
         let fol = match (&s.follow, x.pano) {
             (Some(f), false) => {
                 let q = crate::ai::rots(&shotlab::Clip::open(&s.files[0])?, (x.stab, x.smooth))?;
@@ -1590,9 +1595,9 @@ impl Keep {
     }
 }
 
-/// How a privacy pass holds `ai::MODELS` (one user at a time): for the whole pass, as the Export screen always has (a
-/// Deep Track, auto edit or preview started meanwhile waits for it), or per searched frame (the agents' lanes: a
-/// still's one frame waits for one detection of an export's pass, not for the whole pass).
+/// How a privacy or auto framing pass holds `ai::MODELS` (one user at a time): for the whole pass, as the Export screen
+/// always has (a Deep Track, auto edit or preview started meanwhile waits for it), or per searched frame (the agents'
+/// lanes: a still's one frame waits for one detection of an export's pass, not for the whole pass).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Hold {
     Pass,
