@@ -186,7 +186,8 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   (today) changes none of these bytes; the system update of 11-03 10:55 brought linux-firmware 20261019 (the VCN
   firmware runs the rate control) and OBS 33: the firmware is the likeliest cause, unconfirmed. App exports (CBR,
   1000 ms) come out about 9 % over the rate asked, their first IDR worse. **Decide:** report upstream, a per-vendor
-  tolerance, or leave them failing; re-run `cbr` after the reboot into kernel 7.3.5. Fixed since, in crates obs and
+  tolerance, or leave them failing. Kernel 7.3.5 (the reboot of 11-21, Mesa 26.3.1, the same firmware) changes
+  nothing: `cbr` +9.2 % (H.264, 1000 ms), `h265_lens0` +10.8 %, `segments` 32.59 dB. Fixed since, in crates obs and
   media: obs's `tests::layout` wanted our declared libobs API (32.2.2) equal to the installed one (33.0.1 since
   11-03), but libobs refuses only a module whose major.minor is newer than its own (`obs_open_module`, 32.0.0 to
   33.0.1); the test now checks that, and the plugin keeps declaring 32.2 (libobs 33.0.1 loads it, refuses a module
