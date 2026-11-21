@@ -82,7 +82,7 @@ impl Cuts {
         );
         let s = (seg::SIDE * seg::SIDE) as u64;
         Ok(Self {
-            net: seg::Net::new(&bd)?,
+            net: seg::Net::new(&bd, false)?,
             pv: array(&pat),
             pat,
             cams: cx.buf(64 * n as u64, B::STORAGE | B::COPY_DST),

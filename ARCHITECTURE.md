@@ -353,6 +353,17 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   through `Models::with_stop`, whose wait for them sees the job's stop), so the other lane waits out one detection,
   not a pass. `Models::trim` drops them when nobody holds them (an idle MCP host's trim). The player's Blur faces and
   Blur license plates previews carry into the export (`Spec::faces`, `Spec::plates`).
+- Shot Lab's Sky Swap (`shotlab::Sky`, its maker in `lab.rs`): EfficientViT-seg B1 (ADE20K, Apache-2.0,
+  `shotlab/models/README`) runs on six 120° tiles fixed to the world (`track::ring(6, 120, 35)` around the world's up),
+  each frame's directions turned into the world's by the stitch pose and the gyro (`Clip::world`, the first frame's
+  heading taken out). Its sky probability goes into a 1024 × 512 equirect of the world, mixed into the last (half-life
+  0.1 s); a guided filter with the frame's colour as its guide fits its edge to the frame (the probability steepened
+  about ½ threefold, coefficients over 21 × 21 mask pixels, applied to the frame's own pixels); the panorama (a picked
+  JPEG / PNG equirect, or `shotlab::gradient`) is sampled at the world direction, so it stays put as the camera turns,
+  scaled per channel towards the replaced sky's mean colour (`Sky::tone`, smoothed with a half-life of 1 s). The network
+  for frame k runs at frame k + 1 (it reads the frame the hook's encoder makes): the maker stitches the range's first
+  frame and pushes it once before the job, so the first frame has its sky; afterwards the mask is a frame late, the
+  world frame taking the camera's turning out of that.
 - Editor projects are edit's JSON plus a top-level `"x5desk"` object (overlays, denoise, stabilisation). A clip's
   look (one of fx's looks by name or a `.cube` path) and colour adjustments (per clip `"adjust"`: the `fx::Params`
   fields that differ from the defaults) live in edit's clips; a file from before per-clip adjustments holds the
@@ -409,9 +420,9 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   submitting threads hold `GATE` shared around each piece of GPU work (live output thread per pass, RTMP encoder per
   frame, export threads and decoders, photo exports, the MCP engine's lanes and its probe; macOS: `clip::Video`'s and
   the live preview's decoders around their copies, `Decoder::gated`); threads whose work runs through burn (RAFT
-  worker, the AI models, shotlab's person network) hold `BURN` for a whole job instead. Lock order: GATE is dropped
-  before BURN is taken; BURN never nests. A new submitter takes one of them. A headless host has no surface, so its
-  GATE never has a writer; its two lanes' RAFT flows take turns at BURN (a RAFT still waits out an export's first
+  worker, the AI models, shotlab's person and sky networks) hold `BURN` for a whole job instead. Lock order: GATE is
+  dropped before BURN is taken; BURN never nests. A new submitter takes one of them. A headless host has no surface, so
+  its GATE never has a writer; its two lanes' RAFT flows take turns at BURN (a RAFT still waits out an export's first
   kernel compile).
 - burn's cache: burn keeps its device measurements and autotune results (burn feature `persistence`) in a slot of
   `<cache>/x5desk/cubecl` (`stitch::cache(Option<&Path>)`, which `gpu::open` calls before `stitch::attach`; the first

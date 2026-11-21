@@ -120,6 +120,12 @@ impl Clip {
         }
     }
 
+    /// Frame `k` stitched with `pose(k, p)`: the rotation from its directions to the world's (Z up; the gyro with
+    /// gravity correction, its heading drifting); None without IMU records.
+    pub fn world(&self, k: usize, p: Option<&[stab::Pose]>) -> Option<glam::Quat> {
+        Some(self.orient(k)?.as_quat() * self.pose(k, p).q)
+    }
+
     /// Poses that register frames `ks` onto frame `ks[r]` by what they show: each frame stitched with `pose(k)` at
     /// 2048 × 1024, the rotation left between it and the reference fitted (`crate::align`, corners between polar angles
     /// `band`, rad) and folded into its pose. The gyro's direction lock leaves its drift and a hand's sway; this takes

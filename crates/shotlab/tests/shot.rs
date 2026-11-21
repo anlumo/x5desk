@@ -1559,3 +1559,350 @@ fn presets() {
         &[0.0, 1.5, 3.0, 4.5, 5.9],
     );
 }
+
+/// Share of the world mask's upper hemisphere (stitch's layout, `shotlab::MW` wide) where `f` holds, by solid angle,
+/// weighted by `f`'s value.
+fn upper(f: impl Fn(usize) -> f64) -> f64 {
+    let (w, h) = (shotlab::MW as usize, shotlab::MW as usize / 2);
+    let (mut a, mut n) = (0.0, 0.0);
+    for y in 0..h / 2 {
+        let s = (std::f64::consts::PI * y as f64 / (h - 1) as f64).sin();
+        for x in 0..w {
+            a += s * f(y * w + x);
+            n += s;
+        }
+    }
+    a / n
+}
+
+/// The short name of a clip: its number.
+fn short(p: &Path) -> String {
+    let s = p.file_stem().unwrap().to_string_lossy();
+    s.rsplit('_').next().unwrap().to_string()
+}
+
+/// Sky Swap on single frames (`X5_SAMPLES`; with `X5_RIDES`, the rides' folder, rides too), each stitched at 3840
+/// with the horizon lock and pushed twice (its own sky found, then replaced). The share of the upper hemisphere the
+/// mask calls sky (by solid angle) against what each frame shows; with a test sky (magenta to orange, no colour match)
+/// the ground below −30° untouched to the bit and the share of the upper hemisphere that changed by more than 40
+/// levels within −0.05..+0.25 of the mask's (a soft night mask changes more than its share).
+/// Pictures with a clear-sky gradient and the colour match (`sky_<clip>_<frame>.jpg`: the frame, the result, the mask
+/// in the world), and the pass's time per frame at 2048, 3840 and 5760.
+#[test]
+fn sky_footage() {
+    let Some(smp) = sample("v606.insv").map(|p| p.parent().unwrap().to_path_buf()) else {
+        return;
+    };
+    let rides = std::env::var_os("X5_RIDES").map(PathBuf::from);
+    let (_l, g, sx, cx) = gpu();
+    // clip, frame, the mask's sky share of the upper hemisphere: at least, at most
+    let mut cases = vec![
+        // the gate under a blue sky (it and the buildings cover about half the hemisphere); at night; indoors under a
+        // glass dome
+        (smp.join("v606.insv"), 300, 0.4, 0.8),
+        (smp.join("v627.insv"), 300, 0.6, 1.0),
+        (smp.join("v635.insv"), 0, 0.0, 0.3),
+    ];
+    if let Some(r) = &rides {
+        let r = |n: &str| r.join(format!("VID_{n}.insv"));
+        cases.extend([
+            // an overcast street; under a bridge; streets in the sun; at night (reported only)
+            (r("20260413_173716_00_717"), 600, 0.35, 0.8),
+            (r("20260413_173716_00_717"), 2400, 0.0, 0.08),
+            (r("20260416_165209_00_738"), 600, 0.4, 0.8),
+            (r("20260429_115150_00_689"), 3000, 0.45, 0.9),
+            (r("20260304_210620_00_670"), 600, 0.0, 1.0),
+            (r("20260311_183904_00_714"), 1000, 0.0, 1.0),
+        ]);
+    }
+    let test = shotlab::gradient(1024, [255, 0, 255], [255, 128, 0]);
+    let clear = shotlab::gradient(1024, [40, 95, 190], [190, 215, 240]);
+    let (w, h) = (3840u32, 1920u32);
+    let mut fails = vec![];
+    for (p, k, lo, hi) in cases {
+        let c = shotlab::Clip::open(&p).unwrap();
+        let ps = c.poses(stab::Lock::Horizon, 0.5);
+        let name = format!("{}_{k}", short(&p));
+        c.frames(&g, &sx, w, false, &[k], |k| c.pose(k, ps.as_deref()), |f, k| {
+            let q = c.world(k, ps.as_deref()).unwrap_or_default();
+            let before = read(&cx, f);
+            let swap = |sky: &[u8], tone| {
+                put(&cx, f, &before);
+                let mut s = shotlab::Sky::new(&g, &cx, sky, 1024, 512).unwrap();
+                s.tone = tone;
+                for i in 0..2 {
+                    submit(&cx, |e| s.push(e, f, q, i as f64 / 30.0).unwrap());
+                }
+                (s.mask(), read(&cx, f), s)
+            };
+            let (m, after, _) = swap(&test, 0.0);
+            let share = upper(|i| m[i] as f64);
+            let ground = (4 * w * h * 2 / 3) as usize;
+            let kept = before[ground..] == after[ground..];
+            // changed by more than 40 levels in a channel, rows of the upper hemisphere by solid angle
+            let (mut ch, mut n) = (0.0, 0.0);
+            for y in 0..h / 2 {
+                let s = (std::f64::consts::PI * y as f64 / (h - 1) as f64).sin();
+                for x in 0..w {
+                    let i = (4 * (y * w + x)) as usize;
+                    ch += s * (0..3).any(|c| before[i + c].abs_diff(after[i + c]) > 40) as u8 as f64;
+                    n += s;
+                }
+            }
+            let ch = ch / n;
+            eprintln!(
+                "sky {name}: mask {share:.3} of the upper hemisphere (expected {lo}..{hi}), changed {ch:.3}, \
+                 ground kept {kept}"
+            );
+            if !(lo..=hi).contains(&share) || !kept || ch < share - 0.05 || ch > share + 0.25 {
+                fails.push(name.clone());
+            }
+            let (m, after, mut s) = swap(&clear, 0.6);
+            let mw = shotlab::MW;
+            let mut px = before.clone();
+            px.extend(&after);
+            px.extend((0..w * h).flat_map(|i| {
+                let v = (255.0 * m[((i / w * mw / 2 / h) * mw + i % w * mw / w) as usize]) as u8;
+                [v, v, v, 255]
+            }));
+            jpg(&px, w, 3 * h, 3, &format!("sky_{name}.jpg"));
+            if name == "v606_300" {
+                put(&cx, f, &before);
+                let ms = time(&cx, 10, |e| s.push(e, f, q, 1.0).unwrap());
+                let sizes = [2048u32, 5760].map(|w| {
+                    let t = frame(&cx, w, w / 2, FORMATS[0]);
+                    time(&cx, 10, |e| s.push(e, &t, q, 1.0).unwrap())
+                });
+                eprintln!(
+                    "sky: {:.1} ms a frame at 2048, {ms:.1} at 3840, {:.1} at 5760 (network included)",
+                    sizes[0], sizes[1]
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+    assert!(fails.is_empty(), "{fails:?}");
+}
+
+/// Sky Swap's flicker on still stretches stitched at 2048 with the horizon lock: v627 frames 300..420 (night, the
+/// camera on a stick held still) and, with `X5_RIDES`, ride 689 frames 2460..2700 (day, stopped 41–45 s). From the 16th
+/// frame on, per frame: the world mask's mean change from the frame before over the upper hemisphere (by solid angle)
+/// and at the edge (where it was 0.05..0.95), the share whose side of ½ flipped; the share of the upper half's pixels
+/// that changed by more than 8 levels in a channel, the result's against the frames' own. Without smoothing (half-life
+/// 0) and with the default.
+#[test]
+fn sky_flicker() {
+    let Some(p7) = sample("v627.insv") else {
+        return;
+    };
+    let mut cases = vec![(p7, 300, 420)];
+    if let Some(r) = std::env::var_os("X5_RIDES").map(PathBuf::from) {
+        cases.push((r.join("VID_20260429_115150_00_689.insv"), 2460, 2700));
+    }
+    let (_l, g, sx, cx) = gpu();
+    let clear = shotlab::gradient(1024, [40, 95, 190], [190, 215, 240]);
+    let w = 2048u32;
+    // share of the upper half's pixels (by solid angle) where some channel differs by more than 8 levels
+    let moved = |a: &[u8], b: &[u8]| {
+        let (mut c, mut n) = (0.0, 0.0);
+        for y in 0..w / 4 {
+            let s = (std::f64::consts::PI * y as f64 / (w / 2 - 1) as f64).sin();
+            for x in 0..w {
+                let i = (4 * (y * w + x)) as usize;
+                c += s * (0..3).any(|j| a[i + j].abs_diff(b[i + j]) > 8) as u8 as f64;
+                n += s;
+            }
+        }
+        c / n
+    };
+    for (p, a, b) in cases {
+        let c = shotlab::Clip::open(&p).unwrap();
+        let ps = c.poses(stab::Lock::Horizon, 0.5);
+        let ks: Vec<usize> = (a..=b).collect();
+        let mut res = vec![];
+        for half in [0.0, 0.1] {
+            let mut s = shotlab::Sky::new(&g, &cx, &clear, 1024, 512).unwrap();
+            s.half = half;
+            let mut last: Option<(Vec<f32>, Vec<u8>, Vec<u8>)> = None;
+            let mut sum = [0.0; 5];
+            let mut n = 0;
+            c.frames(
+                &g,
+                &sx,
+                w,
+                false,
+                &ks,
+                |k| c.pose(k, ps.as_deref()),
+                |f, k| {
+                    let q = c.world(k, ps.as_deref()).unwrap_or_default();
+                    let i = read(&cx, f);
+                    submit(&cx, |e| s.push(e, f, q, c.times[k]).unwrap());
+                    let (m, o) = (s.mask(), read(&cx, f));
+                    if let Some((lm, lo, li)) = &last
+                        && k >= a + 16
+                    {
+                        let d = upper(|j| (m[j] - lm[j]).abs() as f64);
+                        let fl = upper(|j| ((m[j] > 0.5) != (lm[j] > 0.5)) as u8 as f64);
+                        let edge = |j: usize| (0.05..0.95).contains(&lm[j]) as u8 as f64;
+                        let de = upper(|j| edge(j) * (m[j] - lm[j]).abs() as f64) / upper(edge);
+                        for (x, v) in sum
+                            .iter_mut()
+                            .zip([d, fl, moved(&o, lo), moved(&i, li), de])
+                        {
+                            *x += v;
+                        }
+                        n += 1;
+                    }
+                    last = Some((m, o, i));
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let r = sum.map(|x| x / n as f64);
+            eprintln!(
+                "sky flicker {} {a}..{b}, half-life {half} s: mask change {:.4} (at the edge {:.4}), flipped {:.4}; \
+                 pixels changed: result {:.4}, frames {:.4} ({n} frames)",
+                short(&p),
+                r[0],
+                r[4],
+                r[1],
+                r[2],
+                r[3]
+            );
+            res.push(r);
+        }
+        assert!(res[1][0] < res[0][0] && res[1][4] < res[0][4] && res[1][1] <= res[0][1]);
+    }
+}
+
+/// Sky Swap through export jobs at 3840 with the horizon lock, the first frame pushed once before (as the app's maker
+/// does): with `X5_RIDES` ride 717 from 8 to 14 s (60 fps, trees and wires against an overcast sky) and ride 670 from
+/// 8 to 14 s (night); v627 frames 300..390 (night, still). Frames at 1 and 2.5 s, and strips of 8 consecutive frames
+/// of the sky ahead from 2 s (`sky_<clip>_strip.jpg`, ffmpeg's tile).
+#[test]
+fn sky_export() {
+    let Some(p7) = sample("v627.insv") else {
+        return;
+    };
+    let (_l, g, sx, cx) = gpu();
+    let c7 = shotlab::Clip::open(&p7).unwrap();
+    let mut cases = vec![(p7.clone(), [c7.times[300], c7.times[390]])];
+    if let Some(r) = std::env::var_os("X5_RIDES").map(PathBuf::from) {
+        cases.push((r.join("VID_20260413_173716_00_717.insv"), [8.0, 14.0]));
+        cases.push((r.join("VID_20260304_210620_00_670.insv"), [8.0, 14.0]));
+    }
+    let clear = shotlab::gradient(1024, [40, 95, 190], [190, 215, 240]);
+    let w = 3840;
+    for (p, t) in cases {
+        let c = shotlab::Clip::open(&p).unwrap();
+        let st = (stab::Lock::Horizon, 0.5);
+        let ps = c.poses(st.0, st.1);
+        let k0 = c.times.partition_point(|&x| x < t[0] - 1e-3);
+        let q: Vec<Quat> = (k0..c.times.len())
+            .map(|k| c.world(k, ps.as_deref()).unwrap_or_default())
+            .collect();
+        let mut s = shotlab::Sky::new(&g, &cx, &clear, 1024, 512).unwrap();
+        c.frames(
+            &g,
+            &sx,
+            w,
+            false,
+            &[k0],
+            |k| c.pose(k, ps.as_deref()),
+            |f, _| {
+                submit(&cx, |e| s.push(e, f, q[0], 0.0).unwrap());
+                Ok(())
+            },
+        )
+        .unwrap();
+        let name = format!("sky_{}", short(&p));
+        export(
+            &g,
+            &sx,
+            &p,
+            t,
+            w,
+            Some(st),
+            s.hook(move |k| q.get(k as usize).copied().unwrap_or_default()),
+            &name,
+            &[1.0, 2.5],
+            3,
+        );
+        let strip = out(&format!("{name}_strip.jpg"));
+        let ok = Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-ss", "2", "-i"])
+            .arg(strip.with_file_name(format!("{name}.mp4")))
+            .args([
+                "-frames:v",
+                "1",
+                "-vf",
+                "crop=1280:640:1280:240,scale=640:320,tile=4x2",
+                "-q:v",
+                "3",
+            ])
+            .arg(&strip)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+    }
+}
+
+/// Sky Swap's panorama stays put in the world: v606 frames 0 and 600 (walking through the gate, turning), stitched at
+/// 2048 with the horizon lock, a black panorama with a magenta band 1.4° wide at azimuth 91° (no colour match). The
+/// band's column 70° up in each result against where the frame's rotation into the world (`Clip::world`, the first
+/// frame's heading taken out) puts it.
+#[test]
+fn sky_world() {
+    let Some(p) = sample("v606.insv") else {
+        return;
+    };
+    let (_l, g, sx, cx) = gpu();
+    let (pw, w) = (1024u32, 2048u32);
+    let pano: Vec<u8> = (0..pw * pw / 2)
+        .flat_map(|i| match i % pw {
+            256..260 => [255, 0, 255, 255],
+            _ => [0, 0, 0, 255],
+        })
+        .collect();
+    let mut s = shotlab::Sky::new(&g, &cx, &pano, pw, pw / 2).unwrap();
+    s.tone = 0.0;
+    let c = shotlab::Clip::open(&p).unwrap();
+    let ps = c.poses(stab::Lock::Horizon, 0.5);
+    let q0 = c.world(0, ps.as_deref()).unwrap();
+    let y0 = Quat::from_rotation_z(track::yaw_pitch(q0 * Vec3::NEG_X)[0].to_radians());
+    let y = (20.0 / 180.0 * (w / 2 - 1) as f64).round() as u32;
+    let mut seen = vec![];
+    c.frames(&g, &sx, w, false, &[0, 600], |k| c.pose(k, ps.as_deref()), |f, k| {
+        let q = c.world(k, ps.as_deref()).unwrap();
+        for i in 0..1 + (k == 0) as u32 {
+            submit(&cx, |e| s.push(e, f, q, (k + i as usize) as f64 / 30.0).unwrap());
+        }
+        let px = read(&cx, f);
+        let cols: Vec<f64> = (0..w)
+            .filter(|&x| {
+                let i = (4 * (y * w + x)) as usize;
+                px[i] > 200 && px[i + 1] < 60 && px[i + 2] > 200
+            })
+            .map(|x| x as f64)
+            .collect();
+        // the band's middle (column 258) 70° up, in the world, then in the frame
+        let (th, ph) = (std::f32::consts::TAU * 258.0 / pw as f32, 20f32.to_radians());
+        let d = (y0 * q).inverse() * Vec3::new(ph.sin() * th.cos(), -ph.sin() * th.sin(), ph.cos());
+        let want = (-d.y).atan2(d.x).rem_euclid(std::f32::consts::TAU) as f64 / std::f64::consts::TAU * w as f64;
+        let got = cols.iter().sum::<f64>() / cols.len().max(1) as f64;
+        eprintln!(
+            "sky world: frame {k}, heading {:.1}°, band at column {got:.1} ({} px), expected {want:.1}",
+            track::yaw_pitch(q * Vec3::NEG_X)[0],
+            cols.len()
+        );
+        seen.push((got, want, cols.len()));
+        Ok(())
+    })
+    .unwrap();
+    assert!(seen.iter().all(|&(g, w, n)| n > 3 && (g - w).abs() < 3.0));
+    assert!(
+        (seen[1].1 - seen[0].1).abs() > 20.0,
+        "the camera did not turn"
+    );
+}

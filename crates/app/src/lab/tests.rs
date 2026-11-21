@@ -12,7 +12,7 @@ fn table() {
         assert_eq!(FXS.iter().filter(|x| x.2 == k).count(), 1);
     }
     assert_eq!(FXS.iter().filter(|x| x.0.cut()).count(), 8);
-    assert!(FXS[..7].iter().all(|x| !x.0.cut()) && FXS[7..].iter().all(|x| x.0.cut()));
+    assert!(FXS[..8].iter().all(|x| !x.0.cut()) && FXS[8..].iter().all(|x| x.0.cut()));
     assert!(
         Fx::Passerby.still() && Fx::Shadow.still() && !Fx::Planets.still() && !Fx::Delay.still()
     );
@@ -242,4 +242,81 @@ fn clones_burn() {
     drop(held);
     th.join().unwrap();
     assert!(done.load(Relaxed));
+}
+
+/// Sky Swap's preview on v606 (`X5_SAMPLES`) over 9–10 s (the gate under a blue sky, the source's stabilisation), a
+/// picked picture in the sky: a magenta 2:1 JPEG, the colour match off. The 2048 × 1024 out point keeps the frame below
+/// 30° under the horizon to the bit and is magenta over much of the upper hemisphere; a picture that is not 2:1 is
+/// refused.
+#[test]
+fn preview_sky() {
+    let Some(d) = samples() else { return };
+    let (_l, g, cx) = gpu();
+    let f = d.join("v606.insv");
+    let dir = std::env::var_os("X5_FIXTURES")
+        .map_or_else(std::env::temp_dir, PathBuf::from)
+        .join(format!("x5desk-lab-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pic = |w: u32, h: u32, n: &str| {
+        let p = dir.join(n);
+        let px: Vec<u8> = (0..w * h).flat_map(|_| [255, 0, 255, 255]).collect();
+        std::fs::write(&p, export::jpeg::encode(&px, w, h, 95, None).unwrap()).unwrap();
+        p
+    };
+    let mut l = lab(&g, &cx, &f);
+    (l.fx, l.range, l.p.tone) = (Fx::Sky, [9.0, 10.0], 0.0);
+    l.sky = Some(pic(300, 200, "flat.jpg"));
+    assert!(
+        l.maker(30.0, 0).unwrap()(&g, 64, 32, wgpu::TextureFormat::Rgba8Unorm)
+            .err()
+            .unwrap()
+            .contains("2:1")
+    );
+    l.sky = Some(pic(512, 256, "magenta.jpg"));
+    l.preview();
+    let p = l.pre.as_ref().unwrap().1.clone();
+    let r = wait(|| p.st.lock().unwrap().clone(), 300);
+    assert_eq!(r, ai::St::Done, "{r:?}");
+    let (px, w, h) = p.px.lock().unwrap().take().unwrap();
+    assert_eq!((w, h), (PW, PW / 2));
+    // the out point's frame as it is, stitched the same way (the same frames before it: colour matching follows them)
+    let c = shotlab::Clip::open(&f).unwrap();
+    let ps = ai::poses(&c, l.stab(l.src.as_ref().unwrap())).unwrap();
+    let k1 = c.times.partition_point(|&t| t < 10.0 - 1e-3) - 1;
+    let ks: Vec<usize> = (k1
+        .saturating_sub(SKY_SPAN)
+        .max(crate::clip::frame_at(&c.times, 9.0))..=k1)
+        .collect();
+    let mut plain = vec![];
+    c.frames(
+        &g,
+        &cx,
+        PW,
+        false,
+        &ks,
+        |k| c.pose(k, ps.as_deref()),
+        |t, k| {
+            if k == k1 {
+                plain = stitch::read_texture(&g.device, &g.queue, t);
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    let ground = (4 * w * h * 2 / 3) as usize;
+    let sky = px[..ground / 2]
+        .chunks(4)
+        .filter(|p| p[0] > 200 && p[1] < 60 && p[2] > 200)
+        .count() as f64
+        / (w * h / 3) as f64;
+    eprintln!(
+        "sky preview: {:.3} of the top third magenta, the ground {}",
+        sky,
+        if px[ground..] == plain[ground..] {
+            "kept"
+        } else {
+            "changed"
+        }
+    );
+    assert!(px[ground..] == plain[ground..] && sky > 0.3);
 }

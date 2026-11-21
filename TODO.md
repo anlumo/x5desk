@@ -474,8 +474,40 @@ voice denoise on editor timelines and exports (RNNoise).
   at 3840 × 2160; 4–7 ms under the knee. Contact sheets (100 % crops: input, 0.5, 1 or on day the filter without
   the knee, the temporal mean): `target/forward-scratch/grab/out/{night_n670_5760,night_v627_7680,day_d689_5760}.jpg`.
   Not compared with the vendor's own still denoise.
-- [ ] **Sky Swap.** Sky segmentation on perspective tiles of the sphere (e.g. SegFormer-B0 on ADE20K, NVIDIA's
-  non-commercial licence, to verify), feathered and smoothed over time, a sky panorama in its place; a Shot Lab pass.
+- [x] **Sky Swap.** A Shot Lab pass (`shotlab::Sky`, the screen's Sky Swap, key `sky`: preview and 360 export; the MCP
+  lists it with the Shot Lab effects agents can't run yet): EfficientViT-seg B1 trained on ADE20K by MIT HAN Lab
+  (weights and code Apache-2.0; ADE20K's images for non-commercial research and education, its ImageNet pre-training
+  likewise; 4.8 M parameters, 18.4 MB in git; exported by `models/efficientvit.py`, which writes the network out after
+  the authors' code instead of running it; `shotlab/models/README`) on six 384² tiles of 120° at pitch 35° fixed to the
+  world (`Clip::world`: the stitch pose and the gyro), the softmax's sky into a 1024 × 512 equirect of the world mixed
+  into the last (half-life 0.1 s), its edge fitted to each frame by a guided filter with the frame's colour as its guide
+  (the probability steepened threefold about ½, 21 × 21 mask pixels, applied to the frame's own pixels); from 30° under
+  the horizon down (below the tiles) the frame is untouched to the bit. In its place a picked 360 picture (JPEG,
+  `.insp`, PNG; 2:1) or one of two gradients made in code (Clear, Dusk), sampled at the world direction so it stays put
+  as the camera turns (`sky_world`: a band where the heading puts it, within 1 px at 2048, over a 7.3° turn), its colour
+  moved per channel towards the replaced sky's mean (Match the scene, 0.6 by default, smoothed over 1 s; a night keeps a
+  dark sky). Frame k's network runs at frame k + 1 (the hook's frame exists only in its encoder): the maker stitches the
+  range's first frame and pushes it once before the job. Tiles (chosen with SegFormer-B0 on onnxruntime): six of 100°
+  and one on the zenith read a featureless overcast or night zenith as 0.3–0.5 sky, tiles of 120° see the horizon in
+  each; 384² against 512² IoU 0.96–0.99 on the day frames with sky. SegFormer-B0 (NVIDIA's weights) was the first
+  network, dropped for its licence ("for research or evaluation purposes only"); against its masks (15 frames, upper
+  hemisphere, over ½) B1's agree at IoU 0.91–0.98 by day, see less at night (714 0.12 against 0.19) and miss the
+  overexposed far end of a bridge; EfficientViT-seg B2 finds those (714 0.30) at 51 ms a frame and 58 MB, the Cityscapes
+  models lose the night skies. Against onnxruntime 4.1e-6 of sky probability; the export against PyTorch, logits within
+  3.3e-4 (the authors' own code not run). Cost on the Radeon 8060S: 20 / 22 / 24 ms a frame at 2048 / 3840 / 5760, an
+  export at 3840 43–45 fps (SegFormer-B0: 56 ms, 17.8 fps); about 0.45 GB of GPU memory at 5760. The mask's sky share of
+  the upper hemisphere (solid angle): v606 the gate under a blue sky 0.45, v627 at night 0.71, v635 indoors under a
+  glass dome 0.04; rides 717 overcast 0.43 and under a bridge 0.00, 738 0.42, 689 0.53, at night 670 0.15 and 714 0.14
+  (night masks soft). Flicker on still stretches (v627 at night, 689 stopped by day): the mask's change a frame where it
+  is 0.05–0.95 0.0038 / 0.0045 unsmoothed, 0.0010 / 0.0014 smoothed, the share crossing ½ 0.06 / 0.10 % → 0.02 / 0.04 %.
+  Tests: `sky::tests::vs_onnxruntime`, shot `sky_footage` (expected shares, the ground kept, the sky changed),
+  `sky_flicker`, `sky_export`, `sky_world`, app `lab::tests::preview_sky` (a picked JPEG; one not 2:1 refused).
+  Pictures: `target/wind-scratch/sky/out`. Open: thin things the network calls sky are replaced (lamp posts,
+  traffic-light poles, wires, a sign; B1's output is an eighth of its input, and a lamp post SegFormer left faint is
+  gone); a tree where the network's edge is off by a degree or two gets a veil; street lamps at night a halo; night
+  skies, the far end of a bridge and the glass dome only in part or not at all; on a ride the mask is a frame late
+  before the filter snaps it to the picture; the colour match is a ratio of means (no sun, the ground not relit); the
+  picked picture faces the first frame's heading (no control); a large panorama is sampled without mips.
 - [ ] **Library search.** Tags and text search from an image embedding of each clip's thumbnails (e.g. SigLIP,
   Apache-2.0 per its model card, to verify); near-duplicates from the same embedding.
 - Not worth doing: AI Retouch, AI Warp, AI templates, AI Vlog and 3D Space (generated on the vendor's servers);

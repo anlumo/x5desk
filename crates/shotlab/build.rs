@@ -1,14 +1,16 @@
-//! Network code with embedded weights, generated from the ONNX file in `models/` (source, licence, checksum:
+//! Network code with embedded weights, generated from the ONNX files in `models/` (source, licence, checksum:
 //! `models/README`).
 
 fn main() {
     let m = "human_segmentation_pphumanseg_2023mar";
-    println!("cargo::rerun-if-changed=models/{m}.onnx");
-    burn_onnx::ModelGen::new()
-        .input(&format!("models/{m}.onnx"))
-        .out_dir("model/")
-        .load_strategy(burn_onnx::LoadStrategy::Embedded)
-        .run_from_script();
+    for x in [m, "efficientvit_seg_b1_ade20k_6x384"] {
+        println!("cargo::rerun-if-changed=models/{x}.onnx");
+        burn_onnx::ModelGen::new()
+            .input(&format!("models/{x}.onnx"))
+            .out_dir("model/")
+            .load_strategy(burn_onnx::LoadStrategy::Embedded)
+            .run_from_script();
+    }
     // Every stride-2 3 × 3 conv of the network is SAME_UPPER on an even input: pad 0 before, 1 after. burn-onnx 0.22
     // resolves six of them as 1 on both sides (one input pixel off; against onnxruntime the mask moved and blurred
     // by up to 0.89): set them all.

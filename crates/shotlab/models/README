@@ -1,6 +1,8 @@
-Network compiled into crate shotlab by burn-onnx (build.rs), under a permissive licence whose text is next to this
-file. Checked against onnxruntime on a real cut: src/clone.rs `vs_onnxruntime` (a 192² crop of a woman in v627
-frame 300, run when X5_ORT names a Python with onnxruntime), largest difference of the person probability 2.2e-6.
+Networks compiled into crate shotlab by burn-onnx (build.rs), under permissive licences whose texts are next to this
+file (the sky network made from its checkpoint by efficientvit.py and onnxslim, below). Each checked against
+onnxruntime on real input (run when X5_ORT names a Python with onnxruntime): src/clone.rs `vs_onnxruntime` (a 192² crop
+of a woman in v627 frame 300), largest difference of the person probability 2.2e-6; src/sky.rs `vs_onnxruntime`
+(below).
 
 human_segmentation_pphumanseg_2023mar.onnx
   What: PP-HumanSeg v1 "humanseg_mobile" (PaddleSeg contrib/HumanSeg): FCN on HRNet-W18-Small v1, person
@@ -30,3 +32,51 @@ human_segmentation_pphumanseg_2023mar.onnx
     people it left the torso out or covered only fragments.
   - This network with its input scaled to 384² (Resize targets doubled): legs went missing; 192² is kept.
   Not used: Robust Video Matting (GPL-3.0).
+
+efficientvit_seg_b1_ade20k_6x384.onnx
+  What: EfficientViT-seg B1 (Cai et al., "EfficientViT: Lightweight Multi-Scale Attention for High-Resolution Dense
+        Prediction", ICCV 2023, https://arxiv.org/abs/2205.14756), 4.8 M parameters, trained on ADE20K by its authors
+        (42.8 mIoU at 512², their README): 6x3x384x384 RGB normalised by ImageNet's mean and deviation -> 6x150x48x48
+        class logits (stride 8, the head upsamples bicubically); src/seg.rs takes the softmax's class 2, sky. Six tiles
+        of 120° at pitch 35° around the world's up a run (src/sky.rs).
+  Source: the authors' checkpoint,
+          https://huggingface.co/han-cai/efficientvit-seg/resolve/main/efficientvit_seg_b1_ade20k.pt (sha256
+          59cca6a7ff4d1a6494b7f12072c6a68fee40ef401e971f26af01a2e0f3c8f5e7), linked from the
+          applications/efficientvit_seg README of https://github.com/mit-han-lab/efficientvit. Exported by
+          efficientvit.py (`python efficientvit.py efficientvit_seg_b1_ade20k.pt raw.onnx`, torch 2.14 and onnx 1.23:
+          the network written out after the repository's efficientvit/models, the checkpoint loaded weights-only and
+          strictly, so none of the repository's code runs), then given static shapes by onnxslim 0.1.99 (`onnxslim
+          raw.onnx efficientvit_seg_b1_ade20k_6x384.onnx`: shape arithmetic folded). onnxruntime against PyTorch on the
+          same random input: logits within 3.3e-4.
+  Licence: Apache-2.0: the model card's "license: apache-2.0" (huggingface.co/han-cai/efficientvit-seg) and the
+           repository's LICENSE, "Copyright [2023] [Han Cai]" -> LICENSE-efficientvit. No further terms on the weights
+           in the card or the README.
+  Training data: ADE20K, whose images MIT CSAIL does not own and lets researchers use "only for non-commercial research
+           and educational purposes", its annotations BSD-3-Clause (https://ade20k.csail.mit.edu/terms, read through the
+           Wayback Machine: the site timed out); the backbone "initialized with weights pretrained on ImageNet" (the
+           paper's experimental setup), ImageNet "only for non-commercial research and educational purposes"
+           (https://image-net.org/accessagreement.php).
+  sha256: 3867a774e932636a91c14b7d287c2d4829dae8e6990c03792264de1c93e954b9
+  Checked: src/sky.rs `vs_onnxruntime` (the six tiles of v606 frame 300, the gate under a blue sky): largest
+           difference of the sky probability 4.1e-6 (mean 1.2e-7), none on the other side of ½. The authors' code was
+           not run; efficientvit.py loads every tensor of the checkpoint by name and shape, and its masks agree with
+           SegFormer-B0's by day (below).
+  Considered (licences read 2026-11-21; masks by onnxruntime on the CPU over 15 frames of the samples and the rides at
+  3840, horizon lock, six 384² tiles of 120° at pitch 35°, against SegFormer-B0's as below):
+  - SegFormer-B0 fine-tuned on ADE20K (nvidia/segformer-b0-finetuned-ade-512-512, NVIDIA Source Code License for
+    SegFormer): dropped. Its "non-commercially" means "for research or evaluation purposes only" (the licence's
+    section 3.3), too narrow for this project. Its masks are the reference below; the pass took 56 ms a frame on the
+    Radeon 8060S with it (decode head rewritten), 22 ms with B1 (3840 wide).
+  - EfficientViT-seg B2 on ADE20K (same source and licence, 15 M parameters, 58 MB): agrees with B1 by day; at night
+    and through small openings it finds more sky (714 at night 0.30 of the upper hemisphere against B1's 0.12 and
+    SegFormer's 0.19; the far end of a bridge 0.044 against 0.003 and 0.023), at three times B1's size and 51 ms a
+    frame on the Radeon.
+  - EfficientViT-seg B0 and B1 on Cityscapes (same source and licence; Cityscapes' terms not read, as neither was
+    chosen): no sky at night (v627 0.007 and 0.50 against 0.73), and they lost much of the rides' day skies.
+  - B1 with tiles of 512²: no better at night (714 0.09).
+  - Not evaluated: TopFormer, SegNeXt (both Apache-2.0, built on mmsegmentation and mmcv, whose code would have to
+    run to export them; TopFormer's ADE20K weights on Baidu and Google Drive only), PP-MobileSeg / PP-LiteSeg
+    (PaddleSeg, Apache-2.0; converting them needs PaddlePaddle and paddle2onnx), the CSAIL ADE20K baselines
+    (semantic-segmentation-pytorch, BSD-3-Clause; their weights at sceneparsing.csail.mit.edu, which timed out),
+    xiongzhu666's U2-Net sky model (MIT code; its 167 MB ONNX on Baidu only, the small one in ncnn's format, training
+    data unnamed).

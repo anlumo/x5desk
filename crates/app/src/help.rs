@@ -166,9 +166,14 @@ fn guide(p: Page) -> &'static [&'static str] {
             "Shot Lab works on the clip open in the Library. Pick an effect, set its range and parameters; Preview \
              shows what it makes at the range's out point (the editing presets: four moments through their views).",
             "The passes (Remove Passerby, Light Trails, Star Lapse, Frame Delay, Shadow Clone, Clone Loop, Parallel \
-             Planet) export as 360 videos. Those that need a still camera check the gyro and warn when it turned; \
-             they stitch with the direction lock. The editing presets (Stop Motion, Fly Lapse, Flip My Day, Center \
-             Stage, Spin Me Around, Fly Out, Dolly Zoom) export flat or go onto the editor's timeline.",
+             Planet, Sky Swap) export as 360 videos. Those that need a still camera check the gyro and warn when it \
+             turned; they stitch with the direction lock. The editing presets (Stop Motion, Fly Lapse, Flip My Day, \
+             Center Stage, Spin Me Around, Fly Out, Dolly Zoom, Overtake) export flat or go onto the editor's \
+             timeline.",
+            "Sky Swap finds the sky with a segmentation network and puts a gradient or a 360 picture of yours \
+             (Picture…: an equirect JPEG or PNG, such as a 360 photo) in its place, fixed to the world as the camera \
+             turns; Match the scene pulls its colour and brightness towards the sky it replaces. Night skies, white \
+             skies over white walls, wires and leaves against the sky are where it misses.",
             "Shadow Clone, Clone Loop and the subject presets follow the subject tracked with Deep Track in the \
              player. With Blur faces or Blur license plates on in the Export screen, a pass blurs them before the \
              effect runs.",
@@ -247,7 +252,7 @@ struct Model(
     &'static str,
 );
 
-const MODELS: [Model; 8] = [
+const MODELS: [Model; 9] = [
     Model(
         "RAFT-small",
         "seam flow (stitch)",
@@ -308,6 +313,17 @@ const MODELS: [Model; 8] = [
          Authors",
         "Trained on a \"Baidu self-built dataset\", as PaddleHub's humanseg_mobile page names it.",
         include_str!("../../shotlab/models/LICENSE-pphumanseg"),
+    ),
+    Model(
+        "EfficientViT-seg B1 (ADE20K)",
+        "sky segmentation for Shot Lab's Sky Swap (shotlab)",
+        "Apache-2.0",
+        "MIT HAN Lab, mit-han-lab/efficientvit, efficientvit_seg_b1_ade20k; Copyright 2023 Han Cai",
+        "⚠ Trained on ADE20K, whose images MIT CSAIL lets researchers use only for non-commercial research and \
+         educational purposes (its annotations BSD-3-Clause), from a backbone pre-trained on ImageNet (non-commercial \
+         research and education); the weights are published under Apache-2.0 by their authors. Check the datasets' \
+         terms before any commercial use.",
+        include_str!("../../shotlab/models/LICENSE-efficientvit"),
     ),
     Model(
         "RNNoise 0.2",

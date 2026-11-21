@@ -332,3 +332,256 @@ fn paste(@builtin(global_invocation_id) id: vec3u) {
     }
     textureStore(pdst, id.xy, o);
 }
+
+// ---- sky swap: the network's tiles and the mask fixed to the world (an equirect in stitch's layout), the frame's
+// directions turned into it by m
+
+struct Sy {
+    // world from frame (columns)
+    m0: vec4f,
+    m1: vec4f,
+    m2: vec4f,
+    // probability strides (tile, row, column), the network output's side
+    st: vec4u,
+    // weight of the new probability, of the new gain; spare; how far the panorama's colour moves to the old sky's
+    w: f32,
+    gw: f32,
+    p0: f32,
+    tone: f32,
+    // taps per axis into a tile, into a mask pixel; tiles, the network input's side
+    k: u32,
+    kg: u32,
+    n: u32,
+    side: u32,
+}
+
+@group(0) @binding(29) var<uniform> sy: Sy;
+@group(0) @binding(30) var<storage, read> stile: array<Cam>;
+@group(0) @binding(31) var<storage, read_write> snet: array<f32>;
+
+fn world(d: vec3f) -> vec3f {
+    return mat3x3f(sy.m0.xyz, sy.m1.xyz, sy.m2.xyz) * d;
+}
+
+fn framed(w: vec3f) -> vec3f {
+    return transpose(mat3x3f(sy.m0.xyz, sy.m1.xyz, sy.m2.xyz)) * w;
+}
+
+// network input: planar RGB, ImageNet's normalisation; tile id.z, read from the frame (csrc) along the frame's rays
+@compute @workgroup_size(8, 8)
+fn skyin(@builtin(global_invocation_id) id: vec3u) {
+    let s = sy.side;
+    if id.x >= s || id.y >= s {
+        return;
+    }
+    let t = stile[id.z];
+    let c = Cam(vec4f(framed(t.f.xyz), 0.0), vec4f(framed(t.r.xyz), 0.0), vec4f(framed(t.u.xyz), 0.0), t.e);
+    let v = clamp(crop(c, vec2f(id.xy), f32(s), sy.k), vec3f(0.0), vec3f(1.0));
+    let n = (v - vec3f(0.485, 0.456, 0.406)) / vec3f(0.229, 0.224, 0.225);
+    let m = s * s;
+    let i = id.z * 3u * m + id.y * s + id.x;
+    snet[i] = n.r;
+    snet[i + m] = n.g;
+    snet[i + 2u * m] = n.b;
+}
+
+@group(0) @binding(32) var<storage, read> sprob: array<f32>;
+@group(0) @binding(33) var sprev: texture_2d<f32>;
+@group(0) @binding(34) var snext: texture_storage_2d<rgba16float, write>;
+
+fn sp(t: u32, x: i32, y: i32) -> f32 {
+    let s = i32(sy.st.w) - 1;
+    return sprob[sy.st.x * t + sy.st.y * u32(clamp(y, 0, s)) + sy.st.z * u32(clamp(x, 0, s))];
+}
+
+// the world mask: the tiles' probability (weights falling to each tile's edge: they overlap widely, no seam shows),
+// none below them, mixed into the last; the frame's colour over the pixel, the guided filter's guide
+@compute @workgroup_size(8, 8)
+fn skym(@builtin(global_invocation_id) id: vec3u) {
+    let d = textureDimensions(snext);
+    if id.x >= d.x || id.y >= d.y {
+        return;
+    }
+    let w = ray(vec2f(id.xy), d);
+    var p = 0.0;
+    var sw = 0.0;
+    for (var t = 0u; t < sy.n; t++) {
+        let c = stile[t];
+        let z = dot(w, c.f.xyz);
+        if z <= 1e-4 {
+            continue;
+        }
+        let q = vec2f(dot(w, c.r.xyz) / (z * c.e.x), -dot(w, c.u.xyz) / (z * c.e.y));
+        let g = 1.0 - max(abs(q.x), abs(q.y));
+        if g <= 0.0 {
+            continue;
+        }
+        let m = (q * 0.5 + 0.5) * f32(sy.st.w) - 0.5;
+        let m0 = floor(m);
+        let f = m - m0;
+        let x = i32(m0.x);
+        let y = i32(m0.y);
+        p += g * mix(mix(sp(t, x, y), sp(t, x + 1, y), f.x), mix(sp(t, x, y + 1), sp(t, x + 1, y + 1), f.x), f.y);
+        sw += g;
+    }
+    p = select(0.0, p / sw, sw > 0.0);
+    let k = sy.kg;
+    let dd = vec2f(textureDimensions(csrc));
+    var c = vec3f(0.0);
+    for (var i = 0u; i < k * k; i++) {
+        let o = (vec2f(f32(i % k), f32(i / k)) + 0.5) / f32(k) - 0.5;
+        c += textureSampleLevel(csrc, csmp, uv(framed(ray(vec2f(id.xy) + o, d)), dd), 0.0).rgb;
+    }
+    textureStore(snext, id.xy, vec4f(mix(textureLoad(sprev, id.xy, 0).x, p, sy.w), c / f32(k * k)));
+}
+
+// guided filter (colour guide, He et al.: a white pole against a blue sky differs in colour, hardly in luma), radius GR
+// mask pixels (3.5°: the network's edge is off by a degree or two, and a wider window leans more on the picture),
+// regularised by GEPS; across longitude it wraps. The network's probability is soft across its edge (its output is a
+// quarter of its input): steepened about ½ by GH first, so that the filter puts the edge where the picture has it
+// instead of carrying the softness onto what stands against the sky
+const GR = 10;
+const GEPS = 0.002;
+const GH = 3.0;
+
+@group(0) @binding(35) var amask: texture_2d<f32>;
+@group(0) @binding(36) var aout: texture_storage_2d<rgba32float, write>;
+
+// coefficients a (per channel) and b of the window: a = (Σ + GEPS)⁻¹ cov(colour, p), b = mean p − a · mean colour
+@compute @workgroup_size(8, 8)
+fn skya(@builtin(global_invocation_id) id: vec3u) {
+    let d = vec2i(textureDimensions(aout));
+    if i32(id.x) >= d.x || i32(id.y) >= d.y {
+        return;
+    }
+    var mc = vec3f(0.0);
+    var mp = 0.0;
+    var cp = vec3f(0.0);
+    var dg = vec3f(0.0);
+    var od = vec3f(0.0);
+    for (var j = -GR; j <= GR; j++) {
+        for (var i = -GR; i <= GR; i++) {
+            let v = textureLoad(amask, vec2i((i32(id.x) + i + d.x) % d.x, clamp(i32(id.y) + j, 0, d.y - 1)), 0);
+            let p = clamp((v.x - 0.5) * GH + 0.5, 0.0, 1.0);
+            let c = v.yzw;
+            mc += c;
+            mp += p;
+            cp += c * p;
+            dg += c * c;
+            od += c.xxy * c.yzz;
+        }
+    }
+    let n = f32((2 * GR + 1) * (2 * GR + 1));
+    mc /= n;
+    mp /= n;
+    let cv = cp / n - mc * mp;
+    let dd = dg / n - mc * mc + GEPS;
+    let oo = od / n - mc.xxy * mc.yzz;
+    // Σ's columns; its inverse's rows are their cross products over the determinant
+    let s0 = vec3f(dd.x, oo.x, oo.y);
+    let s1 = vec3f(oo.x, dd.y, oo.z);
+    let s2 = vec3f(oo.y, oo.z, dd.z);
+    let r0 = cross(s1, s2);
+    let a = vec3f(dot(r0, cv), dot(cross(s2, s0), cv), dot(cross(s0, s1), cv)) / dot(s0, r0);
+    textureStore(aout, id.xy, vec4f(a, mp - dot(a, mc)));
+}
+
+@group(0) @binding(37) var bin: texture_2d<f32>;
+@group(0) @binding(38) var bout: texture_storage_2d<rgba32float, write>;
+
+// the coefficients' mean over the same box
+@compute @workgroup_size(8, 8)
+fn skyb(@builtin(global_invocation_id) id: vec3u) {
+    let d = vec2i(textureDimensions(bout));
+    if i32(id.x) >= d.x || i32(id.y) >= d.y {
+        return;
+    }
+    var s = vec4f(0.0);
+    for (var j = -GR; j <= GR; j++) {
+        for (var i = -GR; i <= GR; i++) {
+            s += textureLoad(bin, vec2i((i32(id.x) + i + d.x) % d.x, clamp(i32(id.y) + j, 0, d.y - 1)), 0);
+        }
+    }
+    textureStore(bout, id.xy, s / f32((2 * GR + 1) * (2 * GR + 1)));
+}
+
+@group(0) @binding(39) var gmask: texture_2d<f32>;
+@group(0) @binding(40) var gpano: texture_2d<f32>;
+@group(0) @binding(41) var gsmp: sampler;
+@group(0) @binding(42) var<storage, read_write> ggain: vec4f;
+
+var<workgroup> wo: array<vec4f, 256>;
+var<workgroup> wn: array<vec4f, 256>;
+
+// the colour match: per channel the old sky's mean over the new one's where the mask has sky (by solid angle, every
+// 2nd mask pixel either way, linear light), to the power tone, mixed into the last (w: 0 until a sky was measured)
+@compute @workgroup_size(256)
+fn skyg(@builtin(local_invocation_index) li: u32) {
+    let d = textureDimensions(gmask);
+    let pd = vec2f(textureDimensions(gpano));
+    let cols = d.x / 2u;
+    let cnt = cols * (d.y / 2u);
+    var o = vec4f(0.0);
+    var n = vec4f(0.0);
+    for (var i = li; i < cnt; i += 256u) {
+        let q = vec2u(i % cols, i / cols) * 2u;
+        let v = textureLoad(gmask, q, 0);
+        let w = ray(vec2f(q), d);
+        let a = v.x * sqrt(max(1.0 - w.z * w.z, 0.0));
+        o += vec4f(lin(v.yzw), 1.0) * a;
+        n += vec4f(lin(textureSampleLevel(gpano, gsmp, uv(w, pd), 0.0).rgb), 0.0) * a;
+    }
+    wo[li] = o;
+    wn[li] = n;
+    workgroupBarrier();
+    for (var s = 128u; s > 0u; s >>= 1u) {
+        if li < s {
+            wo[li] += wo[li + s];
+            wn[li] += wn[li + s];
+        }
+        workgroupBarrier();
+    }
+    // less than 0.2 % of the samples' solid angle sky: nothing to measure, the gain stays
+    if li == 0u && wo[0].w > 0.002 * f32(cnt) {
+        let now = pow(max(wo[0].xyz, vec3f(1e-7)) / max(wn[0].xyz, vec3f(1e-7)), vec3f(sy.tone));
+        let g = select(now, mix(ggain.xyz, now, sy.gw), ggain.w > 0.0);
+        ggain = vec4f(clamp(g, vec3f(1.0 / 64.0), vec3f(16.0)), 1.0);
+    }
+}
+
+@group(0) @binding(43) var obg: texture_2d<f32>;
+@group(0) @binding(44) var oab: texture_2d<f32>;
+@group(0) @binding(45) var opano: texture_2d<f32>;
+@group(0) @binding(46) var osmp: sampler;
+@group(0) @binding(47) var<storage, read> ogain: vec4f;
+@group(0) @binding(48) var odst: texture_storage_2d<OUTFMT, write>;
+
+// the composite: alpha from the coefficients at the pixel's world direction and the pixel's own colour, the panorama at
+// that direction in its place (linear light)
+fn ab(x: i32, y: i32) -> vec4f {
+    let d = vec2i(textureDimensions(oab));
+    return textureLoad(oab, vec2i((x % d.x + d.x) % d.x, clamp(y, 0, d.y - 1)), 0);
+}
+
+@compute @workgroup_size(8, 8)
+fn skyo(@builtin(global_invocation_id) id: vec3u) {
+    let d = textureDimensions(odst);
+    if id.x >= d.x || id.y >= d.y {
+        return;
+    }
+    let c = textureLoad(obg, id.xy, 0);
+    let w = world(ray(vec2f(id.xy), d));
+    // the coefficients bilinear (32-bit floats: no filtering sampler)
+    let ad = vec2f(textureDimensions(oab));
+    let t = uv(w, ad) * ad - 0.5;
+    let t0 = floor(t);
+    let fr = t - t0;
+    let x = i32(t0.x);
+    let y = i32(t0.y);
+    let f = mix(mix(ab(x, y), ab(x + 1, y), fr.x), mix(ab(x, y + 1), ab(x + 1, y + 1), fr.x), fr.y);
+    let a = clamp(dot(f.xyz, c.rgb) + f.w, 0.0, 1.0);
+    let g = select(vec3f(1.0), ogain.xyz, ogain.w > 0.0);
+    let s = lin(textureSampleLevel(opano, osmp, uv(w, vec2f(textureDimensions(opano))), 0.0).rgb) * g;
+    // the ground stays as it was, to the bit
+    textureStore(odst, id.xy, select(vec4f(enc(mix(lin(c.rgb), s, a)), c.a), c, a <= 0.0));
+}

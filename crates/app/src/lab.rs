@@ -4,7 +4,8 @@
 //! presets, "Add to timeline" (their clips onto the editor's timeline) or "Export" (flat). The effects that need a
 //! still camera check the gyro over the range and warn; they stitch with the direction lock (every frame into the
 //! same world directions). The subject effects take the player's Deep Track run, re-expressed in the frame the effect
-//! stitches with; Overtake takes the vehicles overtaking close by that the player's auto framing run found.
+//! stitches with; Overtake takes the vehicles overtaking close by that the player's auto framing run found. Sky Swap
+//! takes a picture the user picks (or a gradient of its own) and turns it with the gyro so it stays put in the world.
 
 use crate::{
     BURN, GATE, ai,
@@ -35,6 +36,13 @@ const TURN: f64 = 10.0;
 /// Why Overtake has no pass to follow.
 const NO_PASSES: &str =
     "Tick Auto framing in the player first: its analysis finds the vehicles overtaking close by";
+/// Sky Swap's gradients (`shotlab::gradient`): name, zenith, horizon.
+const GRADS: [(&str, [u8; 3], [u8; 3]); 2] = [
+    ("Clear", [40, 95, 190], [190, 215, 240]),
+    ("Dusk", [25, 35, 90], [250, 160, 90]),
+];
+/// Sky Swap's preview: the last frames of the range (the mask's memory lasts a fraction of a second).
+const SKY_SPAN: usize = 30;
 /// The editing presets' preview: cells of a 2 × 2 grid.
 const CW: u32 = 640;
 const CH: u32 = 360;
@@ -48,6 +56,7 @@ pub enum Fx {
     Shadow,
     Loop,
     Planets,
+    Sky,
     StopMotion,
     FlyLapse,
     Flip,
@@ -60,7 +69,7 @@ pub enum Fx {
 
 /// Effects: kind, name, key (test hook, file names), what it does.
 #[rustfmt::skip]
-pub const FXS: [(Fx, &str, &str, &str); 15] = [
+pub const FXS: [(Fx, &str, &str, &str); 16] = [
     (Fx::Passerby,   "Remove Passerby", "passerby", "The median of frames across the range: whoever passes by is gone (a still camera)"),
     (Fx::Trails,     "Light Trails",    "trails",   "Bright lights leave trails (Night Road, Flash Neon; a still camera)"),
     (Fx::Stars,      "Star Lapse",      "stars",    "Frames stacked: the noise settles, or with Maximum the stars draw trails (a still camera)"),
@@ -68,6 +77,7 @@ pub const FXS: [(Fx, &str, &str, &str); 15] = [
     (Fx::Shadow,     "Shadow Clone",    "shadow",   "Copies of the tracked subject stay behind as it moves (a still camera)"),
     (Fx::Loop,       "Clone Loop",      "loop",     "The tracked subject's past selves follow it (a still camera)"),
     (Fx::Planets,    "Parallel Planet", "planets",  "The tiny planet and its sky world side by side"),
+    (Fx::Sky,        "Sky Swap",        "sky",      "The sky replaced by a panorama that stays put in the world"),
     (Fx::StopMotion, "Stop Motion",     "stopmotion", "Freeze frames a step of source apart"),
     (Fx::FlyLapse,   "Fly Lapse",       "flylapse", "A hyperlapse orbiting out of a tiny planet"),
     (Fx::Flip,       "Flip My Day",     "flip",     "A hyperlapse rolling the world over"),
@@ -145,6 +155,9 @@ pub struct P {
     pub lag: f64,
     /// Parallel Planet: stacked instead of side by side
     pub tall: bool,
+    /// Sky Swap without a picture: the gradient (`GRADS`); how far the new sky's colour moves to the old one's
+    pub grad: usize,
+    pub tone: f32,
     /// editing presets: hyperlapse speed, turns, Stop Motion's step (s), the subject's share of the frame height,
     /// Fly Out's pull (s), Dolly Zoom's first field of view and Overtake's (°), the pass Overtake follows
     pub speed: f64,
@@ -174,6 +187,8 @@ impl Default for P {
             copies: 6,
             lag: 0.6,
             tall: false,
+            grad: 0,
+            tone: 0.6,
             speed: 4.0,
             turns: 1.0,
             step: 0.5,
@@ -237,6 +252,9 @@ pub struct Lab {
     hook: Option<Hook>,
     /// the test hook started the preview: show the screen
     pub show: bool,
+    /// Sky Swap's picture (None: a gradient), the file dialog picking one
+    pub sky: Option<PathBuf>,
+    dlg: Option<mpsc::Receiver<Option<PathBuf>>>,
 }
 
 impl Lab {
@@ -261,6 +279,8 @@ impl Lab {
             err: None,
             hook,
             show: false,
+            sky: None,
+            dlg: None,
         }
     }
 
@@ -301,6 +321,14 @@ impl Lab {
             && let Ok(x) = r.try_recv()
         {
             (self.turn, self.tq) = (Some(x), None);
+        }
+        if let Some(r) = &self.dlg
+            && let Ok(x) = r.try_recv()
+        {
+            self.dlg = None;
+            if x.is_some() {
+                (self.sky, self.tex) = (x, None);
+            }
         }
         // the gyro's turn over the range, when the range or the clip changed
         if let Some(s) = &self.src
@@ -411,9 +439,9 @@ impl Lab {
 
     /// The effect's hook maker for a job whose output frame k shows source frame `k0` + k of a clip at `fps`.
     fn maker(&self, fps: f64, k0: usize) -> Result<Maker, String> {
-        let (fx, p, cx) = (self.fx, self.p, self.cx.clone());
+        let (fx, p, cx, pic) = (self.fx, self.p, self.cx.clone(), self.sky.clone());
         let s = self.src.as_ref().ok_or("no clip")?;
-        let view = s.view;
+        let (view, file, st) = (s.view, s.files[0].clone(), self.stab(s));
         let sub = match fx.subject() {
             true => Some(self.boxes(self.stab(s))?),
             false => None,
@@ -477,6 +505,70 @@ impl Lab {
                     let mut x = shotlab::Planets::new(&cx, f);
                     x.tall = p.tall;
                     x.hook()
+                }
+                Fx::Sky => {
+                    let (px, pw, ph) = match &pic {
+                        Some(f) => {
+                            let (px, w, h) = match f
+                                .extension()
+                                .is_some_and(|e| e.eq_ignore_ascii_case("png"))
+                            {
+                                true => fx::Image::png(
+                                    &std::fs::read(f)
+                                        .map_err(|e| format!("{}: {e}", f.display()))?,
+                                )
+                                .map(|i| (i.px, i.w, i.h))?,
+                                false => crate::photo::load(f)?,
+                            };
+                            if let Some(e) = crate::photo::flat(f, w, h) {
+                                return Err(format!("{}: {e}", f.display()));
+                            }
+                            (px, w, h)
+                        }
+                        None => {
+                            let (_, top, hor) = GRADS[p.grad.min(GRADS.len() - 1)];
+                            (shotlab::gradient(2048, top, hor), 2048, 1024)
+                        }
+                    };
+                    // frame k's directions in the world: the stitch's pose and the gyro's orientation
+                    let c = shotlab::Clip::open(&file)?;
+                    let ps = ai::poses(&c, st)?;
+                    let q: Vec<Quat> = (k0..c.times.len())
+                        .map(|k| c.world(k, ps.as_deref()).unwrap_or_default())
+                        .collect();
+                    let mut x = {
+                        let _b = BURN.lock();
+                        shotlab::Sky::new(g, &sx, &px, pw, ph)?
+                    };
+                    x.tone = p.tone;
+                    // the first frame stitched and pushed once: its sky is found before the job reaches it (burn
+                    // under BURN, never inside GATE)
+                    let mut gate = Some(GATE.read());
+                    c.frames(
+                        g,
+                        &cx,
+                        w,
+                        false,
+                        &[k0],
+                        |k| c.pose(k, ps.as_deref()),
+                        |tex, _| {
+                            gate.take();
+                            let mut e = g.device.create_command_encoder(&Default::default());
+                            {
+                                let _b = BURN.lock();
+                                x.push(&mut e, tex, q[0], 0.0)?;
+                            }
+                            gate = Some(GATE.read());
+                            g.queue.submit([e.finish()]);
+                            Ok(())
+                        },
+                    )?;
+                    drop(gate);
+                    let mut h = x.hook(move |k| q.get(k as usize).copied().unwrap_or_default());
+                    Box::new(move |x: export::Fx| {
+                        let _b = BURN.lock();
+                        h(x)
+                    })
                 }
                 _ => return Err(format!("{} is an editing preset", fx.name())),
             })
@@ -630,7 +722,8 @@ impl Lab {
     }
 
     /// Makes the preview on a thread: a pass over the range's last `SPAN` frames (Remove Passerby: `n` frames across
-    /// it) at `PW` wide, its last frame; an editing preset's timeline at four times through its views.
+    /// it, Sky Swap: `SKY_SPAN`) at `PW` wide, its last frame; an editing preset's timeline at four times through its
+    /// views.
     pub fn preview(&mut self) {
         let Some(s) = self.src.clone() else { return };
         if let Some((_, p)) = &self.pre {
@@ -646,8 +739,13 @@ impl Lab {
             true => self.timeline().map(|(tl, st)| (None, Some(tl), st)),
             false => crate::export::probe(&s.files[0]).and_then(|(fps, _)| {
                 let r = fps.num as f64 / fps.den as f64;
-                let k0 =
-                    crate::clip::frame_at(&shotlab::Clip::open(&s.files[0])?.times, self.range[0]);
+                let t = shotlab::Clip::open(&s.files[0])?.times;
+                let mut k0 = crate::clip::frame_at(&t, self.range[0]);
+                // Sky Swap starts its last frames before the out point: its maker stitches the first of them
+                if self.fx == Fx::Sky {
+                    let k1 = t.partition_point(|&x| x < self.range[1] - 1e-3);
+                    k0 = k0.max(k1.saturating_sub(SKY_SPAN + 1));
+                }
                 Ok((Some((self.maker(r, k0)?, k0)), None, st))
             }),
         };
@@ -839,7 +937,7 @@ impl Lab {
             .show(ui, |ui| {
                 ui.heading("Shot Lab");
                 for (i, (f, n, _, d)) in FXS.iter().enumerate() {
-                    if i == 7 {
+                    if i == 8 {
                         ui.separator();
                         ui.label("Editing presets");
                     }
@@ -1007,6 +1105,49 @@ impl Lab {
                         ui.label("Layout");
                         ui.checkbox(&mut p.tall, "Stacked");
                         ui.end_row();
+                    }
+                    Fx::Sky => {
+                        ui.label("Sky");
+                        ui.horizontal_wrapped(|ui| {
+                            for (i, g) in GRADS.iter().enumerate() {
+                                if ui
+                                    .selectable_label(self.sky.is_none() && p.grad == i, g.0)
+                                    .clicked()
+                                {
+                                    (p.grad, self.sky) = (i, None);
+                                }
+                            }
+                            if ui
+                                .add_enabled(self.dlg.is_none(), egui::Button::new("Picture…"))
+                                .on_hover_text(
+                                    "A 360 picture (equirect, 2:1; JPEG or PNG) to put in the sky",
+                                )
+                                .clicked()
+                            {
+                                let (tx, rx) = mpsc::channel();
+                                let ctx = self.ctx.clone();
+                                // the portal dialog blocks: off the UI thread
+                                thread::spawn(move || {
+                                    let f = rfd::FileDialog::new()
+                                        .add_filter("360 picture", &["jpg", "jpeg", "insp", "png"]);
+                                    let _ = tx.send(f.pick_file());
+                                    ctx.request_repaint();
+                                });
+                                self.dlg = Some(rx);
+                            }
+                            if let Some(f) = &self.sky {
+                                ui.monospace(
+                                    f.file_name()
+                                        .map_or(String::new(), |n| n.to_string_lossy().into()),
+                                );
+                            }
+                        });
+                        ui.end_row();
+                        sl(
+                            ui,
+                            "Match the scene",
+                            egui::Slider::new(&mut p.tone, 0.0..=1.0),
+                        );
                     }
                     Fx::StopMotion => {
                         sl(

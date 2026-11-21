@@ -5,9 +5,10 @@
 //! - Passes on equirect frames in stitch's layout (`Rgba8Unorm` or `Rgba16Float`, sRGB-encoded values), recorded into
 //!   the caller's command encoder like stitch and fx: [`Median`] (Remove Passerby), [`Trails`] (Flash Neon, Night
 //!   Road), [`Stack`] (Star Lapse), [`Delay`] (Frame Delay, time slice), [`Cuts`] (Shadow Clone, Clone Loop: the
-//!   subject cut out with a person segmentation network), [`Planets`] (Parallel Planet). Each turns into an
-//!   `export::Hook` (`hook`), which the exporter calls on every frame before it encodes it. They are meant for 360
-//!   output (`export::Out::Pano`); `Median`, `Trails` and `Delay` with `Map::Cols` / `Map::Rows` work on flat frames too.
+//!   subject cut out with a person segmentation network), [`Planets`] (Parallel Planet), [`Sky`] (Sky Swap: the sky
+//!   found by a segmentation network, a panorama in its place). Each turns into an `export::Hook` (`hook`), which the
+//!   exporter calls on every frame before it encodes it. They are meant for 360 output (`export::Out::Pano`);
+//!   `Median`, `Trails` and `Delay` with `Map::Cols` / `Map::Rows` work on flat frames too.
 //! - Editor timelines the exporter renders (`export::Cut::Edit`): [`cut`] (Stop Motion, Fly Lapse, Flip My Day, Spin
 //!   Me Around, Fly Out, Center Stage, Dolly Zoom, Overtake).
 //!
@@ -22,10 +23,12 @@ mod clip;
 mod clone;
 pub mod cut;
 mod seg;
+mod sky;
 mod stars;
 
 pub use clip::Clip;
 pub use clone::{Clones, Cuts};
+pub use sky::{MW, Sky, gradient};
 pub use stars::{Planets, Stack, align, image, series};
 
 use glam::Vec3;
