@@ -38,8 +38,8 @@ app. `ARCHITECTURE.md` describes the code, `TODO.md` what is open.
 
 ## Requirements
 
-- Linux on x86-64 with Wayland or X11, PipeWire, ALSA and D-Bus (BlueZ for Bluetooth); file dialogs come from
-  xdg-desktop-portal.
+- Linux on x86-64 with Wayland or X11, PipeWire 1.2 or newer, ALSA and D-Bus (BlueZ for Bluetooth); file dialogs
+  come from xdg-desktop-portal.
 - A GPU whose Vulkan driver decodes and encodes H.265 and H.264 (Vulkan Video). x5desk is developed on AMD graphics
   with Mesa's RADV (Mesa 26). NVIDIA's driver is not supported yet (the app's GPU self-test fails on its H.265
   decode), and Intel graphics are untested. Settings → Graphics shows what the app found.
@@ -49,8 +49,8 @@ app. `ARCHITECTURE.md` describes the code, `TODO.md` what is open.
 ## Install
 
 Download `x5desk-<version>-x86_64-linux.tar.gz` from the Releases page, unpack it and run `x5desk`. The binary is
-built on Ubuntu 24.04, so it needs glibc 2.39 or newer. The archive also holds this README, the licence and the
-licence texts of everything bundled (`licenses/`).
+built in Debian 13, so it needs glibc 2.41 or newer (Debian 13, Ubuntu 25.04, Fedora 42, Arch and later). The archive
+also holds this README, the licence and the licence texts of everything bundled (`licenses/`).
 
 To use the camera over USB, choose **Android App** on the camera's USB menu. x5desk talks to the camera directly, so
 your user needs access to the USB device. If the camera is not found, add a udev rule and plug the camera in again:
@@ -67,10 +67,11 @@ You need:
 - Rust 1.98.1 (what x5desk is developed with) or newer, from [rustup](https://rustup.rs).
 - Git LFS. Two model files are stored in LFS; without it the checkout holds pointer files and the build fails while
   importing the models.
-- A C toolchain, pkg-config, clang (for bindgen) and the development files of ALSA, D-Bus and PipeWire:
+- A C toolchain, pkg-config, clang (for bindgen) and the development files of ALSA, D-Bus and PipeWire 1.2 or newer
+  (Ubuntu 24.04's PipeWire 1.0 is too old: the link fails):
 
   ```bash
-  # Debian, Ubuntu (24.04 or newer)
+  # Debian 13, Ubuntu 25.04 or newer
   sudo apt install build-essential pkg-config clang libclang-dev git-lfs libasound2-dev libdbus-1-dev libpipewire-0.3-dev
   ```
 
@@ -95,7 +96,14 @@ cd x5desk && cargo build --release --locked -p app
 
 The app is `target/release/x5desk`. The workspace's release profile keeps line tables, which makes that binary about
 1.1 GB; `CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_PROFILE_RELEASE_STRIP=debuginfo cargo build --release --locked -p app`
-builds it without them, as the release workflow does (`.github/workflows/release.yml`).
+builds it without them.
+
+The release archive is built by `.github/release-linux.sh` in a Debian 13 container, on a GitHub runner for every
+`v<version>` tag (`.github/workflows/release.yml`) or by hand:
+
+```bash
+docker run --rm -v "$PWD:/src" -e CARGO_HOME=/src/target/cargo -e RUST=1.98.1 -e DIR=x5desk-local-x86_64-linux -e CARGO_PROFILE_RELEASE_DEBUG=0 -e CARGO_PROFILE_RELEASE_STRIP=debuginfo debian:13 /src/.github/release-linux.sh
+```
 
 The OBS source plugin is built separately and is not part of the release archive: `cargo build --release --locked -p
 obs` makes `target/release/libx5desk_obs.so`, which OBS loads as

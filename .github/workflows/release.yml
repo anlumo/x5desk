@@ -21,7 +21,6 @@ env:
 
 jobs:
   linux:
-    # glibc 2.39: the binary runs on distributions at least as new
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -50,69 +49,20 @@ jobs:
       - name: Disk space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
 
-      - name: Packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config clang libclang-dev libasound2-dev libdbus-1-dev libpipewire-0.3-dev
-
-      - name: Rust
-        run: rustup toolchain install "$RUST" --profile minimal && rustup default "$RUST"
-
       - uses: actions/cache@v6
         with:
           path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
+            ${{ runner.temp }}/cargo/registry/index
+            ${{ runner.temp }}/cargo/registry/cache
+            ${{ runner.temp }}/cargo/git/db
           key: cargo-${{ hashFiles('Cargo.lock') }}
 
+      # in Debian 13, for its glibc and PipeWire (release-linux.sh)
       - name: Build
-        run: cargo build --release --locked -p app
-
-      - name: Check
         run: |
-          if ldd target/release/x5desk | grep "not found"; then exit 1; fi
-          target/release/x5desk mcp --help > usage.txt
-          grep -q "usage: x5desk mcp" usage.txt
-          ls -l target/release/x5desk
-
-      # The licence texts of the bundled models and of every crate the Linux binary links, as each crate ships
-      # them; INDEX.txt lists them all with licence and source, also those whose package holds no licence file.
-      - name: Package
-        run: |
-          mkdir -p "$DIR/licenses/models" "$DIR/licenses/crates"
-          cp target/release/x5desk README.md LICENSE "$DIR/"
-          cp crates/*/models/LICENSE-* crates/media/src/aacenc/NOTICE-vo-aacenc "$DIR/licenses/models/"
-          python3 - "$DIR/licenses/crates" <<'EOF'
-          import json, pathlib, shutil, subprocess, sys
-
-          out = pathlib.Path(sys.argv[1])
-          m = json.loads(subprocess.check_output(
-              ["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", "x86_64-unknown-linux-gnu"]))
-          pk = {p["id"]: p for p in m["packages"]}
-          deps = {n["id"]: n["deps"] for n in m["resolve"]["nodes"]}
-          seen, todo = set(), [next(p["id"] for p in m["packages"] if p["name"] == "app" and p["source"] is None)]
-          while todo:
-              i = todo.pop()
-              if i not in seen:
-                  seen.add(i)
-                  todo += [d["pkg"] for d in deps[i] if any(k["kind"] != "dev" for k in d["dep_kinds"])]
-          rows = []
-          for p in sorted((pk[i] for i in seen if pk[i]["source"]), key=lambda p: (p["name"], p["version"])):
-              fs = [f for f in pathlib.Path(p["manifest_path"]).parent.iterdir() if f.is_file()
-                    and f.name.upper().startswith(("LICENSE", "LICENCE", "COPYING", "COPYRIGHT", "NOTICE", "UNLICENSE"))]
-              if fs:
-                  d = out / f'{p["name"]}-{p["version"]}'
-                  d.mkdir(parents=True)
-                  for f in fs:
-                      shutil.copy(f, d / f.name)
-              rows.append(f'{p["name"]} {p["version"]} | {p["license"] or "see its files"} | {p["repository"] or ""} | {len(fs)} file(s)')
-          (out / "INDEX.txt").write_text("\n".join(rows) + "\n")
-          EOF
-          tar -czf "$DIR.tar.gz" "$DIR"
-          sha256sum "$DIR.tar.gz" | tee "$DIR.tar.gz.sha256"
-          ls -l "$DIR.tar.gz"
+          docker run --rm -v "$PWD:/src" -v "$RUNNER_TEMP/cargo:/cargo" -e CARGO_HOME=/cargo \
+            -e RUST -e DIR -e CARGO_TERM_COLOR -e CARGO_PROFILE_RELEASE_DEBUG -e CARGO_PROFILE_RELEASE_STRIP \
+            debian:13 /src/.github/release-linux.sh
 
       - uses: actions/upload-artifact@v7
         with:
@@ -132,5 +82,5 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" "$DIR.tar.gz" "$DIR.tar.gz.sha256" --draft --verify-tag \
               --title "x5desk $GITHUB_REF_NAME" \
-              --notes "Linux x86-64 binary, built on Ubuntu 24.04 (glibc 2.39 or newer). Unpack it and run \`x5desk\`; requirements, the licence and the bundled models are in the README."
+              --notes "Linux x86-64 binary, built in Debian 13: it needs glibc 2.41 and PipeWire 1.2 or newer. Unpack it and run \`x5desk\`; requirements, the licence and the bundled models are in the README."
           fi
