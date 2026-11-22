@@ -143,7 +143,7 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
     closes 692 frame 56's gap, but on the reviewed views it trades 3 flagged blurs for 8 new ones (a parking sign's
     logo, bumper corners, a tail light) at +0.95 crops and +1.5 ms a searched frame, and 717's plate has no
     detection within 15° to follow.
-- [ ] **Corrupt frames from the hardware decoder.** The footage tests decoded with `ffmpeg -hwaccel vulkan` on the GPU
+- [x] **Corrupt frames from the hardware decoder.** The footage tests decoded with `ffmpeg -hwaccel vulkan` on the GPU
   the networks run on; while they ran, a run of frames up to the next key frame now and then came back corrupt (half
   the luma pixels off, 17–19 levels on average), differently in each process, and the stitcher's smoothed colour fit
   carried it to the end of the clip. This was the run-to-run "noise" of every unpaired GPU comparison so far; the
@@ -164,18 +164,39 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   load; its sync, DPB slots and coinciding copy read against the spec again, no defect. H.265 of 960 × 540 to
   1920 × 1088: 1.3–9 per 1000 pictures at full speed; H.264 1916 × 1076: 0 of 2,400; H.265 3840 × 2160 and the X5's
   3840²: 0 of 2,140. One picture per 20–30 ms: 0 of 4,800 while the card idles (P8, PCIe gen 1, no replays), 6 of
-  4,800 with a copy load holding it at P2 and gen 4 (replays). Crate video now asks for that status where the decode
-  family reports it (NVIDIA's; RADV's doesn't) and counts the failures in `Decoder::failed` (export's concealed
-  pictures; a strict export fails): on the 4090 41 for 39 wrong stretches in 34 passes, none in the right passes.
-  The link test (2026-11-22, `c1`–`c6` logs there): the user held the root port above the card at gen 3 from Linux
-  (`setpci` on 00:03.1, until the next reboot). The link stayed at gen 3 under load (gen 1 idle, never 4 in 3,344
+  4,800 with a copy load holding it at P2 and gen 4 (replays). The link test (2026-11-22, `c1`–`c6` logs there): the
+  user held the root port above the card at gen 3 from Linux (`setpci` on 00:03.1, until the next reboot). The link
+  stayed at gen 3 under load (gen 1 idle, never 4 in 3,344
   samples) and its errors stopped (5 replays in 28 minutes of jobs, no rollover), the failures didn't: FFmpeg's Vulkan
   decode wrong in 9 of 43 runs (0.97 per 1000 pictures; gen 4: 25 of 33, 4.3), ours alone at full speed 0 of 9,600
   (gen 4: 40 of 12,000), ours at one picture per 20 ms beside a CUDA copy loop 90 of 4,800 (gen 4: 8). They follow
   host-to-device traffic beside the decode: with an upload-only loop 184 of 4,800 paced and 63 of 4,800 at full speed,
   with a download-only loop 5 and 17; with the upload loop NVDEC through CUDA 0 of 30 runs, FFmpeg's Vulkan decode 10
   of 30. So a driver fault of its own, which the link's errors at gen 4 helped trigger. Guess: the Vulkan decode gives
-  a picture up when something it reads from system memory arrives late. Open: NVIDIA's side (report drafted).
+  a picture up when something it reads from system memory arrives late. Crate video recovers from it (2026-11-22,
+  `r*` logs there): where the decode family reports a result status (NVIDIA's; RADV's doesn't), a checker thread
+  per decoder makes a frame ready only once its decode's status is complete, and redoes an unfinished decode and
+  those after it in flight before any of them is handed out, recorded anew and reading the bitstream from device
+  memory; spare DPB images keep what unchecked decodes read (`Decoder::phys`, also inside H.265's RPS). On the 4090
+  at gen 3 beside one or two CUDA upload loops: 56,400 H.265 decodes (960 × 540 to 1920 × 1088, 3–40 Mbit/s, one and
+  two decoders, paced and full speed) with 809 unfinished ones redone, the sample clips' lens pairs (3,880 decodes)
+  and v635's proxy (2,595, 7 redone): every picture FFmpeg's, none given up. Three flat 1080p exports of v606 under
+  the upload loop, each with a redo, are byte-identical to two without load. Ways that didn't work: submitting the
+  kept command buffer again broke NVIDIA's decoder for good (every later P picture wrong, IDRs apart); remapped DPB
+  slots without the RPS's slot indices remapped too broke H.265; redos reading the bitstream from host memory gave up
+  after 3 tries on 284 of 2,542 under the upload loop (IDR pictures mostly, the largest), none since they read from
+  device memory (in other time windows: the failure rate under the same load varies a lot from window to window).
+  `Decoder::redone` counts the pictures recovered, `Decoder::failed` the decodes given up after 3 and those a checker
+  that ended in an error let go (`decode` then returns the error; crate video's `redo_error`); a test hook
+  (`Decoder::fake`) marks chosen decodes unfinished or ends the checker (crate video's `redo`: two decoders, a
+  restart, parked bodies). Where decode and encode share a queue (not NVIDIA's), decodes are only counted: a redo
+  there could deadlock behind an encode batch. Without Resizable BAR the redo buffers' heap is 256 MiB (32 MiB a
+  decoder); later decoders redo from host memory (the first redo's log line says which). Healthy path: decode
+  throughput the same within noise on both GPUs (crate video's `throughput` on the 4090 122.7 / 123.2 pairs/s, the
+  Radeon 85.2 / 85.2; decode alone on the 4090 1916 × 1076 0.146 / 0.149 s per 240 frames with the decoder made each
+  pass, v635's lenses 1.456 / 1.457 s); the Radeon's decode commands are the ones before, its output byte-identical
+  to FFmpeg's (crate video's tests, 3,206 decodes of the streams above). Left: NVIDIA's side (report drafted); the
+  footage tests of crates track and stab still decode in software, which they could leave now (a decision).
 - [x] **No export on the RTX 4090.** NVIDIA's driver offers H.264 and H.265 decode only with DPB and output images
   coinciding. Crate video now decodes that way too (`decode::coincide`): a picture decodes into its DPB slot and the
   same decode submit copies it into the ring texture (the decode family needs transfer; NVIDIA's has it), so DPB
@@ -209,15 +230,15 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   elsewhere (blurred against sharp away from the faces at QP 18: 0.290 at level 2 in 3 runs, 0.248 at 0, the Radeon
   0.014; the frames before the encoder are the same there on both, and the difference shrinks with the QP, 0.184 at 10,
   0.062 at 1). Left:
-  - This card's Vulkan decode now and then stops a picture partway and signals it done; the pictures after it are
-    wrong to the next IDR ("Corrupt frames from the hardware decoder"). FFmpeg's Vulkan decode too, NVDEC through
-    CUDA never. `Decoder::failed` counts them; nothing recovers them. The driver's fault, not the link's: held at gen
-    3 the OcuLink link (x4; at gen 4 under load 5–45 replay rollovers a second, and one 256 MiB upload wrong in 7,968
-    words of about 900 GiB checked each way) shows no errors and no wrong word in about 670 GiB up and 590 GiB down,
-    and the decode still fails, most beside host-to-device traffic (see that item). Gen 3 doesn't make the card fit
-    for decoding: a busy link still breaks pictures. Report for NVIDIA drafted, not sent
-    (`target/level-scratch/dec/nvidia-report.txt`; FFmpeg-only `repro.sh`). Else: decode on the Radeon and run the
-    networks on the 4090, or decode through NVDEC with CUDA (a second backend).
+  - This card's Vulkan decode now and then stops a picture partway and signals it done (FFmpeg's Vulkan decode too,
+    NVDEC through CUDA never). Crate video redoes such a decode before its frame or any that references it is handed
+    out ("Corrupt frames from the hardware decoder": no wrong picture in 62,875 decodes under an upload loop, 816
+    redone); one still unfinished after 3 redos counts in `Decoder::failed`. The driver's fault, not the link's: held
+    at gen 3 the OcuLink link (x4; at gen 4 under load 5–45 replay rollovers a second, and one 256 MiB upload wrong in
+    7,968 words of about 900 GiB checked each way) shows no errors and no wrong word in about 670 GiB up and 590 GiB
+    down, and the decode still fails, most beside host-to-device traffic. Report for NVIDIA drafted, not sent
+    (`target/level-scratch/dec/nvidia-report.txt`; FFmpeg-only `repro.sh`). Unmeasured at gen 4 (the user's cap held
+    through every run); whether the app takes the 4090 for decoding again is a decision.
   - Mesa 26.3.1 writes corrupt H.265 at quality level 3 under constant QP too (PSNR 7 to 15 dB in the level sweep);
     `Encoder::levels` still allows it there, nothing asks for it.
   - DMA-BUF: NV12 in NVIDIA's tallest block-linear modifier (`0x300000000606015`) at 1920 × 1080 doesn't survive a

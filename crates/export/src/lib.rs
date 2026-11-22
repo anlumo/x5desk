@@ -78,9 +78,11 @@ static LOCKS: OnceLock<(&'static RwLock<()>, &'static Mutex<()>)> = OnceLock::ne
 /// Makes every job take a host's locks around its GPU work; call once, before the first job. wgpu fails a surface
 /// configure while another thread submits, so a host that retries it holds `gate` exclusively, after `burn` (the app,
 /// `GATE` and `BURN` in its main.rs). The job's threads hold `gate` shared around each submit of their own and `burn`
-/// around the RAFT model's loading and each flow (burn submits throughout). They never wait for another thread while
-/// holding `gate` (a decoder's wait for a slot, ≤ 50 ms, is for a release the renderer makes without it) and take
-/// nothing while holding it.
+/// around the RAFT model's loading and each flow (burn submits throughout). While holding `gate` they wait only for
+/// what needs no `gate`: a decoder's wait for a slot (≤ 50 ms) is for a release the renderer makes without it, and
+/// where decodes are checked (NVIDIA) for its checker thread, which takes none of the host's locks (a short lock
+/// around host work; before a seek, an in-band parameter set or with no spare DPB image, until the decodes in flight
+/// are checked, or the checker's error). They take none of the host's other locks while holding it.
 pub fn locks(gate: &'static RwLock<()>, burn: &'static Mutex<()>) {
     let _ = LOCKS.set((gate, burn));
 }
@@ -1350,7 +1352,7 @@ fn decode(
             let n = nals(&buf, nal[l], &mut au);
             f[l] = loop {
                 // its flush submits on wgpu's queue; the slot it waits for (≤ 50 ms) the renderer releases without
-                // the gate
+                // the gate, and its checker (checked decodes) needs no gate either
                 let r = {
                     let _g = gate();
                     d[l].decode(g, &au[..n])

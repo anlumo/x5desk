@@ -1149,6 +1149,188 @@ fn x26x_matches_ffmpeg() {
     }
 }
 
+/// Where decodes are checked (NVIDIA), decodes marked unfinished (`Decoder::fake`, runs of them too) are redone before
+/// their frames are ready: two decoders running ahead at once, one restarted between two marked frames, then two made
+/// again from the parked bodies; every picture still FFmpeg's, `redone` counts them, `failed` none.
+#[test]
+fn redo() {
+    if !ffmpeg() {
+        return;
+    }
+    let _l = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    let g = Gpu::new().unwrap();
+    let (w, h) = (720, 404);
+    let fs = w * h * 3 / 2;
+    let x265 =
+        "-c:v libx265 -x265-params keyint=30:min-keyint=30:bframes=0:ref=2:log-level=error -f hevc";
+    for (codec, name, args) in [
+        (Codec::H265, "x265", x265),
+        (
+            Codec::H264,
+            "x264",
+            "-c:v libx264 -bf 0 -refs 3 -g 30 -f h264",
+        ),
+    ] {
+        let o = Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=size={w}x{h}:rate=30"))
+            .args(["-frames:v", "90", "-pix_fmt", "yuv420p"])
+            .args(args.split(' '))
+            .arg("-")
+            .output()
+            .unwrap();
+        if !o.status.success() {
+            println!("{name}: skipped, {}", String::from_utf8_lossy(&o.stderr));
+            continue;
+        }
+        let aus = annexb(codec, &o.stdout);
+        let mut ff = ffdecode(codec, o.stdout.clone(), None);
+        let mut want = vec![0; fs * aus.len()];
+        ff.read_exact(&mut want).unwrap();
+        let want: Vec<_> = want.chunks(fs).map(hash).collect();
+        let params: Vec<_> = aus[0]
+            .iter()
+            .copied()
+            .filter(|n| is_param(codec, n))
+            .collect();
+        // the AUs each decoder takes: all; the first 20, then from the IDR at 30 after a restart (frames 19 | 20)
+        let runs: [Vec<usize>; 2] = [(0..90).collect(), (0..20).chain(30..90).collect()];
+        let fakes = [1, 2, 3, 9, 19, 20, 33, 59, 60, 61];
+        for round in 0..2 {
+            let mut d: Vec<_> = (0..2)
+                .map(|_| Decoder::new(&g, codec, &params, 0, 0).unwrap())
+                .collect();
+            let checked = fakes.iter().all(|&f| d.iter().all(|d| d.fake(f, false)));
+            let (mut got, mut q) = (
+                [vec![], vec![]],
+                [(); 2].map(|_| std::collections::VecDeque::new()),
+            );
+            let mut take =
+                |d: &Decoder, l: usize, q: &mut std::collections::VecDeque<(usize, u64)>| {
+                    let (j, f) = q.pop_front().unwrap();
+                    d.acquire(&g, f);
+                    got[l].push((j, hash(&read(&g, d, d.view, f))));
+                    d.release(&g, f);
+                };
+            for i in 0..90 {
+                for l in 0..2 {
+                    let Some(&j) = runs[l].get(i) else { continue };
+                    if j == 30 && l == 1 {
+                        d[1].restart();
+                    }
+                    let f = decode(&g, &mut d[l], &aus[j]);
+                    q[l].push_back((j, f));
+                    // running ahead: a frame is read once the ring is nearly full
+                    while q[l].len() + 1 >= d[l].slots() {
+                        take(&d[l], l, &mut q[l]);
+                    }
+                }
+            }
+            for l in 0..2 {
+                while !q[l].is_empty() {
+                    take(&d[l], l, &mut q[l]);
+                }
+            }
+            for (l, d) in d.iter().enumerate() {
+                let bad = got[l].iter().filter(|&&(j, x)| want[j] != x).count();
+                println!(
+                    "{name} round {round} decoder {l}: {} pictures, {bad} not FFmpeg's, {} redone, {} failed{}",
+                    got[l].len(),
+                    d.redone(),
+                    d.failed(),
+                    if checked {
+                        ""
+                    } else {
+                        " (decodes not checked here)"
+                    }
+                );
+                assert_eq!(
+                    (bad, d.failed()),
+                    (0, 0),
+                    "{name} round {round} decoder {l}"
+                );
+                assert!(
+                    !checked || d.redone() >= fakes.len() as u64,
+                    "{name}: too few redone"
+                );
+            }
+        }
+    }
+}
+
+/// Where decodes are checked: a checker that ends in an error (`Decoder::fake` with `err`) lets the frames it had not
+/// checked go as failed, `decode` returns its error from then on, reading those frames and dropping the decoder end,
+/// and the next decoder decodes as before.
+#[test]
+fn redo_error() {
+    if !ffmpeg() {
+        return;
+    }
+    let _l = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    let g = Gpu::new().unwrap();
+    let (w, h) = (720, 404);
+    let o = Command::new("ffmpeg")
+        .args(["-v", "error", "-f", "lavfi", "-i"])
+        .arg(format!("testsrc2=size={w}x{h}:rate=30"))
+        .args(["-frames:v", "60", "-pix_fmt", "yuv420p", "-c:v", "libx265"])
+        .args([
+            "-x265-params",
+            "keyint=30:bframes=0:log-level=error",
+            "-f",
+            "hevc",
+            "-",
+        ])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let aus = annexb(Codec::H265, &o.stdout);
+    let params: Vec<_> = (aus[0].iter())
+        .copied()
+        .filter(|n| is_param(Codec::H265, n))
+        .collect();
+    let mut d = Decoder::new(&g, Codec::H265, &params, 0, 0).unwrap();
+    if !d.fake(5, true) {
+        println!("decodes not checked here: skipped");
+        return;
+    }
+    let take = |d: &Decoder, f| {
+        d.acquire(&g, f);
+        read(&g, d, d.view, f);
+        d.release(&g, f);
+    };
+    let (mut q, mut err, mut n) = (std::collections::VecDeque::new(), None, 0);
+    for au in &aus {
+        match d.decode(&g, au) {
+            Ok(f) => q.push_back(f),
+            Err(e) => {
+                err = Some(e);
+                break;
+            }
+        }
+        n += 1;
+        while q.len() + 1 >= d.slots() {
+            take(&d, q.pop_front().unwrap());
+        }
+    }
+    while let Some(f) = q.pop_front() {
+        take(&d, f);
+    }
+    println!(
+        "decode's error after {n} frames: {err:?}; {} failed, {} redone",
+        d.failed(),
+        d.redone()
+    );
+    assert!(matches!(err, Some(Error::Vk(_))) && d.failed() > 0);
+    assert!(matches!(d.decode(&g, &aus[n]), Err(Error::Vk(_))));
+    drop(d);
+    let mut d = Decoder::new(&g, Codec::H265, &params, 0, 0).unwrap();
+    for au in &aus[..10] {
+        let f = decode(&g, &mut d, au);
+        take(&d, f);
+    }
+    assert_eq!((d.failed(), d.frame), (0, 10));
+}
+
 /// An H.265 Main 10 MP4 in `X5_MAIN10` (e.g. an export with one of the app's default presets, 5.7K / 8K): P010
 /// textures, every frame of the first video track byte-identical to FFmpeg's `p010le` (the low 6 bits included).
 #[test]

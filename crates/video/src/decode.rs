@@ -9,6 +9,12 @@
 //! - Timeline `done`: the decode of frame f signals f + 1. Timeline `free`: each wgpu submit that samples f waits for
 //!   `done ≥ f + 1` (`Ring::acquire`), the next submit after the last of them signals f + 1 (`Ring::release`); the
 //!   decode into a slot waits for `free` and `done` from the frame that used the slot before.
+//! - Where the decode family reports a decode's result status (NVIDIA), a decode submit signals the decoder's own
+//!   timeline instead, and its checker thread signals `done` for a frame once its status is complete. A decode the
+//!   driver signalled unfinished (620.73 on the RTX 4090 now and then: cut off at some CTU) is recorded and submitted
+//!   again with every decode after it, before any of them reaches `done`, reading its bitstream from device memory;
+//!   what they are made of is kept (`Rec`), and a DPB slot that an unchecked decode reads is not set up again until
+//!   then (spare slots, `Decoder::phys`).
 //! - A dropped decoder's memory is kept for the next decoder of its shape (`Bin`) instead of freed.
 pub use crate::pic::{Codec, MAXS, OUT};
 pub(crate) use crate::pic::{Pic, Ref};
@@ -20,16 +26,19 @@ use crate::{
 use ash::vk::{self, native::*};
 use std::{
     cell::Cell,
+    collections::VecDeque,
     ffi::c_void,
     mem::take,
     ptr,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Condvar, Mutex, MutexGuard, Weak},
+    thread::JoinHandle,
 };
 use wgpu_hal::api::Vulkan as Vk;
 
 const BS: u64 = 8 << 20; // bitstream bytes per access unit
 const WAIT: u64 = 50_000_000; // ns decode() waits for its slot before returning Full
 const PARK: usize = 2; // parked bodies and rings per shape: a deck's two lenses, while another deck opens
+const TRIES: u8 = 3; // redos of a decode the driver leaves unfinished before it counts as failed
 const NV12: vk::Format = vk::Format::G8_B8R8_2PLANE_420_UNORM;
 const P010: vk::Format = vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
 const RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
@@ -50,6 +59,7 @@ struct Body {
     session: vk::VideoSessionKHR,
     bs: vk::Buffer,
     map: *mut u8,
+    rbs: (vk::Buffer, *mut u8, bool),
     pool: vk::CommandPool,
     cbs: Vec<vk::CommandBuffer>,
     qp: vk::QueryPool,
@@ -57,6 +67,336 @@ struct Body {
 
 // `map` points into host-coherent memory that only its decoder touches
 unsafe impl Send for Body {}
+
+/// A decode's commands as `record` makes them: frame, ring slot, references (`n`) and setup slot with their DPB
+/// images and Std infos, picture info, slice offsets, bitstream range, coded size, session reset, parameters.
+struct Rec {
+    f: u64,
+    k: usize,
+    n: usize,
+    slot: [u8; MAXS],
+    p5: StdVideoDecodeH265PictureInfo,
+    p4: StdVideoDecodeH264PictureInfo,
+    r5: [StdVideoDecodeH265ReferenceInfo; MAXS],
+    r4: [StdVideoDecodeH264ReferenceInfo; MAXS],
+    offs: Vec<u32>,
+    range: u64,
+    ext: vk::Extent2D,
+    reset: bool,
+    params: vk::VideoSessionParametersKHR,
+}
+
+/// What a decode's commands take of its decoder, shared with the checker.
+struct Kit {
+    dev: ash::Device,
+    vq: ash::khr::video_queue::Device,
+    vdq: ash::khr::video_decode_queue::Device,
+    session: vk::VideoSessionKHR,
+    bs: vk::Buffer,
+    map: *mut u8,
+    rbs: (vk::Buffer, *mut u8, bool),
+    slot: usize,
+    dpb: Vec<(vk::Image, vk::ImageView)>,
+    imgs: Vec<vk::Image>,
+    views: Vec<vk::ImageView>,
+    co: bool,
+    h265: bool,
+    qp: vk::QueryPool,
+}
+
+// the decode thread writes a bitstream slot only once its last decode is checked, the checker the redo buffer only
+unsafe impl Send for Kit {}
+unsafe impl Sync for Kit {}
+
+/// Records decode `e` into `cb`: the output image leaves home (still UNDEFINED before its first decode), the setup
+/// slot's old picture is dead; the decode (in the result status query where there is one), coinciding the copy of the
+/// setup slot into the output image; both back. `once`: never submitted again. `redo`: from the redo bitstream buffer.
+unsafe fn record(x: &Kit, cb: vk::CommandBuffer, e: &Rec, once: bool, redo: bool) -> Result<()> {
+    let (n, k, ext) = (e.n, e.k, e.ext);
+    let mut d5 = [vk::VideoDecodeH265DpbSlotInfoKHR::default(); MAXS];
+    let mut d4 = [vk::VideoDecodeH264DpbSlotInfoKHR::default(); MAXS];
+    let mut res = [vk::VideoPictureResourceInfoKHR::default(); MAXS];
+    let mut sl = [vk::VideoReferenceSlotInfoKHR::default(); MAXS];
+    for j in 0..=n {
+        let p = e.slot[j] as usize;
+        d5[j].p_std_reference_info = &e.r5[j];
+        d4[j].p_std_reference_info = &e.r4[j];
+        res[j] = vk::VideoPictureResourceInfoKHR::default()
+            .coded_extent(ext)
+            .image_view_binding(x.dpb[p].1);
+        sl[j] = vk::VideoReferenceSlotInfoKHR {
+            p_next: if x.h265 {
+                &d5[j] as *const _ as *const c_void
+            } else {
+                &d4[j] as *const _ as *const c_void
+            },
+            slot_index: p as i32,
+            p_picture_resource: &res[j],
+            ..Default::default()
+        };
+    }
+    // the setup slot: index -1 in begin, its index in decode
+    let setup = sl[n];
+    sl[n].slot_index = -1;
+    let i5 = vk::VideoDecodeH265PictureInfoKHR::default()
+        .std_picture_info(&e.p5)
+        .slice_segment_offsets(&e.offs);
+    let i4 = vk::VideoDecodeH264PictureInfoKHR::default()
+        .std_picture_info(&e.p4)
+        .slice_offsets(&e.offs);
+    let mut dec = vk::VideoDecodeInfoKHR::default()
+        .src_buffer(if redo { x.rbs.0 } else { x.bs })
+        .src_buffer_offset((k * x.slot) as u64)
+        .src_buffer_range(e.range)
+        .dst_picture_resource(match x.co {
+            true => res[n],
+            false => vk::VideoPictureResourceInfoKHR::default()
+                .coded_extent(ext)
+                .image_view_binding(x.views[k]),
+        })
+        .setup_reference_slot(&setup)
+        .reference_slots(&sl[..n]);
+    dec.p_next = if x.h265 {
+        &i5 as *const _ as *const c_void
+    } else {
+        &i4 as *const _ as *const c_void
+    };
+    let (all, d, vq) = (vk::PipelineStageFlags::ALL_COMMANDS, &x.dev, x.vq.fp());
+    let none = vk::DependencyFlags::empty();
+    let once = match once {
+        true => vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+        false => vk::CommandBufferUsageFlags::empty(),
+    };
+    unsafe {
+        d.begin_command_buffer(cb, &vk::CommandBufferBeginInfo::default().flags(once))?;
+        // the global barrier makes the earlier decodes' DPB writes visible to this one's reference reads: an image
+        // barrier's access scopes cover only its own image
+        let home = match e.f < x.imgs.len() as u64 {
+            true => vk::ImageLayout::UNDEFINED,
+            false => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
+        let (out, s) = (x.imgs[k], x.dpb[e.slot[n] as usize].0);
+        let (dpb, src) = (
+            vk::ImageLayout::VIDEO_DECODE_DPB_KHR,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+        );
+        let to = match x.co {
+            true => vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            false => vk::ImageLayout::VIDEO_DECODE_DST_KHR,
+        };
+        let bars = [
+            barrier(out, home, to),
+            barrier(s, vk::ImageLayout::UNDEFINED, dpb),
+        ];
+        let mem = [vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+            .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)];
+        d.cmd_pipeline_barrier(cb, all, all, none, &mem, &[], &bars);
+        let begin = vk::VideoBeginCodingInfoKHR::default()
+            .video_session(x.session)
+            .video_session_parameters(e.params)
+            .reference_slots(&sl[..=n]);
+        let (qp, q) = (x.qp, x.qp != vk::QueryPool::null());
+        if q {
+            d.cmd_reset_query_pool(cb, qp, k as u32, 1);
+        }
+        (vq.cmd_begin_video_coding_khr)(cb, &begin);
+        if e.reset {
+            (vq.cmd_control_video_coding_khr)(
+                cb,
+                &vk::VideoCodingControlInfoKHR::default()
+                    .flags(vk::VideoCodingControlFlagsKHR::RESET),
+            );
+        }
+        if q {
+            d.cmd_begin_query(cb, qp, k as u32, vk::QueryControlFlags::empty());
+        }
+        (x.vdq.fp().cmd_decode_video_khr)(cb, &dec);
+        if q {
+            d.cmd_end_query(cb, qp, k as u32);
+        }
+        (vq.cmd_end_video_coding_khr)(cb, &vk::VideoEndCodingInfoKHR::default());
+        if x.co {
+            // the slot goes back to the DPB layout after: layout transitions keep its picture
+            d.cmd_pipeline_barrier(cb, all, all, none, &[], &[], &[barrier(s, dpb, src)]);
+            let cp = [
+                (vk::ImageAspectFlags::PLANE_0, 1),
+                (vk::ImageAspectFlags::PLANE_1, 2),
+            ]
+            .map(|(aspect_mask, q)| {
+                let l = vk::ImageSubresourceLayers {
+                    aspect_mask,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                };
+                vk::ImageCopy::default()
+                    .src_subresource(l)
+                    .dst_subresource(l)
+                    .extent(vk::Extent3D {
+                        width: ext.width / q,
+                        height: ext.height / q,
+                        depth: 1,
+                    })
+            });
+            d.cmd_copy_image(cb, s, src, out, to, &cp);
+        }
+        let back = [
+            barrier(out, to, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+            barrier(s, src, dpb),
+        ];
+        let nb = 1 + x.co as usize;
+        d.cmd_pipeline_barrier(cb, all, all, none, &[], &[], &back[..nb]);
+        d.end_command_buffer(cb)?;
+    }
+    Ok(())
+}
+
+/// A decode not yet checked: its commands, the DPB images it reads (bits), its last submit's value on `Chk::dec`,
+/// its redos.
+struct Fly {
+    e: Rec,
+    refs: u32,
+    seq: u64,
+    n: u8,
+}
+
+/// The unchecked decodes in submit order, the counts (`Decoder::redone`, `failed`), test marks (`Decoder::fake`), a
+/// checker's error, under `Chk::st`.
+#[derive(Default)]
+struct Flight {
+    q: VecDeque<Fly>,
+    seq: u64,
+    redone: u64,
+    failed: u64,
+    fake: Vec<(u64, bool)>,
+    err: Option<vk::Result>,
+    said: bool,
+    stop: bool,
+}
+
+/// What a decoder shares with its checker thread (`check`).
+struct Chk {
+    st: Mutex<Flight>,
+    cv: Condvar,
+    dec: vk::Semaphore,
+}
+
+impl Chk {
+    fn lock(&self) -> MutexGuard<'_, Flight> {
+        self.st.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// The checker thread: takes the unchecked decodes in order; once a decode's last submit is done, a complete status
+/// signals `done` for its frame, anything else (the driver signalled it unfinished) records it and every decode after
+/// it again into `cbs` and submits them, reading what they read the first time (`Decoder::phys`). Recorded anew:
+/// NVIDIA's driver (620.73) breaks for good on a command buffer submitted twice, every P picture after it wrong. After
+/// `TRIES` redos a decode counts as failed and goes out as it is. An error ends it: kept for `decode` to return, and
+/// every unchecked frame goes out as failed (`done` reaches the last, `failed` counts them), so that nothing waits
+/// for a checker that is gone. Its lock is held for host work only: the decode thread waits on it under export's
+/// `gate`.
+fn check(
+    c: Arc<Chk>,
+    x: Arc<Kit>,
+    queue: Arc<Mutex<vk::Queue>>,
+    cbs: Vec<vk::CommandBuffer>,
+    done: vk::Semaphore,
+) {
+    let dev = &x.dev;
+    // Ok(false): stopped
+    let till = |v| loop {
+        let (s, v) = ([c.dec], [v]);
+        let i = vk::SemaphoreWaitInfo::default().semaphores(&s).values(&v);
+        match unsafe { dev.wait_semaphores(&i, 100_000_000) } {
+            Ok(()) => return Ok(true),
+            Err(vk::Result::TIMEOUT) if !c.lock().stop => {}
+            Err(vk::Result::TIMEOUT) => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    };
+    let signal = |f: u64| unsafe {
+        let i = vk::SemaphoreSignalInfo::default()
+            .semaphore(done)
+            .value(f + 1);
+        dev.signal_semaphore(&i)
+    };
+    let r = (|| loop {
+        let (f, k, seq, n) = {
+            let mut s = c.lock();
+            loop {
+                match (s.q.front(), s.stop) {
+                    (Some(u), _) => break (u.e.f, u.e.k, u.seq, u.n),
+                    (None, true) => return Ok(()),
+                    _ => s = c.cv.wait(s).unwrap_or_else(|e| e.into_inner()),
+                }
+            }
+        };
+        if !till(seq)? {
+            return Ok(());
+        }
+        let (mut v, fl) = ([0i32], vk::QueryResultFlags::WITH_STATUS_KHR);
+        // not ready once its decode is done: the driver never finished it
+        let ok = unsafe { dev.get_query_pool_results(x.qp, k as u32, &mut v, fl) }.is_ok()
+            && v[0] == vk::QueryResultStatusKHR::COMPLETE.as_raw();
+        let last = {
+            let mut s = c.lock();
+            let fake = (s.fake.iter().position(|y| y.0 == f)).map(|i| s.fake.swap_remove(i).1);
+            if fake == Some(true) {
+                return Err(vk::Result::ERROR_UNKNOWN);
+            }
+            if ok && fake.is_none() || n >= TRIES {
+                (s.failed, s.redone) = (s.failed + !ok as u64, s.redone + (ok && n > 0) as u64);
+                s.q.pop_front();
+                signal(f)?;
+                continue;
+            }
+            s.seq
+        };
+        // everything submitted so far done first (`cbs` are free again), the decode thread free meanwhile
+        if !till(last)? {
+            return Ok(());
+        }
+        let mut s = c.lock();
+        if !std::mem::replace(&mut s.said, true) {
+            let m = if x.rbs.2 { "device" } else { "host" };
+            eprintln!(
+                "video: frame {f}'s decode came back unfinished (the driver); redone from {m} memory"
+            );
+        }
+        s.seq += 1;
+        s.q[0].n += 1;
+        let (sv, mut cb) = ([s.seq], vec![]);
+        for (e, &b) in s.q.iter_mut().zip(&cbs) {
+            e.seq = sv[0];
+            // the redo reads its bitstream from device memory: a decode that reads it over a busy PCIe link fails more
+            let o = e.e.k * x.slot;
+            unsafe { ptr::copy_nonoverlapping(x.map.add(o), x.rbs.1.add(o), e.e.range as usize) };
+            unsafe { record(&x, b, &e.e, true, true) }.map_err(|e| match e {
+                Error::Vk(r) => r,
+                _ => vk::Result::ERROR_UNKNOWN,
+            })?;
+            cb.push(b);
+        }
+        let mut tl = vk::TimelineSemaphoreSubmitInfo::default().signal_semaphore_values(&sv);
+        let ss = [c.dec];
+        let submit = vk::SubmitInfo::default()
+            .command_buffers(&cb)
+            .signal_semaphores(&ss)
+            .push_next(&mut tl);
+        let q = queue.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { dev.queue_submit(*q, &[submit], vk::Fence::null()) }?;
+    })();
+    if let Err(e) = r {
+        let mut s = c.lock();
+        s.err = Some(e);
+        s.failed += s.q.len() as u64;
+        if let Some(u) = s.q.back() {
+            let _ = signal(u.e.f);
+        }
+        s.q.clear();
+    }
+}
 
 impl Body {
     /// Destroys it; nothing of it is in flight.
@@ -68,6 +408,7 @@ impl Body {
                 d.destroy_image(img, None);
             }
             d.destroy_buffer(self.bs, None);
+            d.destroy_buffer(self.rbs.0, None);
             d.destroy_command_pool(self.pool, None);
             d.destroy_query_pool(self.qp, None);
             for &m in &self.mem {
@@ -302,21 +643,27 @@ pub struct Decoder {
     co: bool, // DPB and output coincide: a picture decodes into its DPB slot, then is copied into the ring
     st: St,
     refs: Vec<Ref>,
+    // DPB image of each of the parsers' slots (`refs`): the same index unless checked, where the spares in `dpb` stand
+    // in for a slot whose image an unchecked decode still reads
+    phys: Vec<u8>,
     dpb: Vec<(vk::Image, vk::ImageView)>,
     mem: Vec<vk::DeviceMemory>, // session, DPB and bitstream memory
     session: vk::VideoSessionKHR,
     params: vk::VideoSessionParametersKHR,
     bs: vk::Buffer,
     map: *mut u8,
-    slot: usize,  // bitstream bytes per ring slot
-    align: usize, // bitstream size alignment
+    rbs: (vk::Buffer, *mut u8, bool), // checked: the redos' bitstream buffer, in device memory (a type allowed it)
+    slot: usize,                      // bitstream bytes per ring slot
+    align: usize,                     // bitstream size alignment
     pool: vk::CommandPool,
     cbs: Vec<vk::CommandBuffer>,
     offs: Vec<u32>,
     reset: bool,
     qp: vk::QueryPool, // a result status query per ring slot, null where the decode family has none
-    // frames whose status is checked, those of them not decoded (`failed`)
-    chk: Cell<[u64; 2]>,
+    kit: Option<Arc<Kit>>,
+    // with `qp` but no checker (decode and encode share the queue): frames whose status is counted, those not complete
+    seen: Cell<[u64; 2]>,
+    chk: Option<(Arc<Chk>, JoinHandle<()>, vk::CommandPool)>, // with `qp`; the pool of its redos
     // its shape once whole, and where its body parks
     shape: Option<Shape>,
     bin: Weak<Mutex<Bin>>,
@@ -382,6 +729,18 @@ pub(crate) fn coincide(
         _ if dc.contains(D::DPB_AND_OUTPUT_COINCIDE) && copy() => Some(true),
         _ => None,
     }
+}
+
+/// Decodes are checked, and those left unfinished redone (`check`), where the decode family reports a decode's result
+/// status (NVIDIA's does; RADV's doesn't, and a query there hangs), unless decode and encode share the queue: there a
+/// redo, and the checker's wait for the decodes before it, would queue behind an encode batch that waits for frames
+/// the renderer fills only once their decodes are checked. There a failure is only counted (`Decoder::failed`).
+fn checked(g: &Gpu) -> bool {
+    status(g)
+        && !g
+            .enc
+            .as_ref()
+            .is_some_and(|e| Arc::ptr_eq(&e.queue, &g.dec.queue))
 }
 
 /// The decode family reports a decode's result status (NVIDIA's does; RADV's doesn't, and a query there hangs).
@@ -524,6 +883,12 @@ impl Decoder {
                 return Err(Bad("picture larger than the driver decodes"));
             }
             let slots = slots.min(caps.max_dpb_slots as usize).min(MAXS);
+            // checked: a spare image per decode in flight, for the slots unchecked decodes read
+            let (stat, chkd) = (status(g), checked(g));
+            let np = match chkd {
+                true => (slots + out).min(caps.max_dpb_slots as usize).min(MAXS),
+                false => slots,
+            };
             let hd = g.device.as_hal::<Vk>().ok_or(Bad("not a Vulkan device"))?;
             let shape = (codec, idc, deep, w, h, slots, out);
             let bin = || g.bin.lock().unwrap_or_else(|e| e.into_inner());
@@ -670,12 +1035,14 @@ impl Decoder {
                 co,
                 st,
                 refs: vec![Ref::default(); slots],
+                phys: (0..slots as u8).collect(),
                 dpb: vec![],
                 mem: vec![],
                 session: vk::VideoSessionKHR::null(),
                 params: vk::VideoSessionParametersKHR::null(),
                 bs: vk::Buffer::null(),
                 map: ptr::null_mut(),
+                rbs: (vk::Buffer::null(), ptr::null_mut(), false),
                 slot: BS.next_multiple_of(caps.min_bitstream_buffer_offset_alignment.max(1))
                     as usize,
                 align: caps.min_bitstream_buffer_size_alignment.max(1) as usize,
@@ -684,16 +1051,20 @@ impl Decoder {
                 offs: vec![],
                 reset: true,
                 qp: vk::QueryPool::null(),
-                chk: Cell::new([0; 2]),
+                kit: None,
+                seen: Cell::new([0; 2]),
+                chk: None,
                 shape: None,
                 bin: Arc::downgrade(&g.bin),
                 dev: g.dev.clone(),
                 vq: g.vq.clone(),
             };
             if let Some(b) = Bin::take(&mut bin().body, shape) {
-                (d.dpb, d.mem, d.session, d.bs, d.map, d.pool, d.cbs, d.qp) =
-                    (b.dpb, b.mem, b.session, b.bs, b.map, b.pool, b.cbs, b.qp);
+                (d.dpb, d.mem, d.session, d.bs, d.map, d.rbs) =
+                    (b.dpb, b.mem, b.session, b.bs, b.map, b.rbs);
+                (d.pool, d.cbs, d.qp) = (b.pool, b.cbs, b.qp);
                 d.params(g)?;
+                d.arm(g)?;
                 d.shape = Some(shape);
                 return Ok(d);
             }
@@ -703,7 +1074,7 @@ impl Decoder {
                 .picture_format(fmt)
                 .max_coded_extent(ext)
                 .reference_picture_format(fmt)
-                .max_dpb_slots(slots as u32)
+                .max_dpb_slots(np as u32)
                 .max_active_reference_pictures(
                     (slots as u32 - 1).min(caps.max_active_reference_pictures),
                 )
@@ -750,7 +1121,7 @@ impl Decoder {
                     vk::ImageUsageFlags::empty(),
                 ),
             };
-            for i in 0..slots {
+            for i in 0..np {
                 let (img, m) = image(u | x, vk::ImageCreateFlags::empty(), &[])?;
                 d.mem.push(m);
                 d.dpb.push((img, vk::ImageView::null()));
@@ -772,6 +1143,22 @@ impl Decoder {
                 .dev
                 .map_memory(m, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())?
                 as *mut u8;
+            if chkd {
+                d.rbs.0 = g.dev.create_buffer(&info, None)?;
+                let q = g.dev.get_buffer_memory_requirements(d.rbs.0);
+                let hv =
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+                // without Resizable BAR the host-visible device heap is 256 MiB: later decoders get host memory
+                let dl = g.alloc(q, vk::MemoryPropertyFlags::DEVICE_LOCAL | hv);
+                d.rbs.2 = dl.is_ok();
+                d.mem.push(dl.or_else(|_| g.alloc(q, hv))?);
+                let m = d.mem[d.mem.len() - 1];
+                g.dev.bind_buffer_memory(d.rbs.0, m, 0)?;
+                d.rbs.1 = g
+                    .dev
+                    .map_memory(m, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())?
+                    as *mut u8;
+            }
             let info = vk::CommandPoolCreateInfo::default()
                 .queue_family_index(g.dec.family)
                 .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
@@ -780,7 +1167,7 @@ impl Decoder {
                 .command_pool(d.pool)
                 .command_buffer_count(out as u32);
             d.cbs = g.dev.allocate_command_buffers(&info)?;
-            if status(g) {
+            if stat {
                 let mut info = vk::QueryPoolCreateInfo::default()
                     .query_type(vk::QueryType::RESULT_STATUS_ONLY_KHR)
                     .query_count(out as u32);
@@ -789,9 +1176,76 @@ impl Decoder {
             }
             d.params(g)?;
             d.warm(g)?;
+            d.arm(g)?;
             d.shape = Some(shape);
             Ok(d)
         }
+    }
+
+    /// What its decodes' commands take (`Kit`), and the checker where the decode family reports result status
+    /// (`check`), with command buffers of its own for redos.
+    unsafe fn arm(&mut self, g: &Gpu) -> Result<()> {
+        let x = Arc::new(Kit {
+            dev: self.dev.clone(),
+            vq: g.vq.clone(),
+            vdq: g.vdq.clone(),
+            session: self.session,
+            bs: self.bs,
+            map: self.map,
+            rbs: self.rbs,
+            slot: self.slot,
+            dpb: self.dpb.clone(),
+            imgs: self.ring.imgs.clone(),
+            views: self.ring.views.clone(),
+            co: self.co,
+            h265: matches!(self.st, St::H265(_)),
+            qp: self.qp,
+        });
+        self.kit = Some(x.clone());
+        if self.qp == vk::QueryPool::null() || !checked(g) {
+            return Ok(());
+        }
+        let d = &self.dev;
+        let info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(g.dec.family)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        let pool = unsafe { d.create_command_pool(&info, None) }?;
+        let mut t =
+            vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
+        let info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool)
+            .command_buffer_count(self.cbs.len() as u32);
+        let r = unsafe { d.allocate_command_buffers(&info) }.and_then(|cbs| {
+            let s = vk::SemaphoreCreateInfo::default().push_next(&mut t);
+            Ok((cbs, unsafe { d.create_semaphore(&s, None) }?))
+        });
+        let (cbs, dec) = match r {
+            Ok(x) => x,
+            Err(e) => {
+                unsafe { d.destroy_command_pool(pool, None) };
+                return Err(e.into());
+            }
+        };
+        let c = Arc::new(Chk {
+            st: Default::default(),
+            cv: Condvar::new(),
+            dec,
+        });
+        let a = (c.clone(), g.dec.queue.clone(), self.ring.done);
+        let h = std::thread::Builder::new()
+            .name("decode check".into())
+            .spawn(move || check(a.0, x, a.1, cbs, a.2));
+        match h {
+            Ok(h) => self.chk = Some((c, h, pool)),
+            Err(_) => {
+                unsafe {
+                    d.destroy_semaphore(c.dec, None);
+                    d.destroy_command_pool(pool, None);
+                }
+                return Err(Bad("no thread for the decode checker"));
+            }
+        }
+        Ok(())
     }
 
     /// Grows the command buffers' upload memory before any decode: RADV starts it at 16 KB on a buffer's first use
@@ -888,7 +1342,7 @@ impl Decoder {
         if self.params != vk::VideoSessionParametersKHR::null() {
             // decodes in flight still use the old object
             unsafe {
-                self.wait(&[self.ring.done], self.frame, u64::MAX)?;
+                self.drain(self.frame)?;
                 (vq.destroy_video_session_parameters_khr)(dh, self.params, ptr::null());
             }
         }
@@ -896,20 +1350,27 @@ impl Decoder {
         Ok(())
     }
 
-    /// Pictures that did not decode, counted once their decode is done: here the decodes the driver signalled done
-    /// unfinished, whose result status isn't complete (NVIDIA's RTX 4090 on 620.73 now and then: cut off at some CTU,
-    /// the rest zero), where the decode family reports one. The pictures after one reference it up to the next IDR.
-    /// A picture the driver refuses up front is an error (`decode`). macOS conceals instead and counts them.
+    /// Pictures that did not decode, counted once their frame is ready, where the decode family reports a decode's
+    /// result status: decodes the driver still left unfinished after `TRIES` redos, those a checker that ended in an
+    /// error (`decode` returns it) let go unchecked, or, where decodes are only counted (`checked`), every unfinished
+    /// one. The pictures after one reference it up to the next IDR. A picture the driver refuses up front is an error
+    /// (`decode`). macOS conceals instead and counts them.
     pub fn failed(&self) -> u64 {
-        self.verify();
-        self.chk.get()[1]
+        match &self.chk {
+            Some(c) => c.0.lock().failed,
+            None => {
+                self.verify();
+                self.seen.get()[1]
+            }
+        }
     }
 
-    /// Checks the result status of every decode done since the last check: before its query slot's next reset.
+    /// Where decodes are only counted: checks the result status of every decode done since the last check, before
+    /// its query slot's next reset.
     fn verify(&self) {
-        let [mut c, mut n] = self.chk.get();
+        let [mut c, mut n] = self.seen.get();
         let (r, done) = (self.ring.slots() as u64, self.ring.ready().min(self.frame));
-        while self.qp != vk::QueryPool::null() && c < done {
+        while self.qp != vk::QueryPool::null() && self.chk.is_none() && c < done {
             let (k, mut v) = ((c % r) as u32, [0i32]);
             let f = vk::QueryResultFlags::WITH_STATUS_KHR;
             // not ready after its decode is done: the driver never finished it
@@ -917,7 +1378,37 @@ impl Decoder {
             n += (ok.is_err() || v[0] != vk::QueryResultStatusKHR::COMPLETE.as_raw()) as u64;
             c += 1;
         }
-        self.chk.set([c, n]);
+        self.seen.set([c, n]);
+    }
+
+    /// Pictures whose decode the driver left unfinished and a redo then completed, before their frames were ready
+    /// (NVIDIA's RTX 4090 on 620.73 now and then); each counts once however many redos it took.
+    pub fn redone(&self) -> u64 {
+        self.chk.as_ref().map_or(0, |c| c.0.lock().redone)
+    }
+
+    /// Tests: frame `f`'s first decode counts as unfinished, so it is redone; or, `err`, the checker ends in an error
+    /// there. False where decodes aren't checked.
+    #[doc(hidden)]
+    pub fn fake(&self, f: u64, err: bool) -> bool {
+        self.chk
+            .as_ref()
+            .map(|c| c.0.lock().fake.push((f, err)))
+            .is_some()
+    }
+
+    /// Waits until `done` reaches `v`; where a checker signals it, only while the checker lives: its error otherwise.
+    unsafe fn drain(&self, v: u64) -> Result<()> {
+        let s = [self.ring.done];
+        let Some((c, ..)) = &self.chk else {
+            return unsafe { self.wait(&s, v, u64::MAX) }.map(drop);
+        };
+        while !unsafe { self.wait(&s, v, 100_000_000) }? {
+            if let Some(e) = c.lock().err {
+                return Err(e.into());
+            }
+        }
+        Ok(())
     }
 
     /// Decoding restarts at the next access unit, a random access point (a seek), as in a new decoder: the session is
@@ -943,6 +1434,9 @@ impl Decoder {
     pub fn decode(&mut self, g: &Gpu, au: &[&[u8]]) -> Result<u64> {
         let (f, r) = (self.frame, self.ring.slots() as u64);
         let k = (f % r) as usize;
+        if let Some(e) = self.chk.as_ref().and_then(|c| c.0.lock().err) {
+            return Err(e.into());
+        }
         // the consumer released frame f - r and its decode is done (a frame released without being sampled may
         // still be decoding): its texture, bitstream slot and command buffer are free
         let (s, v) = ([self.ring.free, self.ring.done], (f + 1).saturating_sub(r));
@@ -953,7 +1447,6 @@ impl Decoder {
             }
         }
         self.verify();
-        let h265 = matches!(self.st, St::H265(_));
         let mut dirty = false;
         for n in au {
             if n.len() > 2 && self.st.kind(n) == 2 {
@@ -998,166 +1491,100 @@ impl Decoder {
             return Err(Bad("picture bit depth other than the decoder's"));
         }
         self.view = pic.view;
+        // checked: a redo of an unchecked decode reads what it read the first time, so the setup slot's image must
+        // not be one of those; a spare stands in, or, with none left, the decodes in flight are checked first. So
+        // before a session reset, which deactivates the slots they read.
+        if let Some((c, ..)) = &self.chk {
+            if self.reset {
+                unsafe { self.drain(f)? };
+            }
+            let busy = c.lock().q.iter().fold(0, |m, u| m | u.refs);
+            if busy >> self.phys[pic.setup] & 1 == 1 {
+                let used = self.phys.iter().fold(busy, |m, &p| m | 1 << p);
+                match (0..self.dpb.len()).find(|&p| used >> p & 1 == 0) {
+                    Some(p) => self.phys[pic.setup] = p as u8,
+                    None => unsafe { self.drain(f)? },
+                }
+            }
+        }
 
-        // reference slots: the active ones, then the setup slot (slot index -1 in begin, its index in decode)
-        let ext = vk::Extent2D {
-            width: pic.w,
-            height: pic.h,
+        // H.265's RPS lists slots too
+        for v in (p5.RefPicSetStCurrBefore.iter_mut())
+            .chain(&mut p5.RefPicSetStCurrAfter)
+            .chain(&mut p5.RefPicSetLtCurr)
+            .filter(|v| **v != 0xff)
+        {
+            *v = self.phys[*v as usize];
+        }
+        // reference slots: the active ones, then the setup slot
+        let mut e = Rec {
+            f,
+            k,
+            n: pic.n,
+            slot: [0; MAXS],
+            p5,
+            p4,
+            r5: unsafe { std::mem::zeroed() },
+            r4: unsafe { std::mem::zeroed() },
+            offs: take(&mut self.offs),
+            range: range as u64,
+            ext: vk::Extent2D {
+                width: pic.w,
+                height: pic.h,
+            },
+            reset: std::mem::replace(&mut self.reset, false),
+            params: self.params,
         };
-        let (mut r5, mut r4): (
-            [StdVideoDecodeH265ReferenceInfo; MAXS],
-            [StdVideoDecodeH264ReferenceInfo; MAXS],
-        ) = unsafe { std::mem::zeroed() };
-        let mut d5 = [vk::VideoDecodeH265DpbSlotInfoKHR::default(); MAXS];
-        let mut d4 = [vk::VideoDecodeH264DpbSlotInfoKHR::default(); MAXS];
-        let mut res = [vk::VideoPictureResourceInfoKHR::default(); MAXS];
-        let mut sl = [vk::VideoReferenceSlotInfoKHR::default(); MAXS];
+        let mut reads = 0u32; // the DPB images it reads
         for (j, i) in act[..pic.n]
             .iter()
             .map(|&i| i as usize)
             .chain([pic.setup])
             .enumerate()
         {
-            let r = self.refs[i];
-            r5[j].PicOrderCntVal = r.poc[0];
-            (r4[j].FrameNum, r4[j].PicOrderCnt) = (r.num as u16, r.poc);
-            r4[j].flags.set_used_for_long_term_reference(r.long as u32);
-            d5[j].p_std_reference_info = &r5[j];
-            d4[j].p_std_reference_info = &r4[j];
-            res[j] = vk::VideoPictureResourceInfoKHR::default()
-                .coded_extent(ext)
-                .image_view_binding(self.dpb[i].1);
-            sl[j] = vk::VideoReferenceSlotInfoKHR {
-                p_next: if h265 {
-                    &d5[j] as *const _ as *const c_void
-                } else {
-                    &d4[j] as *const _ as *const c_void
-                },
-                slot_index: i as i32,
-                p_picture_resource: &res[j],
-                ..Default::default()
-            };
+            let (r, p) = (self.refs[i], self.phys[i]);
+            reads |= ((j < pic.n) as u32) << p;
+            e.slot[j] = p;
+            e.r5[j].PicOrderCntVal = r.poc[0];
+            (e.r4[j].FrameNum, e.r4[j].PicOrderCnt) = (r.num as u16, r.poc);
+            e.r4[j]
+                .flags
+                .set_used_for_long_term_reference(r.long as u32);
         }
-        let n = pic.n;
-        let setup = sl[n];
-        sl[n].slot_index = -1;
-        let reset = std::mem::replace(&mut self.reset, false);
-        let i5 = vk::VideoDecodeH265PictureInfoKHR::default()
-            .std_picture_info(&p5)
-            .slice_segment_offsets(&self.offs);
-        let i4 = vk::VideoDecodeH264PictureInfoKHR::default()
-            .std_picture_info(&p4)
-            .slice_offsets(&self.offs);
-        let mut dec = vk::VideoDecodeInfoKHR::default()
-            .src_buffer(self.bs)
-            .src_buffer_offset((k * self.slot) as u64)
-            .src_buffer_range(range as u64)
-            .dst_picture_resource(match self.co {
-                true => res[n],
-                false => vk::VideoPictureResourceInfoKHR::default()
-                    .coded_extent(ext)
-                    .image_view_binding(self.ring.views[k]),
-            })
-            .setup_reference_slot(&setup)
-            .reference_slots(&sl[..n]);
-        dec.p_next = if h265 {
-            &i5 as *const _ as *const c_void
-        } else {
-            &i4 as *const _ as *const c_void
+        let Some(x) = self.kit.clone() else {
+            return Err(Bad("decoder not set up"));
         };
-
-        let (cb, all, d) = (self.cbs[k], vk::PipelineStageFlags::ALL_COMMANDS, &self.dev);
-        let (vq, none) = (g.vq.fp(), vk::DependencyFlags::empty());
+        let (cb, d) = (self.cbs[k], &self.dev);
         unsafe {
-            d.begin_command_buffer(
-                cb,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )?;
-            // the output image leaves home (still UNDEFINED before its first decode); the setup slot's old
-            // picture is dead. The global barrier makes the earlier decodes' DPB writes visible to this one's
-            // reference reads: an image barrier's access scopes cover only its own image.
-            let home = match f < r {
-                true => vk::ImageLayout::UNDEFINED,
-                false => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            record(&x, cb, &e, self.chk.is_none(), false)?;
+            // checked: it signals the checker's timeline, and the checker `done`; in flight under the checker's lock,
+            // so a redo and this submit don't interleave
+            let ck = self.chk.as_ref().map(|c| &c.0);
+            let mut fl = ck.map(|c| c.lock());
+            let (sem, sv) = match (ck, &mut fl) {
+                (Some(c), Some(s)) => {
+                    // a checker that ended since: nothing would signal this one
+                    if let Some(e) = s.err {
+                        return Err(e.into());
+                    }
+                    s.seq += 1;
+                    let (refs, seq) = (reads, s.seq);
+                    s.q.push_back(Fly {
+                        e: Rec {
+                            offs: take(&mut e.offs),
+                            ..e
+                        },
+                        refs,
+                        seq,
+                        n: 0,
+                    });
+                    (c.dec, seq)
+                }
+                _ => (self.ring.done, f + 1),
             };
-            let (out, s) = (self.ring.imgs[k], self.dpb[pic.setup].0);
-            let (dpb, src) = (
-                vk::ImageLayout::VIDEO_DECODE_DPB_KHR,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            );
-            let to = match self.co {
-                true => vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                false => vk::ImageLayout::VIDEO_DECODE_DST_KHR,
-            };
-            let bars = [
-                barrier(out, home, to),
-                barrier(s, vk::ImageLayout::UNDEFINED, dpb),
-            ];
-            let mem = [vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
-                .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)];
-            d.cmd_pipeline_barrier(cb, all, all, none, &mem, &[], &bars);
-            let begin = vk::VideoBeginCodingInfoKHR::default()
-                .video_session(self.session)
-                .video_session_parameters(self.params)
-                .reference_slots(&sl[..=n]);
-            let (qp, q) = (self.qp, self.qp != vk::QueryPool::null());
-            if q {
-                d.cmd_reset_query_pool(cb, qp, k as u32, 1);
-            }
-            (vq.cmd_begin_video_coding_khr)(cb, &begin);
-            if reset {
-                (vq.cmd_control_video_coding_khr)(
-                    cb,
-                    &vk::VideoCodingControlInfoKHR::default()
-                        .flags(vk::VideoCodingControlFlagsKHR::RESET),
-                );
-            }
-            if q {
-                d.cmd_begin_query(cb, qp, k as u32, vk::QueryControlFlags::empty());
-            }
-            (g.vdq.fp().cmd_decode_video_khr)(cb, &dec);
-            if q {
-                d.cmd_end_query(cb, qp, k as u32);
-            }
-            (vq.cmd_end_video_coding_khr)(cb, &vk::VideoEndCodingInfoKHR::default());
-            if self.co {
-                // the slot goes back to the DPB layout after: layout transitions keep its picture
-                d.cmd_pipeline_barrier(cb, all, all, none, &[], &[], &[barrier(s, dpb, src)]);
-                let cp = [
-                    (vk::ImageAspectFlags::PLANE_0, 1),
-                    (vk::ImageAspectFlags::PLANE_1, 2),
-                ]
-                .map(|(aspect_mask, q)| {
-                    let l = vk::ImageSubresourceLayers {
-                        aspect_mask,
-                        mip_level: 0,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    };
-                    vk::ImageCopy::default()
-                        .src_subresource(l)
-                        .dst_subresource(l)
-                        .extent(vk::Extent3D {
-                            width: pic.w / q,
-                            height: pic.h / q,
-                            depth: 1,
-                        })
-                });
-                d.cmd_copy_image(cb, s, src, out, to, &cp);
-            }
-            let back = [
-                barrier(out, to, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-                barrier(s, src, dpb),
-            ];
-            let nb = 1 + self.co as usize;
-            d.cmd_pipeline_barrier(cb, all, all, none, &[], &[], &back[..nb]);
-            d.end_command_buffer(cb)?;
-
-            let nw = (f >= r) as usize;
+            let (nw, all) = ((f >= r) as usize, vk::PipelineStageFlags::ALL_COMMANDS);
             let (ws, wv, wst) = ([self.ring.free], [v], [all]);
-            let (ss, sv, cbs) = ([self.ring.done], [f + 1], [cb]);
+            let (ss, sv, cbs) = ([sem], [sv], [cb]);
             let mut tl = vk::TimelineSemaphoreSubmitInfo::default()
                 .wait_semaphore_values(&wv[..nw])
                 .signal_semaphore_values(&sv);
@@ -1168,7 +1595,18 @@ impl Decoder {
                 .signal_semaphores(&ss)
                 .push_next(&mut tl);
             let q = g.dec.queue.lock().unwrap_or_else(|e| e.into_inner());
-            d.queue_submit(*q, &[submit], vk::Fence::null())?;
+            let r = d.queue_submit(*q, &[submit], vk::Fence::null());
+            if let (Some(s), Err(_)) = (&mut fl, &r) {
+                s.q.pop_back();
+                s.seq -= 1;
+            }
+            drop((q, fl));
+            // unchecked, its slice offsets come back for the next decode
+            self.offs = take(&mut e.offs);
+            r?;
+            if let Some(c) = ck {
+                c.cv.notify_one();
+            }
         }
         self.frame += 1;
         Ok(f)
@@ -1179,7 +1617,14 @@ impl Drop for Decoder {
     fn drop(&mut self) {
         unsafe {
             // every submitted decode can finish: decode() submits only once its slot is released
-            let idle = self.wait(&[self.ring.done], self.frame, u64::MAX);
+            let idle = self.drain(self.frame);
+            if let Some((c, h, pool)) = self.chk.take() {
+                c.lock().stop = true;
+                c.cv.notify_one();
+                let _ = h.join();
+                self.dev.destroy_semaphore(c.dec, None);
+                self.dev.destroy_command_pool(pool, None);
+            }
             (self.vq.fp().destroy_video_session_parameters_khr)(
                 self.dev.handle(),
                 self.params,
@@ -1191,12 +1636,13 @@ impl Drop for Decoder {
                 session: self.session,
                 bs: self.bs,
                 map: self.map,
+                rbs: self.rbs,
                 pool: self.pool,
                 cbs: take(&mut self.cbs),
                 qp: self.qp,
             };
             let left = match (self.shape, self.bin.upgrade()) {
-                (Some(s), Some(bin)) if idle.is_ok_and(|x| x) => Bin::park(
+                (Some(s), Some(bin)) if idle.is_ok() => Bin::park(
                     &mut bin.lock().unwrap_or_else(|e| e.into_inner()).body,
                     s,
                     b,
