@@ -33,9 +33,10 @@ pub struct Cfg {
     /// over their share and the excess is never paid back: +4 to +10 % at 100 ms (each IDR capped at about the
     /// buffer), up to +2.4 % at 250 ms (Mesa 26.2.5, the `cbr` test).
     pub vbv: u32,
-    /// Driver quality level (higher: better and slower, per the spec), clamped to the highest usable
-    /// (`Encoder::levels`). RADV (Mesa 26.2.5): 0 and 1 write identical H.265 streams (both the firmware's balanced
-    /// preset), 2 measures 0.2 dB lower PSNR(Y) on the X5's footage.
+    /// Quality levels over the driver's default (higher: better and slower, per the spec), clamped to the highest
+    /// usable (`Encoder::levels`). The default: 0 on RADV and drivers not known, NVIDIA H.264 2 and H.265 3 (`encode`'s
+    /// `NV`). RADV (Mesa 26.2.5): 0 and 1 write identical H.265 streams (both the firmware's balanced preset), 2
+    /// measures 0.2 dB lower PSNR(Y) on the X5's footage.
     pub quality: u32,
     /// Full range (0–255) instead of limited (16–235); BT.709 primaries, transfer and matrix either way.
     pub full: bool,

@@ -121,11 +121,24 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   rate control buffer in ms (1000 for files, 100 for low-latency RTMP). The VCN firmware's CBR (RADV and radeonsi alike)
   runs 4 to 10 % over at 100 ms and near the target from about 500 ms on ordinary content (`video` test `cbr`); initial
   occupancy, GOP flags and GOP-remaining hints change nothing. RADV: no B-frames, quality level 3 of H.265 under rate
-  control writes corrupt slices (excluded by `Encoder::levels`). NVIDIA (620.73, RTX 4090): its CBR stays within 2 % at
-  100 to 1000 ms (test `cbr`); it takes rate control only with the codec's layer struct chained
+  control writes corrupt slices (excluded by `Encoder::levels`); Mesa 26.3.1 corrupts it at constant QP too (PSNR 7 to
+  15 dB in the level sweep below; still allowed there, nothing asks for it). NVIDIA (620.73, RTX 4090): its CBR stays
+  within 2 % at 100 to 1000 ms (test `cbr`) but gives an IDR about 2.6 frames' share and pays it back over the frames
+  after (crate export's `queue`, 0.5 s of 854 × 480 H.264 at 20 Mbit/s: frame 7 56 kB at its default level, 43 at 0,
+  RADV's 81 kB); it takes rate control only with the codec's layer struct chained
   (`VkVideoEncodeH26xRateControlLayerInfo`, optional in the spec; without it `vkEndCommandBuffer` returns
   `ERROR_INVALID_VIDEO_STD_PARAMETERS` for the control command), and writes the encode feedback (offset, size) as 32
   bits even when asked for 64, so `packet` reads 32-bit results on every driver.
+- Quality levels: `Cfg.quality` counts from the driver's default and every caller passes 0: RADV and drivers not known
+  their level 0, NVIDIA H.264 2 and H.265 3 (`encode`'s `NV`, 8 and 10 bit). NVIDIA's 7 H.265 and 5 H.264 levels all
+  prefer VBR and a 250-frame GOP and differ in the B-frames (H.265 0, 1, 2, 3, 3, 3, 3; H.264 0, 0, 1, 3, 3) and
+  references they prefer, which our P-only single-reference streams don't use (H.265 levels 0–2 write the same stream).
+  Measured (`target/nv-scratch/level`: 2 s of v606 and v627 exported flat 1080p and 360 4K, H.264, H.265 and Main 10,
+  CBR 20 / 60 Mbit/s and QP 24, PSNR(Y) against a QP 0 export of the same frames; the encoder alone at 3840 × 1920 CBR
+  60 Mbit/s): NVIDIA's 0 already lands −0.4 to +0.8 dB of RADV's 0 (worst frames higher under CBR) at 246 fps for H.265
+  (RADV 200) and 215 for H.264 (RADV 207); its defaults add 0.05 to 0.17 dB (H.265 3, 136 fps) and 0.05 to 0.25 dB
+  (H.264 2, 149 fps), the 4090's exports rendering as fast as at 0 (90 to 117 fps) and a 4K60 RTMP stream using 40 % of
+  its frame time; H.265 5–6 would add up to 0.26 dB at 50 fps (the 360 export halves), H.264 4 up to 0.38 dB at 73.
 - DMA-BUF export (`live::dmabuf`): `Image::acquire()` before the first submit that writes an exported image (content
   undefined afterwards), `Image::release()` after the last one; it returns the sync_file and also attaches it to the
   DMA-BUF as its write fence, so implicit-sync consumers (PipeWire clients) are correct too.

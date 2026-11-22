@@ -1338,8 +1338,16 @@ fn timeline_faces() {
          {dout:.3} ({nout} px)"
     );
     assert!(din > 3.0, "the face is not blurred");
+    // before the encoder no pixel away from the regions differs, on either GPU; the encoder's other choices around the
+    // blurred face spread its quantisation noise into blocks further off: RADV 0.014, NVIDIA (620.73, its H.264 level 2)
+    // 0.290 (level 0: 0.248, 0.184 at QP 10, 0.062 at QP 1); a blur reaching 1 % of these pixels (|Δ| about 30, as
+    // inside) would add 0.3
+    let max = match g.adapter.get_info().driver == "NVIDIA" {
+        true => 0.4,
+        false => 0.1,
+    };
     assert!(
-        nout > 10000 && dout < 0.1,
+        nout > 10000 && dout < max,
         "the frame changed away from the faces"
     );
     for x in [true, false] {

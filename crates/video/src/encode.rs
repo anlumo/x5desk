@@ -35,6 +35,11 @@ const NV12: vk::Format = vk::Format::G8_B8R8_2PLANE_420_UNORM;
 const P010: vk::Format = vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
 const ALL: vk::PipelineStageFlags = vk::PipelineStageFlags::ALL_COMMANDS;
 const DPB: u32 = 2; // the reference and the picture being encoded
+// NVIDIA's (620.73) default quality levels, H.264 and H.265, where `Cfg::quality` 0 lands: its own 0, the fastest,
+// already matches RADV's 0, and these add 0.05 to 0.25 dB PSNR(Y) on the app's exports at 0.55 to 0.7 of the encoder's
+// speed (H.265 3: 136 fps at 3840 × 1920, H.264 2: 149), more than the 4090's exports or a 4K60 stream need; H.265's
+// 0 to 2 write the same stream here (they differ in the B-frames we don't use)
+const NV: [u32; 2] = [2, 3];
 
 /// NAL units of an Annex B buffer, without start codes and trailing zero bytes (a NAL unit never ends in 0).
 fn split(b: &[u8], out: &mut Vec<Range<usize>>) {
@@ -415,6 +420,7 @@ pub struct Encoder {
     pub levels: u32,
     /// Index of the next frame to encode.
     pub frame: u64,
+    level: u32, // the quality level in use
     c: Cfg,
     ext: vk::Extent2D, // coded size
     idr: u64,          // the last IDR's frame
@@ -590,7 +596,12 @@ impl Encoder {
                 true => ec.max_quality_levels.min(3),
                 false => ec.max_quality_levels,
             };
-            let quality = c.quality.min(levels.saturating_sub(1));
+            let quality = (c.quality)
+                .saturating_add(match dp.driver_id {
+                    vk::DriverId::NVIDIA_PROPRIETARY => NV[h265 as usize],
+                    _ => 0,
+                })
+                .min(levels.saturating_sub(1));
             let info = vk::PhysicalDeviceVideoEncodeQualityLevelInfoKHR::default()
                 .video_profile(&pr[0])
                 .quality_level(quality);
@@ -779,6 +790,7 @@ impl Encoder {
                 input: Arc::new(input),
                 params: vec![],
                 levels,
+                level: quality,
                 frame: 0,
                 c: *c,
                 ext,
@@ -1318,8 +1330,7 @@ impl Encoder {
                 };
             }
         }
-        let mut ql = vk::VideoEncodeQualityLevelInfoKHR::default()
-            .quality_level(c.quality.min(self.levels.saturating_sub(1)));
+        let mut ql = vk::VideoEncodeQualityLevelInfoKHR::default().quality_level(self.level);
         ql.p_next = &mut rc as *mut _ as *mut c_void;
         // the GOP's frames left, this one included: required where requiresGopRemainingFrames (not RADV, which ignores
         // them), a rate control hint elsewhere

@@ -192,7 +192,15 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   42.4 / 39.5, RAFT pano 41.4 / 34.8, stills 53.8 and 45.0); crates stitch, shotlab, export, live and the app (the
   player's seam and stabiliser tests, the live outputs' OBS, PipeWire and RTMP tests, the MCP tests) pass but for
   the points below. The app takes the 4090 whenever Vulkan sees it (`video::Gpu::new`: wgpu's high-performance
-  adapter; `VK_ICD_FILENAMES` picks the Radeon). Left:
+  adapter; `VK_ICD_FILENAMES` picks the Radeon). Quality level, measured per level on both GPUs
+  (`target/nv-scratch/level`, ARCHITECTURE.md's encoder notes): NVIDIA's 0 already matches RADV's 0; NVIDIA's default is
+  now H.264 2 and H.265 3 (`encode`'s `NV`: +0.05 to 0.25 dB for 0.55 to 0.7 of the encoder's speed, the 4090's exports
+  render as fast). Export's `queue` passes the common 36 dB there again (frame 7 of a 0.5 s 854 × 480 H.264 export at
+  CBR 20 Mbit/s: 36.89 dB in 4 runs, 56 kB, the Radeon 38.98 dB, 81 kB; at level 0 35.4 dB, 43 kB: NVIDIA's CBR pays
+  back the IDR over the frames after it). The app's `timeline_faces` takes NVIDIA's own bound, under 0.4 there, 0.1
+  elsewhere (blurred against sharp away from the faces at QP 18: 0.290 at level 2 in 3 runs, 0.248 at 0, the Radeon
+  0.014; the frames before the encoder are the same there on both, and the difference shrinks with the QP, 0.184 at 10,
+  0.062 at 1). Left:
   - This card's Vulkan decode now and then stops a picture partway and signals it done; the pictures after it are
     wrong to the next IDR ("Corrupt frames from the hardware decoder"). FFmpeg's Vulkan decode too, NVDEC through
     CUDA never. `Decoder::failed` counts them; nothing recovers them. Driver or link: the OcuLink link runs x4 at gen
@@ -201,13 +209,8 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
     held loaded (P2, gen 4). Another NVIDIA card or slot, another cable, or the port held at gen 3 would tell. Report
     for NVIDIA drafted, not sent (`target/level-scratch/dec/nvidia-report.txt`; FFmpeg-only `repro.sh`). Else: decode
     on the Radeon and run the networks on the 4090, or decode through NVDEC with CUDA (a second backend).
-  - Encoder differences two tests' thresholds don't allow: export's `queue` (frame 7 of a 0.5 s 854 × 480 H.264
-    export at CBR 20 Mbit/s 35.4 dB against the rendered frame, the Radeon 39.0, the test wants 36: NVIDIA spends
-    15 of the 20 Mbit/s there) and the app's `export::tests::timeline_faces` (blurred vs sharp export away from the
-    faces 0.248, the Radeon 0.014, the test wants under 0.1; guess: NVIDIA's rate control requantises the whole frame).
-  - The exports' quality level 0 (`Cfg.quality`) is RADV's balanced preset but NVIDIA's lowest, by the look of it:
-    `queue`'s frame 7 at levels 0–4 35.4, 36.0, 36.9, 36.9, 36.3 dB. A per-driver level is a decision (speeds not
-    measured).
+  - Mesa 26.3.1 writes corrupt H.265 at quality level 3 under constant QP too (PSNR 7 to 15 dB in the level sweep);
+    `Encoder::levels` still allows it there, nothing asks for it.
   - DMA-BUF: NV12 in NVIDIA's tallest block-linear modifier (`0x300000000606015`) at 1920 × 1080 doesn't survive a
     re-import (crate live's `tiled`: 65 chroma samples wrong in rows 518–539; the export's chroma plane is 640 rows,
     5 blocks of 128, not of the modifier's 256: guess, the driver shrinks that plane's blocks). The driver's own pick
