@@ -47,7 +47,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 
 | Crate | Content |
 |---|---|
-| `video` | `Gpu` (one Vulkan device via wgpu-hal with decode and encode queues; macOS: the Metal device; `Gpu::trim`: an idle host's parked decoder memory freed, macOS the texture cache flushed), H.265 / H.264 parsers, Vulkan Video (macOS: VideoToolbox, `mac/`) decode and encode, NV12 / P010 pictures for wgpu (`Ring::planes`); `Decoder::failed`, the pictures concealed (macOS) or a driver left unfinished despite redos (Linux), `Decoder::redone`, the redos; `check`, a host's GPU self-test: an exact decode of hand-made H.264 High I_PCM pictures (`pcm`), the X5's H.265 at its size from the driver's caps without a session (`h265`), the decode and encode caps per profile, H.265 Main, Main 10, H.264 High (`caps`), one 640 × 360 picture through an encoder (`encode`), and its test streams (`sets`, `flat`, `skip`, `broken`; the bit writer gains `se`, `align`) |
+| `video` | `Gpu` (one Vulkan device via wgpu-hal with decode and encode queues; macOS: the Metal device; `Gpu::trim`: an idle host's parked decoder memory freed, macOS the texture cache flushed; on the adapter `PICK` names, `--gpu`'s, matched by `pick`, else wgpu's high-performance one; `gpus`: `--gpu list`'s text), H.265 / H.264 parsers, Vulkan Video (macOS: VideoToolbox, `mac/`) decode and encode, NV12 / P010 pictures for wgpu (`Ring::planes`); `Decoder::failed`, the pictures concealed (macOS) or a driver left unfinished despite redos (Linux), `Decoder::redone`, the redos, both summed over the device's decoders in `Gpu::checks` (Linux); `check`, a host's GPU self-test: an exact decode of hand-made H.264 High I_PCM pictures (`pcm`), the X5's H.265 at its size from the driver's caps without a session (`h265`), the decode and encode caps per profile, H.265 Main, Main 10, H.264 High (`caps`), one 640 × 360 picture through an encoder (`encode`), and its test streams (`sets`, `flat`, `skip`, `broken`; the bit writer gains `se`, `align`) |
 | `media` | MP4 demux and mux (`sv3d` / `st3d`; `Mux::new` writes into a file made elsewhere, emptied first, `Mux::finish_with` asks a stop before each 4 MiB chunk of the faststart shift, `Mp4::from_file` reads an open file), output files beside their name (`part`: `<p>.part` made `O_CREAT\|O_EXCL`, never through a link, read + write, 0o666 under the umask, known by its identity from then on, `Id`: dev, inode, birth time, inode and birth alone when dev differs, Windows the volume serial and file index; `publish` never replaces: Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`, Windows `MoveFileExW` without replacing, where the file system lacks it a hard link and an unlink, without hard links a look and a rename, said once per volume; `settle`, the one cleanup by identity: dst, then the `.part`, then dst again; `finish`, a job's end: the stop checked last, the `.part` still the open file as it is now, the publish, every error removing it only if it is that file; `free`: nothing at a name or its `.part`, a dangling link included; `avail`: free space and volume; `fat`: FAT or exFAT, whose inode numbers may change across mounts, on macOS as a file is written), an RGBA area downscaler (`scale`: an agent's still preview), `.insv` / `.insp` trailer (calibration, gyro, exposure), AAC decode (symphonia) and AAC-LC encode (`aacenc`), editor mixer with ducking and limiter (`mix`), music import (`music`) and its beats (`beat`: spectral-flux onset envelope, tempo, Ellis's dynamic-programming beat tracker, no model), resampler, RNNoise denoise, audio output and master clock (cpal; `audio::Player::open_on` plays on a picked device, `audio::device(id)` resolves the settings' device id by exact match: it lists the devices, so resolve when the choice changes, never per open; macOS: the app's settings look a gone or missing picked device up again on the opening thread), `audio::Conv` to a stream's format (`Conv::on`: macOS the device's own rate and up to 2 channels, else the source's; the clock counts source frames), MJPEG decode, baseline JPEG encode (`jpeg`), UVC capture of the X5's Webcam Mode |
 | `proto` | Protobuf messages for the camera (prost, compiled with protox from `proto/`) |
 | `link` | Camera link: UCD framing, session, requests, notifications, HTTP tunnel with several connections, downloads (each connection writes its range at its offset of `<dst>.part`; on FAT and exFAT, which hold no holes and zero-fill up to an out-of-order write, one connection writes in order; Windows marks the file sparse first); USB (nusb), Wi-Fi (TCP); BLE lives in `ble`. Connections start as `link::Opening` (dropping it cancels the sync); `Error::Silent` after 30 s without a sync answer; `Camera::set_time` sends the app's two SET_OPTIONS at once and returns both pending answers; `scan` / `watch` report `Plug::Disk` for an Insta360 product string under vendor 070a (the X5 in U-disk mode, or the first seconds of app mode); feature `sim`: a simulated camera (a handler status 0 leaves the request unanswered) |
@@ -122,7 +122,11 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   go as failed, so no wait on `done` outlives it, and `decode` returns the error from then on. Where decode and
   encode share a queue, decodes are only counted, not redone: a redo there could queue behind an encode batch that
   waits for frames filled only once their decodes are checked. `Decoder::redone()` counts the pictures a redo
-  recovered, each once.
+  recovered, each once. Decoders come and go, so the device keeps the process's counts (`Gpu::checks`, `on` where
+  decodes are checked): the pictures recovered and those given up (after redos or by a checker's error), each an
+  atomic add where a redo or failure happens (nothing per decode), and whether redos read device or host memory.
+  Settings → Graphics shows them (`settings::checks`; no row where decodes aren't checked), the MCP's `status` as
+  `gpu.decode_checks` and `gpu-check`'s info as `checks`.
 - `Decoder::failed()`: the pictures that showed the frame before them (macOS: VideoToolbox conceals a picture it
   fails on), or here a decode still unfinished after 3 redos, one a checker that ended in an error let go, or, where
   decodes are only counted, every unfinished one; it goes out as it is and crate export's strict jobs fail on it. A
@@ -356,6 +360,15 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   or P010 to RGBA through BT.709 limited range); `ai.rs`; `settings.rs`; `help.rs`; `gpu.rs` (the process's one GPU
   setup, the window's and the MCP server's: below). Work runs on the threads in PLAN.md §2; the UI thread only reads
   the newest state and draws.
+- GPU choice: `main` takes `--gpu <which>` / `--gpu=<which>` (mcp's `cli::value`; the last one counts) out of the
+  arguments, wherever it is, before the MCP dispatch, and sets `video::PICK`, which every `video::Gpu::new` of the
+  process then opens: an index in the list, else a case-insensitive part of one adapter's name (none or several: the
+  error, with the list; in the window's process before any window). Everything on the GPU follows the one device:
+  decode, encode, stitching, burn (`stitch::attach` on its adapter; its cache dir keys on the adapter), egui's surface
+  (`WgpuSetup::Existing` with it). An MCP host hands it to its `gpu-check` child as `--gpu=<which>`. `--gpu list`
+  prints `video::gpus` (index, name, driver, H.265 / H.264 decode and encode from the queue families, wgpu's
+  high-performance adapter marked the default) and exits. Without the flag nothing changes (wgpu's high-performance
+  adapter, as `request_adapter` picks it).
 - GPU setup (`gpu::open`, once per process): the device (`video::Gpu::new`), burn's cache dir (`stitch::cache`, before
   burn attaches: else cubecl keeps it under its Target root, an MCP client's project's `target/`), burn attached
   (`stitch::attach`, first, as cubecl installs its own error handler then), the error policy (`gpu::Policy`), then
@@ -552,9 +565,13 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 - CLI, dispatched in the app's `main` before `finder::watch`, `gpu::open` and anything that prints, the app's engine
   its GPU tools' backend (`export::agent::Agent::headless()`, which only allocates) (`x5desk <file>` and macOS's
   `-psn_` stay as they were; a file named `mcp` opens as `./mcp`):
-  - `x5desk mcp [--sim] [--tiers a,b] [--allow-dir DIR]…` serves MCP on stdio. `--tiers` only narrows the enabled
-    set (twice: both narrow); `--allow-dir` adds a read root (canonicalised; a missing one exits 1). `--sim`: cam's
-    simulated X5, a fake card, agent folder, log, queue and jobs in a temp dir that goes with the host.
+  - `x5desk mcp [--sim] [--tiers a,b] [--allow-dir DIR]… [--gpu <which>]` serves MCP on stdio. `--tiers` only narrows
+    the enabled set (twice: both narrow); `--allow-dir` adds a read root (canonicalised; a missing one exits 1).
+    `--sim`: cam's simulated X5, a fake card, agent folder, log, queue and jobs in a temp dir that goes with the host.
+    `--gpu` (and `x5desk mcp --gpu list`) the app's `main` takes out before `cli` parses (GPU choice, above): the
+    host's GPU, its `gpu-check` child's too. A `<which>` that names no adapter is not checked at the start (that
+    would load the drivers in the host, which the child keeps out of it): the first GPU call's start fails at step 1
+    with the list, and `gpu-check` exits 1 with it.
   - `x5desk mcp enable --tiers read,local[,camera][,delete][,untested]` writes `<config>/x5desk/mcp` (the set replaced;
     the dir owner-only, the file 0600; under an `flock` on `mcp.lock`, so a host storing its Wi-Fi id meanwhile loses
     neither) and prints what is enabled; `disable` turns every tier off. Hosts follow within 2 s.
@@ -895,8 +912,11 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   their `cfg(test)` times (1 s), the blur's result and time guess. `render`'s own `Fake` (a self-test that passes, fails
   or panics) drives `cli`'s `gpu-check` line and `server`'s listing; `cli`'s `reaps` starts a server's SIGCHLD ignored.
   The app's `tests/mcp.rs` runs the GPU tools on this machine's GPU, one server at a time, on `export::synth`'s
-  recording (300 frames of 256² a lens): `gpu-check`'s one line, `mcp-noattach` (a still without RAFT, `raft: true` and
-  blur refused), a 360 still and two exports followed to done, a cancel at 10 frames or more leaving nothing, a still
+  recording (300 frames of 256² a lens): `gpu-check`'s one line, `--gpu` (`gpu_flag`: `x5desk --gpu list`, then
+  `gpu-check --gpu=<X5_GPU>`, by default the default's index, on the adapter the list names, and one matching none
+  failing at step 1 with the list; the app's `main` and crate video have the flag's and the match's unit tests,
+  Settings' `decode_checks` `Decoder::fake`'s redos in the device's count and the Graphics row), `mcp-noattach` (a
+  still without RAFT, `raft: true` and blur refused), a 360 still and two exports followed to done, a cancel at 10 frames or more leaving nothing, a still
   overtaking a RAFT export (the lanes), blurred a still and an export followed to done (`gpu_blur_synth`), one cancelled
   in its pass and a still done while a whole-clip export still detects (`gpu_blur_lanes`, no RAFT: the models held per
   frame), stdin's end and SIGTERM mid-export, SIGTERM in the first RAFT compile (burn's cache cold: the end waits

@@ -4,7 +4,10 @@ use crate::{Error, Result};
 use ash::{ext, khr, vk};
 use std::{
     ffi::CStr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, AtomicU64, Ordering::Relaxed},
+    },
 };
 use wgpu_hal::api::Vulkan as Vk;
 
@@ -43,6 +46,26 @@ pub struct Gpu {
     pub sem_fd: Option<khr::external_semaphore_fd::Device>,
     /// decoder memory parked for reuse, freed with the `Gpu` (or by `trim`)
     pub(crate) bin: Arc<Mutex<crate::decode::Bin>>,
+    pub checks: Arc<Checks>,
+}
+
+/// What the decode checks found over every decoder of this device, as `Decoder::redone` and `failed` count them
+/// each: pictures a redo recovered, pictures given up, the memory the redos read their bitstream from (bit 0 device,
+/// bit 1 host). `on`: decodes are checked here (`decode::checked`). Counted where a redo or a failure happens.
+#[derive(Default)]
+pub struct Checks {
+    pub on: bool,
+    pub redone: AtomicU64,
+    pub failed: AtomicU64,
+    pub mem: AtomicU8,
+}
+
+impl Checks {
+    /// The memory the redos so far read: "device", "host", "device and host"; None before the first.
+    pub fn read(&self) -> Option<&'static str> {
+        [None, Some("device"), Some("host"), Some("device and host")]
+            [self.mem.load(Relaxed) as usize & 3]
+    }
 }
 
 impl Drop for Gpu {
@@ -77,23 +100,69 @@ const EXT: [&CStr; 13] = [
 /// loader unloads that ICD whenever no scan or instance holds it, so its init reruns on later `Gpu::new`s too.
 static SCAN: Mutex<()> = Mutex::new(());
 
+/// wgpu's Vulkan instance, made under [`SCAN`].
+pub(crate) fn instance() -> wgpu::Instance {
+    let mut d = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+    d.backends = wgpu::Backends::VULKAN;
+    // a poisoned lock still holds the guard
+    let _g = SCAN.lock();
+    wgpu::Instance::new(d)
+}
+
+/// Each queue family's flags and video codec operations.
+unsafe fn families(
+    inst: &ash::Instance,
+    pd: vk::PhysicalDevice,
+) -> Vec<(vk::QueueFlags, vk::VideoCodecOperationFlagsKHR)> {
+    let n = unsafe { inst.get_physical_device_queue_family_properties2_len(pd) };
+    let mut vp = vec![vk::QueueFamilyVideoPropertiesKHR::default(); n];
+    let mut qp: Vec<_> = vp
+        .iter_mut()
+        .map(|v| vk::QueueFamilyProperties2::default().push_next(v))
+        .collect();
+    unsafe { inst.get_physical_device_queue_family_properties2(pd, &mut qp) };
+    let fl: Vec<_> = qp
+        .iter()
+        .map(|q| q.queue_family_properties.queue_flags)
+        .collect();
+    drop(qp);
+    fl.into_iter()
+        .zip(vp.iter().map(|v| v.video_codec_operations))
+        .collect()
+}
+
+/// What `a`'s queue families decode and encode of H.265 and H.264, as `--gpu list` says it.
+pub(crate) fn codecs(a: &wgpu::Adapter) -> [String; 2] {
+    use vk::VideoCodecOperationFlagsKHR as V;
+    let ops = unsafe { a.as_hal::<Vk>() }.map_or(V::empty(), |h| {
+        let f = unsafe { families(h.shared_instance().raw_instance(), h.raw_physical_device()) };
+        f.iter().fold(V::empty(), |o, f| o | f.1)
+    });
+    [
+        [(V::DECODE_H265, "H.265"), (V::DECODE_H264, "H.264")],
+        [(V::ENCODE_H265, "H.265"), (V::ENCODE_H264, "H.264")],
+    ]
+    .map(|c| {
+        let v: Vec<_> = c
+            .iter()
+            .filter(|x| ops.contains(x.0))
+            .map(|x| x.1)
+            .collect();
+        match v.is_empty() {
+            true => "nothing".into(),
+            false => v.join(", "),
+        }
+    })
+}
+
 impl Gpu {
-    /// Opens the high-performance Vulkan adapter with every adapter feature, the experimental features, the decode
-    /// and encode queues, and whichever of the video and external memory / semaphore extensions the driver has.
+    /// Opens the high-performance Vulkan adapter (`--gpu`'s: `crate::PICK`) with every adapter feature, the
+    /// experimental features, the decode and encode queues, and whichever of the video and external memory /
+    /// semaphore extensions the driver has.
     pub fn new() -> Result<Gpu> {
         let err = |e: &dyn std::fmt::Display| Error::Gpu(e.to_string());
-        let mut d = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
-        d.backends = wgpu::Backends::VULKAN;
-        // a poisoned lock still holds the guard
-        let instance = {
-            let _g = SCAN.lock();
-            wgpu::Instance::new(d)
-        };
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        }))
-        .map_err(|e| err(&e))?;
+        let instance = instance();
+        let adapter = crate::adapter(&instance)?;
         let (features, limits) = (adapter.features(), adapter.limits());
         if !features.contains(wgpu::Features::TEXTURE_FORMAT_NV12) {
             return Err(err(&"no NV12 textures"));
@@ -109,22 +178,11 @@ impl Gpu {
                 si.entry().clone(),
                 hal.raw_physical_device(),
             );
-            let n = inst.get_physical_device_queue_family_properties2_len(pd);
-            let mut vp = vec![vk::QueueFamilyVideoPropertiesKHR::default(); n];
-            let mut qp: Vec<_> = vp
-                .iter_mut()
-                .map(|v| vk::QueueFamilyProperties2::default().push_next(v))
-                .collect();
-            inst.get_physical_device_queue_family_properties2(pd, &mut qp);
-            let fl: Vec<_> = qp
-                .iter()
-                .map(|q| q.queue_family_properties.queue_flags)
-                .collect();
-            drop(qp);
+            let fq = families(&inst, pd);
             let fam = |f| {
-                fl.iter()
-                    .position(|q: &vk::QueueFlags| q.contains(f))
-                    .map(|i| (i as u32, vp[i].video_codec_operations))
+                fq.iter()
+                    .position(|q| q.0.contains(f))
+                    .map(|i| (i as u32, fq[i].1))
             };
             let dec = fam(vk::QueueFlags::VIDEO_DECODE_KHR)
                 .ok_or_else(|| err(&"no video decode queue"))?;
@@ -210,7 +268,7 @@ impl Gpu {
             false => q(e),
         });
         let has = |e| ext.contains(&e);
-        Ok(Gpu {
+        let mut g = Gpu {
             vqi: khr::video_queue::Instance::new(&entry, &inst),
             vq: khr::video_queue::Device::new(&inst, &dev),
             vdq: khr::video_decode_queue::Device::new(&inst, &dev),
@@ -221,6 +279,7 @@ impl Gpu {
             sem_fd: has(khr::external_semaphore_fd::NAME)
                 .then(|| khr::external_semaphore_fd::Device::new(&inst, &dev)),
             bin: Default::default(),
+            checks: Default::default(),
             mem: unsafe { inst.get_physical_device_memory_properties(pd) },
             dec,
             enc,
@@ -234,7 +293,12 @@ impl Gpu {
             dev,
             pd,
             gfx,
-        })
+        };
+        g.checks = Arc::new(Checks {
+            on: crate::decode::checked(&g),
+            ..Default::default()
+        });
+        Ok(g)
     }
 
     /// What an idle host gives back: the decoder memory parked in the bin (two per shape), which the next decoders

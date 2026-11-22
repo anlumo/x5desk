@@ -43,7 +43,9 @@ app. `ARCHITECTURE.md` describes the code, `TODO.md` what is open.
 - A GPU whose Vulkan driver decodes and encodes H.265 and H.264 (Vulkan Video). x5desk is developed on AMD graphics
   with Mesa's RADV (Mesa 26). On NVIDIA it has been run on one card, an RTX 4090 with driver 620.73, without a
   display attached: stills and exports work there. Intel graphics are untested. Settings → Graphics shows what the
-  app found; on a machine with two GPUs the app takes the faster one (`VK_ICD_FILENAMES` picks another).
+  app found; on a machine with two GPUs the app takes the faster one. `x5desk --gpu list` lists the GPUs with what
+  they decode and encode, and `x5desk --gpu <number or part of the name>` (e.g. `--gpu radeon`) runs the app on
+  another; `x5desk mcp` takes `--gpu` too.
 - An Insta360 X5. Other Insta360 cameras have not been tried.
 - macOS 15 or later also works (Metal, VideoToolbox); see "macOS" in `ARCHITECTURE.md`. There is no Windows version.
 

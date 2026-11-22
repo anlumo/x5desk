@@ -17,19 +17,26 @@ pub struct Gpu {
     pub(crate) cache: Cf,
 }
 
+/// wgpu's Metal instance.
+pub(crate) fn instance() -> wgpu::Instance {
+    let mut d = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+    d.backends = wgpu::Backends::METAL;
+    wgpu::Instance::new(d)
+}
+
+/// VideoToolbox decodes and encodes both, whichever the adapter, as `--gpu list` says it.
+pub(crate) fn codecs(_: &wgpu::Adapter) -> [String; 2] {
+    ["H.265, H.264 (VideoToolbox)"; 2].map(String::from)
+}
+
 impl Gpu {
-    /// Opens the Metal adapter with every adapter feature and the experimental features. VideoToolbox decodes and
-    /// encodes on the media engine and hands over IOSurfaces, so there are no video queues to open.
+    /// Opens the high-performance Metal adapter (`--gpu`'s: `crate::PICK`) with every adapter feature and the
+    /// experimental features. VideoToolbox decodes and encodes on the media engine and hands over IOSurfaces, so there
+    /// are no video queues to open.
     pub fn new() -> Result<Gpu> {
         let err = |e: &dyn std::fmt::Display| Error::Gpu(e.to_string());
-        let mut d = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
-        d.backends = wgpu::Backends::METAL;
-        let instance = wgpu::Instance::new(d);
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        }))
-        .map_err(|e| err(&e))?;
+        let instance = instance();
+        let adapter = crate::adapter(&instance)?;
         let (features, limits) = (adapter.features(), adapter.limits());
         if !features.contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM) {
             return Err(err(&"no 16-bit normalised textures (P010 planes)"));

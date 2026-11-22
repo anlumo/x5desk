@@ -29,6 +29,86 @@ pub use gpu::Gpu;
 #[cfg(target_os = "linux")]
 pub use gpu::VideoQueue;
 
+/// The adapter `--gpu` chose for every `Gpu` of the process: an index in [`gpus`]' list or a part of an adapter's
+/// name ([`pick`]); unset, wgpu's high-performance adapter, as without the flag.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub static PICK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Which of the adapters named `n` `w` means: index `w`, else the one whose name has `w` in it, in any case.
+pub fn pick(n: &[String], w: &str) -> std::result::Result<usize, String> {
+    let l = w.to_lowercase();
+    let m: Vec<usize> = match w.parse() {
+        Ok(i) if i < n.len() => vec![i],
+        _ => (0..n.len())
+            .filter(|&i| n[i].to_lowercase().contains(&l))
+            .collect(),
+    };
+    match m[..] {
+        [i] => Ok(i),
+        [] => Err(format!("no GPU is {w:?} or has it in its name")),
+        _ => Err(format!(
+            "{w:?} is in {} GPUs' names: give the index",
+            m.len()
+        )),
+    }
+}
+
+/// wgpu's high-performance adapter: the one taken without `--gpu`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn best(i: &wgpu::Instance) -> Result<wgpu::Adapter> {
+    pollster::block_on(i.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    }))
+    .map_err(|e| Error::Gpu(e.to_string()))
+}
+
+/// The adapter of `Gpu::new`: [`PICK`]'s, else [`best`]. Err: none, or `PICK` names none or several (with the list).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn adapter(i: &wgpu::Instance) -> Result<wgpu::Adapter> {
+    let Some(w) = PICK.get() else { return best(i) };
+    let mut a = pollster::block_on(i.enumerate_adapters(wgpu::Backends::all()));
+    let n: Vec<_> = a.iter().map(|a| a.get_info().name).collect();
+    let k = pick(&n, w).map_err(|e| Error::Gpu(format!("--gpu: {e}\n{}", table(i, &a))))?;
+    Ok(a.swap_remove(k))
+}
+
+/// `a` as `--gpu list` shows them: index, name, driver, the H.265 and H.264 it decodes and encodes, the default
+/// marked.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn table(i: &wgpu::Instance, a: &[wgpu::Adapter]) -> String {
+    let def = best(i).ok().map(|d| d.get_info());
+    let mut s = String::from("GPUs, for --gpu <index or a part of the name>:");
+    for (k, a) in a.iter().enumerate() {
+        let (x, [d, e]) = (a.get_info(), gpu::codecs(a));
+        let v = format!("{} {}", x.driver, x.driver_info);
+        let drv = match v.trim() {
+            "" => String::new(),
+            v => format!(", driver {v}"),
+        };
+        let m = if def.as_ref() == Some(&x) {
+            " (the default)"
+        } else {
+            ""
+        };
+        s += &format!("\n  {k}: {}{drv}; decodes {d}; encodes {e}{m}", x.name);
+    }
+    if a.is_empty() {
+        s += "\n  none found";
+    }
+    s
+}
+
+/// `x5desk --gpu list`: every adapter, as [`table`] shows them.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn gpus() -> String {
+    let i = gpu::instance();
+    table(
+        &i,
+        &pollster::block_on(i.enumerate_adapters(wgpu::Backends::all())),
+    )
+}
+
 #[derive(Debug)]
 pub enum Error {
     Vk(ash::vk::Result),
@@ -71,3 +151,34 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    /// `--gpu`'s value: an adapter's index, else a part of one adapter's name in any case (an index past the last one
+    /// too); one in no name or in several is an error.
+    #[test]
+    fn pick() {
+        let n = [
+            "NVIDIA GeForce RTX 4090",
+            "AMD Radeon 8060S Graphics (RADV GFX1151)",
+            "AMD Radeon RX 7900 XTX (RADV NAVI31)",
+        ]
+        .map(String::from);
+        let p = |w| super::pick(&n, w);
+        assert_eq!(
+            [
+                p("0"),
+                p("2"),
+                p("4090"),
+                p("rtx"),
+                p("8060S"),
+                p("xtx"),
+                p("31")
+            ],
+            [Ok(0), Ok(2), Ok(0), Ok(0), Ok(1), Ok(2), Ok(2)]
+        );
+        assert!(p("radeon").unwrap_err().contains("in 2 GPUs' names"));
+        assert!(p("intel").unwrap_err().contains("no GPU"));
+        assert!(p("12").unwrap_err().contains("no GPU"));
+    }
+}

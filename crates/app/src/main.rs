@@ -2,7 +2,8 @@
 //! panel switches screens. `x5desk [file]` opens a file; on macOS so do Finder, the Dock and `open` (`finder.rs`), as
 //! a drop on the window would. `x5desk mcp …` is the MCP server instead (crate `mcp`), with no window; its GPU tools
 //! run on this app's engine (`export::agent`; `X5DESK_TEST=mcp-noattach` keeps burn off its device). One GPU setup for
-//! both (`gpu.rs`).
+//! both (`gpu.rs`), on the adapter `--gpu <index or part of the name>` names anywhere in either's arguments
+//! (`video::PICK`); `--gpu list` prints the adapters and exits.
 //!
 //! Test hooks: `X5DESK_SHOT=<file.png>` (with `X5DESK_SHOT_AFTER=<s>`, default 1) saves a screenshot once that time has
 //! passed and the player has nothing pending, then exits. `X5DESK_TEST=<tokens>` (comma separated) sets up the first
@@ -93,6 +94,7 @@ use cam::{album, awake, conf, disk, dl};
 use eframe::{egui, egui_wgpu};
 use std::{
     cell::RefCell,
+    ffi::OsString,
     path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockWriteGuard,
@@ -891,12 +893,44 @@ fn icon() -> egui::IconData {
     eframe::icon_data::from_png_bytes(include_bytes!("../icon/x5desk.png")).expect("x5desk.png")
 }
 
+/// Takes `--gpu <which>` (or `--gpu=<which>`, as the MCP's flags) out of `a`: the last one's value.
+fn gpu_flag(a: &mut Vec<OsString>) -> Result<Option<String>, String> {
+    let (mut w, mut i) = (None, 0);
+    while i < a.len() {
+        let Some(r) = mcp::cli::value(a, i, "--gpu") else {
+            i += 1;
+            continue;
+        };
+        let (v, n) = r?;
+        w = Some(v.into_string().map_err(|_| "--gpu: not text")?);
+        a.drain(i..i + n);
+    }
+    match w {
+        Some(v) if v.is_empty() => Err("--gpu needs a value".into()),
+        w => Ok(w),
+    }
+}
+
 fn main() -> eframe::Result {
+    let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // the window's and the MCP server's: every `video::Gpu` of the process, the MCP's `gpu-check` child's too
+    match gpu_flag(&mut args) {
+        Ok(Some(w)) if w == "list" => {
+            println!("{}", video::gpus());
+            std::process::exit(0)
+        }
+        Ok(Some(w)) => _ = video::PICK.set(w),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("x5desk: {e}");
+            std::process::exit(2)
+        }
+    }
     // `x5desk mcp …`: the MCP server, before anything here runs or prints (its stdout is the protocol's)
-    if std::env::args_os().nth(1).is_some_and(|a| a == "mcp") {
+    if args.first().is_some_and(|a| a == "mcp") {
         let r: Arc<dyn mcp::render::Render> = export::agent::Agent::headless();
         let b = mcp::render::Backend { render: Some(r) };
-        let code = mcp::main(std::env::args_os().skip(2).collect(), b);
+        let code = mcp::main(args.split_off(1), b);
         // a lane still in the driver: no atexit, no driver teardown (the stdout writer is done by now)
         if export::agent::busy() {
             eprintln!("x5desk mcp: ending with a GPU thread in the driver: without its teardown");
@@ -908,7 +942,7 @@ fn main() -> eframe::Result {
     // before AppKit starts: the launch's files come as it does
     #[cfg(target_os = "macos")]
     finder::watch();
-    let file = std::env::args_os().nth(1).map(PathBuf::from);
+    let file = args.first().map(PathBuf::from);
     // an old macOS launching the bundle passes its process serial number
     #[cfg(target_os = "macos")]
     let file = file.filter(|f| !f.as_os_str().as_encoded_bytes().starts_with(b"-psn_"));
@@ -1007,6 +1041,33 @@ mod tests {
             (ble("ble=sim"), ble("ble=sta"), ble("ble=x")),
             (Some(false), Some(true), None)
         );
+    }
+
+    /// `--gpu` taken out of the arguments wherever it is, as `--gpu v` or `--gpu=v` (the last one counts), the rest left
+    /// as it was; one without a value is an error.
+    #[test]
+    fn gpu_flag() {
+        let f = |s: &str| {
+            let mut a: Vec<_> = s.split_whitespace().map(std::ffi::OsString::from).collect();
+            let w = super::gpu_flag(&mut a)?;
+            let rest: Vec<_> = a.iter().map(|x| x.to_str().unwrap()).collect();
+            Ok::<_, String>((w, rest.join(" ")))
+        };
+        let ok = |w: Option<&str>, r: &str| Ok((w.map(String::from), r.to_string()));
+        assert_eq!(f("--gpu radeon a.insv"), ok(Some("radeon"), "a.insv"));
+        assert_eq!(f("a.insv --gpu=1"), ok(Some("1"), "a.insv"));
+        assert_eq!(
+            f("mcp --sim --gpu=4090 --tiers read"),
+            ok(Some("4090"), "mcp --sim --tiers read")
+        );
+        assert_eq!(
+            f("mcp gpu-check --gpu 0 --gpu list"),
+            ok(Some("list"), "mcp gpu-check")
+        );
+        assert_eq!(f("mcp"), ok(None, "mcp"));
+        for bad in ["--gpu", "a.insv --gpu", "--gpu="] {
+            assert!(f(bad).is_err(), "{bad}");
+        }
     }
 
     /// The error wgpu 30 reports for `Surface::configure` when another thread submitted during its idle wait, and

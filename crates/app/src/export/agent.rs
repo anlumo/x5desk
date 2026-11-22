@@ -272,6 +272,10 @@ impl Agent {
             .filter(|&l| lock(&rd.lane(l).wedged).is_some() || !rd.lane(l).q.alive())
             .collect();
         i.blur_stuck = rd.stuck();
+        #[cfg(target_os = "linux")]
+        {
+            i.checks = checks(&rd.g);
+        }
         i
     }
 
@@ -390,8 +394,23 @@ fn base(g: &Gpu) -> GpuInfo {
         device: a.device,
         max_texture: g.device.limits().max_texture_dimension_2d,
         env: env(),
+        #[cfg(target_os = "linux")]
+        checks: checks(g),
         ..Default::default()
     }
+}
+
+/// What the device's decode checks found so far; None where decodes aren't checked.
+#[cfg(target_os = "linux")]
+fn checks(g: &Gpu) -> Option<Box<r::Checks>> {
+    let c = &g.checks;
+    c.on.then(|| {
+        Box::new(r::Checks {
+            recovered: c.redone.load(Relaxed),
+            failed: c.failed.load(Relaxed),
+            redo_memory: c.read().map(String::from),
+        })
+    })
 }
 
 fn codec_id(c: Codec) -> &'static str {
@@ -449,9 +468,9 @@ fn encode(g: &Gpu, say: &dyn Fn(String)) -> Vec<r::Cap> {
         .collect()
 }
 
-/// The self-test in a child, `<exe> mcp gpu-check`: its stdin a pipe (it ends at its EOF, so a host that is killed
-/// takes it along), its stdout's one line read back, its stderr (16 KiB of it) and its pass into `log`; killed after
-/// [`CHILD`] or once `halt` is set.
+/// The self-test in a child, `<exe> mcp gpu-check` (on `--gpu`'s adapter): its stdin a pipe (it ends at its EOF, so a
+/// host that is killed takes it along), its stdout's one line read back, its stderr (16 KiB of it) and its pass into
+/// `log`; killed after [`CHILD`] or once `halt` is set.
 fn child(
     exe: &Path,
     halt: &AtomicBool,
@@ -459,6 +478,7 @@ fn child(
 ) -> Result<GpuInfo, Fail> {
     let mut c = Command::new(exe)
         .args(["mcp", "gpu-check"])
+        .args(video::PICK.get().map(|w| format!("--gpu={w}")))
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

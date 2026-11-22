@@ -1151,7 +1151,9 @@ fn x26x_matches_ffmpeg() {
 
 /// Where decodes are checked (NVIDIA), decodes marked unfinished (`Decoder::fake`, runs of them too) are redone before
 /// their frames are ready: two decoders running ahead at once, one restarted between two marked frames, then two made
-/// again from the parked bodies; every picture still FFmpeg's, `redone` counts them, `failed` none.
+/// again from the parked bodies; every picture still FFmpeg's, `redone` counts them, `failed` none, and the device's
+/// counts (`Gpu::checks`) are the decoders' summed.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn redo() {
     if !ffmpeg() {
@@ -1160,7 +1162,7 @@ fn redo() {
     let _l = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let g = Gpu::new().unwrap();
     let (w, h) = (720, 404);
-    let fs = w * h * 3 / 2;
+    let (fs, mut sum) = (w * h * 3 / 2, 0);
     let x265 =
         "-c:v libx265 -x265-params keyint=30:min-keyint=30:bframes=0:ref=2:log-level=error -f hevc";
     for (codec, name, args) in [
@@ -1253,14 +1255,27 @@ fn redo() {
                     !checked || d.redone() >= fakes.len() as u64,
                     "{name}: too few redone"
                 );
+                sum += d.redone();
             }
         }
     }
+    let c = &g.checks;
+    println!(
+        "the device's counts: {} redone, {} failed",
+        c.redone.load(Relaxed),
+        c.failed.load(Relaxed)
+    );
+    assert_eq!(
+        (c.redone.load(Relaxed), c.failed.load(Relaxed)),
+        (sum, 0),
+        "the device's counts"
+    );
 }
 
 /// Where decodes are checked: a checker that ends in an error (`Decoder::fake` with `err`) lets the frames it had not
 /// checked go as failed, `decode` returns its error from then on, reading those frames and dropping the decoder end,
 /// and the next decoder decodes as before.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn redo_error() {
     if !ffmpeg() {
@@ -1321,6 +1336,11 @@ fn redo_error() {
         d.redone()
     );
     assert!(matches!(err, Some(Error::Vk(_))) && d.failed() > 0);
+    assert_eq!(
+        g.checks.failed.load(Relaxed),
+        d.failed(),
+        "the device's count"
+    );
     assert!(matches!(d.decode(&g, &aus[n]), Err(Error::Vk(_))));
     drop(d);
     let mut d = Decoder::new(&g, Codec::H265, &params, 0, 0).unwrap();

@@ -30,7 +30,7 @@ use std::{
     ffi::c_void,
     mem::take,
     ptr,
-    sync::{Arc, Condvar, Mutex, MutexGuard, Weak},
+    sync::{Arc, Condvar, Mutex, MutexGuard, Weak, atomic::Ordering::Relaxed},
     thread::JoinHandle,
 };
 use wgpu_hal::api::Vulkan as Vk;
@@ -275,11 +275,12 @@ struct Flight {
     stop: bool,
 }
 
-/// What a decoder shares with its checker thread (`check`).
+/// What a decoder shares with its checker thread (`check`), and the device's counts over all decoders.
 struct Chk {
     st: Mutex<Flight>,
     cv: Condvar,
     dec: vk::Semaphore,
+    all: Arc<crate::gpu::Checks>,
 }
 
 impl Chk {
@@ -347,6 +348,10 @@ fn check(
             }
             if ok && fake.is_none() || n >= TRIES {
                 (s.failed, s.redone) = (s.failed + !ok as u64, s.redone + (ok && n > 0) as u64);
+                // a picture given up was redone too (`TRIES` times)
+                if n > 0 {
+                    [&c.all.failed, &c.all.redone][ok as usize].fetch_add(1, Relaxed);
+                }
                 s.q.pop_front();
                 signal(f)?;
                 continue;
@@ -357,6 +362,7 @@ fn check(
         if !till(last)? {
             return Ok(());
         }
+        c.all.mem.fetch_or(1 << !x.rbs.2 as u8, Relaxed);
         let mut s = c.lock();
         if !std::mem::replace(&mut s.said, true) {
             let m = if x.rbs.2 { "device" } else { "host" };
@@ -391,6 +397,7 @@ fn check(
         let mut s = c.lock();
         s.err = Some(e);
         s.failed += s.q.len() as u64;
+        c.all.failed.fetch_add(s.q.len() as u64, Relaxed);
         if let Some(u) = s.q.back() {
             let _ = signal(u.e.f);
         }
@@ -735,7 +742,7 @@ pub(crate) fn coincide(
 /// status (NVIDIA's does; RADV's doesn't, and a query there hangs), unless decode and encode share the queue: there a
 /// redo, and the checker's wait for the decodes before it, would queue behind an encode batch that waits for frames
 /// the renderer fills only once their decodes are checked. There a failure is only counted (`Decoder::failed`).
-fn checked(g: &Gpu) -> bool {
+pub(crate) fn checked(g: &Gpu) -> bool {
     status(g)
         && !g
             .enc
@@ -1230,6 +1237,7 @@ impl Decoder {
             st: Default::default(),
             cv: Condvar::new(),
             dec,
+            all: g.checks.clone(),
         });
         let a = (c.clone(), g.dec.queue.clone(), self.ring.done);
         let h = std::thread::Builder::new()

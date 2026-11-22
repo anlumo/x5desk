@@ -816,6 +816,7 @@ fn gpu_value(st: GpuSt, started: Option<std::time::SystemTime>) -> Value {
             "errors": i.errors,
             "suspect": i.suspect,
             "wedged": i.wedged,
+            "decode_checks": i.checks,
             "checked_ms": i.ms,
             "started": started.map(utc),
         }),

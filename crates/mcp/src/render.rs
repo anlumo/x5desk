@@ -237,6 +237,20 @@ pub struct GpuInfo {
     pub env: Vec<String>,
     /// how long the check took
     pub ms: u64,
+    /// what the decode checks found so far; None: the device's decodes aren't checked (boxed: `GpuSt` stays small)
+    #[serde(default)]
+    pub checks: Option<Box<Checks>>,
+}
+
+/// The decode checks' counts since the device opened, where the driver reports how each decode ended and decodes on a
+/// queue of its own (NVIDIA): pictures decoded again and recovered (correct ones), pictures that could not be decoded
+/// (shown as the driver left them), the memory the redos read their bitstream from ("device", "host", "device and
+/// host"; none before the first).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Checks {
+    pub recovered: u64,
+    pub failed: u64,
+    pub redo_memory: Option<String>,
 }
 
 /// A codec profile the device decodes or encodes.

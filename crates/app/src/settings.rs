@@ -228,6 +228,9 @@ pub struct Settings {
     pub p: Prefs,
     /// the shared device: name and value per row
     gpu: Vec<(&'static str, String)>,
+    /// its decode checks' counts, which change ([`checks`])
+    #[cfg(target_os = "linux")]
+    checks: std::sync::Arc<video::gpu::Checks>,
     cache: album::Cache,
     /// the thumbnail cache's files and bytes, measured when the page opens
     usage: Option<Usage>,
@@ -254,6 +257,20 @@ pub fn driver(i: &wgpu::AdapterInfo) -> String {
         true => format!("{:?}", i.backend),
         false => v.join(" "),
     }
+}
+
+/// The Graphics page's decode checks row: the pictures a redo recovered and those that could not be decoded since the
+/// start, the memory the redos read (the host's fails more often); none where decodes aren't checked (RADV reports no
+/// decode status).
+#[cfg(target_os = "linux")]
+fn checks(c: &video::gpu::Checks) -> Option<String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (r, f) = (c.redone.load(Relaxed), c.failed.load(Relaxed));
+    let m = c
+        .read()
+        .map_or(String::new(), |m| format!(" (redone from {m} memory)"));
+    let s = if r == 1 { "" } else { "s" };
+    c.on.then(|| format!("{r} picture{s} recovered{m}, {f} could not be decoded"))
 }
 
 /// Codec operations of a video queue, as text.
@@ -328,6 +345,8 @@ impl Settings {
         Settings {
             p,
             gpu,
+            #[cfg(target_os = "linux")]
+            checks: g.checks.clone(),
             cache,
             usage: None,
             io: None,
@@ -524,6 +543,20 @@ impl Settings {
                     ui.label(v);
                     ui.end_row();
                 }
+                #[cfg(target_os = "linux")]
+                if let Some(v) = checks(&self.checks) {
+                    ui.label("Decode checks");
+                    ui.label(v);
+                    ui.end_row();
+                    ui.label("");
+                    ui.colored_label(
+                        weak,
+                        "The driver reports whether each picture finished decoding. One it left unfinished is decoded \
+                         again before it is shown or exported: recovered pictures are correct. One still unfinished \
+                         after three tries is used as it came out. Counted since x5desk started.",
+                    );
+                    ui.end_row();
+                }
             });
             ui.add_space(12.0);
             ui.heading("Camera link");
@@ -718,5 +751,63 @@ mod tests {
         assert_eq!(std::fs::read_dir(&t).unwrap().count(), 0);
         drop((s, frame));
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Graphics' decode checks row: none where decodes aren't checked (RADV); where they are (NVIDIA), pictures
+    /// `Decoder::fake` marks unfinished are redone, and the device's count over two decoders, one gone already, rises
+    /// by the pictures they recovered, which the row says.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn decode_checks() {
+        use std::sync::atomic::Ordering::Relaxed;
+        use video::{Codec, Decoder, check};
+        let g = Gpu::new().unwrap();
+        let s = Settings::new(&g, Prefs::load(None));
+        let row = || checks(&s.checks);
+        if !g.checks.on {
+            println!("{}: decodes not checked, no row", g.adapter.get_info().name);
+            return assert_eq!(row(), None);
+        }
+        let (side, mut sum) = (256, 0);
+        assert_eq!(
+            row().as_deref(),
+            Some("0 pictures recovered, 0 could not be decoded")
+        );
+        for _ in 0..2 {
+            let mut d =
+                Decoder::new(&g, Codec::H264, &check::sets(side, true), side, side).unwrap();
+            assert!([1, 2, 4].iter().all(|&f| d.fake(f, false)));
+            for k in 0..3 {
+                for au in [check::flat(side, k, 128), check::skip(side, 1)] {
+                    let f = d.decode(&g, &[&au]).unwrap();
+                    d.release(&g, f);
+                }
+            }
+            let t0 = std::time::Instant::now();
+            while d.ready() < d.frame {
+                assert!(
+                    t0.elapsed().as_secs() < 10,
+                    "{} of {} ready",
+                    d.ready(),
+                    d.frame
+                );
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(
+                d.redone() >= 3 && d.failed() == 0,
+                "{} redone, {} failed",
+                d.redone(),
+                d.failed()
+            );
+            sum += d.redone();
+        }
+        let r = row().unwrap();
+        println!("{sum} redone: {r}");
+        assert_eq!(g.checks.redone.load(Relaxed), sum);
+        assert!(
+            r.starts_with(&format!("{sum} pictures recovered (redone from ")),
+            "{r}"
+        );
+        assert!(r.ends_with(", 0 could not be decoded"), "{r}");
     }
 }

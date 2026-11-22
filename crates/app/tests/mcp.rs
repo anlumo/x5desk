@@ -811,6 +811,46 @@ fn gpu_selftest() {
     assert!(has("decode", "h265") && has("encode", "h264"), "{v}");
 }
 
+/// `--gpu`: `x5desk --gpu list` lists this machine's adapters, one the default, and exits; `x5desk mcp gpu-check
+/// --gpu=<X5_GPU>` (unset: the default's index) passes on the adapter the list has at that index or with that in its
+/// name, and one in no adapter's name fails at step 1 with the list.
+#[test]
+fn gpu_flag() {
+    let _g = gpu();
+    let t = Tmp::new("gpuflag");
+    let o = x5desk(&t, &["--gpu", "list"]).output().unwrap();
+    let list = String::from_utf8_lossy(&o.stdout).into_owned();
+    println!("{list}");
+    assert!(o.status.success() && list.starts_with("GPUs"), "{o:?}");
+    let names: Vec<String> = (list.lines().skip(1))
+        .filter_map(|l| l.trim_start().split_once(": "))
+        .map(|(_, r)| r[..r.find(", driver ").or(r.find("; decodes")).unwrap()].into())
+        .collect();
+    let def = (list.lines().skip(1)).position(|l| l.ends_with(" (the default)"));
+    let w = std::env::var("X5_GPU").unwrap_or_else(|_| def.unwrap().to_string());
+    let check = |w: &str| {
+        let mut k = spawn_args(&t, &["mcp", "gpu-check", &format!("--gpu={w}")], &[]);
+        let s = k.wait();
+        std::thread::sleep(Duration::from_millis(200));
+        let all = k.all.lock().unwrap().clone();
+        assert_eq!(all.len(), 1, "{all:?}; stderr:\n{}", k.stderr());
+        (
+            s,
+            serde_json::from_str::<Value>(&all[0]).unwrap(),
+            k.stderr(),
+        )
+    };
+    let (s, v, err) = check(&w);
+    assert!(s.success() && v["ok"] == true, "{s}: {v}; stderr:\n{err}");
+    let i = &v["info"];
+    println!("--gpu={w}: {}; decode checks {}", i["adapter"], i["checks"]);
+    assert_eq!(i["adapter"], names[video::pick(&names, &w).unwrap()]);
+    let (s, v, _) = check("no-such-gpu");
+    let why = v["why"].as_str().unwrap();
+    assert!(!s.success() && v["step"] == 1, "{s}: {v}");
+    assert!(why.contains("no GPU") && why.contains(&names[0]), "{why}");
+}
+
 /// A tool call's error text, which it must be.
 fn refused(k: &mut Kid, name: &str, args: Value) -> String {
     let r = k.call(name, args);

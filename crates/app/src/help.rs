@@ -236,7 +236,11 @@ fn guide(p: Page) -> &'static [&'static str] {
             "The download folder (camera downloads and card imports), the default export preset, the audio output of \
              the player, the live outputs and the editor's preview, and the thumbnail cache's limit and clearing.",
             "Graphics shows the shared device (Vulkan on Linux, Metal on macOS): decode, encode and DMA-BUF export \
-             capabilities. The client id is what the camera remembers when you allow this computer on it.",
+             capabilities, and where the driver reports how each decode ended (NVIDIA), the pictures decoded again \
+             and recovered. The client id is what the camera remembers when you allow this computer on it.",
+            "With two GPUs x5desk runs on the faster one. To choose, start it as x5desk --gpu <name or number>, e.g. \
+             x5desk --gpu radeon; x5desk --gpu list lists the GPUs with their numbers and what they decode and \
+             encode. x5desk mcp takes --gpu too.",
             #[cfg(not(target_os = "macos"))]
             "Settings are kept in ~/.config/x5desk; thumbnails and what the library search saw in ~/.cache/x5desk.",
             #[cfg(target_os = "macos")]

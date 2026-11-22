@@ -14,6 +14,8 @@
 //!   executable; refused from a disk image (`/Volumes/`) or a translocated copy (`/AppTranslocation/`), gone later.
 //! - `x5desk mcp gpu-check` (not in the usage): the GPU self-test child a host's backend runs before it opens the
 //!   device itself ([`gpu_check`]'s one line on stdout). It ends at stdin's EOF (its parent gone) and after 25 s.
+//! - `--gpu <gpu>` (and `--gpu list`) the app takes out of the arguments before (`video::PICK`; the host hands it to
+//!   its `gpu-check` child), so the usage names it but [`parse`] never sees it.
 //!
 //! Wrong arguments: the usage on stderr, exit 2. A server that could not start exits 1, one whose client went (stdin's
 //! end, once the open requests are answered; SIGTERM, SIGINT and SIGHUP unless started with them ignored (`nohup`);
@@ -39,12 +41,15 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const USAGE: &str = "\
-usage: x5desk mcp [--sim] [--tiers <tiers>] [--allow-dir <dir>]...  serve MCP on stdin and stdout
+usage: x5desk mcp [--sim] [--tiers <tiers>] [--allow-dir <dir>]... [--gpu <gpu>]  serve MCP on stdin and stdout
        x5desk mcp enable --tiers <tiers>  enable tiers for agents (replaces the enabled set)
        x5desk mcp disable                 turn every tier off
        x5desk mcp --print-config          how to add x5desk to Claude Code and Claude Desktop
+       x5desk mcp --gpu list              the GPUs, with what they decode and encode
 <tiers>: a comma list of read, local, camera, delete, untested (delete and untested only by their names); when
          serving, --tiers only narrows. untested: modes and settings x5desk has not run on an X5
+<gpu>:   the GPU stills and exports run on: its index in --gpu list or a part of its name (radeon, 4090); without
+         --gpu, the faster one
 ";
 
 /// What the command line asks for.
@@ -62,8 +67,9 @@ enum Cmd {
     GpuCheck,
 }
 
-/// The value of flag `f` at `a[i]` (`f=v`, or `f v`) and how many arguments it took; none: not that flag.
-fn value(a: &[OsString], i: usize, f: &str) -> Option<Result<(OsString, usize), String>> {
+/// The value of flag `f` at `a[i]` (`f=v`, or `f v`) and how many arguments it took; none: not that flag. The app's
+/// `--gpu` too.
+pub fn value(a: &[OsString], i: usize, f: &str) -> Option<Result<(OsString, usize), String>> {
     let x = a[i].to_str()?;
     if x == f {
         return Some(
