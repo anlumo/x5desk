@@ -1,6 +1,6 @@
 //! Editor screen (PLAN.md milestone 7, groups 10, 12, 13) on crate edit's model: a timeline of clips from the
 //! library (drag in, trim, split, delete, reorder, speed with ramp keys, freeze frames), reframing keys from the
-//! viewer's view with easing and camera-movement presets (edit) or Effects cuts (shotlab), a look (ours or an
+//! viewer's view with easing and camera-movement presets (edit) or Effects cuts (effects), a look (ours or an
 //! imported `.cube`) and colour adjustments per clip, overlays (fx), clip volume envelopes, mute, music with ducking
 //! and denoise (media), undo / redo (edit's log for the timeline, steps of the extras between its steps), project
 //! files and "Export timeline" (`export::Cut::Edit` on the Export screen's queue). The viewer frames what a flat export
@@ -1181,7 +1181,7 @@ impl Editor {
                     _ => Ok(()),
                 };
                 let r = fwd
-                    .and_then(|_| shotlab::Clip::open(Path::new(&path)))
+                    .and_then(|_| effects::Clip::open(Path::new(&path)))
                     .and_then(|c| {
                         c.poses(lock, s)
                             .ok_or("no IMU record to stabilise with".into())
@@ -2926,7 +2926,7 @@ impl Editor {
                 .on_hover_text("Hyperlapse orbiting from a tiny planet")
                 .clicked()
             {
-                let r = shotlab::cut::orbit(file, a, b, self.lapse, ramp, v, self.turns, 1.0);
+                let r = effects::cut::orbit(file, a, b, self.lapse, ramp, v, self.turns, 1.0);
                 self.shot(k, r.map(|c| vec![c]));
             }
             if ui
@@ -2934,7 +2934,7 @@ impl Editor {
                 .on_hover_text("Hyperlapse rolling the world over")
                 .clicked()
             {
-                let r = shotlab::cut::roll(file, a, b, self.lapse, ramp, v, self.turns);
+                let r = effects::cut::roll(file, a, b, self.lapse, ramp, v, self.turns);
                 self.shot(k, r.map(|c| vec![c]));
             }
             if ui
@@ -2943,7 +2943,7 @@ impl Editor {
                 .clicked()
             {
                 let hold = (self.every / self.lapse).max(fd);
-                let r = shotlab::cut::stop_motion(file, a, b, self.every, hold);
+                let r = effects::cut::stop_motion(file, a, b, self.every, hold);
                 self.shot(k, r);
             }
         });

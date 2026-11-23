@@ -317,23 +317,23 @@ const MODELS: [Model; 11] = [
     ),
     Model(
         "PP-HumanSeg v1 (mobile)",
-        "person segmentation for Freeze Trail and Echo Trail (shotlab)",
+        "person segmentation for Freeze Trail and Echo Trail (effects)",
         "Apache-2.0",
         "PaddleSeg via the OpenCV model zoo, human_segmentation_pphumanseg_2023mar; Copyright (c) 2021 PaddlePaddle \
          Authors",
         "Trained on a \"Baidu self-built dataset\", as PaddleHub's humanseg_mobile page names it.",
-        include_str!("../../shotlab/models/LICENSE-pphumanseg"),
+        include_str!("../../effects/models/LICENSE-pphumanseg"),
     ),
     Model(
         "EfficientViT-seg B1 (ADE20K)",
-        "sky segmentation for New Sky (shotlab)",
+        "sky segmentation for New Sky (effects)",
         "Apache-2.0",
         "MIT HAN Lab, mit-han-lab/efficientvit, efficientvit_seg_b1_ade20k; Copyright 2023 Han Cai",
         "⚠ Trained on ADE20K, whose images MIT CSAIL lets researchers use only for non-commercial research and \
          educational purposes (its annotations BSD-3-Clause), from a backbone pre-trained on ImageNet (non-commercial \
          research and education); the weights are published under Apache-2.0 by their authors. Check the datasets' \
          terms before any commercial use.",
-        include_str!("../../shotlab/models/LICENSE-efficientvit"),
+        include_str!("../../effects/models/LICENSE-efficientvit"),
     ),
     Model(
         "TinyCLIP ViT-39M/16 Text-19M",

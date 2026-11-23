@@ -1,10 +1,10 @@
 //! The effects on synthetic frames (exact checks) and on the X5's footage (`X5_SAMPLES`; skipped when unset). Pictures
-//! and videos go to `X5_SHOT_OUT` (default `target/shotlab/out` next to Cargo's test tmp directory, on disk); ffmpeg
+//! and videos go to `X5_SHOT_OUT` (default `target/effects/out` next to Cargo's test tmp directory, on disk); ffmpeg
 //! serves as a test tool only (frames out of the exported videos). GPU timings are noisy: other work shares the GPU.
 //! Run with `--release`.
 
+use effects::{Ctx, Delay, FORMATS, Light, Map, Median, Stack, Trails};
 use glam::{DQuat, DVec3, Quat, Vec3};
-use shotlab::{Ctx, Delay, FORMATS, Light, Map, Median, Stack, Trails};
 use stab::vis;
 use std::{
     path::{Path, PathBuf},
@@ -312,7 +312,7 @@ fn median_footage() {
 
 fn median_clip(p: &Path, clip: &str, k0: usize, k1: usize) {
     let (_l, g, sx, cx) = gpu();
-    let c = shotlab::Clip::open(p).unwrap();
+    let c = effects::Clip::open(p).unwrap();
     let all: Vec<usize> = (k0..k1).collect();
     let turn = c.turn(&all).unwrap();
     eprintln!("{clip} frames {k0}..{k1}: the camera turned {turn:.3}° at most (gyro)");
@@ -651,7 +651,7 @@ fn h16(v: u16) -> f64 {
     }
 }
 
-/// Night Road on v627 frames 165..465 (10 s at night, the camera held still, people with phones and lamps): an export
+/// Light trails on v627 frames 165..465 (10 s at night, the camera held still, people with phones and lamps): an export
 /// job (360 at 3840, the gyro's direction lock) with the trails as its effect hook.
 #[test]
 fn trails_v627() {
@@ -697,7 +697,7 @@ fn boxed(s: &track::Sample) -> bool {
 
 /// IoU of the mask's bounding box (probability > ½, inside the paste's gate) with the subject's box, in the crop.
 fn mask_iou(m: &[f32], size: glam::Vec2, margin: f32) -> f32 {
-    let n = shotlab::Cuts::SIDE as usize;
+    let n = effects::Cuts::SIDE as usize;
     let b = (size / 2.0).to_array().map(|a| a.to_radians().tan());
     let e = b[0].max(b[1]) * margin;
     let g = [b[0] / e, b[1] / e];
@@ -728,12 +728,12 @@ fn clones_v627() {
         return;
     };
     let (_l, g, sx, cx) = gpu();
-    let c = shotlab::Clip::open(&p).unwrap();
+    let c = effects::Clip::open(&p).unwrap();
     let lock = c.poses(stab::Lock::Direction, 0.0).unwrap();
     let pose = |k: usize| c.pose(k, Some(&lock));
     let (k0, k1) = (300usize, 480usize);
     let w = 2880u32;
-    let mut cuts = shotlab::Cuts::new(&g, &cx, 9, 512, FORMATS[0]).unwrap();
+    let mut cuts = effects::Cuts::new(&g, &cx, 9, 512, FORMATS[0]).unwrap();
     let mut med = Median::new(&cx, w, w / 2, 18, FORMATS[0]);
     let (mut iou, mut slots, mut last) = (vec![], vec![], None::<(Vec3, f32)>);
     let t = Instant::now();
@@ -836,10 +836,10 @@ fn clones_v627() {
     };
     let t = [c.times[k0], c.times[k1]];
     for (name, mode) in [
-        ("v627_freeze", shotlab::Clones::Freeze { gap: 1.2, n: 8 }),
-        ("v627_echo", shotlab::Clones::Echo { lag: 20, n: 4 }),
+        ("v627_freeze", effects::Clones::Freeze { gap: 1.2, n: 8 }),
+        ("v627_echo", effects::Clones::Echo { lag: 20, n: 4 }),
     ] {
-        let cu = shotlab::Cuts::new(&g, &cx, mode.slots(), 512, FORMATS[0]).unwrap();
+        let cu = effects::Cuts::new(&g, &cx, mode.slots(), 512, FORMATS[0]).unwrap();
         let hook = cu.hook(mode, sub(smp.clone())).unwrap();
         export(
             &g,
@@ -863,7 +863,7 @@ fn clones_v627() {
 fn walker(
     g: &Gpu,
     sx: &stitch::Ctx,
-    c: &shotlab::Clip,
+    c: &effects::Clip,
     pose: &dyn Fn(usize) -> stitch::Pose,
     k0: usize,
     k1: usize,
@@ -924,7 +924,7 @@ fn gauss(s: &mut u64) -> f64 {
 
 /// Frame Stack on a synthetic night: 3000 stars (brightness power law, Gaussian PSF) turning about the celestial pole
 /// at 52.5° elevation by 0.25° per frame (a photo a minute), a static ground below the horizon, and noise of σ 0.03
-/// on every frame (8-bit sRGB, 2048 × 1024). Each frame aligned to the one before (`shotlab::align`), the fits
+/// on every frame (8-bit sRGB, 2048 × 1024). Each frame aligned to the one before (`effects::align`), the fits
 /// chained, against the true rotation; then stacked: the mean (noise in a starless patch of sky against one frame's,
 /// √40 ≈ 6.3 expected) and peaks of bright stars against a mean without alignment, and the maximum of the frames as
 /// they are (star trails).
@@ -1000,7 +1000,7 @@ fn stars_synthetic() {
     let (band, r) = ([10f64.to_radians(), 85f64.to_radians()], n / 2);
     let pan: Vec<vis::Pano> = frames.iter().map(|f| vis::Pano::rgba(f, w, h)).collect();
     let t = Instant::now();
-    let reg = shotlab::series(&pan, r, band);
+    let reg = effects::series(&pan, r, band);
     let secs = t.elapsed().as_secs_f64();
     let reg: Vec<(DQuat, f64)> = reg
         .into_iter()
@@ -1035,7 +1035,7 @@ fn stars_synthetic() {
     assert!(worst < 0.02);
     let tex: Vec<wgpu::Texture> = frames
         .iter()
-        .map(|f| shotlab::image(&cx, f, w as u32, h as u32))
+        .map(|f| effects::image(&cx, f, w as u32, h as u32))
         .collect();
     // stacks into half floats, measured in linear light
     let o = frame(&cx, w as u32, h as u32, FORMATS[1]);
@@ -1252,7 +1252,7 @@ fn delay_footage() {
         let Some(p) = sample(&format!("{clip}.insv")) else {
             return;
         };
-        let c = shotlab::Clip::open(&p).unwrap();
+        let c = effects::Clip::open(&p).unwrap();
         let d = Delay::new(&cx, 3840, 1920, n, FORMATS[0], map);
         let t = [c.times[k0], c.times[k0 + 180]];
         export(
@@ -1278,8 +1278,8 @@ fn planets_v606() {
         return;
     };
     let (_l, g, sx, _cx) = gpu();
-    let c = shotlab::Clip::open(&p).unwrap();
-    let pl = shotlab::Planets::new(&sx, FORMATS[0]);
+    let c = effects::Clip::open(&p).unwrap();
+    let pl = effects::Planets::new(&sx, FORMATS[0]);
     export(
         &g,
         &sx,
@@ -1371,7 +1371,7 @@ fn render(
 /// directions smoothed by `track::smooth`).
 #[test]
 fn presets() {
-    use shotlab::cut;
+    use effects::cut;
     let fps = edit::Rate {
         num: 30000,
         den: 1001,
@@ -1380,7 +1380,7 @@ fn presets() {
         return;
     };
     let (_l, g, sx, _cx) = gpu();
-    let c6 = shotlab::Clip::open(&p6).unwrap();
+    let c6 = effects::Clip::open(&p6).unwrap();
     let dur6 = c6.times.len() as f64 * 1001.0 / 30000.0;
     let path6 = p6.to_str().unwrap();
 
@@ -1449,7 +1449,7 @@ fn presets() {
     );
 
     // subject presets: the walker in v627 frames 300..480
-    let c7 = shotlab::Clip::open(&p7).unwrap();
+    let c7 = effects::Clip::open(&p7).unwrap();
     let dur7 = c7.times.len() as f64 * 1001.0 / 30000.0;
     let path7 = p7.to_str().unwrap();
     let lock = c7.poses(stab::Lock::Direction, 0.0).unwrap();
@@ -1560,10 +1560,10 @@ fn presets() {
     );
 }
 
-/// Share of the world mask's upper hemisphere (stitch's layout, `shotlab::MW` wide) where `f` holds, by solid angle,
+/// Share of the world mask's upper hemisphere (stitch's layout, `effects::MW` wide) where `f` holds, by solid angle,
 /// weighted by `f`'s value.
 fn upper(f: impl Fn(usize) -> f64) -> f64 {
-    let (w, h) = (shotlab::MW as usize, shotlab::MW as usize / 2);
+    let (w, h) = (effects::MW as usize, effects::MW as usize / 2);
     let (mut a, mut n) = (0.0, 0.0);
     for y in 0..h / 2 {
         let s = (std::f64::consts::PI * y as f64 / (h - 1) as f64).sin();
@@ -1615,12 +1615,12 @@ fn sky_footage() {
             (r("20260311_183904_00_714"), 1000, 0.0, 1.0),
         ]);
     }
-    let test = shotlab::gradient(1024, [255, 0, 255], [255, 128, 0]);
-    let clear = shotlab::gradient(1024, [40, 95, 190], [190, 215, 240]);
+    let test = effects::gradient(1024, [255, 0, 255], [255, 128, 0]);
+    let clear = effects::gradient(1024, [40, 95, 190], [190, 215, 240]);
     let (w, h) = (3840u32, 1920u32);
     let mut fails = vec![];
     for (p, k, lo, hi) in cases {
-        let c = shotlab::Clip::open(&p).unwrap();
+        let c = effects::Clip::open(&p).unwrap();
         let ps = c.poses(stab::Lock::Horizon, 0.5);
         let name = format!("{}_{k}", short(&p));
         c.frames(&g, &sx, w, false, &[k], |k| c.pose(k, ps.as_deref()), |f, k| {
@@ -1628,7 +1628,7 @@ fn sky_footage() {
             let before = read(&cx, f);
             let swap = |sky: &[u8], tone| {
                 put(&cx, f, &before);
-                let mut s = shotlab::Sky::new(&g, &cx, sky, 1024, 512).unwrap();
+                let mut s = effects::Sky::new(&g, &cx, sky, 1024, 512).unwrap();
                 s.tone = tone;
                 for i in 0..2 {
                     submit(&cx, |e| s.push(e, f, q, i as f64 / 30.0).unwrap());
@@ -1658,7 +1658,7 @@ fn sky_footage() {
                 fails.push(name.clone());
             }
             let (m, after, mut s) = swap(&clear, 0.6);
-            let mw = shotlab::MW;
+            let mw = effects::MW;
             let mut px = before.clone();
             px.extend(&after);
             px.extend((0..w * h).flat_map(|i| {
@@ -1701,7 +1701,7 @@ fn sky_flicker() {
         cases.push((r.join("VID_20260429_115150_00_689.insv"), 2460, 2700));
     }
     let (_l, g, sx, cx) = gpu();
-    let clear = shotlab::gradient(1024, [40, 95, 190], [190, 215, 240]);
+    let clear = effects::gradient(1024, [40, 95, 190], [190, 215, 240]);
     let w = 2048u32;
     // share of the upper half's pixels (by solid angle) where some channel differs by more than 8 levels
     let moved = |a: &[u8], b: &[u8]| {
@@ -1717,12 +1717,12 @@ fn sky_flicker() {
         c / n
     };
     for (p, a, b) in cases {
-        let c = shotlab::Clip::open(&p).unwrap();
+        let c = effects::Clip::open(&p).unwrap();
         let ps = c.poses(stab::Lock::Horizon, 0.5);
         let ks: Vec<usize> = (a..=b).collect();
         let mut res = vec![];
         for half in [0.0, 0.1] {
-            let mut s = shotlab::Sky::new(&g, &cx, &clear, 1024, 512).unwrap();
+            let mut s = effects::Sky::new(&g, &cx, &clear, 1024, 512).unwrap();
             s.half = half;
             let mut last: Option<(Vec<f32>, Vec<u8>, Vec<u8>)> = None;
             let mut sum = [0.0; 5];
@@ -1786,23 +1786,23 @@ fn sky_export() {
         return;
     };
     let (_l, g, sx, cx) = gpu();
-    let c7 = shotlab::Clip::open(&p7).unwrap();
+    let c7 = effects::Clip::open(&p7).unwrap();
     let mut cases = vec![(p7.clone(), [c7.times[300], c7.times[390]])];
     if let Some(r) = std::env::var_os("X5_RIDES").map(PathBuf::from) {
         cases.push((r.join("VID_20260413_173716_00_717.insv"), [8.0, 14.0]));
         cases.push((r.join("VID_20260304_210620_00_670.insv"), [8.0, 14.0]));
     }
-    let clear = shotlab::gradient(1024, [40, 95, 190], [190, 215, 240]);
+    let clear = effects::gradient(1024, [40, 95, 190], [190, 215, 240]);
     let w = 3840;
     for (p, t) in cases {
-        let c = shotlab::Clip::open(&p).unwrap();
+        let c = effects::Clip::open(&p).unwrap();
         let st = (stab::Lock::Horizon, 0.5);
         let ps = c.poses(st.0, st.1);
         let k0 = c.times.partition_point(|&x| x < t[0] - 1e-3);
         let q: Vec<Quat> = (k0..c.times.len())
             .map(|k| c.world(k, ps.as_deref()).unwrap_or_default())
             .collect();
-        let mut s = shotlab::Sky::new(&g, &cx, &clear, 1024, 512).unwrap();
+        let mut s = effects::Sky::new(&g, &cx, &clear, 1024, 512).unwrap();
         c.frames(
             &g,
             &sx,
@@ -1865,9 +1865,9 @@ fn sky_world() {
             _ => [0, 0, 0, 255],
         })
         .collect();
-    let mut s = shotlab::Sky::new(&g, &cx, &pano, pw, pw / 2).unwrap();
+    let mut s = effects::Sky::new(&g, &cx, &pano, pw, pw / 2).unwrap();
     s.tone = 0.0;
-    let c = shotlab::Clip::open(&p).unwrap();
+    let c = effects::Clip::open(&p).unwrap();
     let ps = c.poses(stab::Lock::Horizon, 0.5);
     let q0 = c.world(0, ps.as_deref()).unwrap();
     let y0 = Quat::from_rotation_z(track::yaw_pitch(q0 * Vec3::NEG_X)[0].to_radians());

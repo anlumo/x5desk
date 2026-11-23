@@ -150,7 +150,7 @@ fn preview_trails() {
     let (px, w, h) = p.px.lock().unwrap().take().unwrap();
     assert_eq!((w, h, px.len()), (PW, PW / 2, (PW * PW / 2 * 4) as usize));
     // the out point's frame as it is, stitched the same way (the same frames before it: colour matching follows them)
-    let c = shotlab::Clip::open(&f).unwrap();
+    let c = effects::Clip::open(&f).unwrap();
     let ps = c.poses(stab::Lock::Direction, 0.0).unwrap();
     let (k0, k1) = (
         crate::clip::frame_at(&c.times, 8.0),
@@ -278,7 +278,7 @@ fn preview_sky() {
     let (px, w, h) = p.px.lock().unwrap().take().unwrap();
     assert_eq!((w, h), (PW, PW / 2));
     // the out point's frame as it is, stitched the same way (the same frames before it: colour matching follows them)
-    let c = shotlab::Clip::open(&f).unwrap();
+    let c = effects::Clip::open(&f).unwrap();
     let ps = ai::poses(&c, l.stab(l.src.as_ref().unwrap())).unwrap();
     let k1 = c.times.partition_point(|&t| t < 10.0 - 1e-3) - 1;
     let ks: Vec<usize> = (k1

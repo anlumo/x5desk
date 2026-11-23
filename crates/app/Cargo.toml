@@ -47,12 +47,12 @@ stitch.workspace = true
 stab = { path = "../stab" }
 live.workspace = true
 # the Export screen: render jobs, effects, the face privacy blur; the faces are found on frames of a clip that
-# shotlab's `Clip` decodes and stitches; a job is a one-clip editor timeline
+# effects's `Clip` decodes and stitches; a job is a one-clip editor timeline
 export.workspace = true
 fx.workspace = true
 track.workspace = true
 edit.workspace = true
-shotlab = { path = "../shotlab" }
+effects = { path = "../effects" }
 bytemuck.workspace = true
 glam.workspace = true
 eframe.workspace = true

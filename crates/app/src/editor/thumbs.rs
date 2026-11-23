@@ -1,4 +1,4 @@
-//! Timeline thumbnails: a worker thread decodes and stitches a source file's sync frames (shotlab's `Clip`, template
+//! Timeline thumbnails: a worker thread decodes and stitches a source file's sync frames (effects's `Clip`, template
 //! seam; one frame decoded each, so the preview's decoders keep the hardware) and draws each as a small perspective
 //! view (the default framing), read back into egui textures. One file at a time, in the order asked.
 
@@ -104,7 +104,7 @@ impl Thumbs {
 
 /// Decodes `p` through to its last thumbnail frame and renders each one; the GPU work under the app's gate.
 fn shots(g: &Gpu, cx: &stitch::Ctx, p: &std::path::Path) -> Result<Shots, String> {
-    let c = shotlab::Clip::open(p)?;
+    let c = effects::Clip::open(p)?;
     // the frames every video track has as sync samples (X5: every 2 s)
     let m = media::mp4::Mp4::open(p).map_err(|e| format!("{}: {e}", p.display()))?;
     let v: Vec<&media::mp4::Track> = (m.tracks.iter())

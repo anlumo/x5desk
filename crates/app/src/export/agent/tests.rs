@@ -584,7 +584,7 @@ fn blur(b: &[&str]) -> Vec<String> {
     b.iter().map(|b| b.to_string()).collect()
 }
 
-/// Blur's check, before the GPU (`shotlab::Clip::open` only), on the synthetic recording (300 frames at 30 fps, no
+/// Blur's check, before the GPU (`effects::Clip::open` only), on the synthetic recording (300 frames at 30 fps, no
 /// IMU): the source frames its pass searches (an export's every 3rd of its span whatever its rate, a still's one), the
 /// plan's targets and settings, the `_blur_` name; none without blur. Refused on a recording in a file per lens (which
 /// the source check takes) and with burn kept off; an asked stabilisation there is no IMU for is refused by the

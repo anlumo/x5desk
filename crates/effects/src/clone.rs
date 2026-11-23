@@ -322,7 +322,7 @@ mod tests {
             eprintln!("X5_SAMPLES or X5_ORT unset: skipped");
             return;
         };
-        let d = std::env::temp_dir().join("x5-shotlab-ort");
+        let d = std::env::temp_dir().join("x5-effects-ort");
         std::fs::create_dir_all(&d).unwrap();
         let g = video::Gpu::new().unwrap();
         let (sx, cx) = (

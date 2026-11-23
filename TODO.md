@@ -232,7 +232,7 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   `nvwide.sh`, `summary3.sh`): the self-test passes with the pixel check and all three encoders; all 21,060 lens
   frames of v606, v627, v635 equal FFmpeg's, idle and under RAFT; exports and stills run (pano4k with RAFT 12.7 fps,
   flat 1280 × 720 H.264 109 fps) and match the Radeon's (PSNR mean / min: flat 50.2 / 42.2 dB, 10-bit pano
-  42.4 / 39.5, RAFT pano 41.4 / 34.8, stills 53.8 and 45.0); crates stitch, shotlab, export, live and the app (the
+  42.4 / 39.5, RAFT pano 41.4 / 34.8, stills 53.8 and 45.0); crates stitch, effects, export, live and the app (the
   player's seam and stabiliser tests, the live outputs' OBS, PipeWire and RTMP tests, the MCP tests) pass but for
   the points below. The app takes the 4090 whenever Vulkan sees it (`video::Gpu::new`: wgpu's high-performance
   adapter; `VK_ICD_FILENAMES` picks the Radeon). Quality level, measured per level on both GPUs
@@ -424,7 +424,7 @@ cuts on the music's beats), seam flow on exports and paused frames (RAFT-small),
   speed's per-pair estimates are bimodal (a low median made parked cars look oncoming), and no moving vehicle we
   passed turned up to set a threshold against. Auto edit: `Sig::Pass`, 1 over each pass's span, weight 0.2 with the
   other four scaled by 0.8 (their ratios kept: a clip without passes gets the same picks). Effects: Passing Vehicle, an
-  editing preset (`shotlab::cut::passing`: keys on every detection of the vehicle at a fixed field of view, 80° by
+  editing preset (`effects::cut::passing`: keys on every detection of the vehicle at a fixed field of view, 80° by
   default, as fitting its height would zoom from a few degrees to over 100), offered (enabled in the list) once the
   player's Auto framing run on the clip (`ai::Track::passes`, `Library::framing`) found one: a Vehicle list, the range
   its pass and a second either side, the run's stabilisation. Measured on all 36 scooter rides (five days, 35 min,
@@ -606,11 +606,11 @@ cuts on the music's beats), seam flow on exports and paused frames (RAFT-small),
   at 3840 × 2160; 4–7 ms under the knee. Contact sheets (100 % crops: input, 0.5, 1 or on day the filter without
   the knee, the temporal mean): `target/forward-scratch/grab/out/{night_n670_5760,night_v627_7680,day_d689_5760}.jpg`.
   Not compared with the vendor's own still denoise.
-- [x] **New Sky.** An Effects pass (`shotlab::Sky`, the screen's New Sky, key `sky`: preview and 360 export; the MCP
+- [x] **New Sky.** An Effects pass (`effects::Sky`, the screen's New Sky, key `sky`: preview and 360 export; the MCP
   lists it with the effects agents can't run yet): EfficientViT-seg B1 trained on ADE20K by MIT HAN Lab
   (weights and code Apache-2.0; ADE20K's images for non-commercial research and education, its ImageNet pre-training
   likewise; 4.8 M parameters, 18.4 MB in git; exported by `models/efficientvit.py`, which writes the network out after
-  the authors' code instead of running it; `shotlab/models/README`) on six 384² tiles of 120° at pitch 35° fixed to the
+  the authors' code instead of running it; `effects/models/README`) on six 384² tiles of 120° at pitch 35° fixed to the
   world (`Clip::world`: the stitch pose and the gyro), the softmax's sky into a 1024 × 512 equirect of the world mixed
   into the last (half-life 0.1 s), its edge fitted to each frame by a guided filter with the frame's colour as its guide
   (the probability steepened threefold about ½, 21 × 21 mask pixels, applied to the frame's own pixels); from 30° under

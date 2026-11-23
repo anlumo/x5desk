@@ -1,4 +1,4 @@
-//! Effects screen (PLAN.md milestone 9, group 14) on crate shotlab, for the library's clip: each effect with its
+//! Effects screen (PLAN.md milestone 9, group 14) on crate effects, for the library's clip: each effect with its
 //! parameters; a preview (the effect over the range up to its out point at preview size, on a thread, shown as the
 //! frame it makes); "Export" (a job on the Export screen with the effect as its hook, 360) and, for the editing
 //! presets, "Add to timeline" (their clips onto the editor's timeline) or "Export" (flat). The effects that need a
@@ -13,9 +13,9 @@ use crate::{
     export::{Exp, Lab as Job, Maker, PRESETS, Spec, Tl},
     gyro,
 };
+use effects::{Clones, Light, Map};
 use eframe::egui;
 use glam::Quat;
-use shotlab::{Clones, Light, Map};
 use std::{
     path::PathBuf,
     sync::{
@@ -37,7 +37,7 @@ const TURN: f64 = 10.0;
 /// Why Passing Vehicle has no pass to follow.
 const NO_PASSES: &str =
     "Tick Auto framing in the player first: its analysis finds the vehicles overtaking close by";
-/// New Sky's gradients (`shotlab::gradient`): name, zenith, horizon.
+/// New Sky's gradients (`effects::gradient`): name, zenith, horizon.
 const GRADS: [(&str, [u8; 3], [u8; 3]); 2] = [
     ("Clear", [40, 95, 190], [190, 215, 240]),
     ("Dusk", [25, 35, 90], [250, 160, 90]),
@@ -72,7 +72,7 @@ pub enum Fx {
 #[rustfmt::skip]
 pub const FXS: [(Fx, &str, &str, &str); 16] = [
     (Fx::Empty,      "Empty Scene",     "empty",    "The median of frames across the range: whoever passes by is gone (a still camera)"),
-    (Fx::Trails,     "Light Trails",    "trails",   "Bright lights leave trails (Night Road, Flash Neon; a still camera)"),
+    (Fx::Trails,     "Light Trails",    "trails",   "Bright lights leave trails (a still camera)"),
     (Fx::Stack,      "Frame Stack",     "stack",    "Frames stacked: the noise settles, or with Maximum the stars draw trails (a still camera)"),
     (Fx::Delay,      "Frame Delay",     "delay",    "Each part of the picture lags behind by its place: a time slice"),
     (Fx::Freeze,     "Freeze Trail",    "freeze",   "Copies of the tracked subject stay behind as it moves (a still camera)"),
@@ -343,7 +343,7 @@ impl Lab {
             let (tx, rx) = mpsc::channel();
             let (f, r, ctx) = (s.files[0].clone(), self.range, self.ctx.clone());
             thread::spawn(move || {
-                let t = shotlab::Clip::open(&f).ok().and_then(|c| {
+                let t = effects::Clip::open(&f).ok().and_then(|c| {
                     let k0 = crate::clip::frame_at(&c.times, r[0]);
                     let k1 = crate::clip::frame_at(&c.times, r[1]);
                     c.turn(&(k0..=k1).step_by(5).collect::<Vec<_>>())
@@ -451,7 +451,7 @@ impl Lab {
         };
         let frames = ((self.range[1] - self.range[0]) * fps).max(1.0) as u64;
         Ok(Box::new(move |g, w, h, f| {
-            let sx = shotlab::Ctx::new(&g.device, &g.queue);
+            let sx = effects::Ctx::new(&g.device, &g.queue);
             let subj = move |k: u64| {
                 let (t0, b) = sub.as_ref()?;
                 *b.get((k0 + k as usize).checked_sub(*t0)?)?
@@ -460,7 +460,7 @@ impl Lab {
                 Fx::Empty => {
                     // the ring spans the range: every `every`-th frame enters it
                     let n = p.n.clamp(2, 64);
-                    shotlab::Median::new(&sx, w, h, n, f).hook(frames.div_ceil(n as u64).max(1))
+                    effects::Median::new(&sx, w, h, n, f).hook(frames.div_ceil(n as u64).max(1))
                 }
                 Fx::Trails => {
                     let light = Light {
@@ -470,15 +470,15 @@ impl Lab {
                         },
                         ..p.light
                     };
-                    shotlab::Trails::new(&sx, w, h, f, light).hook([0.0, f64::INFINITY])
+                    effects::Trails::new(&sx, w, h, f, light).hook([0.0, f64::INFINITY])
                 }
-                Fx::Stack => shotlab::Stack::new(&sx, w, h, p.max).hook(|_| Quat::IDENTITY),
+                Fx::Stack => effects::Stack::new(&sx, w, h, p.max).hook(|_| Quat::IDENTITY),
                 Fx::Delay => {
                     let n = ((p.span * fps).round() as u32 + 1).clamp(2, 64);
                     let d = track::dir(view.yaw, view.pitch);
                     let map =
                         [Map::Lon(d), Map::Dir(d), Map::Cols, Map::Rows][p.map.min(3) as usize];
-                    let mut x = shotlab::Delay::new(&sx, w, h, n, f, map);
+                    let mut x = effects::Delay::new(&sx, w, h, n, f, map);
                     x.rev = p.rev;
                     x.hook()
                 }
@@ -497,7 +497,7 @@ impl Lab {
                     // crate export's RAFT (a job calls its hook outside GATE)
                     let mut h = {
                         let _b = BURN.lock();
-                        shotlab::Cuts::new(g, &sx, m.slots(), 512, f)?.hook(m, subj)?
+                        effects::Cuts::new(g, &sx, m.slots(), 512, f)?.hook(m, subj)?
                     };
                     Box::new(move |x: export::Fx| {
                         let _b = BURN.lock();
@@ -505,7 +505,7 @@ impl Lab {
                     })
                 }
                 Fx::Planets => {
-                    let mut x = shotlab::Planets::new(&cx, f);
+                    let mut x = effects::Planets::new(&cx, f);
                     x.tall = p.tall;
                     x.hook()
                 }
@@ -530,18 +530,18 @@ impl Lab {
                         }
                         None => {
                             let (_, top, hor) = GRADS[p.grad.min(GRADS.len() - 1)];
-                            (shotlab::gradient(2048, top, hor), 2048, 1024)
+                            (effects::gradient(2048, top, hor), 2048, 1024)
                         }
                     };
                     // frame k's directions in the world: the stitch's pose and the gyro's orientation
-                    let c = shotlab::Clip::open(&file)?;
+                    let c = effects::Clip::open(&file)?;
                     let ps = ai::poses(&c, st)?;
                     let q: Vec<Quat> = (k0..c.times.len())
                         .map(|k| c.world(k, ps.as_deref()).unwrap_or_default())
                         .collect();
                     let mut x = {
                         let _b = BURN.lock();
-                        shotlab::Sky::new(g, &sx, &px, pw, ph)?
+                        effects::Sky::new(g, &sx, &px, pw, ph)?
                     };
                     x.tone = p.tone;
                     // the first frame stitched and pushed once: its sky is found before the job reaches it (burn
@@ -592,7 +592,7 @@ impl Lab {
         let v = crate::editor::to_edit(&s.view);
         let ramp = (0.15 * (b - a)).min(1.0);
         // the subject over time: the smoothed path, the box sizes where the tracker had it
-        let subj = || -> Result<(Vec<shotlab::cut::Subj>, (gyro::Mode, f64)), String> {
+        let subj = || -> Result<(Vec<effects::cut::Subj>, (gyro::Mode, f64)), String> {
             let t = (self.trk.as_ref())
                 .filter(|t| t.file == s.files[0])
                 .ok_or("Track a subject in the player first")?;
@@ -608,7 +608,7 @@ impl Lab {
                     )
                 })
                 .filter_map(|(i, x)| {
-                    Some(shotlab::cut::Subj {
+                    Some(effects::cut::Subj {
                         t: *ts.get(t.k0 + i)?,
                         dir: t.dir(t.k0 + i)?,
                         size: x.size,
@@ -621,25 +621,25 @@ impl Lab {
         let e = |e: edit::Error| e.0;
         let (clips, st) = match self.fx {
             Fx::StopMotion => (
-                shotlab::cut::stop_motion(0, a, b, p.step, (p.step / p.speed).max(fps.t(1)))
+                effects::cut::stop_motion(0, a, b, p.step, (p.step / p.speed).max(fps.t(1)))
                     .map_err(e)?,
                 own,
             ),
             Fx::Orbit => (
-                vec![shotlab::cut::orbit(0, a, b, p.speed, ramp, v, p.turns, 1.0).map_err(e)?],
+                vec![effects::cut::orbit(0, a, b, p.speed, ramp, v, p.turns, 1.0).map_err(e)?],
                 own,
             ),
             Fx::Roll => (
-                vec![shotlab::cut::roll(0, a, b, p.speed, ramp, v, p.turns).map_err(e)?],
+                vec![effects::cut::roll(0, a, b, p.speed, ramp, v, p.turns).map_err(e)?],
                 own,
             ),
             Fx::Framing | Fx::Spin | Fx::PullOut | Fx::Dolly => {
                 let (x, st) = subj()?;
                 let c = match self.fx {
-                    Fx::Framing => shotlab::cut::framing(0, a, b, &x, p.fill, aspect, 0.5),
-                    Fx::Spin => shotlab::cut::spin(0, a, b, &x, p.fill, aspect, p.turns),
-                    Fx::PullOut => shotlab::cut::pull_out(0, a, b, &x, p.fill, aspect, p.out),
-                    _ => shotlab::cut::dolly(0, a, b, &x, p.fov, 0.5),
+                    Fx::Framing => effects::cut::framing(0, a, b, &x, p.fill, aspect, 0.5),
+                    Fx::Spin => effects::cut::spin(0, a, b, &x, p.fill, aspect, p.turns),
+                    Fx::PullOut => effects::cut::pull_out(0, a, b, &x, p.fill, aspect, p.out),
+                    _ => effects::cut::dolly(0, a, b, &x, p.fov, 0.5),
                 };
                 (vec![c.map_err(e)?], st)
             }
@@ -649,21 +649,21 @@ impl Lab {
                     .get(p.pass)
                     .ok_or("Auto framing found no vehicle overtaking close by")?;
                 let ts = t.times.get().ok_or("no auto framing")?;
-                let v: Vec<shotlab::cut::Subj> = (x.path.iter())
-                    .map(|&(k, dir, size)| shotlab::cut::Subj {
+                let v: Vec<effects::cut::Subj> = (x.path.iter())
+                    .map(|&(k, dir, size)| effects::cut::Subj {
                         t: ts[k],
                         dir,
                         size,
                     })
                     .collect();
                 // a key at every detection: the vehicle sweeps 100° and more past abeam within a second
-                let c = shotlab::cut::passing(0, a, b, &v, p.fov, 0.1);
+                let c = effects::cut::passing(0, a, b, &v, p.fov, 0.1);
                 (vec![c.map_err(e)?], t.stab)
             }
             _ => return Err(format!("{} is a pass on the frames", self.fx.name())),
         };
         let tl =
-            shotlab::cut::timeline(&s.files[0].to_string_lossy(), dur, fps, clips).map_err(e)?;
+            effects::cut::timeline(&s.files[0].to_string_lossy(), dur, fps, clips).map_err(e)?;
         Ok((tl, st))
     }
 
@@ -702,7 +702,7 @@ impl Lab {
         }
         let (fps, _) = crate::export::probe(&s.files[0])?;
         let r = fps.num as f64 / fps.den as f64;
-        let k0 = crate::clip::frame_at(&shotlab::Clip::open(&s.files[0])?.times, self.range[0]);
+        let k0 = crate::clip::frame_at(&effects::Clip::open(&s.files[0])?.times, self.range[0]);
         let hook = self.maker(r, k0)?;
         x.apply(self.pano);
         let st = self.stab(&s);
@@ -742,7 +742,7 @@ impl Lab {
             true => self.timeline().map(|(tl, st)| (None, Some(tl), st)),
             false => crate::export::probe(&s.files[0]).and_then(|(fps, _)| {
                 let r = fps.num as f64 / fps.den as f64;
-                let t = shotlab::Clip::open(&s.files[0])?.times;
+                let t = effects::Clip::open(&s.files[0])?.times;
                 let mut k0 = crate::clip::frame_at(&t, self.range[0]);
                 // New Sky starts its last frames before the out point: its maker stitches the first of them
                 if self.fx == Fx::Sky {
@@ -773,7 +773,7 @@ impl Lab {
             .spawn(move || {
                 let _a = crate::awake::hold();
                 let r = crate::export::scoped(&g.device, || {
-                    let c = shotlab::Clip::open(&s.files[0])?;
+                    let c = effects::Clip::open(&s.files[0])?;
                     let ps = ai::poses(&c, st)?;
                     let pose = |k| c.pose(k, ps.as_deref());
                     let stop = || match p.stop.load(Relaxed) {

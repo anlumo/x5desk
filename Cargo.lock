@@ -376,6 +376,7 @@ dependencies = [
  "cam",
  "cpal",
  "edit",
+ "effects",
  "eframe",
  "egui",
  "export",
@@ -394,7 +395,6 @@ dependencies = [
  "proto",
  "rfd",
  "serde_json",
- "shotlab",
  "stab",
  "stitch",
  "track",
@@ -3241,6 +3241,28 @@ dependencies = [
  "fx",
  "glam",
  "media",
+]
+
+[[package]]
+name = "effects"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "burn-cubecl",
+ "burn-onnx",
+ "burn-store",
+ "bytemuck",
+ "cubecl-runtime",
+ "edit",
+ "export",
+ "glam",
+ "media",
+ "pollster 1.0.1",
+ "stab",
+ "stitch",
+ "track",
+ "video",
+ "wgpu",
 ]
 
 [[package]]
@@ -7878,28 +7900,6 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
-
-[[package]]
-name = "shotlab"
-version = "0.1.0"
-dependencies = [
- "burn",
- "burn-cubecl",
- "burn-onnx",
- "burn-store",
- "bytemuck",
- "cubecl-runtime",
- "edit",
- "export",
- "glam",
- "media",
- "pollster 1.0.1",
- "stab",
- "stitch",
- "track",
- "video",
- "wgpu",
-]
 
 [[package]]
 name = "shuttle"

@@ -147,7 +147,7 @@ that states no licence at all:
 | RNNoise (Xiph.Org) | voice denoise | BSD-3-Clause | public datasets |
 
 The app's About page shows each model's source, licence text and training data in full; the `models/README` files in
-`crates/track`, `crates/stitch`, `crates/shotlab` and `crates/media` record where every file came from and how it was
+`crates/track`, `crates/stitch`, `crates/effects` and `crates/media` record where every file came from and how it was
 converted. No Insta360 model is used.
 
 The Rust crates the app is built from are under permissive licences (MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0),

@@ -3,7 +3,7 @@
 //!
 //! Two kinds of output:
 //! - Passes on equirect frames in stitch's layout (`Rgba8Unorm` or `Rgba16Float`, sRGB-encoded values), recorded into
-//!   the caller's command encoder like stitch and fx: [`Median`] (Empty Scene), [`Trails`] (Flash Neon, Night Road),
+//!   the caller's command encoder like stitch and fx: [`Median`] (Empty Scene), [`Trails`],
 //!   [`Stack`] (Frame Stack), [`Delay`] (Frame Delay, time slice), [`Cuts`] (Freeze Trail, Echo Trail: the subject
 //!   cut out with a person segmentation network), [`Planets`] (Planet Pair), [`Sky`] (New Sky: the sky found by a
 //!   segmentation network, a panorama in its place). Each turns into an `export::Hook` (`hook`), which the
@@ -111,7 +111,7 @@ impl Ctx {
 
     fn buf(&self, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
         self.dev.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("shotlab"),
+            label: Some("effects"),
             size,
             usage,
             mapped_at_creation: false,
@@ -127,7 +127,7 @@ impl Ctx {
         usage: wgpu::TextureUsages,
     ) -> wgpu::Texture {
         self.dev.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shotlab"),
+            label: Some("effects"),
             size: wgpu::Extent3d {
                 width: w,
                 height: h,
@@ -312,7 +312,7 @@ impl Default for Light {
     }
 }
 
-/// Flash Neon / Night Road: the bright parts of every frame kept as a decaying per-channel maximum in linear light and
+/// Light trails: the bright parts of every frame kept as a decaying per-channel maximum in linear light and
 /// laid over the frame. Memory: 8 bytes per pixel (half floats) plus a frame copy.
 pub struct Trails {
     cx: Ctx,

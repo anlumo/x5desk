@@ -284,7 +284,7 @@ fn track_v606() {
     );
     let same = t.boxes(st).unwrap();
     let dl = t.boxes((Some(stab::Lock::Direction), 0.0)).unwrap();
-    let c = shotlab::Clip::open(&t.file).unwrap();
+    let c = effects::Clip::open(&t.file).unwrap();
     let (ph, pd) = (
         c.poses(stab::Lock::Horizon, gyro::SMOOTH).unwrap(),
         c.poses(stab::Lock::Direction, 0.0).unwrap(),

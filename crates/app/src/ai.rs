@@ -8,7 +8,7 @@
 //! the effect Passing Vehicle (`Track::passes`), auto edit scores them.
 //! [`privacy`]: the faces and licence plates of one frame for the viewers' privacy preview.
 //!
-//! Frames come from `shotlab::Clip` (decoded and stitched on the shared device) with the stabilisation the result is
+//! Frames come from `effects::Clip` (decoded and stitched on the shared device) with the stabilisation the result is
 //! for: directions are in the frame of that stitch, which is the frame the player's and the exporter's views turn in.
 //! Locks: the models' mutex first; around each network call `BURN` (burn submits throughout), never inside `GATE`,
 //! which the decode and stitch submits hold shared in between (the UI's retry takes BURN, then GATE).
@@ -336,7 +336,7 @@ impl Track {
         k1: usize,
         s: Subject,
     ) -> Result<(), String> {
-        let c = shotlab::Clip::open(&self.file)?;
+        let c = effects::Clip::open(&self.file)?;
         let _ = self.times.set(c.times.clone());
         let poses = poses(&c, self.stab)?;
         let _ = (self.qs).set(
@@ -470,7 +470,7 @@ impl Track {
         stop: &AtomicBool,
         ctx: Option<&egui::Context>,
     ) -> Result<(), String> {
-        let c = shotlab::Clip::open(&self.file)?;
+        let c = effects::Clip::open(&self.file)?;
         let _ = self.times.set(c.times.clone());
         let mut say = |i, n| {
             *lock(&self.st) = St::Run(i, n);
@@ -522,7 +522,7 @@ impl Track {
         let ok = |s: &Sample| matches!(s.state, State::Tracked | State::Checked | State::Found);
         let qs = match stab == self.stab {
             true => None,
-            false => Some(rots(&shotlab::Clip::open(&self.file)?, stab)?),
+            false => Some(rots(&effects::Clip::open(&self.file)?, stab)?),
         };
         let q = |k: usize| {
             qs.as_ref()
@@ -536,7 +536,7 @@ impl Track {
 
 /// The poses of clip `c` stitched with `stab` (None: off).
 pub fn poses(
-    c: &shotlab::Clip,
+    c: &effects::Clip,
     stab: (gyro::Mode, f64),
 ) -> Result<Option<Vec<stab::Pose>>, String> {
     match stab.0 {
@@ -548,8 +548,8 @@ pub fn poses(
     }
 }
 
-/// The stitch rotation of every frame of clip `c` stitched with `stab` (`shotlab::Clip::pose`).
-pub fn rots(c: &shotlab::Clip, stab: (gyro::Mode, f64)) -> Result<Vec<Quat>, String> {
+/// The stitch rotation of every frame of clip `c` stitched with `stab` (`effects::Clip::pose`).
+pub fn rots(c: &effects::Clip, stab: (gyro::Mode, f64)) -> Result<Vec<Quat>, String> {
     let ps = poses(c, stab)?;
     Ok((0..c.times.len())
         .map(|k| c.pose(k, ps.as_deref()).q)
@@ -709,7 +709,7 @@ pub fn pick(
     k: usize,
     at: Option<Vec3>,
 ) -> Result<Vec<track::Det>, String> {
-    let c = shotlab::Clip::open(file)?;
+    let c = effects::Clip::open(file)?;
     let poses = poses(&c, stab)?;
     MODELS.with(g, false, None, |ai| {
         let (mut out, mut gate) = (vec![], Some(GATE.read()));
@@ -748,7 +748,7 @@ pub fn privacy(
     k: usize,
     [fa, pl]: [bool; 2],
 ) -> Result<(Vec<track::Region>, usize), String> {
-    let c = shotlab::Clip::open(file)?;
+    let c = effects::Clip::open(file)?;
     let poses = poses(&c, stab)?;
     let tiles = track::face_tiles();
     MODELS.with(g, false, None, |ai| {
@@ -793,7 +793,7 @@ pub fn privacy(
 fn scan(
     g: &Arc<Gpu>,
     cx: &stitch::Ctx,
-    c: &shotlab::Clip,
+    c: &effects::Clip,
     file: &Path,
     stab: (gyro::Mode, f64),
     aspect: f32,
@@ -962,7 +962,7 @@ impl Auto {
         ctx: &egui::Context,
         aspect: f32,
     ) -> Result<edit::Timeline, String> {
-        let c = shotlab::Clip::open(&self.file)?;
+        let c = effects::Clip::open(&self.file)?;
         let (fps, dur) = crate::export::probe(&self.file)?;
         let n = c.times.len();
         let mut sc = track::Scorer::new(dur);

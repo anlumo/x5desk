@@ -253,7 +253,7 @@ fn alike(a: &[f32], b: &[f32]) -> f32 {
 /// `p`'s pictures: `K` sync frames at the middles of equal parts (fewer in a short clip), each stitched level (the
 /// horizon lock without smoothing), `PICS` of each.
 fn clip(g: &Arc<Gpu>, cx: &stitch::Ctx, p: &Path) -> Result<Vec<f32>, String> {
-    let c = shotlab::Clip::open(p)?;
+    let c = effects::Clip::open(p)?;
     let ks = c.keys();
     if ks.is_empty() {
         return Err(format!("{}: no frame decodes alone", p.display()));

@@ -578,7 +578,7 @@ impl Render for Agent {
             false if self.noattach => return Err(r::no_blur(gpu::NOATTACH)),
             false => match self.dev.get().and_then(|rd| rd.stuck()) {
                 Some(l) => return Err(r::stuck_blur(l)),
-                None => Some(shotlab::Clip::open(&q.files[0]).map_err(|e| format!("blur: {e}"))?),
+                None => Some(effects::Clip::open(&q.files[0]).map_err(|e| format!("blur: {e}"))?),
             },
         };
         // auto framing's pass reads the clip as the blur's does
@@ -594,7 +594,7 @@ impl Render for Agent {
                 gpu::NOATTACH
             ));
         }
-        // the pass stabilises with shotlab's reading of the IMU
+        // the pass stabilises with effects's reading of the IMU
         let no_imu = clip.as_ref().is_some_and(|c| c.imu.is_none());
         // horizon when the recording can be stabilised, unless asked otherwise
         let given = q.want.stabilisation.as_deref();

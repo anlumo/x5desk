@@ -1230,7 +1230,7 @@ impl Keep {
         // a followed subject or auto framing: its directions turned into the frame this export stitches in
         let fol = match (&s.follow, x.pano) {
             (Some(f), false) => {
-                let q = crate::ai::rots(&shotlab::Clip::open(&s.files[0])?, (x.stab, x.smooth))?;
+                let q = crate::ai::rots(&effects::Clip::open(&s.files[0])?, (x.stab, x.smooth))?;
                 Some((f.clone(), Arc::<[Quat]>::from(q)))
             }
             _ => None,
@@ -1658,7 +1658,7 @@ pub(crate) fn privacy_pass(
     if f.len() > 1 {
         return Err("privacy blur: recordings in a file per lens are not supported yet".into());
     }
-    let c = shotlab::Clip::open(&f[0])?;
+    let c = effects::Clip::open(&f[0])?;
     let poses = match stab {
         Some((l, s)) => Some(
             c.poses(l, s)
@@ -1687,7 +1687,7 @@ pub(crate) fn privacy_pass(
     };
     let w = if pl { PLATES_W } else { FACES_W };
     let pose = |k| c.pose(k, poses.as_deref());
-    // shotlab decodes and submits each stitch on this thread between the calls: a surface configure the UI retries
+    // effects decodes and submits each stitch on this thread between the calls: a surface configure the UI retries
     // waits for that (no wait there depends on another thread); the detection runs under BURN instead, never inside
     // GATE (the UI takes BURN, then GATE), and so does a wait for the models
     match hold {

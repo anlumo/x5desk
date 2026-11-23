@@ -50,7 +50,7 @@ impl Info {
         })
     }
 
-    /// The stitch pose of frame `k` (shotlab's `Clip::pose`).
+    /// The stitch pose of frame `k` (effects's `Clip::pose`).
     pub fn pose(&self, k: usize, key: Key) -> Pose {
         match &self.poses {
             Some((pk, Ok(p))) if *pk == key && key.0.is_some() && !p.is_empty() => {

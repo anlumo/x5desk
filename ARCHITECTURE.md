@@ -214,7 +214,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   QP, QP 0-51, no bit rate reported. The pixel check also catches VideoToolbox's concealment, a picture it returns `Ok`.
 - `Decoder::gated(&GATE)`: the decoder holds GATE shared around its copy submits only, not the decode, waiting for it
   at most 50 ms (a GATE holder may be joining its thread). For consumers that decode outside GATE (the live preview,
-  `clip::Video`); one that holds GATE around `decode` (crate export, shotlab's frames) must not, since std's RwLock
+  `clip::Video`); one that holds GATE around `decode` (crate export, effects's frames) must not, since std's RwLock
   queues a reader behind a waiting writer.
 - Encode: each input slot is a CVPixelBuffer whose planes wgpu writes through Metal textures over the IOSurface;
   `copy_buffer` copies stitch's YUV buffer with a render pass (any even pitch; the buffer needs STORAGE usage).
@@ -337,7 +337,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   screen, About with licences). A camera battery at 20 % or less and not charging shows as a warning on every screen
   (`camera::low`).
 - One module per screen: `library.rs` / `player.rs`; `editor.rs` (`deck.rs`, `sound.rs`, `thumbs.rs`, `doc.rs`);
-  `lab.rs` (Effects on crate shotlab); `camera.rs` (its worker, `cam::camera`, connects in the app's order, PROTOCOL.md
+  `lab.rs` (Effects on crate effects); `camera.rs` (its worker, `cam::camera`, connects in the app's order, PROTOCOL.md
   §5.1: identity, options, capture status, then the clock's two SET_OPTIONS (§5.3) on every USB and Wi-Fi connect, not
   waited for: polled in its tick; once both were answered, a refusal too, the options are read again, so the Clock row
   shows the clock as the camera has it (set, even when only the zone was refused); not when an answer never came or came
@@ -387,7 +387,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 - AI (`ai.rs`): `ai::MODELS` loads one `track::Ai` per run and device on first use (warm-up: the tracker and the
   detector at every batch size, one network call at a time under BURN; re-identification runs no network), shared by
   subject tracking, auto edit and every privacy pass. Subject tracking sets `Tracker::fps` from the clip
-  (`shotlab::Clip::meta.fps`); its directions are in the frame of the track's stabilisation and are turned into any
+  (`effects::Clip::meta.fps`); its directions are in the frame of the track's stabilisation and are turned into any
   other frame with `Track::turn` / `ai::rots`. The player's pick (`ai::pick`, on a thread per search like the privacy
   preview): armed on a paused frame, the detector's people and animals (`track::alive`) over `track::sphere()`, keyed
   by frame and stabilisation and boxed in any projection (`ai::outline` through `export::proj` / `px`, cut where a box
@@ -412,13 +412,13 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   through `Models::with_stop`, whose wait for them sees the job's stop), so the other lane waits out one detection,
   not a pass. `Models::trim` drops them when nobody holds them (an idle MCP host's trim). The player's Blur faces and
   Blur license plates previews carry into the export (`Spec::faces`, `Spec::plates`).
-- New Sky on the Effects screen (`shotlab::Sky`, its maker in `lab.rs`): EfficientViT-seg B1 (ADE20K, Apache-2.0,
-  `shotlab/models/README`) runs on six 120° tiles fixed to the world (`track::ring(6, 120, 35)` around the world's up),
+- New Sky on the Effects screen (`effects::Sky`, its maker in `lab.rs`): EfficientViT-seg B1 (ADE20K, Apache-2.0,
+  `effects/models/README`) runs on six 120° tiles fixed to the world (`track::ring(6, 120, 35)` around the world's up),
   each frame's directions turned into the world's by the stitch pose and the gyro (`Clip::world`, the first frame's
   heading taken out). Its sky probability goes into a 1024 × 512 equirect of the world, mixed into the last (half-life
   0.1 s); a guided filter with the frame's colour as its guide fits its edge to the frame (the probability steepened
   about ½ threefold, coefficients over 21 × 21 mask pixels, applied to the frame's own pixels); the panorama (a picked
-  JPEG / PNG equirect, or `shotlab::gradient`) is sampled at the world direction, so it stays put as the camera turns,
+  JPEG / PNG equirect, or `effects::gradient`) is sampled at the world direction, so it stays put as the camera turns,
   scaled per channel towards the replaced sky's mean colour (`Sky::tone`, smoothed with a half-life of 1 s). The network
   for frame k runs at frame k + 1 (it reads the frame the hook's encoder makes): the maker stitches the range's first
   frame and pushes it once before the job, so the first frame has its sky; afterwards the mask is a frame late, the
@@ -484,7 +484,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   submitting threads hold `GATE` shared around each piece of GPU work (live output thread per pass, RTMP encoder per
   frame, export threads and decoders, photo exports, the MCP engine's lanes and its probe; macOS: `clip::Video`'s and
   the live preview's decoders around their copies, `Decoder::gated`); threads whose work runs through burn (RAFT
-  worker, the AI models, shotlab's person and sky networks) hold `BURN` for a whole job instead. Lock order: GATE is
+  worker, the AI models, effects's person and sky networks) hold `BURN` for a whole job instead. Lock order: GATE is
   dropped before BURN is taken; BURN never nests. A new submitter takes one of them. A headless host has no surface, so
   its GATE never has a writer; its two lanes' RAFT flows take turns at BURN (a RAFT still waits out an export's first
   kernel compile).
@@ -517,7 +517,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   callbacks a failed configure collected, so a `map_async` user treats a dropped callback as a finished map.
   Everything else panics. burn attaches once per device through `stitch::attach`, which installs cubecl's handler
   (and device-lost callback) on first attach only; `gpu::open` calls it before installing the policy's own, and RAFT,
-  shotlab's segmentation and the one `track::Ai` in `ai::MODELS` reuse that attachment. It submits at most 4 kernels
+  effects's segmentation and the one `track::Ai` in `ai::MODELS` reuse that attachment. It submits at most 4 kernels
   a command buffer (cubecl's default 32 held the shared queue up to 30 ms on the Radeon 8060S: a played frame's draw
   waited behind RAFT).
 - Test hooks: `X5DESK_SHOT=<file.png>` (plus `X5DESK_SHOT_AFTER=<s>`) saves a screenshot of the window through egui's
@@ -721,7 +721,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   to 8192 wide, flat 16 to 8192 a side), the host (its jobs file its own, not ending, no timed recording of its own),
   the source, the backend's check of it (`Render::check`: trailer, both lenses, calibration, IMU, rate, length, tracks;
   stabilisation `horizon` by default when it has IMU data, else `off`; with blur: a recording in a file per lens and
-  `mcp-noattach` refused, the clip opened as the pass reads it, shotlab's IMU: an asked stabilisation it has none for
+  `mcp-noattach` refused, the clip opened as the pass reads it, effects's IMU: an asked stabilisation it has none for
   refused, a defaulted one `off`, and the frames its pass searches counted, `Plan::search`), the device's limits once it
   is up (the texture size, the source's tracks among what it decodes, the codec, size and rate among what it encodes,
   burn there for RAFT and blur), then the destination (made only inside the agent folder, UTF-8, not on FAT or exFAT,
@@ -821,7 +821,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   leaves it cancellable, and once that lane is wedged blur is refused while it holds them (`Models::holder`,
   `GpuInfo::blur_stuck`: the backend's check and submit, mcp's device check, the catalog and `status`;
   `render::stuck_blur`), and RAFT too, whose flows would wait for its BURN past their stop: off by default, refused when
-  asked (`render::stuck_raft`); a decoder wedged in the pass (shotlab's frames never look at the stop) goes the way of a
+  asked (`render::stuck_raft`); a decoder wedged in the pass (effects's frames never look at the stop) goes the way of a
   wedged driver. While one is unfinished the poller holds `cam::awake::keep()` (macOS: no idle sleep; Linux: nothing
   yet).
 - Renders: records and files. Render jobs are kept in `mcp-renders` beside `mcp-jobs`, under its lock, a JSON object a

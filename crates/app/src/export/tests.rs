@@ -338,7 +338,7 @@ fn plates() {
     let (_l, g, cx) = gpu();
     let f = d.join("v606.insv");
     let (fps, dur) = probe(&f).unwrap();
-    let a = shotlab::Clip::open(&f).unwrap().times[120];
+    let a = effects::Clip::open(&f).unwrap().times[120];
     let spec = Spec {
         files: vec![f],
         photo: false,
@@ -1681,7 +1681,7 @@ impl Keep {
         if f.len() > 1 {
             return Err("privacy blur: recordings in a file per lens are not supported yet".into());
         }
-        let c = shotlab::Clip::open(&f[0])?;
+        let c = effects::Clip::open(&f[0])?;
         let poses = match stab {
             Some((l, s)) => Some(
                 c.poses(l, s)
@@ -1707,7 +1707,7 @@ impl Keep {
         );
         it.set(St::Pass(0, n, what));
         crate::ai::MODELS.with(g, false, Some(ctx), |ai| {
-            // shotlab decodes and submits each stitch on this thread between the calls: a surface configure the UI
+            // effects decodes and submits each stitch on this thread between the calls: a surface configure the UI
             // retries waits for that (no wait there depends on another thread); the detection runs under BURN instead,
             // never inside GATE (the UI takes BURN, then GATE)
             let mut gate = Some(crate::GATE.read());
