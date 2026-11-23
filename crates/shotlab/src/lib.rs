@@ -1,16 +1,16 @@
-//! Shot Lab (PLAN.md group 14): creative effects on stitched X5 footage, our own. The Insta360 app's templates and
+//! Effects (PLAN.md group 14): creative effects on stitched X5 footage, our own. The Insta360 app's templates and
 //! models come from its server and are not used (`../insta360/re/analysis/app_features.md` §10, §11.6).
 //!
 //! Two kinds of output:
 //! - Passes on equirect frames in stitch's layout (`Rgba8Unorm` or `Rgba16Float`, sRGB-encoded values), recorded into
-//!   the caller's command encoder like stitch and fx: [`Median`] (Remove Passerby), [`Trails`] (Flash Neon, Night
-//!   Road), [`Stack`] (Star Lapse), [`Delay`] (Frame Delay, time slice), [`Cuts`] (Shadow Clone, Clone Loop: the
-//!   subject cut out with a person segmentation network), [`Planets`] (Parallel Planet), [`Sky`] (Sky Swap: the sky
-//!   found by a segmentation network, a panorama in its place). Each turns into an `export::Hook` (`hook`), which the
+//!   the caller's command encoder like stitch and fx: [`Median`] (Empty Scene), [`Trails`] (Flash Neon, Night Road),
+//!   [`Stack`] (Frame Stack), [`Delay`] (Frame Delay, time slice), [`Cuts`] (Freeze Trail, Echo Trail: the subject
+//!   cut out with a person segmentation network), [`Planets`] (Planet Pair), [`Sky`] (New Sky: the sky found by a
+//!   segmentation network, a panorama in its place). Each turns into an `export::Hook` (`hook`), which the
 //!   exporter calls on every frame before it encodes it. They are meant for 360 output (`export::Out::Pano`);
 //!   `Median`, `Trails` and `Delay` with `Map::Cols` / `Map::Rows` work on flat frames too.
-//! - Editor timelines the exporter renders (`export::Cut::Edit`): [`cut`] (Stop Motion, Fly Lapse, Flip My Day, Spin
-//!   Me Around, Fly Out, Center Stage, Dolly Zoom, Overtake).
+//! - Editor timelines the exporter renders (`export::Cut::Edit`): [`cut`] (Stop Motion, Orbit Lapse, Roll Lapse,
+//!   Subject Spin, Pull Out, Subject Framing, Dolly Zoom, Passing Vehicle).
 //!
 //! [`Clip`] decodes and stitches the frames of a clip for the effects that look at a whole clip first (a clean plate,
 //! a star series, a subject's track) and checks with the gyro that a shot is locked off.
@@ -198,7 +198,7 @@ fn tv(t: &wgpu::Texture) -> wgpu::TextureView {
     t.create_view(&Default::default())
 }
 
-/// Remove Passerby: the per-pixel, per-channel median of up to `n` frames of a locked-off shot (the lower median for
+/// Empty Scene: the per-pixel, per-channel median of up to `n` frames of a locked-off shot (the lower median for
 /// an even count; exact on 8-bit frames, to 1/4095 on 16-bit float ones, clamped to 0..1). Whatever covers a pixel in
 /// fewer than half of the frames is gone. Memory: `n` frames (66 MB each at 5760 × 2880, 8-bit).
 pub struct Median {

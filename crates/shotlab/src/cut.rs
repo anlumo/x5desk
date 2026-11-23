@@ -1,4 +1,4 @@
-//! Shot Lab presets that are pure editing: clips for an editor timeline (crate edit), which the exporter renders
+//! Effects presets that are pure editing: clips for an editor timeline (crate edit), which the exporter renders
 //! (`export::Cut::Edit`). Our own content. View keys sit on the clip's content time (source s), so trimming and speed
 //! changes keep them on their pictures. Directions are in the equirect frame the exporter reframes: the clip stitched
 //! with its pose (stabilisation, framing), as `Clip::frames` with `Clip::pose` renders it for the tracker.
@@ -65,10 +65,10 @@ fn on(c: &Clip, k: Vec<Key>) -> Vec<Key> {
         .collect()
 }
 
-/// Fly Lapse: a hyperlapse of `a..b` (`speed`×, `ramp` as in `lapse`) with view `v` orbiting `orbit` times about the
+/// Orbit Lapse: a hyperlapse of `a..b` (`speed`×, `ramp` as in `lapse`) with view `v` orbiting `orbit` times about the
 /// vertical at constant speed, unfolding from a tiny planet over the first `planet` output s (0: none).
 #[allow(clippy::too_many_arguments)]
-pub fn fly_lapse(
+pub fn orbit(
     file: u32,
     a: f64,
     b: f64,
@@ -90,11 +90,11 @@ pub fn fly_lapse(
     Ok(c)
 }
 
-/// Flip My Day: a hyperlapse of `a..b` (`speed`×, `ramp` as in `lapse`) while view `v` rolls `turns` full turns about
+/// Roll Lapse: a hyperlapse of `a..b` (`speed`×, `ramp` as in `lapse`) while view `v` rolls `turns` full turns about
 /// its axis, the world going over and coming back upright, easing in and out.
-pub fn flip(file: u32, a: f64, b: f64, speed: f64, ramp: f64, v: View, turns: f32) -> Result<Clip> {
+pub fn roll(file: u32, a: f64, b: f64, speed: f64, ramp: f64, v: View, turns: f32) -> Result<Clip> {
     if !(turns.is_finite() && turns != 0.0 && turns.abs() <= 16.0) {
-        return bad("flip");
+        return bad("roll lapse");
     }
     let mut c = lapse(file, a, b, speed, ramp)?;
     let (d, n) = (c.dur(), (turns.abs() * 4.0).ceil() as usize);
@@ -187,9 +187,9 @@ fn look(d: Vec3, roll: f32, fov: f32, proj: Proj) -> View {
     View::look(y, p, roll, fov, proj)
 }
 
-/// Center Stage: source `a..b` of `file` reframed on the subject, its height filling `fill` of an `aspect` frame,
+/// Subject Framing: source `a..b` of `file` reframed on the subject, its height filling `fill` of an `aspect` frame,
 /// keys every `every` s.
-pub fn center_stage(
+pub fn framing(
     file: u32,
     a: f64,
     b: f64,
@@ -205,18 +205,19 @@ pub fn center_stage(
     Ok(c)
 }
 
-/// Overtake: source `a..b` of `file` turned onto a passing vehicle (`track::Pass::path`) at a fixed horizontal field of
-/// view `fov` (fitting its height would zoom from a few degrees to over 100 as it comes abeam), keys every `every` s.
-pub fn overtake(file: u32, a: f64, b: f64, s: &[Subj], fov: f32, every: f64) -> Result<Clip> {
+/// Passing Vehicle: source `a..b` of `file` turned onto a passing vehicle (`track::Pass::path`) at a fixed horizontal
+/// field of view `fov` (fitting its height would zoom from a few degrees to over 100 as it comes abeam), keys every
+/// `every` s.
+pub fn passing(file: u32, a: f64, b: f64, s: &[Subj], fov: f32, every: f64) -> Result<Clip> {
     if !(fov > 0.0 && fov < 170.0) {
-        return bad("overtake");
+        return bad("passing vehicle");
     }
     let mut c = Clip::new(file, a, b);
     c.view = follow(s, a, b, every, |x, _| look(x.dir, 0.0, fov, Proj::Persp))?;
     Ok(c)
 }
 
-/// Spin Me Around: Center Stage while the picture turns `turns` full turns about the subject.
+/// Subject Spin: Subject Framing while the picture turns `turns` full turns about the subject.
 pub fn spin(
     file: u32,
     a: f64,
@@ -243,8 +244,9 @@ pub fn spin(
     Ok(c)
 }
 
-/// Fly Out: Center Stage that pulls out over the last `out` source s into a tiny planet facing the subject's heading.
-pub fn fly_out(
+/// Pull Out: Subject Framing that pulls out over the last `out` source s into a tiny planet facing the subject's
+/// heading.
+pub fn pull_out(
     file: u32,
     a: f64,
     b: f64,
@@ -254,9 +256,9 @@ pub fn fly_out(
     out: f64,
 ) -> Result<Clip> {
     if !(out > 0.0 && out < b - a) {
-        return bad("fly out");
+        return bad("pull out");
     }
-    let mut c = center_stage(file, a, b - out, s, fill, aspect, 0.5)?;
+    let mut c = framing(file, a, b - out, s, fill, aspect, 0.5)?;
     c.b = b;
     let l = c.view.last_mut().unwrap();
     l.e = Ease::InOut;

@@ -48,18 +48,18 @@
 //! Wireless pane), `ble=sta` (the same X5 on `HomeNet` from an earlier session: scans, connects, pairs and reads its
 //! station connection, no join). Under the hook nothing of the user's config or cache is read, written or trimmed
 //! (the app's and the camera's settings, the recent list, the download queue: the run's own; no thumbnail cache), and
-//! `dest=` is the download folder too. AI and Shot Lab:
-//! `box=<x0>/<y0>/<x1>/<y1>` (Deep Track in the player: that box, 0..1 of the view at 16:9 as a flat 1080p export
+//! `dest=` is the download folder too. AI and Effects:
+//! `box=<x0>/<y0>/<x1>/<y1>` (subject tracking in the player: that box, 0..1 of the view at 16:9 as a flat 1080p export
 //! frames it, whatever the window, drawn once the frame shows, its subject printed; the view follows the subject when
 //! the run is over, and an `export=` waits for it and takes the follow view),
 //! `restab=off|free|horizon|direction[/<σ>]` (once that run is over, the player's stabilisation changes to this, as its
 //! controls would: the follow view turns into the new frame), `blur`
 //! (the player's face blur preview), `plates` (its licence plate blur preview), `autoedit[=<preset>]` (an auto edit
 //! of the first file onto the editor's timeline; with a preset key exported once made, the run ending with the
-//! queue), `ebox=<x0>/<y0>/<x1>/<y1>` (Deep
-//! Track in the editor's viewer at the playhead once it is set up: that box, 0..1 of the export preset's flat frame
+//! queue), `ebox=<x0>/<y0>/<x1>/<y1>` (subject
+//! tracking in the editor's viewer at the playhead once it is set up: that box, 0..1 of the export preset's flat frame
 //! (`epreset=`; 16:9 for a 360 one, as `box=`) whatever the window, its subject printed), `lab=<effect>` (start on
-//! Shot Lab with that effect, e.g. `trails`, `shadow`, `center`), `lrange=<a>/<b>` (its range, s), `lpre` (make its
+//! Effects with that effect, e.g. `trails`, `freeze`, `framing`), `lrange=<a>/<b>` (its range, s), `lpre` (make its
 //! preview), `lexp=<preset>[:faces][:plates]` (export it with that preset, and the face or plate blur, once the clip,
 //! and for the subject effects the `box=` run, is there; the run ends with the queue).
 
@@ -141,7 +141,7 @@ pub struct Test {
     pub import: bool,
     /// the simulated Bluetooth adapter: its camera on HomeNet from an earlier session
     pub ble: Option<bool>,
-    /// the player's Deep Track box, face and plate blur preview, an auto edit (and the preset to export it with)
+    /// the player's tracking box, face and plate blur preview, an auto edit (and the preset to export it with)
     pub tbox: Option<[f32; 4]>,
     pub restab: Option<(gyro::Mode, f64)>,
     pub blur: bool,
@@ -357,7 +357,7 @@ enum Tab {
 const TABS: [(Tab, &str); 9] = [
     (Tab::Library, "Library"),
     (Tab::Editor, "Editor"),
-    (Tab::Lab, "Shot Lab"),
+    (Tab::Lab, "Effects"),
     (Tab::Camera, "Camera"),
     (Tab::Capture, "Capture"),
     (Tab::Live, "Live"),
@@ -534,7 +534,7 @@ impl App {
             Some(t) if t.settings => Tab::Settings,
             Some(t) if t.help.is_some() => Tab::Help,
             _ if ed.first() => Tab::Editor,
-            // a Deep Track box is drawn in the player's view: the Library first, Shot Lab once its preview starts
+            // a tracking box is drawn in the player's view: the Library first, Effects once its preview starts
             _ if lab.first() && test.as_ref().is_none_or(|t| t.tbox.is_none()) => Tab::Lab,
             _ if ch.as_ref().is_some_and(|h| h.on) => Tab::Capture,
             _ if pane.is_some() => Tab::Camera,

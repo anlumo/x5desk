@@ -1,6 +1,6 @@
-//! Stabilisation maths for the X5: trailer IMU ([`media::insv`]) -> per-frame orientation, a smoothed camera path
-//! (FlowState-like), horizon / direction lock, the forward view (the direction of travel, [`fwd`]) and the
-//! rolling-shutter term of `stitch::Pose`.
+//! Stabilisation maths for the X5: trailer IMU ([`media::insv`]) -> per-frame orientation, a smoothed camera path,
+//! horizon / direction lock, the forward view (the direction of travel, [`fwd`]) and the rolling-shutter term of
+//! `stitch::Pose`.
 //!
 //! Frames: body = the camera's calibration world (`stitch`: Z up when the camera stands upright, lens 0 axis −X);
 //! world = Z up (against gravity), yaw arbitrary (no magnetometer); orientations are body -> world.

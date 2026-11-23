@@ -1,4 +1,4 @@
-//! Shot Lab on synthetic frames (exact checks) and on the X5's footage (`X5_SAMPLES`; skipped when unset). Pictures
+//! The effects on synthetic frames (exact checks) and on the X5's footage (`X5_SAMPLES`; skipped when unset). Pictures
 //! and videos go to `X5_SHOT_OUT` (default `target/shotlab/out` next to Cargo's test tmp directory, on disk); ffmpeg
 //! serves as a test tool only (frames out of the exported videos). GPU timings are noisy: other work shares the GPU.
 //! Run with `--release`.
@@ -158,8 +158,8 @@ fn differ(a: &[u8], b: &[u8], t: u8) -> f64 {
     n as f64 / (a.len() / 4) as f64
 }
 
-/// The median against a CPU median (byte-exact on 8-bit frames, odd and even counts, ring wrap-around), and Remove
-/// Passerby's ground truth: a textured background with discs moving across it plus noise; the plate against the
+/// The median against a CPU median (byte-exact on 8-bit frames, odd and even counts, ring wrap-around), and Empty
+/// Scene's ground truth: a textured background with discs moving across it plus noise; the plate against the
 /// background where the discs passed.
 #[test]
 fn median_synthetic() {
@@ -278,7 +278,7 @@ fn median_synthetic() {
     jpg(&got, w, h, 1, "median_synthetic_plate.jpg");
 }
 
-/// Remove Passerby on v635 (6 s, held on a railing: the gyro says it turned 5° about the vertical) and on v627 frames
+/// Empty Scene on v635 (6 s, held on a railing: the gyro says it turned 5° about the vertical) and on v627 frames
 /// 165..600 (14.5 s at night, the camera on a stick held still, people walking past): 21 frames over each stitched at
 /// 5760 × 2880 into the median, with the camera's own orientation and with the gyro's (direction lock: every frame
 /// into the same world directions). Moving people measured as the share of each frame that differs
@@ -719,9 +719,9 @@ fn mask_iou(m: &[f32], size: glam::Vec2, margin: f32) -> f32 {
 }
 
 /// Clones on v627 frames 300..480 (6 s at night, the camera on a stick held still, people walking past): the man in
-/// the green jacket (`walker`) on frames stitched with the gyro's direction lock. A Shadow Clone still at 2880 (a cut
+/// the green jacket (`walker`) on frames stitched with the gyro's direction lock. A Freeze Trail still at 2880 (a cut
 /// each time he moved 1.5 of his widths, over the median of the clip), the masks against the tracker's box (IoU), then
-/// export jobs at 3840 with the Shadow Clone and Clone Loop hooks, and the passes' GPU times at 5760 × 2880.
+/// export jobs at 3840 with the Freeze Trail and Echo Trail hooks, and the passes' GPU times at 5760 × 2880.
 #[test]
 fn clones_v627() {
     let Some(p) = sample("v627.insv") else {
@@ -772,7 +772,7 @@ fn clones_v627() {
     let plate = read(&cx, &o);
     submit(&cx, |e| cuts.paste(e, &o, &slots));
     let px = read(&cx, &o);
-    jpg(&px, w, w / 2, 1, "v627_shadow_still.jpg");
+    jpg(&px, w, w / 2, 1, "v627_freeze_still.jpg");
     // the subject's stretch of the path (across the seam), plate above clones
     let x0 = pixel(w, smp[0].raw)[0];
     let xs: Vec<f64> = smp
@@ -799,7 +799,7 @@ fn clones_v627() {
             })
         })
         .collect();
-    jpg(&both, cw, 2 * ch, 1, "v627_shadow_still_crop.jpg");
+    jpg(&both, cw, 2 * ch, 1, "v627_freeze_still_crop.jpg");
     // he walks about 25° in these 6 s: four copies 1.5 of his widths apart
     assert!(iou.len() >= 4 && iou.iter().all(|&x| x > 0.4));
 
@@ -836,8 +836,8 @@ fn clones_v627() {
     };
     let t = [c.times[k0], c.times[k1]];
     for (name, mode) in [
-        ("v627_shadow", shotlab::Clones::Shadow { gap: 1.2, n: 8 }),
-        ("v627_loop", shotlab::Clones::Loop { lag: 20, n: 4 }),
+        ("v627_freeze", shotlab::Clones::Freeze { gap: 1.2, n: 8 }),
+        ("v627_echo", shotlab::Clones::Echo { lag: 20, n: 4 }),
     ] {
         let cu = shotlab::Cuts::new(&g, &cx, mode.slots(), 512, FORMATS[0]).unwrap();
         let hook = cu.hook(mode, sub(smp.clone())).unwrap();
@@ -922,7 +922,7 @@ fn gauss(s: &mut u64) -> f64 {
     (-2.0 * rng(s).max(1e-12).ln()).sqrt() * (std::f64::consts::TAU * rng(s)).cos()
 }
 
-/// Star Lapse on a synthetic night: 3000 stars (brightness power law, Gaussian PSF) turning about the celestial pole
+/// Frame Stack on a synthetic night: 3000 stars (brightness power law, Gaussian PSF) turning about the celestial pole
 /// at 52.5° elevation by 0.25° per frame (a photo a minute), a static ground below the horizon, and noise of σ 0.03
 /// on every frame (8-bit sRGB, 2048 × 1024). Each frame aligned to the one before (`shotlab::align`), the fits
 /// chained, against the true rotation; then stacked: the mean (noise in a starless patch of sky against one frame's,
@@ -1270,7 +1270,7 @@ fn delay_footage() {
     }
 }
 
-/// Parallel Planet through an export job: v606 frames 0..90 (the gate in daylight) at 3840 with the horizon lock, the
+/// Planet Pair through an export job: v606 frames 0..90 (the gate in daylight) at 3840 with the horizon lock, the
 /// tiny planet and its sky world side by side.
 #[test]
 fn planets_v606() {
@@ -1366,8 +1366,8 @@ fn render(
 }
 
 /// The editing presets as editor timelines (crate edit's checks pass in `cut::timeline`), checked against what they
-/// promise at sampled output times, then rendered: Stop Motion, Fly Lapse and Flip My Day on v606 (a walk through
-/// the gate), Center Stage, Spin Me Around, Fly Out and Dolly Zoom on v627 with the walker's track (`walker`, its
+/// promise at sampled output times, then rendered: Stop Motion, Orbit Lapse and Roll Lapse on v606 (a walk through
+/// the gate), Subject Framing, Subject Spin, Pull Out and Dolly Zoom on v627 with the walker's track (`walker`, its
 /// directions smoothed by `track::smooth`).
 #[test]
 fn presets() {
@@ -1406,11 +1406,11 @@ fn presets() {
     );
 
     let v = edit::View::look(0.0, -10.0, 0.0, 100.0, edit::Proj::Persp);
-    let fl = cut::fly_lapse(0, 0.0, 30.0, 8.0, 2.0, v, 1.0, 1.0).unwrap();
-    let tl = cut::timeline(path6, dur6, fps, vec![fl]).unwrap();
+    let ol = cut::orbit(0, 0.0, 30.0, 8.0, 2.0, v, 1.0, 1.0).unwrap();
+    let tl = cut::timeline(path6, dur6, fps, vec![ol]).unwrap();
     let (e0, e1) = (tl.at(0.0).unwrap(), tl.at(tl.dur() / 2.0).unwrap());
     eprintln!(
-        "fly lapse: 30 s at up to 8× in {:.2} s; starts as {:?} at {:.0}°, speed {:.1}× halfway",
+        "orbit lapse: 30 s at up to 8× in {:.2} s; starts as {:?} at {:.0}°, speed {:.1}× halfway",
         tl.dur(),
         e0.view.proj,
         e0.view.fov,
@@ -1423,12 +1423,12 @@ fn presets() {
         &p6,
         tl,
         stab::Lock::Horizon,
-        "v606_flylapse",
+        "v606_orbit",
         &[0.0, 1.0, 2.0, 3.0, 4.0],
     );
 
-    let fp = cut::flip(0, 0.0, 30.0, 8.0, 2.0, v, 1.0).unwrap();
-    let tl = cut::timeline(path6, dur6, fps, vec![fp]).unwrap();
+    let rl = cut::roll(0, 0.0, 30.0, 8.0, 2.0, v, 1.0).unwrap();
+    let tl = cut::timeline(path6, dur6, fps, vec![rl]).unwrap();
     let rolls: Vec<f32> = (0..=4)
         .map(|i| {
             tl.at(tl.dur() * i as f64 / 4.0 - 1e-3 * (i / 4) as f64)
@@ -1437,14 +1437,14 @@ fn presets() {
                 .ypr()[2]
         })
         .collect();
-    eprintln!("flip my day: roll at 0, ¼, ½, ¾, 1 of the clip {rolls:?}");
+    eprintln!("roll lapse: roll at 0, ¼, ½, ¾, 1 of the clip {rolls:?}");
     render(
         &g,
         &sx,
         &p6,
         tl,
         stab::Lock::Horizon,
-        "v606_flip",
+        "v606_roll",
         &[0.0, 1.0, 2.0, 3.0, 4.0],
     );
 
@@ -1496,9 +1496,9 @@ fn presets() {
         );
         (off, fill)
     };
-    let cs = cut::center_stage(0, a, b, &subj, 0.4, 16.0 / 9.0, 0.5).unwrap();
-    let tl = cut::timeline(path7, dur7, fps, vec![cs]).unwrap();
-    let (off, fill) = check("center stage", &tl);
+    let fr = cut::framing(0, a, b, &subj, 0.4, 16.0 / 9.0, 0.5).unwrap();
+    let tl = cut::timeline(path7, dur7, fps, vec![fr]).unwrap();
+    let (off, fill) = check("subject framing", &tl);
     assert!(off < 2.0 && fill.iter().all(|f| (f - 0.4).abs() < 0.06));
     render(
         &g,
@@ -1506,13 +1506,13 @@ fn presets() {
         &p7,
         tl,
         stab::Lock::Direction,
-        "v627_centerstage",
+        "v627_framing",
         &[0.0, 1.5, 3.0, 4.5, 5.9],
     );
 
     let sp = cut::spin(0, a, b, &subj, 0.4, 16.0 / 9.0, 1.0).unwrap();
     let tl = cut::timeline(path7, dur7, fps, vec![sp]).unwrap();
-    let (off, _) = check("spin me around", &tl);
+    let (off, _) = check("subject spin", &tl);
     assert!(off < 2.0);
     render(
         &g,
@@ -1524,11 +1524,11 @@ fn presets() {
         &[0.0, 1.5, 3.0, 4.5, 5.9],
     );
 
-    let fo = cut::fly_out(0, a, b, &subj, 0.4, 16.0 / 9.0, 2.0).unwrap();
-    let tl = cut::timeline(path7, dur7, fps, vec![fo]).unwrap();
+    let po = cut::pull_out(0, a, b, &subj, 0.4, 16.0 / 9.0, 2.0).unwrap();
+    let tl = cut::timeline(path7, dur7, fps, vec![po]).unwrap();
     let end = tl.at(tl.dur() - 1e-3).unwrap().view;
     eprintln!(
-        "fly out: ends as {:?} at {:.0}°, pitch {:.0}°",
+        "pull out: ends as {:?} at {:.0}°, pitch {:.0}°",
         end.proj,
         end.fov,
         end.ypr()[1]
@@ -1539,7 +1539,7 @@ fn presets() {
         &p7,
         tl,
         stab::Lock::Direction,
-        "v627_flyout",
+        "v627_pullout",
         &[0.0, 2.0, 4.0, 5.0, 5.9],
     );
 
@@ -1581,7 +1581,7 @@ fn short(p: &Path) -> String {
     s.rsplit('_').next().unwrap().to_string()
 }
 
-/// Sky Swap on single frames (`X5_SAMPLES`; with `X5_RIDES`, the rides' folder, rides too), each stitched at 3840
+/// New Sky on single frames (`X5_SAMPLES`; with `X5_RIDES`, the rides' folder, rides too), each stitched at 3840
 /// with the horizon lock and pushed twice (its own sky found, then replaced). The share of the upper hemisphere the
 /// mask calls sky (by solid angle) against what each frame shows; with a test sky (magenta to orange, no colour match)
 /// the ground below −30° untouched to the bit and the share of the upper hemisphere that changed by more than 40
@@ -1685,7 +1685,7 @@ fn sky_footage() {
     assert!(fails.is_empty(), "{fails:?}");
 }
 
-/// Sky Swap's flicker on still stretches stitched at 2048 with the horizon lock: v627 frames 300..420 (night, the
+/// New Sky's flicker on still stretches stitched at 2048 with the horizon lock: v627 frames 300..420 (night, the
 /// camera on a stick held still) and, with `X5_RIDES`, ride 689 frames 2460..2700 (day, stopped 41–45 s). From the 16th
 /// frame on, per frame: the world mask's mean change from the frame before over the upper hemisphere (by solid angle)
 /// and at the edge (where it was 0.05..0.95), the share whose side of ½ flipped; the share of the upper half's pixels
@@ -1776,7 +1776,7 @@ fn sky_flicker() {
     }
 }
 
-/// Sky Swap through export jobs at 3840 with the horizon lock, the first frame pushed once before (as the app's maker
+/// New Sky through export jobs at 3840 with the horizon lock, the first frame pushed once before (as the app's maker
 /// does): with `X5_RIDES` ride 717 from 8 to 14 s (60 fps, trees and wires against an overcast sky) and ride 670 from
 /// 8 to 14 s (night); v627 frames 300..390 (night, still). Frames at 1 and 2.5 s, and strips of 8 consecutive frames
 /// of the sky ahead from 2 s (`sky_<clip>_strip.jpg`, ffmpeg's tile).
@@ -1848,7 +1848,7 @@ fn sky_export() {
     }
 }
 
-/// Sky Swap's panorama stays put in the world: v606 frames 0 and 600 (walking through the gate, turning), stitched at
+/// New Sky's panorama stays put in the world: v606 frames 0 and 600 (walking through the gate, turning), stitched at
 /// 2048 with the horizon lock, a black panorama with a magenta band 1.4° wide at azimuth 91° (no colour match). The
 /// band's column 70° up in each result against where the frame's rotation into the world (`Clip::world`, the first
 /// frame's heading taken out) puts it.

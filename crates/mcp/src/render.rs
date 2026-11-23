@@ -500,7 +500,7 @@ pub struct Later {
     pub id: String,
     pub name: Option<String>,
     pub aliases: Vec<String>,
-    /// Shot Lab's effect ids
+    /// the effect ids (the app's Effects screen)
     pub effects: Vec<String>,
 }
 

@@ -2690,7 +2690,7 @@ mod tests {
         }
     }
 
-    /// Two presets, two codecs, two looks, two projections, one adjustment, two blur targets, Shot Lab later.
+    /// Two presets, two codecs, two looks, two projections, one adjustment, two blur targets, the effects later.
     fn cat() -> Catalog {
         let r = |min, max, d| Range {
             min,
@@ -2793,9 +2793,9 @@ mod tests {
             ],
             blur_every: 3,
             later: vec![Later {
-                id: "shot_lab".into(),
+                id: "effects".into(),
                 aliases: s(&["effect"]),
-                effects: s(&["trails", "stars"]),
+                effects: s(&["trails", "stack"]),
                 ..Default::default()
             }],
         }
@@ -3001,7 +3001,7 @@ mod tests {
         let r = call(&c, "export", ex(json!({ "trails": 1, "look": "sepia" }))).await;
         assert_eq!(
             e(r),
-            "`trails` is not available to agents yet (catalog: later: shot_lab)"
+            "`trails` is not available to agents yet (catalog: later: effects)"
         );
         for (a, w) in [
             (

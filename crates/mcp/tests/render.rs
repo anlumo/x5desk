@@ -391,7 +391,7 @@ fn work(r: &FRun) {
 }
 
 /// Two presets (`p360` 64 wide, `flat` 32 × 16), two codecs, one look, off and horizon, perspective, the app's blur
-/// targets; Shot Lab and LUTs later.
+/// targets; the effects and LUTs later.
 fn cat() -> Catalog {
     let r = |min, max, d| Range {
         min,
@@ -489,7 +489,7 @@ fn cat() -> Catalog {
         ],
         blur_every: 3,
         later: vec![
-            later("shot_lab", &["effect"], &["trails", "stars"]),
+            later("effects", &["effect"], &["trails", "stack"]),
             later("lut", &["luts"], &[]),
         ],
     }
@@ -1167,7 +1167,7 @@ async fn refusals() {
         (
             "export",
             json!({ "trails": true }),
-            later("trails", "shot_lab"),
+            later("trails", "effects"),
         ),
         ("export", json!({ "lut": "a.cube" }), later("lut", "lut")),
         (

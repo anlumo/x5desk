@@ -1,4 +1,4 @@
-//! Shadow Clone, Clone Loop: the subject cut out at several times and composited onto one frame. A cut is a square
+//! Freeze Trail, Echo Trail: the subject cut out at several times and composited onto one frame. A cut is a square
 //! perspective crop around the subject's box (from crate track: `Tracker` samples or `Det`s), kept as a patch, and a
 //! person mask of the crop (`seg`, PP-HumanSeg); pasting projects every equirect pixel into each cut's crop and lays
 //! the patch over the frame by the mask, gated to the subject's box so the other people in the crop stay out.
@@ -9,19 +9,19 @@ use glam::{Vec2, Vec3};
 /// What a hook keeps of the subject.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Clones {
-    /// Shadow Clone: a copy stays behind each time the subject has moved `gap` of its own width from the last copy;
+    /// Freeze Trail: a copy stays behind each time the subject has moved `gap` of its own width from the last copy;
     /// the latest `n` show.
-    Shadow { gap: f32, n: u32 },
-    /// Clone Loop: the subject as it was `lag`, 2·`lag`, …, `n`·`lag` frames ago, all moving with it.
-    Loop { lag: u32, n: u32 },
+    Freeze { gap: f32, n: u32 },
+    /// Echo Trail: the subject as it was `lag`, 2·`lag`, …, `n`·`lag` frames ago, all moving with it.
+    Echo { lag: u32, n: u32 },
 }
 
 impl Clones {
     /// Cut slots the hook needs.
     pub fn slots(&self) -> u32 {
         match *self {
-            Clones::Shadow { n, .. } => n + 1,
-            Clones::Loop { lag, n } => n * lag.max(1) + 2,
+            Clones::Freeze { n, .. } => n + 1,
+            Clones::Echo { lag, n } => n * lag.max(1) + 2,
         }
     }
 }
@@ -259,8 +259,8 @@ impl Cuts {
                 self.slots()
             ));
         }
-        // Shadow: the slots shown, oldest first, the next slot, the last copy's direction and width;
-        // Loop: whether each slot holds a masked cut of the frame it belongs to
+        // Freeze: the slots shown, oldest first, the next slot, the last copy's direction and width;
+        // Echo: whether each slot holds a masked cut of the frame it belongs to
         let (mut shown, mut next, mut last) = (vec![], 0, None::<(Vec3, f32)>);
         let mut have = vec![false; r as usize];
         let mut list = vec![];
@@ -268,7 +268,7 @@ impl Cuts {
             let done = self.seg(x.enc).unwrap_or_else(|e| panic!("clones: {e}"));
             let b = subj(x.k);
             match mode {
-                Clones::Shadow { gap, n } => {
+                Clones::Freeze { gap, n } => {
                     if let Some(s) = done {
                         shown.push(s);
                         if shown.len() > n as usize {
@@ -284,7 +284,7 @@ impl Cuts {
                     }
                     self.paste(x.enc, x.tex, &shown);
                 }
-                Clones::Loop { lag, n } => {
+                Clones::Echo { lag, n } => {
                     if let Some(s) = done {
                         have[s as usize] = true;
                     }

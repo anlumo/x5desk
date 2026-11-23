@@ -10,7 +10,7 @@ fn want(kind: Kind) -> Want {
 
 /// The catalog's ids are the app's tables': looks in `fx::Look::ALL`'s order with the test hook's first words and the
 /// display names; the player's projections but the equirect; `gyro::parse`'s modes; the editor's adjustments with
-/// their defaults; Shot Lab's effects; the presets, the 360 video widths without the photos' 11904; the blur targets in
+/// their defaults; the effects; the presets, the 360 video widths without the photos' 11904; the blur targets in
 /// `Set::faces`, `Set::plates` order, searched every `STEP` frames, and no longer later; denoise 0 to 1, off by
 /// default; a still's noise reduction 0 to 1, the screen's by default.
 #[test]
@@ -52,7 +52,7 @@ fn catalog_tables() {
             .filter(|a| a.id != "reach")
             .all(|a| a.default == 0.0)
     );
-    let lab = c.later.iter().find(|l| l.id == "shot_lab").unwrap();
+    let lab = c.later.iter().find(|l| l.id == "effects").unwrap();
     assert_eq!(lab.effects.len(), lab::FXS.len());
     assert!(lab.effects.iter().zip(lab::FXS).all(|(e, f)| e == f.2));
     assert_eq!(c.later.len(), 6);
@@ -731,7 +731,7 @@ fn engine(g: &Arc<Gpu>, cx: &stitch::Ctx, raft: Option<&str>) -> Agent {
 }
 
 /// How long a blurred run may take at most: ai's tests (their own device) hold the models for whole runs of minutes
-/// (Deep Track, auto edit with `X5_SAMPLES`), which a pass waits for.
+/// (subject tracking, auto edit with `X5_SAMPLES`), which a pass waits for.
 const BOUND: Duration = Duration::from_secs(1800);
 
 /// `q` checked and run on `lane` of `a` into `<dir>/<plan's stem>.<ext>`: the plan, its readings every 5 ms until it

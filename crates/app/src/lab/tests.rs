@@ -13,11 +13,9 @@ fn table() {
     }
     assert_eq!(FXS.iter().filter(|x| x.0.cut()).count(), 8);
     assert!(FXS[..8].iter().all(|x| !x.0.cut()) && FXS[8..].iter().all(|x| x.0.cut()));
-    assert!(
-        Fx::Passerby.still() && Fx::Shadow.still() && !Fx::Planets.still() && !Fx::Delay.still()
-    );
-    assert!(Fx::Center.subject() && Fx::Loop.subject() && !Fx::Trails.subject());
-    assert!(Fx::Overtake.cut() && !Fx::Overtake.subject() && !Fx::Overtake.still());
+    assert!(Fx::Empty.still() && Fx::Freeze.still() && !Fx::Planets.still() && !Fx::Delay.still());
+    assert!(Fx::Framing.subject() && Fx::Echo.subject() && !Fx::Trails.subject());
+    assert!(Fx::Passing.cut() && !Fx::Passing.subject() && !Fx::Passing.still());
 }
 
 /// A Lab on clip `f` (its whole range), the library's spec of it.
@@ -27,11 +25,11 @@ fn lab(g: &Arc<Gpu>, cx: &stitch::Ctx, f: &std::path::Path) -> Lab {
     l
 }
 
-/// The editing presets on v635 (`X5_SAMPLES`): Fly Lapse and Stop Motion over 0.5–4.5 s are timelines crate edit
-/// checks, at the source's frame rate, in the source's stabilisation; Center Stage wants the Deep Track subject, and
-/// with one (made up, on this file) its keys follow it inside the range; Overtake wants the auto framing run's passes,
-/// and with one (made up) its keys follow the vehicle at a fixed field of view; a pass is no editing preset. "Add to
-/// timeline": the clips go onto an empty editor timeline as one undo step, which takes their stabilisation.
+/// The editing presets on v635 (`X5_SAMPLES`): Orbit Lapse and Stop Motion over 0.5–4.5 s are timelines crate edit
+/// checks, at the source's frame rate, in the source's stabilisation; Subject Framing wants the tracked subject, and
+/// with one (made up, on this file) its keys follow it inside the range; Passing Vehicle wants the auto framing run's
+/// passes, and with one (made up) its keys follow the vehicle at a fixed field of view; a pass is no editing preset.
+/// "Add to timeline": the clips go onto an empty editor timeline as one undo step, which takes their stabilisation.
 #[test]
 fn presets_v635() {
     let Some(d) = samples() else { return };
@@ -39,7 +37,7 @@ fn presets_v635() {
     let f = d.join("v635.insv");
     let mut l = lab(&g, &cx, &f);
     l.range = [0.5, 4.5];
-    l.fx = Fx::FlyLapse;
+    l.fx = Fx::Orbit;
     let (tl, st) = l.timeline().unwrap();
     tl.check().unwrap();
     assert_eq!(
@@ -52,8 +50,8 @@ fn presets_v635() {
     let (sm, _) = l.timeline().unwrap();
     assert_eq!(sm.clips.len(), 8);
     assert!(sm.clips.iter().all(|c| c.hold > 0.0));
-    l.fx = Fx::Center;
-    assert!(l.timeline().unwrap_err().contains("Deep Track"));
+    l.fx = Fx::Framing;
+    assert!(l.timeline().unwrap_err().contains("Track a subject"));
     let mut t = made();
     t.file = f.clone();
     l.tick(Some(Spec::of(&f).unwrap()), Some(Arc::new(t)), None);
@@ -75,10 +73,10 @@ fn presets_v635() {
             k.t
         );
     }
-    // Overtake wants the player's auto framing run; with one (made up: a vehicle on the right from 1 to 2 s, sweeping
-    // from 45° to 135° in yaw, seen every 10th frame from 0.67 to 2.33 s) the range is its pass and a second either
-    // side, and the keys turn onto it at the field of view chosen
-    l.fx = Fx::Overtake;
+    // Passing Vehicle wants the player's auto framing run; with one (made up: a vehicle on the right from 1 to 2 s,
+    // sweeping from 45° to 135° in yaw, seen every 10th frame from 0.67 to 2.33 s) the range is its pass and a second
+    // either side, and the keys turn onto it at the field of view chosen
+    l.fx = Fx::Passing;
     assert!(l.timeline().unwrap_err().contains("Auto framing"));
     let mut a = made();
     (a.file, a.auto) = (f.clone(), true);
@@ -189,7 +187,7 @@ fn preview_trails() {
     assert!(lit > 100, "no trails");
 }
 
-/// Shadow Clone's export hook runs its person network under BURN (burn submits from the export thread, which calls
+/// Freeze Trail's export hook runs its person network under BURN (burn submits from the export thread, which calls
 /// the hook outside GATE): with a subject made up on v635 (`X5_SAMPLES`), the hook waits while another thread holds
 /// BURN and runs its frames once that lets go.
 #[test]
@@ -201,7 +199,7 @@ fn clones_burn() {
     let mut t = made();
     t.file = f.clone();
     l.tick(Some(Spec::of(&f).unwrap()), Some(Arc::new(t)), None);
-    l.fx = Fx::Shadow;
+    l.fx = Fx::Freeze;
     let (w, h) = (512, 256);
     let fmt = wgpu::TextureFormat::Rgba8Unorm;
     let mut hk = (l.maker(30.0, 10).unwrap())(&g, w, h, fmt).unwrap();
@@ -244,7 +242,7 @@ fn clones_burn() {
     assert!(done.load(Relaxed));
 }
 
-/// Sky Swap's preview on v606 (`X5_SAMPLES`) over 9–10 s (the gate under a blue sky, the source's stabilisation), a
+/// New Sky's preview on v606 (`X5_SAMPLES`) over 9–10 s (the gate under a blue sky, the source's stabilisation), a
 /// picked picture in the sky: a magenta 2:1 JPEG, the colour match off. The 2048 × 1024 out point keeps the frame below
 /// 30° under the horizon to the bit and is magenta over much of the upper hemisphere; a picture that is not 2:1 is
 /// refused.

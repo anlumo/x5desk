@@ -57,7 +57,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 | `proto` | Protobuf messages for the camera (prost, compiled with protox from `proto/`), package `cam`, only what x5desk sends or reads: `session` (authorization, phone, errors), `settings` (`Settings` by `Setting` number, `ReadSettings` / `WriteSettings`), `params` (per-mode `Params` by `Param` number under a `Profile`, `ReadParams` / `WriteParams`; enum values spell the `/CONF` strings), `capture` (`TakePhoto`, `StartRecording`, `StartLapse`, `Mark`, `StartPreview`, `CaptureState`), `files` (`ListFiles`, `ListEntries`, `Metadata`, `ReadExtra`, favourites), `notes` (notifications) |
 | `link` | Camera link: UCD framing, session, requests, notifications, HTTP tunnel with several connections, downloads (each connection writes its range at its offset of `<dst>.part`; on FAT and exFAT, which hold no holes and zero-fill up to an out-of-order write, one connection writes in order; Windows marks the file sparse first); USB (nusb), Wi-Fi (TCP); BLE lives in `ble`. Connections start as `link::Opening` (dropping it cancels the sync); `Error::Silent` after 30 s without a sync answer; `Camera::set_time` sends the app's two SET_OPTIONS at once and returns both pending answers; `scan` / `watch` report `Plug::Disk` for an Insta360 product string under vendor 070a (the X5 in U-disk mode, or the first seconds of app mode); feature `sim`: a simulated camera (a handler status 0 leaves the request unanswered) |
 | `stitch` | Dual fisheye → equirect / perspective on the shared device from NV12 / P010 textures: template seam, RAFT flow, colour matching, stabilisation rotation; burn's attachment per device (`attach`) and its cache dir (`cache`: a slot of the process's own, else memory only) |
-| `stab` | Stabilisation maths: trailer gyro / accelerometer → per-frame orientation, smoothing (FlowState-like), horizon and direction lock, the forward view (`fwd`: the direction of travel from the feature motion the gyro leaves, its focus of expansion fitted per pair of frames; `Lock::Forward` follows it, smoothed, and keeps the horizon lock's heading, turned by the last offset, below walking pace), rolling-shutter terms |
+| `stab` | Stabilisation maths: trailer gyro / accelerometer → per-frame orientation, smoothing, horizon and direction lock, the forward view (`fwd`: the direction of travel from the feature motion the gyro leaves, its focus of expansion fitted per pair of frames; `Lock::Forward` follows it, smoothed, and keeps the horizon lock's heading, turned by the last offset, below walking pace), rolling-shutter terms |
 | `fx` | Image effects on the shared device: colour adjustments (incl. brightness, brilliance), automatic colour and underwater correction, `.cube` LUTs and our own looks, defringe (purple / green / blue), clarity, overlays (watermark, stickers, text); non-local means for stills from video (`Nlm`: weights from luma patches, h from the frame's own noise, nothing filtered under a knee daylight footage stays below) |
 | `edit` | Editor model: timeline, clips with a look and colour adjustments each (`fx::Params`: edit depends on fx), trim / split / speed / freeze, reframing keyframes and camera-movement presets, undo (a drag that ends where it started leaves no undo step and keeps the redo list), project files |
 | `export` | Render jobs: decode → stitch → stabilise → effects → encode → mux, 360 and flat, queue; the forward view's analysis (`flow`: every 15th of a second stitched 1024 wide with the gyro's rotation out and its corners tracked by `stab::vis`; `travel`: the direction of travel per pair, kept for the process per file, which a job with `Lock::Forward` runs in its plan unless the player, the Export screen or auto edit ran it first); editor timelines (`Cut::Edit`: speed ramps, freeze frames, views, each clip's adjustments and look via `fx`, audio mixed with music, RNNoise-denoised after the time-stretch when `Edit::denoise` is set, and AAC-encoded, or copied for plain 1× cuts without denoise); photo frame grabs (JPEG with GPano, their noise reduced first at `Enc::Jpeg`'s strength by `fx::Nlm` right after the stitch; the encoder is `media::jpeg`, also reachable as `export::jpeg`). `export::locks(gate, burn)` hands it the app's GATE / BURN; `Job::flat` keeps a flat 2:1 picture from a 360 hook untagged. Output: `<path>.part` made new at the job's start (`media::part::create`; one there fails it, "being written by another export") or reserved by the caller (`run_into`'s `Dest`), written through the open file, published only if nothing is at `path` and `stop` is still clear after the last write, every error removing it and only it (`media::part::finish`; the job's closures dropped first, one that panics as it drops failing the job). `Dest::strict`: the MP4's frame count or the still's JPEG decode and size checked before the publish, and a concealed picture (`Progress::concealed`, from `Decoder::failed`) fails the job (`CONCEALED`) unless `frozen_ok`. `stop` reaches the decode pass (its catch-up from the sync sample too), the renderer (a 100 ms `recv_timeout`: a stalled decode), the encoder's drain and the faststart shift. `Queue`: `with(name)` (queues on one device run side by side), `push_into` (a reserved `.part`; Err: the thread gone, the `.part` removed), a queued job's cancel final at once (its `.part` removed), a panic failing its job alone (`catch_unwind` per job), a device poll after each job (`lost`), `busy`, `alive`, `trim` (its RAFT model dropped), `forget`, `detach` (no join; `Drop` joins). `source` reads a recording as a job would, without the GPU (`Src`: rate, frames, length, each lens's codec, depth and size, IMU, AAC); `scoped` is public (a host's GPU work). `Job::pre`: what a job's frames need first (an agent's blur pass), run once on its render thread in an error scope of its own, after the plan and before RAFT loads, with the job's stop (looked at again after it); a hook it hands back runs on each frame before `Job::fx`. Feature `synth`: a synthetic X5 recording for the tests of this crate and those above it (`synth::insv`, `damaged`: both lenses as H.264 High tracks of `video::check`'s I_PCM pictures, an IDR every 30 frames, 29.97 fps, a V3 trailer with a synthetic calibration, no IMU, no audio) |
@@ -275,8 +275,8 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   `Ai::coreml_used` tells whether it runs; a model that won't load, or a run it fails, leaves burn's YuNet, which the
   other platforms run. The plate pass stays on burn's GPU (YOLOX, the plate detector).
 - App Nap: long work holds an `awake::Hold` (one ref-counted NSProcessInfo activity, user initiated, idle system sleep
-  allowed; a no-op elsewhere): each job on the export thread (exports, frame grabs, Shot Lab exports), Deep Track and
-  auto edit, Shot Lab previews, the live outputs while one runs (RTMP, a watched OBS output, the PipeWire camera; not
+  allowed; a no-op elsewhere): each job on the export thread (exports, frame grabs, Effects exports), subject tracking
+  and auto edit, Effects previews, the live outputs while one runs (RTMP, a watched OBS output, the PipeWire camera; not
   the Live screen's preview alone), and the running download or card import (`dl::Cur`). An MCP host's renders hold
   an `awake::Keep` instead (its poller, while a render job of the host is unfinished): an activity of its own, user
   initiated, that keeps idle system sleep off too (the display may sleep), as nobody may be at the keyboard and
@@ -331,13 +331,13 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
 ## App (`crates/app`)
 
 - One eframe window on `video::Gpu` (`WgpuSetup::Existing`). A side panel switches between Library (local files and
-  player), Editor, Shot Lab, Camera (panes Album, Downloads, Camera, Wireless), Capture (live preview, `/CONF`-driven
+  player), Editor, Effects, Camera (panes Album, Downloads, Camera, Wireless), Capture (live preview, `/CONF`-driven
   controls, shutter), Live (RTMP, OBS, PipeWire camera), Export, Settings (download folder, default export preset, audio
   output of the player and the editor's preview, thumbnail cache, GPU info, client id) and Help (keys, a guide per
   screen, About with licences). A camera battery at 20 % or less and not charging shows as a warning on every screen
   (`camera::low`).
 - One module per screen: `library.rs` / `player.rs`; `editor.rs` (`deck.rs`, `sound.rs`, `thumbs.rs`, `doc.rs`);
-  `lab.rs` (Shot Lab on crate shotlab); `camera.rs` (its worker, `cam::camera`, connects in the app's order, PROTOCOL.md
+  `lab.rs` (Effects on crate shotlab); `camera.rs` (its worker, `cam::camera`, connects in the app's order, PROTOCOL.md
   §5.1: identity, options, capture status, then the clock's two SET_OPTIONS (§5.3) on every USB and Wi-Fi connect, not
   waited for: polled in its tick; once both were answered, a refusal too, the options are read again, so the Clock row
   shows the clock as the camera has it (set, even when only the zone was refused); not when an answer never came or came
@@ -386,7 +386,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   a minute), and cubecl's line "the wgpu device was lost" makes the GPU suspect.
 - AI (`ai.rs`): `ai::MODELS` loads one `track::Ai` per run and device on first use (warm-up: the tracker and the
   detector at every batch size, one network call at a time under BURN; re-identification runs no network), shared by
-  Deep Track, auto edit and every privacy pass. Deep Track sets `Tracker::fps` from the clip
+  subject tracking, auto edit and every privacy pass. Subject tracking sets `Tracker::fps` from the clip
   (`shotlab::Clip::meta.fps`); its directions are in the frame of the track's stabilisation and are turned into any
   other frame with `Track::turn` / `ai::rots`. The player's pick (`ai::pick`, on a thread per search like the privacy
   preview): armed on a paused frame, the detector's people and animals (`track::alive`) over `track::sphere()`, keyed
@@ -400,11 +400,11 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   direction of travel, then the detector over the sphere every 10th frame into `track::Framer`, with the stitch
   rotations as the camera body's frame, which tells the camera's carrier, and where the travel estimates move) over
   the whole clip, its path a `Track` of its own (`auto`, no samples) that the player's follow view, `Spec::follow` and
-  the editor's keys take as they take Deep Track's; the agents' lanes run it from `Job::pre` (`Hold::Frame`). The
+  the editor's keys take as they take a tracking run's; the agents' lanes run it from `Job::pre` (`Hold::Frame`). The
   same detections, turned into the travel's frame (`Framer::fwd`, from the forward view's poses), give the vehicles
-  overtaking close by (`Framer::passes`, linked on their own): the run keeps them (`Track::passes`) for Shot Lab's
-  Overtake (the player's run, as the subject effects take its Deep Track run), auto edit scores them (`Sig::Pass`). The
-  privacy blur also covers editor timelines (one face pass per clip) and Shot Lab passes (before the effect). The
+  overtaking close by (`Framer::passes`, linked on their own): the run keeps them (`Track::passes`) for the effect
+  Passing Vehicle (the player's run, as the subject effects take its tracking run), auto edit scores them (`Sig::Pass`).
+  The privacy blur also covers editor timelines (one face pass per clip) and Effects passes (before the effect). The
   privacy pass (the export's `Keep::privacy` over `export::privacy_pass`, the player's preview `ai::privacy`) finds
   faces and/or licence plates every 3rd frame, each linked by a `Hide` of its own; with plates it stitches 7680 wide
   and finds faces there too, else 3072. `Keep::privacy` holds `ai::MODELS` for the whole pass (`Hold::Pass`); the
@@ -412,7 +412,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   through `Models::with_stop`, whose wait for them sees the job's stop), so the other lane waits out one detection,
   not a pass. `Models::trim` drops them when nobody holds them (an idle MCP host's trim). The player's Blur faces and
   Blur license plates previews carry into the export (`Spec::faces`, `Spec::plates`).
-- Shot Lab's Sky Swap (`shotlab::Sky`, its maker in `lab.rs`): EfficientViT-seg B1 (ADE20K, Apache-2.0,
+- New Sky on the Effects screen (`shotlab::Sky`, its maker in `lab.rs`): EfficientViT-seg B1 (ADE20K, Apache-2.0,
   `shotlab/models/README`) runs on six 120° tiles fixed to the world (`track::ring(6, 120, 35)` around the world's up),
   each frame's directions turned into the world's by the stitch pose and the gyro (`Clip::world`, the first frame's
   heading taken out). Its sky probability goes into a 1024 × 512 equirect of the world, mixed into the last (half-life
@@ -548,7 +548,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   - editor: `editor`, `project=<file>`, `clip=<file>` (repeatable), `undo=<n>`, `redo=<n>`, `at=<s>`, `sel=<k>`,
     `etab=clip|reframe|colour|audio|overlays`, `e360`, `epreset=<preset>`, `esave=<file>`,
     `tlexport=<preset>[:noraft][:qp=<n>]`, `eplay`;
-  - AI and Shot Lab: `box=<x0>/<y0>/<x1>/<y1>`, `restab=off|free|horizon|direction[/<σ>]`, `ebox=<x0>/<y0>/<x1>/<y1>`,
+  - AI and Effects: `box=<x0>/<y0>/<x1>/<y1>`, `restab=off|free|horizon|direction[/<σ>]`, `ebox=<x0>/<y0>/<x1>/<y1>`,
     `blur`, `plates` (the player's plate blur preview), `autoedit[=<preset>[:faces][:plates]]`, `lab=<effect>`,
     `lrange=<a>/<b>`, `lpre`, `lexp=<preset>[:faces][:plates]` (`box=`
     is 0..1 of the player's view at 16:9, as a flat 1080p export frames it, whatever the window's size or layout; the
@@ -707,7 +707,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   their names and aliases, the editor's adjustments, stabilisation modes, the flat projections, the still's preset-free
   defaults: 360 at 7680, flat 1920 × 1080, quality 92; the blur targets, `faces` and `plates` with their aliases, and
   the pass: one source frame in `blur_every` (3) searched, best effort, what it costs, unavailable with why while the
-  GPU is up without burn; what agents can't do yet: follow, photos, LUTs, overlays, timelines, Shot Lab), narrowed to
+  GPU is up without burn; what agents can't do yet: follow, photos, LUTs, overlays, timelines, effects), narrowed to
   what the device takes once it is up, and the GPU's state; it never starts the GPU. `render_still` and `export` (local)
   take an X5 recording under the read roots (an `.insv`, paired by `cam::work::pair`: an `.lrv` or `_10_` file finds the
   `.insv` beside it; a proxy alone, a photo or an `.mp4` refused, saying what to give) and write into the agent folder

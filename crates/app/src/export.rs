@@ -9,9 +9,9 @@
 //! source span, each output frame blurred with its clip's regions in its view). The pass ([`privacy_pass`]) is the
 //! agents' too: their lanes run it from `Job::pre`, the models held per searched frame ([`Hold`]), the screen's for
 //! the whole pass. Photos (the camera's equirect JPEGs)
-//! render here too: the view through the preview, the effects, the blur, a JPEG. A Deep Track or auto framing follow
+//! render here too: the view through the preview, the effects, the blur, a JPEG. A tracking or auto framing follow
 //! view (`Spec::follow`) turns a flat output onto the subject, the run's directions turned into the frame the export
-//! stitches in; a Shot Lab job ([`Lab`]) brings its effect's hook maker, run on the export thread for the output's
+//! stitches in; an Effects job ([`Lab`]) brings its effect's hook maker, run on the export thread for the output's
 //! frame size and format.
 
 use crate::{clip, gyro, photo, player::Look};
@@ -62,7 +62,7 @@ pub struct Spec {
     pub look: Look,
     pub stab: gyro::Mode,
     pub smooth: f64,
-    /// a flat output follows this Deep Track subject or auto framing instead of `view`'s direction
+    /// a flat output follows this tracked subject or auto framing instead of `view`'s direction
     pub follow: Option<Arc<crate::ai::Track>>,
     /// the player previews the face or plate blur: the export starts with it on
     pub faces: bool,
@@ -364,7 +364,7 @@ struct Task {
     grab: bool,
     /// an editor timeline instead of the source's range
     ed: Option<Box<Tl>>,
-    /// a Shot Lab effect on the frames
+    /// an effect (the Effects screen's) on the frames
     lab: Option<Lab>,
     /// where a video job writes and how strictly (`run_into`; an agent's reserved `.part`, M4); None: a `.part` of its
     /// own, as the screen's jobs
@@ -375,7 +375,7 @@ struct Task {
 pub type Maker =
     Box<dyn FnOnce(&Gpu, u32, u32, wgpu::TextureFormat) -> Result<export::Hook, String> + Send>;
 
-/// A Shot Lab effect for a job: its hook's maker (taken by the job); `flat`: what it makes is no sphere
+/// An effect of the Effects screen for a job: its hook's maker (taken by the job); `flat`: what it makes is no sphere
 /// (`export::Job::flat`); `key` names the output file.
 pub struct Lab {
     pub key: &'static str,
@@ -492,10 +492,10 @@ impl Exp {
         self.push(s, x, self.range, grab, None)
     }
 
-    /// Queues Shot Lab effect `l` on source span `range` (s) of `s` with the settings `x`.
+    /// Queues effect `l` on source span `range` (s) of `s` with the settings `x`.
     pub fn lab(&mut self, s: Spec, x: Set, range: [f64; 2], l: Lab) -> Result<(), String> {
         if s.photo || s.files.len() > 1 {
-            return Err("Shot Lab works on X5 videos with both lenses in one file".into());
+            return Err("The effects work on X5 videos with both lenses in one file".into());
         }
         if self.src.is_none() {
             self.source(s.clone());
@@ -1133,7 +1133,7 @@ pub(crate) fn span(r: [f64; 2], grab: bool, fps: edit::Rate, dur: f64) -> [f64; 
 
 /// One clip of `files` (`dur` s, the source's rate `src`) at 1× over `ab` (from `span`) with `x`: the Export screen's
 /// job and the agents'. `grab`: its first frame as a JPEG; `at`: the flat view per output time; `fx`: the caller's
-/// hooks (privacy blur, Shot Lab); `flat`: Lab's 2:1 non-sphere. Also returns the timeline's frames
+/// hooks (privacy blur, Effects); `flat`: Lab's 2:1 non-sphere. Also returns the timeline's frames
 /// (`Progress::total`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn clip_job(
@@ -1596,7 +1596,7 @@ impl Keep {
 }
 
 /// How a privacy or auto framing pass holds `ai::MODELS` (one user at a time): for the whole pass, as the Export screen
-/// always has (a Deep Track, auto edit or preview started meanwhile waits for it), or per searched frame (the agents'
+/// always has (a tracking run, auto edit or preview started meanwhile waits for it), or per searched frame (the agents'
 /// lanes: a still's one frame waits for one detection of an export's pass, not for the whole pass).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Hold {

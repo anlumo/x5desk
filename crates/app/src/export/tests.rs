@@ -395,7 +395,7 @@ fn plates() {
 }
 
 /// Output names: a preset's key while it is unchanged, else the kind; a grab by its time and kind; a photo by its kind
-/// alone; the prefix (Shot Lab, follow); numbered past a taken name; an editor timeline by its project's name.
+/// alone; the prefix (Effects, follow); numbered past a taken name; an editor timeline by its project's name.
 #[test]
 fn names() {
     let (_l, g, cx) = gpu();

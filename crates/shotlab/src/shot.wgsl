@@ -1,4 +1,4 @@
-// Shot Lab passes on equirect frames in stitch's layout: pixel (x, y) at azimuth 2πx/W, polar angle πy/(H − 1),
+// Effects passes on equirect frames in stitch's layout: pixel (x, y) at azimuth 2πx/W, polar angle πy/(H − 1),
 // direction (sin φ cos θ, −sin φ sin θ, cos φ). Frames hold sRGB-encoded values; light is added and stacked in linear
 // light. OUTFMT is replaced by the destination's storage format. Each entry point has bindings of its own (auto layout).
 
@@ -333,7 +333,7 @@ fn paste(@builtin(global_invocation_id) id: vec3u) {
     textureStore(pdst, id.xy, o);
 }
 
-// ---- sky swap: the network's tiles and the mask fixed to the world (an equirect in stitch's layout), the frame's
+// ---- new sky: the network's tiles and the mask fixed to the world (an equirect in stitch's layout), the frame's
 // directions turned into it by m
 
 struct Sy {

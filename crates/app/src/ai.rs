@@ -1,11 +1,11 @@
 //! AI features (PLAN.md milestone 9, group 11) on crate track's open models. [`MODELS`]: the networks, loaded once
-//! per app run on first use and warmed up off the UI thread. Deep Track ([`Track`]): a subject the user boxes in a
-//! view, followed through the clip on a background thread (the player's follow view, the editor's reframing keys,
-//! Shot Lab's subject). Auto framing (`Track::framing`): the auto framer's path over the whole clip as a run of its own
-//! for the same three (Shot Lab aside). Auto edit ([`Auto`]): highlights cut along that path into an editor timeline,
-//! with a music track under them their cuts on its beats. Both analyse the clip in one pass ([`scan`]), whose
+//! per app run on first use and warmed up off the UI thread. Subject tracking ([`Track`]): a subject the user boxes
+//! in a view, followed through the clip on a background thread (the player's follow view, the editor's reframing keys,
+//! the effects' subject). Auto framing (`Track::framing`): the auto framer's path over the whole clip as a run of its
+//! own for the same three (the effects aside). Auto edit ([`Auto`]): highlights cut along that path into an editor
+//! timeline, with a music track under them their cuts on its beats. Both analyse the clip in one pass ([`scan`]), whose
 //! detections also give the vehicles overtaking close by (`track::Framer::passes`): an auto framing run keeps them for
-//! Shot Lab's Overtake (`Track::passes`), auto edit scores them.
+//! the effect Passing Vehicle (`Track::passes`), auto edit scores them.
 //! [`privacy`]: the faces and licence plates of one frame for the viewers' privacy preview.
 //!
 //! Frames come from `shotlab::Clip` (decoded and stitched on the shared device) with the stabilisation the result is
@@ -266,7 +266,7 @@ impl St {
 /// A subject's box (centre, angular size) per frame where it was tracked.
 pub type Boxes = Vec<Option<(Vec3, Vec2)>>;
 
-/// A Deep Track run: the subject's samples from frame `k0` on as they come, the smoothed path once done. Or auto
+/// A tracking run: the subject's samples from frame `k0` on as they come, the smoothed path once done. Or auto
 /// framing's (`auto`, `framing`): the framer's path of the whole clip, no samples.
 #[derive(Debug)]
 pub struct Track {
@@ -305,7 +305,7 @@ impl Track {
         let t = Track::new(file, stab, k0, false);
         let (g, cx, ctx, t2) = (g.clone(), cx.clone(), ctx.clone(), t.clone());
         thread::Builder::new()
-            .name("deep track".into())
+            .name("subject tracking".into())
             .spawn(move || {
                 let _a = crate::awake::hold();
                 let t = &t2;
@@ -324,7 +324,7 @@ impl Track {
                 };
                 ctx.request_repaint();
             })
-            .expect("deep track thread");
+            .expect("subject tracking thread");
         t
     }
 
@@ -699,7 +699,7 @@ pub fn outline(v: &View, r: egui::Rect, dir: Vec3, size: Vec2) -> Vec<Vec<egui::
     o
 }
 
-/// Deep Track's pick on frame `k` of `file` stitched with `stab` (the viewer's frame): the people and animals over the
+/// Tracking's pick on frame `k` of `file` stitched with `stab` (the viewer's frame): the people and animals over the
 /// sphere to box (`track::sphere`, `track::alive`), or with `at` the one at that direction, if any (`Ai::pick`).
 pub fn pick(
     g: &Arc<Gpu>,

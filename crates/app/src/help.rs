@@ -31,7 +31,7 @@ const PAGES: [(Page, &str, &str); 10] = [
     (Page::Keys, "Keyboard and mouse", "keys"),
     (Page::Library, "Library", "library"),
     (Page::Editor, "Editor", "editor"),
-    (Page::Lab, "Shot Lab", "lab"),
+    (Page::Lab, "Effects", "lab"),
     (Page::Camera, "Camera", "camera"),
     (Page::Capture, "Capture", "capture"),
     (Page::Live, "Live", "live"),
@@ -59,7 +59,7 @@ const KEYS: [(&str, &str, &str); 21] = [
     ("Viewers", "Drag", "Look around (360 views)"),
     (
         "Viewers",
-        "Drag (Deep Track on)",
+        "Drag (tracking on)",
         "Draw a box around the subject to track",
     ),
     ("Viewers", "Scroll", "Zoom: narrower or wider field of view"),
@@ -68,7 +68,7 @@ const KEYS: [(&str, &str, &str); 21] = [
     ("Player", "← / →", "One frame back / forward"),
     (
         "Player",
-        "Click (Deep Track on, paused)",
+        "Click (tracking on, paused)",
         "Track the person or animal there (those found are boxed)",
     ),
     ("Plain videos", "Space", "Play / pause"),
@@ -132,7 +132,7 @@ fn guide(p: Page) -> &'static [&'static str] {
              template seam once the GPU can't keep up).",
             "Export… takes the file and the current view to the Export screen; Grab 360 and Grab view make a JPEG of \
              the frame shown there. A file's menu in the lists exports it or adds it to the editor.",
-            "Deep Track: turn it on and draw a box around a subject in the perspective view, or pause on a frame: \
+            "Track a subject: turn it on and draw a box around a subject in the perspective view, or pause on a frame: \
              its people and animals show boxed in any view, and a click on one picks it (a click elsewhere looks \
              closer around it for a person or animal the boxes missed). It is tracked from that \
              frame to the end on the AI models (loaded on first use, a minute's warm-up the first time); the bar \
@@ -154,7 +154,7 @@ fn guide(p: Page) -> &'static [&'static str] {
             "Drag recordings from the media list onto the timeline. Trim clips at their edges, split them at the \
              playhead (S), reorder them by dragging, delete the selected one (Delete).",
             "Reframe: set the view in the viewer and press K for a key; keys ease between views, or apply a camera \
-             movement preset or a Shot Lab cut. Speed ramps and freeze frames are on the Clip tab.",
+             movement preset or an Effects cut. Speed ramps and freeze frames are on the Clip tab.",
             "Colour: a look (ours or an imported .cube) and adjustments per clip, each with a button that puts it on \
              every clip. Audio: clip volume, mute, music that ducks under the clips' audio, voice denoise. Overlays: \
              text, a PNG sticker or watermark, a nadir patch over the tripod.",
@@ -168,19 +168,19 @@ fn guide(p: Page) -> &'static [&'static str] {
              audio, and the cuts land on its beats.",
         ],
         Page::Lab => &[
-            "Shot Lab works on the clip open in the Library. Pick an effect, set its range and parameters; Preview \
+            "Effects work on the clip open in the Library. Pick an effect, set its range and parameters; Preview \
              shows what it makes at the range's out point (the editing presets: four moments through their views).",
-            "The passes (Remove Passerby, Light Trails, Star Lapse, Frame Delay, Shadow Clone, Clone Loop, Parallel \
-             Planet, Sky Swap) export as 360 videos. Those that need a still camera check the gyro and warn when it \
-             turned; they stitch with the direction lock. The editing presets (Stop Motion, Fly Lapse, Flip My Day, \
-             Center Stage, Spin Me Around, Fly Out, Dolly Zoom, Overtake) export flat or go onto the editor's \
+            "The passes (Empty Scene, Light Trails, Frame Stack, Frame Delay, Freeze Trail, Echo Trail, Planet Pair, \
+             New Sky) export as 360 videos. Those that need a still camera check the gyro and warn when it turned; \
+             they stitch with the direction lock. The editing presets (Stop Motion, Orbit Lapse, Roll Lapse, Subject \
+             Framing, Subject Spin, Pull Out, Dolly Zoom, Passing Vehicle) export flat or go onto the editor's \
              timeline.",
-            "Sky Swap finds the sky with a segmentation network and puts a gradient or a 360 picture of yours \
+            "New Sky finds the sky with a segmentation network and puts a gradient or a 360 picture of yours \
              (Picture…: an equirect JPEG or PNG, such as a 360 photo) in its place, fixed to the world as the camera \
              turns; Match the scene pulls its colour and brightness towards the sky it replaces. Night skies, white \
              skies over white walls, wires and leaves against the sky are where it misses.",
-            "Shadow Clone, Clone Loop and the subject presets follow the subject tracked with Deep Track in the \
-             player. With Blur faces or Blur license plates on in the Export screen, a pass blurs them before the \
+            "Freeze Trail, Echo Trail and the subject presets follow the subject tracked in the player (Track a \
+             subject). With Blur faces or Blur license plates on in the Export screen, a pass blurs them before the \
              effect runs.",
         ],
         Page::Camera => &[
@@ -317,7 +317,7 @@ const MODELS: [Model; 11] = [
     ),
     Model(
         "PP-HumanSeg v1 (mobile)",
-        "person segmentation for Shot Lab (shotlab)",
+        "person segmentation for Freeze Trail and Echo Trail (shotlab)",
         "Apache-2.0",
         "PaddleSeg via the OpenCV model zoo, human_segmentation_pphumanseg_2023mar; Copyright (c) 2021 PaddlePaddle \
          Authors",
@@ -326,7 +326,7 @@ const MODELS: [Model; 11] = [
     ),
     Model(
         "EfficientViT-seg B1 (ADE20K)",
-        "sky segmentation for Shot Lab's Sky Swap (shotlab)",
+        "sky segmentation for New Sky (shotlab)",
         "Apache-2.0",
         "MIT HAN Lab, mit-han-lab/efficientvit, efficientvit_seg_b1_ade20k; Copyright 2023 Han Cai",
         "⚠ Trained on ADE20K, whose images MIT CSAIL lets researchers use only for non-commercial research and \

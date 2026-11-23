@@ -1,4 +1,4 @@
-//! Star Lapse: a photo or frame series aligned on the sky's rotation and stacked; Parallel Planet.
+//! Frame Stack: a photo or frame series aligned on the sky's rotation and stacked; Planet Pair.
 
 use crate::{Cache, Ctx, cached, fi, run, tv};
 use glam::{DQuat, Mat3, Quat};
@@ -179,7 +179,7 @@ impl Stack {
     }
 }
 
-/// Parallel Planet: two views of one equirect in one frame, side by side (or stacked with `tall`); by default the tiny
+/// Planet Pair: two views of one equirect in one frame, side by side (or stacked with `tall`); by default the tiny
 /// planet (looking down) and its sky world (looking up), each stereographic over 280°.
 pub struct Planets {
     pv: [stitch::Preview; 2],

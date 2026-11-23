@@ -13,16 +13,16 @@ x5desk is a personal project. It is not affiliated with, endorsed by or supporte
   lenses live. Views: perspective, Panini, equirect, tiny planet. Stabilisation from the camera's gyro: free, horizon
   lock, direction lock, or a forward view along the direction of travel. The seam is aligned by optical flow (RAFT).
   Frame grabs as JPEG, with noise reduction on night footage.
-- **Tracking and framing.** Follow a subject you box or click on a paused frame (Deep Track), or let auto framing pick
-  the clip's main subject. Faces and licence plates can be blurred. Highlights become an auto edit, cut to a music
+- **Tracking and framing.** Follow a subject you box or click on a paused frame, or let auto framing pick the clip's
+  main subject. Faces and licence plates can be blurred. Highlights become an auto edit, cut to a music
   track's beats if you give it one.
 - **Library search.** Type words to rank your recordings by what their pictures show; tags (night, ride, city, …) and
   near-duplicates come from the same model.
 - **Editor.** A timeline with trim, split, speed ramps and freeze frames; reframing with keyframes and camera movement
   presets; looks (`.cube` LUTs) and colour adjustments per clip; music that ducks under the clips' audio, voice
   denoise; text, stickers, watermark and a nadir patch; undo and project files.
-- **Shot Lab.** Effects on a clip: Remove Passerby, Light Trails, Star Lapse, Frame Delay, Shadow Clone, Clone Loop,
-  Parallel Planet, Sky Swap, and editing presets such as Dolly Zoom, Fly Out or Overtake.
+- **Effects.** Passes over a clip: Empty Scene, Light Trails, Frame Stack, Frame Delay, Freeze Trail, Echo Trail,
+  Planet Pair, New Sky, and editing presets such as Dolly Zoom, Pull Out or Passing Vehicle.
 - **Camera.** Over USB, Wi-Fi or Bluetooth: the album with thumbnails and resumable downloads, import from the card,
   camera information and clock, and capture with the live preview, the camera's modes and settings, the shutter and
   timelapse. The X5's Webcam Mode works as a source as well.
@@ -141,8 +141,8 @@ that states no licence at all:
 | VitTrack (OpenCV zoo) | tracking a subject | Apache-2.0 | includes GOT-10k: CC BY-NC-SA 4.0 |
 | YuNet (OpenCV zoo) | face detection for the blur | MIT | WIDER FACE: non-commercial |
 | YOLOX-nano licence plates (this project's fine-tune) | plate detection for the blur | Apache-2.0 (YOLOX) | open datasets, own footage, and one dataset without a stated licence |
-| PP-HumanSeg (PaddleSeg) | person segmentation in Shot Lab | Apache-2.0 | a Baidu dataset |
-| EfficientViT-seg B1 (MIT HAN Lab) | sky segmentation for Sky Swap | Apache-2.0 | ADE20K, ImageNet: non-commercial research and education |
+| PP-HumanSeg (PaddleSeg) | person segmentation for Freeze Trail and Echo Trail | Apache-2.0 | a Baidu dataset |
+| EfficientViT-seg B1 (MIT HAN Lab) | sky segmentation for New Sky | Apache-2.0 | ADE20K, ImageNet: non-commercial research and education |
 | TinyCLIP ViT-39M/16 (Microsoft) | library search | MIT | YFCC-15M (partly non-commercial), distilled from a LAION-2B model |
 | RNNoise (Xiph.Org) | voice denoise | BSD-3-Clause | public datasets |
 

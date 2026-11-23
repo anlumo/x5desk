@@ -1,4 +1,4 @@
-//! Sky Swap: the sky found by a segmentation network (EfficientViT-seg B1 on ADE20K, `seg`) on perspective tiles fixed
+//! New Sky: the sky found by a segmentation network (EfficientViT-seg B1 on ADE20K, `seg`) on perspective tiles fixed
 //! to the world, kept in an equirect of the world where it is smoothed over time, its edge fitted to each frame by a
 //! guided filter (He et al., "Guided Image Filtering", colour guide: coefficients at the mask's resolution, applied to
 //! the frame's own pixels), and a panorama fixed to the world in its place, its colour pulled towards the sky it

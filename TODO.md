@@ -354,10 +354,10 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
 
 ## AI features
 
-Compared with the vendor's apps (2026-11-13). Here: Deep Track (VitTrack, YOLOX-nano, LOMO re-identification), face
-and licence plate blur (YuNet, our YOLOX-nano plate fine-tune), auto edit (heuristic highlights, auto framing, cuts on
-the music's beats), seam flow on exports and paused frames (RAFT-small), Shadow Clone and Clone Loop (PP-HumanSeg),
-voice denoise on editor timelines and exports (RNNoise), library search (TinyCLIP).
+Compared with the vendor's apps (2026-11-13). Here: subject tracking (VitTrack, YOLOX-nano, LOMO re-identification),
+face and licence plate blur (YuNet, our YOLOX-nano plate fine-tune), auto edit (heuristic highlights, auto framing,
+cuts on the music's beats), seam flow on exports and paused frames (RAFT-small), Freeze Trail and Echo Trail
+(PP-HumanSeg), voice denoise on editor timelines and exports (RNNoise), library search (TinyCLIP).
 
 - [x] **Wind noise on every export.** Library exports take the editor's RNNoise (`Set::denoise` into
   `export::Edit::denoise`): the Export screen's Audio row, the MCP `export` tool's `denoise` (0–1; catalog: denoise).
@@ -423,8 +423,8 @@ voice denoise on editor timelines and exports (RNNoise), library search (TinyCLI
   a parked car's speed came out at −0.2 to 0.5 of ours (0.2–0.5 along a close row parked at an angle), the ground
   speed's per-pair estimates are bimodal (a low median made parked cars look oncoming), and no moving vehicle we
   passed turned up to set a threshold against. Auto edit: `Sig::Pass`, 1 over each pass's span, weight 0.2 with the
-  other four scaled by 0.8 (their ratios kept: a clip without passes gets the same picks). Shot Lab: Overtake, an
-  editing preset (`shotlab::cut::overtake`: keys on every detection of the vehicle at a fixed field of view, 80° by
+  other four scaled by 0.8 (their ratios kept: a clip without passes gets the same picks). Effects: Passing Vehicle, an
+  editing preset (`shotlab::cut::passing`: keys on every detection of the vehicle at a fixed field of view, 80° by
   default, as fitting its height would zoom from a few degrees to over 100), offered (enabled in the list) once the
   player's Auto framing run on the clip (`ai::Track::passes`, `Library::framing`) found one: a Vehicle list, the range
   its pass and a second either side, the run's stabilisation. Measured on all 36 scooter rides (five days, 35 min,
@@ -446,9 +446,9 @@ voice denoise on editor timelines and exports (RNNoise), library search (TinyCLI
   all parked cars or hops), a speed share for we-pass events (above). Tests: `track::tests::passes` (synthetic:
   overtaking on the left past a parked row and on the right; a parked row, a car we pass, oncoming, 5 away, waiting
   8 s beside us; two classes pass once; nothing without the travel's frame), `track::tests::pass_signal`,
-  `lab::tests::table` and `presets_v635` (Overtake's range and keys), `ai::tests::overtakes_ride` (738's two;
-  `X5_RIDES`). Open: overtakes on the right; very close big vehicles; 3 camera heights or 6 (the next lane); Shot Lab
-  needs the player's Auto framing run first; the GUI (the list entry, the Vehicle list) untested by hand.
+  `lab::tests::table` and `presets_v635` (Passing Vehicle's range and keys), `ai::tests::overtakes_ride` (738's two;
+  `X5_RIDES`). Open: overtakes on the right; very close big vehicles; 3 camera heights or 6 (the next lane); Passing
+  Vehicle needs the player's Auto framing run first; the GUI (the list entry, the Vehicle list) untested by hand.
 - [x] **Music in auto edit.** The editor's Media panel picks it (Auto edit music: Choose…, the editor's music
   formats; the player's Auto edit uses it too; not in the MCP, which has no auto edit). It plays from its start under
   the highlights as the timeline's music, gain 1 and ducked as the editor's import puts it on (`edit::Music`, the
@@ -476,14 +476,14 @@ voice denoise on editor timelines and exports (RNNoise), library search (TinyCLI
   another frame rate than the clip's, each clip's frame rounding can move the cuts after it by up to half a frame.
 - [x] **Auto framing for a whole clip.** `ai::Track::framing`: auto edit's pass (`ai::scan`, factored out of
   `Auto::run`, one detection loop for both: the direction of travel, then YOLOX over the sphere every 10th frame into
-  `track::Framer`, the forward view as its `ahead`) over the whole clip, the framer's path as a Deep Track run of its
-  own (`Track::auto`: from frame 0, no samples), so it reaches Deep Track's three consumers through the same
-  mechanism: the player's Auto framing tick beside Deep Track (the analysis on the first tick, its progress on the
+  `track::Framer`, the forward view as its `ahead`) over the whole clip, the framer's path as a tracking run of its
+  own (`Track::auto`: from frame 0, no samples), so it reaches subject tracking's three consumers through the same
+  mechanism: the player's Auto framing tick beside Track a subject (the analysis on the first tick, its progress on the
   view, kept while the clip is open: unticked and ticked again it follows at once; one follow view at a time, a drag
   on the view ends it); the follow view a flat export takes (Export screen: `autoframe_` name, "framed automatically";
   MCP `export`'s `auto_framing`, flat only, catalog and docs: the agents' lanes run the pass in the job's `pre` with
   the models held per frame, `autoframe_` name); the editor's Auto framing (Reframe tab, beside Track a subject): keys
-  every 0.5 s over the whole clip at the playhead, one undo step. Like Deep Track's, the follow view and the keys take
+  every 0.5 s over the whole clip at the playhead, one undo step. Like tracking's, the follow view and the keys take
   the path's direction and keep the view's field of view, roll and projection; the framer's own field of view (subject
   height to 45 %, 60–110°: 60° on the forward view) is unused. Nothing changes without it. The framer, fixed after a
   first measurement that framed the rider's legs for a whole ride and never showed the forward view (contact sheets
@@ -536,12 +536,12 @@ voice denoise on editor timelines and exports (RNNoise), library search (TinyCLI
   reached at 40 °/s; the editor analyses the clip's whole file, not its span; the player's forward view and auto
   framing run the travel twice when started together (`export::travel` keeps a finished one only); the GUI paths (the
   tick, the button, the labels) are untested by hand.
-- [x] **Pick by click.** The detector's people and animals boxed on the paused frame, a click starting Deep Track
-  (the vendor's Identify Tracking Targets). With Deep Track armed (the toggle now in every view; drawing a box stays
-  the perspective view's) and the player paused, `ai::pick` finds the frame's people and animals (`track::alive`)
+- [x] **Pick by click.** The detector's people and animals boxed on the paused frame, a click starting subject
+  tracking (the vendor's Identify Tracking Targets). With tracking armed (the toggle now in every view; drawing a box
+  stays the perspective view's) and the player paused, `ai::pick` finds the frame's people and animals (`track::alive`)
   over `track::sphere()` on a thread of its own, as the privacy preview does, keyed by frame and stabilisation; they
   show as yellow boxes in any projection (`ai::outline`: each side a great circle through the preview's projection,
-  `export::proj` / `px`, cut where it leaves the view, on both sides of the equirect's edge; Deep Track's own box now
+  `export::proj` / `px`, cut where it leaves the view, on both sides of the equirect's edge; tracking's own box now
   shows in every view too). A click (`export::ray`, the preview's ray, moved out of the export tests) takes the
   smallest box that holds it (`track::at`, `Ai::pick`'s rule, now people and animals only) and starts the run
   through `Player::track` as a drawn box does (its class known, the run skips the class detection); off the boxes
@@ -606,8 +606,8 @@ voice denoise on editor timelines and exports (RNNoise), library search (TinyCLI
   at 3840 × 2160; 4–7 ms under the knee. Contact sheets (100 % crops: input, 0.5, 1 or on day the filter without
   the knee, the temporal mean): `target/forward-scratch/grab/out/{night_n670_5760,night_v627_7680,day_d689_5760}.jpg`.
   Not compared with the vendor's own still denoise.
-- [x] **Sky Swap.** A Shot Lab pass (`shotlab::Sky`, the screen's Sky Swap, key `sky`: preview and 360 export; the MCP
-  lists it with the Shot Lab effects agents can't run yet): EfficientViT-seg B1 trained on ADE20K by MIT HAN Lab
+- [x] **New Sky.** An Effects pass (`shotlab::Sky`, the screen's New Sky, key `sky`: preview and 360 export; the MCP
+  lists it with the effects agents can't run yet): EfficientViT-seg B1 trained on ADE20K by MIT HAN Lab
   (weights and code Apache-2.0; ADE20K's images for non-commercial research and education, its ImageNet pre-training
   likewise; 4.8 M parameters, 18.4 MB in git; exported by `models/efficientvit.py`, which writes the network out after
   the authors' code instead of running it; `shotlab/models/README`) on six 384² tiles of 120° at pitch 35° fixed to the
@@ -689,7 +689,7 @@ voice denoise on editor timelines and exports (RNNoise), library search (TinyCLI
   detection and model-based defringe (the classical Auto colour, Underwater and fringe controls are in); multi-frame
   video denoise (the camera denoises); dive-case removal (diving only); freeze-frame plane detection (purpose
   unknown); a learned highlight scorer (no open model for 360 ride footage; marks, motion and overtakes first); an
-  automatic selfie view (Deep Track on the person does it). Lens guard detection is the Stitch item "Lens guards".
+  automatic selfie view (subject tracking on the person does it). Lens guard detection is the Stitch item "Lens guards".
 
 ## Camera
 

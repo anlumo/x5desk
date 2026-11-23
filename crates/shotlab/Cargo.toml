@@ -3,7 +3,7 @@ name = "shotlab"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Shot Lab for the Insta360 X5: remove passerby, light trails, star stacking, frame delay, clones, sky swap and editing presets, on the shared wgpu device"
+description = "Effects for the Insta360 X5: an empty scene, light trails, frame stacking, frame delay, freeze and echo trails, a new sky and editing presets, on the shared wgpu device"
 
 [dependencies]
 wgpu.workspace = true
@@ -19,9 +19,9 @@ export.workspace = true
 edit.workspace = true
 track.workspace = true
 
-# Clones, Sky Swap: the person and sky segmentation networks (PP-HumanSeg, EfficientViT-seg B1; models/README) on the
-# shared device, as crate track runs its networks: burn through stitch::attach, its tensors' wgpu buffers written and
-# read by our passes
+# Freeze and echo trails, New Sky: the person and sky segmentation networks (PP-HumanSeg, EfficientViT-seg B1;
+# models/README) on the shared device, as crate track runs its networks: burn through stitch::attach, its tensors' wgpu
+# buffers written and read by our passes
 burn = { workspace = true, features = ["extension", "cubecl"] }
 burn-store.workspace = true
 burn-cubecl = { version = "0.22", default-features = false }

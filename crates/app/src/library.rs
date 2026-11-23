@@ -317,7 +317,7 @@ impl Library {
         v
     }
 
-    /// The open player's Deep Track run.
+    /// The open player's tracking run.
     pub fn track(&self) -> Option<Arc<crate::ai::Track>> {
         self.player.as_ref()?.lock().unwrap().trk.clone()
     }

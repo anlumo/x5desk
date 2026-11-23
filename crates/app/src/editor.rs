@@ -1,15 +1,15 @@
 //! Editor screen (PLAN.md milestone 7, groups 10, 12, 13) on crate edit's model: a timeline of clips from the
 //! library (drag in, trim, split, delete, reorder, speed with ramp keys, freeze frames), reframing keys from the
-//! viewer's view with easing and camera-movement presets (edit) or Shot Lab cuts (shotlab), a look (ours or an
+//! viewer's view with easing and camera-movement presets (edit) or Effects cuts (shotlab), a look (ours or an
 //! imported `.cube`) and colour adjustments per clip, overlays (fx), clip volume envelopes, mute, music with ducking
 //! and denoise (media), undo / redo (edit's log for the timeline, steps of the extras between its steps), project
 //! files and "Export timeline" (`export::Cut::Edit` on the Export screen's queue). The viewer frames what a flat export
 //! shows and plays the timeline through decks (`deck`) on the preview sound's clock (`sound`); paused, it shows the
 //! frame's RAFT stitch from the app's worker (`player::still`). Thumbnails come from a worker (`thumbs`).
 //!
-//! AI (`ai`): Deep Track from a box drawn in the viewer follows the subject from the playhead to the clip's end and
-//! becomes the clip's reframing keys (its states on the clip in the timeline); auto framing's path keys the whole clip
-//! the same way; auto edit puts a clip's highlights, framed automatically, on the timeline.
+//! AI (`ai`): subject tracking from a box drawn in the viewer follows the subject from the playhead to the clip's end
+//! and becomes the clip's reframing keys (its states on the clip in the timeline); auto framing's path keys the whole
+//! clip the same way; auto edit puts a clip's highlights, framed automatically, on the timeline.
 
 mod deck;
 pub mod doc;
@@ -99,12 +99,12 @@ pub struct Hook {
     pub vol: Option<f32>,
     /// preview the 360 frame
     pub pano: bool,
-    /// Deep Track: the box drawn once the editor is set up, 0..1 of the export preset's flat frame (16:9 for a 360
+    /// tracking: the box drawn once the editor is set up, 0..1 of the export preset's flat frame (16:9 for a 360
     /// preset) whatever the window
     pub tbox: Option<[f32; 4]>,
 }
 
-/// A Deep Track or auto framing run for clip `k` (of file `path`, source `a..b`), keyed as view `v` turned onto the
+/// A tracking or auto framing run for clip `k` (of file `path`, source `a..b`), keyed as view `v` turned onto the
 /// subject.
 struct Trk {
     t: Arc<ai::Track>,
@@ -242,7 +242,7 @@ pub struct Editor {
     drag: Option<Drag>,
     /// an undo group is open
     grp: bool,
-    /// freeze length, preset length, Shot Lab parameters
+    /// freeze length, preset length, effect parameters
     hold: f64,
     pdur: f64,
     turns: f32,
@@ -259,7 +259,7 @@ pub struct Editor {
     /// test hook: playback statistics (frames shown, start: wall time and playhead); play once idle
     log: Option<(u64, Option<(std::time::Instant, f64)>)>,
     autoplay: bool,
-    /// Deep Track: the run, armed (a box drawn in the viewer starts one), the box being drawn
+    /// tracking: the run, armed (a box drawn in the viewer starts one), the box being drawn
     trk: Option<Trk>,
     arm: bool,
     from: Option<egui::Pos2>,
@@ -463,7 +463,7 @@ impl Editor {
         self.did(r)
     }
 
-    /// Ends the open drag and its undo step, before an edit that is not its own (Delete or S mid-drag, a Deep Track's
+    /// Ends the open drag and its undo step, before an edit that is not its own (Delete or S mid-drag, a tracking run's
     /// keys): it names its clip, key or point by index, which may be another's afterwards (its widget's id too).
     fn halt(&mut self) {
         if self.drag.take().is_some() {
@@ -668,21 +668,21 @@ impl Editor {
         }
     }
 
-    /// Deep Track of subject `s` (`ai::subject` of a box in the viewer's perspective view) from the playhead to the end
+    /// Tracking of subject `s` (`ai::subject` of a box in the viewer's perspective view) from the playhead to the end
     /// of its clip: the result becomes the clip's reframing keys, the viewer's view turned onto it.
     pub fn track(&mut self, s: track::Subject) -> Result<(), String> {
         let v = self.shown();
         if self.pano || look_of(&v) != Look::Perspective {
-            return Err("Deep Track: draw the box in the perspective view".into());
+            return Err("Tracking: draw the box in the perspective view".into());
         }
         let (i, ..) = self
             .cur()
-            .ok_or("Deep Track: the frame at the playhead is not shown yet")?;
+            .ok_or("Tracking: the frame at the playhead is not shown yet")?;
         let d = &self.decks[i];
         let (k, k0) = (d.k.ok_or("no clip")?.0, d.held.ok_or("no frame")?.k);
         let c = self.pj.tl().clips[k].clone();
         if c.hold > 0.0 || c.rev {
-            return Err("Deep Track follows clips that play forwards".into());
+            return Err("Tracking follows clips that play forwards".into());
         }
         let k1 = clip::frame_at(&d.s.v.times, c.b);
         let path = self.pj.tl().files[c.file as usize].path.clone();
@@ -764,7 +764,7 @@ impl Editor {
             return;
         };
         t.keyed = true;
-        let w = ["Deep Track", "Auto framing"][t.t.auto as usize];
+        let w = ["Tracking", "Auto framing"][t.t.auto as usize];
         match t.t.st() {
             ai::St::Done => {}
             ai::St::Failed(e) => {
@@ -1987,12 +1987,12 @@ impl Editor {
         let tl = self.pj.tl();
         let mut lines = vec![format!("{} / {}", mmss(self.t), mmss(tl.dur()))];
         if self.arm {
-            lines.push("Deep Track: drag a box around the subject".into());
+            lines.push("Tracking: drag a box around the subject".into());
         }
         if let Some(t) = self.trk.as_ref().filter(|t| !t.keyed) {
             lines.push(
                 t.t.st()
-                    .line(["Deep Track", "Auto framing"][t.t.auto as usize]),
+                    .line(["Tracking", "Auto framing"][t.t.auto as usize]),
             );
         }
         if let Some(a) = &self.auto {
@@ -2298,7 +2298,7 @@ impl Editor {
                 }
                 x += tw;
             }
-            // a Deep Track run on this clip's file: its states along the clip's bottom
+            // a tracking run on this clip's file: its states along the clip's bottom
             if let Some(t) = self
                 .trk
                 .as_ref()
@@ -2894,7 +2894,7 @@ impl Editor {
             self.ed(|p| p.edit(k, |c| c.rev = rev));
         }
         ui.separator();
-        ui.label("Shot Lab (replaces this clip)");
+        ui.label("Effects (replaces this clip)");
         ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::DragValue::new(&mut self.lapse)
@@ -2922,19 +2922,19 @@ impl Editor {
         let ramp = (0.15 * (b - a)).min(1.0);
         ui.horizontal_wrapped(|ui| {
             if ui
-                .button("Fly Lapse")
+                .button("Orbit Lapse")
                 .on_hover_text("Hyperlapse orbiting from a tiny planet")
                 .clicked()
             {
-                let r = shotlab::cut::fly_lapse(file, a, b, self.lapse, ramp, v, self.turns, 1.0);
+                let r = shotlab::cut::orbit(file, a, b, self.lapse, ramp, v, self.turns, 1.0);
                 self.shot(k, r.map(|c| vec![c]));
             }
             if ui
-                .button("Flip My Day")
+                .button("Roll Lapse")
                 .on_hover_text("Hyperlapse rolling the world over")
                 .clicked()
             {
-                let r = shotlab::cut::flip(file, a, b, self.lapse, ramp, v, self.turns);
+                let r = shotlab::cut::roll(file, a, b, self.lapse, ramp, v, self.turns);
                 self.shot(k, r.map(|c| vec![c]));
             }
             if ui
@@ -3123,7 +3123,7 @@ impl Editor {
             None => {}
         }
         ui.separator();
-        ui.label("Deep Track and auto framing");
+        ui.label("Tracking and auto framing");
         ui.horizontal_wrapped(|ui| {
             match self.trk.as_ref().map(|t| t.t.st()) {
                 Some(st) if !st.over() => {
@@ -3141,7 +3141,7 @@ impl Editor {
                                 "Drag a box around a subject in the viewer: it is followed from the playhead to the \
                                  clip's end, and the clip gets keys that keep it in view",
                             )
-                            .on_disabled_hover_text("Deep Track needs the perspective view (not the 360 frame)");
+                            .on_disabled_hover_text("Tracking needs the perspective view (not the 360 frame)");
                     });
                     if ui
                         .button("Auto framing")

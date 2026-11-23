@@ -98,14 +98,14 @@ const BLUR: [(&str, &str, &[&str]); 2] = [
         &["plate", "licence_plates", "license_plates", "number_plates"],
     ),
 ];
-/// What agents can't do yet: id, name, the argument names that ask for it (Shot Lab's effects are `lab::FXS`').
+/// What agents can't do yet: id, name, the argument names that ask for it (the effects are `lab::FXS`').
 const LATER: [(&str, Option<&str>, &[&str]); 6] = [
-    ("follow", Some("Deep Track follow"), &["track"]),
+    ("follow", Some("Subject tracking follow"), &["track"]),
     ("photos", None, &[]),
     ("cube_luts", None, &["lut"]),
     ("overlays", None, &["overlay", "watermark"]),
     ("editor_timelines", None, &[]),
-    ("shot_lab", None, &["effect"]),
+    ("effects", None, &["effect"]),
 ];
 
 /// The engine: its state, the device once open, what the device reported.
@@ -1397,7 +1397,7 @@ fn catalog() -> Catalog {
                 name: name.map(String::from),
                 aliases: al.iter().map(|a| a.to_string()).collect(),
                 effects: match *id {
-                    "shot_lab" => lab::FXS.iter().map(|f| f.2.to_string()).collect(),
+                    "effects" => lab::FXS.iter().map(|f| f.2.to_string()).collect(),
                     _ => vec![],
                 },
             })

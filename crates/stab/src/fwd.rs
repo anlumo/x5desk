@@ -1,4 +1,4 @@
-//! Direction of travel for the forward view (the vendor's AI Forward). Between two frames, the image motion the gyro's
+//! Direction of travel for the forward view. Between two frames, the image motion the gyro's
 //! rotation leaves is translational flow: a static point's ray at the first frame `a`, at the second `b` and the
 //! translation `t` are coplanar, `t · (a × b) = 0`, so every tracked feature is a great-circle constraint on `t`, and
 //! the features move away from `t` (the focus of expansion) and toward `−t`. [`fit`] finds `t` robustly from the

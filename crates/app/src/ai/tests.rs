@@ -231,7 +231,7 @@ fn box_round_trip() {
     assert!(x.iter().all(|&x| !(26.0..=1802.0 - 26.0).contains(&x)));
 }
 
-/// Deep Track from the UI's path on v606 (`X5_SAMPLES`): the woman in the purple coat boxed in the player's view
+/// Subject tracking from the UI's path on v606 (`X5_SAMPLES`): the woman in the purple coat boxed in the player's view
 /// (yaw −71°, pitch −35°, 110°, the box of the follow-view run) on frame 0 with the horizon lock, followed through
 /// 240 frames: the samples come in order, she is had on most of them, the smoothed path stays on her boxes, and the
 /// boxes re-expressed under the direction lock turn by no more than the stabilisation difference.

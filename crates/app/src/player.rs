@@ -4,11 +4,11 @@
 //! (`gyro`) turns each frame's view by its pose: the preview applies orientation and rolling shutter; the RAFT stitch
 //! applies the rolling shutter and the preview turns the resulting body-frame equirect.
 //!
-//! Deep Track (`ai`): with Deep Track armed, a box dragged around a subject in the perspective view starts a run from
-//! the frame shown, or on a paused frame a click in any view: its people and animals show boxed (found on a thread,
-//! `ai::pick`), and the one clicked is tracked (off the boxes, `Ai::pick` searches around the click). The run's states
-//! show under the seek bar, the box on the picture, and once it is over the view follows the subject (the follow view
-//! the export takes). Auto framing follows the clip's auto framing the same way, its analysis run on first use and
+//! Subject tracking (`ai`): with tracking armed, a box dragged around a subject in the perspective view starts a run
+//! from the frame shown, or on a paused frame a click in any view: its people and animals show boxed (found on a
+//! thread, `ai::pick`), and the one clicked is tracked (off the boxes, `Ai::pick` searches around the click). The run's
+//! states show under the seek bar, the box on the picture, and once it is over the view follows the subject (the follow
+//! view the export takes). Auto framing follows the clip's auto framing the same way, its analysis run on first use and
 //! kept. Privacy preview: the faces and licence plates of the paused frame blurred as the export blurs them. Auto edit
 //! hands the clip to the editor.
 //!
@@ -376,7 +376,7 @@ impl Src {
 pub(crate) type Key = (u64, usize, bool);
 /// A frame of the main file under a stabilisation (lock, σ bits).
 type PickKey = (usize, gyro::Mode, u64);
-/// Deep Track's pick: the people and animals found, or a click's subject.
+/// Tracking's pick: the people and animals found, or a click's subject.
 type Picks = Result<Vec<track::Det>, String>;
 /// The faces and plates (as asked: faces, plates) of a frame of the main file under a stabilisation (lock, σ bits).
 type FaceKey = (usize, gyro::Mode, u64, [bool; 2]);
@@ -888,17 +888,17 @@ pub struct Player {
     note: Option<String>,
     /// the AAC track for live outputs, opened on first use
     tap: Option<Option<crate::live::Tap>>,
-    /// Deep Track: the run on this clip; a box drawn in the view starts one (armed); the view follows the subject;
+    /// tracking: the run on this clip; a box drawn in the view starts one (armed); the view follows the subject;
     /// the box being drawn
     pub trk: Option<Arc<ai::Track>>,
     arm: bool,
     pub follow: bool,
     from: Option<egui::Pos2>,
-    /// Deep Track's pick (armed, paused): the frame's people and animals, boxed; a search out (with a click's
+    /// tracking's pick (armed, paused): the frame's people and animals, boxed; a search out (with a click's
     /// direction: for its subject, which starts a run)
     dets: Option<(PickKey, Vec<track::Det>)>,
     dq: Option<(PickKey, Option<glam::Vec3>, mpsc::Receiver<Picks>)>,
-    /// auto framing: the clip's run (kept while the player is open); the view follows it (Deep Track's or this one)
+    /// auto framing: the clip's run (kept while the player is open); the view follows it (tracking's or this one)
     pub frm: Option<Arc<ai::Track>>,
     pub framing: bool,
     /// privacy preview: the paused frame's faces, plates blurred; the regions found (and how many are faces), a search
@@ -1160,7 +1160,7 @@ impl Player {
         Some((k, m, s, [self.blur, self.plates]))
     }
 
-    /// Deep Track's search on frame `k`: its people and animals, or with `at` the subject at that direction
+    /// Tracking's search on frame `k`: its people and animals, or with `at` the subject at that direction
     /// (`ai::pick`), on a thread of its own; it replaces one out.
     fn find(&mut self, k: PickKey, at: Option<glam::Vec3>) {
         let Some(f) = self.work.main.first() else {
@@ -1178,7 +1178,7 @@ impl Player {
         self.dq = Some((k, at, rx));
     }
 
-    /// A click on direction `d` of frame `k`, Deep Track armed: the person or animal boxed there is tracked
+    /// A click on direction `d` of frame `k`, tracking armed: the person or animal boxed there is tracked
     /// (`track::at`); off the boxes `Ai::pick` searches around it.
     fn click(&mut self, k: PickKey, d: glam::Vec3) {
         let x = (self.dets.as_ref()).filter(|x| x.0 == k);
@@ -1192,11 +1192,11 @@ impl Player {
         }
     }
 
-    /// Deep Track of subject `s` (`ai::subject` of a box in the perspective view, or a pick's), from the frame shown to
+    /// Tracking of subject `s` (`ai::subject` of a box in the perspective view, or a pick's), from the frame shown to
     /// the clip's end; the view follows it once the run is over.
     pub fn track(&mut self, s: track::Subject) -> Result<(), String> {
         let f = (self.work.main.first().cloned())
-            .ok_or("Deep Track needs the main file, not the proxy alone")?;
+            .ok_or("Tracking needs the main file, not the proxy alone")?;
         let p = self.held.ok_or("no frame shown yet")?;
         if let Some(t) = &self.trk {
             t.stop.store(true, Relaxed);
@@ -1217,7 +1217,7 @@ impl Player {
         Ok(())
     }
 
-    /// The run the view follows: Deep Track's or auto framing's.
+    /// The run the view follows: tracking's or auto framing's.
     fn followed(&self) -> Option<&Arc<ai::Track>> {
         (self.trk.as_ref().filter(|_| self.follow)).or(self.frm.as_ref().filter(|_| self.framing))
     }
@@ -1433,7 +1433,7 @@ impl Player {
             });
             self.fq = Some((k, rx));
         }
-        // Deep Track armed on a paused frame: its people and animals boxed, a click's subject tracked (if it is still
+        // tracking armed on a paused frame: its people and animals boxed, a click's subject tracked (if it is still
         // the frame shown)
         if let Some((k, at, r)) = &self.dq
             && let Ok(x) = r.try_recv()
@@ -1445,14 +1445,14 @@ impl Player {
                 (Ok(v), Some(_)) if self.arm && Some(k) == self.pkey() => {
                     let r = match v.first() {
                         Some(d) => self.track((*d).into()),
-                        None => Err("Deep Track: no person or animal there".into()),
+                        None => Err("Tracking: no person or animal there".into()),
                     };
                     if let Err(e) = r {
                         self.note = Some(e);
                     }
                 }
                 (Ok(_), _) => {}
-                (Err(e), _) => (self.note, self.arm) = (Some(format!("Deep Track: {e}")), false),
+                (Err(e), _) => (self.note, self.arm) = (Some(format!("Tracking: {e}")), false),
             }
         }
         if self.arm
@@ -1476,7 +1476,7 @@ impl Player {
             );
             let r = match self.look {
                 Look::Perspective => self.track(s),
-                _ => Err("Deep Track: draw the box in the perspective view".into()),
+                _ => Err("Tracking: draw the box in the perspective view".into()),
             };
             if let Err(e) = r {
                 eprintln!("x5desk: box: {e}");
@@ -1672,7 +1672,7 @@ impl Player {
                 self.seek(j);
             }
         }
-        // the Deep Track run's states under the bar (the rail sits a handle's radius in from the ends)
+        // the tracking run's states under the bar (the rail sits a handle's radius in from the ends)
         if let Some(tr) = &self.trk
             && let Some(ts) = tr.times.get()
         {
@@ -1764,12 +1764,12 @@ impl Player {
                 }
                 over => {
                     ui.add_enabled_ui(main, |ui| {
-                        ui.toggle_value(&mut self.arm, "Deep Track")
+                        ui.toggle_value(&mut self.arm, "Track a subject")
                             .on_hover_text(
                                 "Paused, click a person or animal (those found are boxed), or drag a box around a \
                                  subject in the perspective view: it is tracked from this frame on",
                             )
-                            .on_disabled_hover_text("Deep Track needs the main file");
+                            .on_disabled_hover_text("Tracking needs the main file");
                     });
                     if over.is_some() {
                         if ui
@@ -1966,18 +1966,18 @@ impl Player {
                 .filter(|x| Some(x.0) == self.pkey())
                 .map(|x| x.1.len());
             lines.push(match (self.playing, &self.dq, n) {
-                (true, ..) => format!("Deep Track: pause to pick a subject{drag}"),
-                (_, Some((_, Some(_), _)), _) => "Deep Track: picking…".into(),
+                (true, ..) => format!("Tracking: pause to pick a subject{drag}"),
+                (_, Some((_, Some(_), _)), _) => "Tracking: picking…".into(),
                 (_, _, Some(n)) => {
-                    format!("Deep Track: click a subject ({n} people and animals found){drag}")
+                    format!("Tracking: click a subject ({n} people and animals found){drag}")
                 }
-                _ => format!("Deep Track: finding people and animals…{drag}"),
+                _ => format!("Tracking: finding people and animals…{drag}"),
             });
         }
         if let Some(t) = &self.trk {
             lines.push(match t.st() {
-                ai::St::Done if self.follow => "Deep Track: following the subject".into(),
-                st => st.line("Deep Track"),
+                ai::St::Done if self.follow => "Tracking: following the subject".into(),
+                st => st.line("Tracking"),
             });
         }
         match self.frm.as_ref().map(|t| t.st()) {
@@ -2319,7 +2319,7 @@ mod tests {
         (t, v)
     }
 
-    /// Deep Track's pick on v606's frame 0 (`X5_SAMPLES`; `X5_PICK` = `<file>:<frame>` entries, `;` between them,
+    /// Tracking's pick on v606's frame 0 (`X5_SAMPLES`; `X5_PICK` = `<file>:<frame>` entries, `;` between them,
     /// instead): armed on the paused frame the player finds its people and animals (on v606 a person or more); a click
     /// on the centre of the biggest person's box starts a run from that frame whose first box is that box. What
     /// `Ai::pick` finds there (a click off the boxes searches so) is printed, with its IoU against the box. The paused

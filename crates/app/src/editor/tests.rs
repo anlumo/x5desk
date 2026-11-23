@@ -1156,7 +1156,7 @@ fn clamp() {
 }
 
 /// The history keeps in step with edit's log (no samples needed): a drag that ends where it started after an undo keeps
-/// edit's redo, and so the history's; a Shot Lab replacement that would fail halfway changes nothing (redo kept); no
+/// edit's redo, and so the history's; an Effects replacement that would fail halfway changes nothing (redo kept); no
 /// undo mid-drag; a view key dragged past another (egui input) stays in the drag and ends as one step.
 #[test]
 fn sync() {
@@ -1228,7 +1228,7 @@ fn sync() {
         0,
         Ok(vec![Clip::new(f, 0.0, 5.0), Clip::new(f, 15.0, 25.0)]),
     );
-    state(&e, "bad Shot Lab replacement");
+    state(&e, "bad Effects replacement");
     assert!(e.err.is_some());
     assert_eq!(
         (e.pj.tl().clips.len(), a(&e), e.history(), e.pj.history()),
@@ -1672,7 +1672,7 @@ fn poses() {
 }
 
 /// The `ebox=` hook's box is 0..1 of the export preset's flat frame, whatever the window (`X5_SAMPLES`, v606 in
-/// the view of `deep_track`): under a 360 preset, whose picture is the viewer's rect, the run's subject
+/// the view of `subject_track`): under a 360 preset, whose picture is the viewer's rect, the run's subject
 /// (its first sample) is the box's in a 16:9 frame in a wide and in a tall window; under a flat one, in the preset's.
 #[test]
 fn ebox() {
@@ -1744,12 +1744,12 @@ fn ebox() {
     }
 }
 
-/// Deep Track in the editor (`X5_SAMPLES`, v606 trimmed to 0–4 s): a box around the woman in the purple coat in the
-/// viewer's view (yaw −71°, pitch −35°, 110°) at the playhead becomes the clip's reframing keys, one undo step: keys
-/// every 0.5 s over the clip, the view's field of view kept, each aimed within a few degrees of her box; the viewer
-/// then follows the keys.
+/// Subject tracking in the editor (`X5_SAMPLES`, v606 trimmed to 0–4 s): a box around the woman in the purple coat in
+/// the viewer's view (yaw −71°, pitch −35°, 110°) at the playhead becomes the clip's reframing keys, one undo step:
+/// keys every 0.5 s over the clip, the view's field of view kept, each aimed within a few degrees of her box; the
+/// viewer then follows the keys.
 #[test]
-fn deep_track() {
+fn subject_track() {
     let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
         eprintln!("X5_SAMPLES unset: skipped");
         return;

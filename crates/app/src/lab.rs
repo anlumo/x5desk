@@ -1,11 +1,12 @@
-//! Shot Lab screen (PLAN.md milestone 9, group 14) on crate shotlab, for the library's clip: each effect with its
+//! Effects screen (PLAN.md milestone 9, group 14) on crate shotlab, for the library's clip: each effect with its
 //! parameters; a preview (the effect over the range up to its out point at preview size, on a thread, shown as the
 //! frame it makes); "Export" (a job on the Export screen with the effect as its hook, 360) and, for the editing
 //! presets, "Add to timeline" (their clips onto the editor's timeline) or "Export" (flat). The effects that need a
 //! still camera check the gyro over the range and warn; they stitch with the direction lock (every frame into the
-//! same world directions). The subject effects take the player's Deep Track run, re-expressed in the frame the effect
-//! stitches with; Overtake takes the vehicles overtaking close by that the player's auto framing run found. Sky Swap
-//! takes a picture the user picks (or a gradient of its own) and turns it with the gyro so it stays put in the world.
+//! same world directions). The subject effects take the player's tracking run, re-expressed in the frame the effect
+//! stitches with; Passing Vehicle takes the vehicles overtaking close by that the player's auto framing run found. New
+//! Sky takes a picture the user picks (or a gradient of its own) and turns it with the gyro so it stays put in the
+//! world.
 
 use crate::{
     BURN, GATE, ai,
@@ -33,15 +34,15 @@ use video::Gpu;
 const PW: u32 = 2048;
 const SPAN: usize = 300;
 const TURN: f64 = 10.0;
-/// Why Overtake has no pass to follow.
+/// Why Passing Vehicle has no pass to follow.
 const NO_PASSES: &str =
     "Tick Auto framing in the player first: its analysis finds the vehicles overtaking close by";
-/// Sky Swap's gradients (`shotlab::gradient`): name, zenith, horizon.
+/// New Sky's gradients (`shotlab::gradient`): name, zenith, horizon.
 const GRADS: [(&str, [u8; 3], [u8; 3]); 2] = [
     ("Clear", [40, 95, 190], [190, 215, 240]),
     ("Dusk", [25, 35, 90], [250, 160, 90]),
 ];
-/// Sky Swap's preview: the last frames of the range (the mask's memory lasts a fraction of a second).
+/// New Sky's preview: the last frames of the range (the mask's memory lasts a fraction of a second).
 const SKY_SPAN: usize = 30;
 /// The editing presets' preview: cells of a 2 × 2 grid.
 const CW: u32 = 640;
@@ -49,43 +50,43 @@ const CH: u32 = 360;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fx {
-    Passerby,
+    Empty,
     Trails,
-    Stars,
+    Stack,
     Delay,
-    Shadow,
-    Loop,
+    Freeze,
+    Echo,
     Planets,
     Sky,
     StopMotion,
-    FlyLapse,
-    Flip,
-    Center,
+    Orbit,
+    Roll,
+    Framing,
     Spin,
-    FlyOut,
+    PullOut,
     Dolly,
-    Overtake,
+    Passing,
 }
 
 /// Effects: kind, name, key (test hook, file names), what it does.
 #[rustfmt::skip]
 pub const FXS: [(Fx, &str, &str, &str); 16] = [
-    (Fx::Passerby,   "Remove Passerby", "passerby", "The median of frames across the range: whoever passes by is gone (a still camera)"),
+    (Fx::Empty,      "Empty Scene",     "empty",    "The median of frames across the range: whoever passes by is gone (a still camera)"),
     (Fx::Trails,     "Light Trails",    "trails",   "Bright lights leave trails (Night Road, Flash Neon; a still camera)"),
-    (Fx::Stars,      "Star Lapse",      "stars",    "Frames stacked: the noise settles, or with Maximum the stars draw trails (a still camera)"),
+    (Fx::Stack,      "Frame Stack",     "stack",    "Frames stacked: the noise settles, or with Maximum the stars draw trails (a still camera)"),
     (Fx::Delay,      "Frame Delay",     "delay",    "Each part of the picture lags behind by its place: a time slice"),
-    (Fx::Shadow,     "Shadow Clone",    "shadow",   "Copies of the tracked subject stay behind as it moves (a still camera)"),
-    (Fx::Loop,       "Clone Loop",      "loop",     "The tracked subject's past selves follow it (a still camera)"),
-    (Fx::Planets,    "Parallel Planet", "planets",  "The tiny planet and its sky world side by side"),
-    (Fx::Sky,        "Sky Swap",        "sky",      "The sky replaced by a panorama that stays put in the world"),
+    (Fx::Freeze,     "Freeze Trail",    "freeze",   "Copies of the tracked subject stay behind as it moves (a still camera)"),
+    (Fx::Echo,       "Echo Trail",      "echo",     "The tracked subject's past selves follow it (a still camera)"),
+    (Fx::Planets,    "Planet Pair",     "planets",  "The tiny planet and its sky world side by side"),
+    (Fx::Sky,        "New Sky",         "sky",      "The sky replaced by a panorama that stays put in the world"),
     (Fx::StopMotion, "Stop Motion",     "stopmotion", "Freeze frames a step of source apart"),
-    (Fx::FlyLapse,   "Fly Lapse",       "flylapse", "A hyperlapse orbiting out of a tiny planet"),
-    (Fx::Flip,       "Flip My Day",     "flip",     "A hyperlapse rolling the world over"),
-    (Fx::Center,     "Center Stage",    "center",   "Framed on the tracked subject"),
-    (Fx::Spin,       "Spin Me Around",  "spin",     "Framed on the tracked subject while the picture turns"),
-    (Fx::FlyOut,     "Fly Out",         "flyout",   "Framed on the tracked subject, pulling out into a tiny planet"),
+    (Fx::Orbit,      "Orbit Lapse",     "orbit",    "A hyperlapse orbiting out of a tiny planet"),
+    (Fx::Roll,       "Roll Lapse",      "roll",     "A hyperlapse rolling the world over"),
+    (Fx::Framing,    "Subject Framing", "framing",  "Framed on the tracked subject"),
+    (Fx::Spin,       "Subject Spin",    "spin",     "Framed on the tracked subject while the picture turns"),
+    (Fx::PullOut,    "Pull Out",        "pullout",  "Framed on the tracked subject, pulling out into a tiny planet"),
     (Fx::Dolly,      "Dolly Zoom",      "dolly",    "The tracked subject keeps its size while the background moves"),
-    (Fx::Overtake,   "Overtake",        "overtake", "Follows a vehicle overtaking close by (found by the player's Auto framing)"),
+    (Fx::Passing,    "Passing Vehicle", "passing",  "Follows a vehicle overtaking close by (found by the player's Auto framing)"),
 ];
 
 impl Fx {
@@ -106,13 +107,13 @@ impl Fx {
         matches!(
             self,
             Fx::StopMotion
-                | Fx::FlyLapse
-                | Fx::Flip
-                | Fx::Center
+                | Fx::Orbit
+                | Fx::Roll
+                | Fx::Framing
                 | Fx::Spin
-                | Fx::FlyOut
+                | Fx::PullOut
                 | Fx::Dolly
-                | Fx::Overtake
+                | Fx::Passing
         )
     }
 
@@ -120,15 +121,15 @@ impl Fx {
     fn still(self) -> bool {
         matches!(
             self,
-            Fx::Passerby | Fx::Trails | Fx::Stars | Fx::Shadow | Fx::Loop
+            Fx::Empty | Fx::Trails | Fx::Stack | Fx::Freeze | Fx::Echo
         )
     }
 
-    /// Needs the Deep Track subject.
+    /// Needs the tracked subject.
     fn subject(self) -> bool {
         matches!(
             self,
-            Fx::Shadow | Fx::Loop | Fx::Center | Fx::Spin | Fx::FlyOut | Fx::Dolly
+            Fx::Freeze | Fx::Echo | Fx::Framing | Fx::Spin | Fx::PullOut | Fx::Dolly
         )
     }
 }
@@ -136,30 +137,31 @@ impl Fx {
 /// The effects' parameters.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct P {
-    /// Remove Passerby: frames in the median
+    /// Empty Scene: frames in the median
     pub n: u32,
     /// Light Trails: the light that enters, its half-life (s; 0 keeps it)
     pub light: Light,
     pub half: f32,
-    /// Star Lapse: the maximum (trails) instead of the mean
+    /// Frame Stack: the maximum (trails) instead of the mean
     pub max: bool,
     /// Frame Delay: the largest delay (s), where it lags (0 by longitude from the view, 1 around the view, 2 left to
     /// right, 3 top to bottom), reversed
     pub span: f64,
     pub map: u8,
     pub rev: bool,
-    /// Shadow Clone: a copy each `gap` of the subject's widths, `copies` shown; Clone Loop: `copies` selves `lag` s
+    /// Freeze Trail: a copy each `gap` of the subject's widths, `copies` shown; Echo Trail: `copies` selves `lag` s
     /// apart
     pub gap: f32,
     pub copies: u32,
     pub lag: f64,
-    /// Parallel Planet: stacked instead of side by side
+    /// Planet Pair: stacked instead of side by side
     pub tall: bool,
-    /// Sky Swap without a picture: the gradient (`GRADS`); how far the new sky's colour moves to the old one's
+    /// New Sky without a picture: the gradient (`GRADS`); how far the new sky's colour moves to the old one's
     pub grad: usize,
     pub tone: f32,
     /// editing presets: hyperlapse speed, turns, Stop Motion's step (s), the subject's share of the frame height,
-    /// Fly Out's pull (s), Dolly Zoom's first field of view and Overtake's (°), the pass Overtake follows
+    /// Pull Out's pull (s), Dolly Zoom's first field of view and Passing Vehicle's (°), the pass Passing Vehicle
+    /// follows
     pub speed: f64,
     pub turns: f32,
     pub step: f64,
@@ -234,7 +236,7 @@ pub struct Lab {
     ctx: egui::Context,
     pub fx: Fx,
     pub p: P,
-    /// the library's clip, the player's Deep Track run and auto framing run (over), the source span (s)
+    /// the library's clip, the player's tracking run and auto framing run (over), the source span (s)
     src: Option<Spec>,
     trk: Option<Arc<ai::Track>>,
     frm: Option<Arc<ai::Track>>,
@@ -252,7 +254,7 @@ pub struct Lab {
     hook: Option<Hook>,
     /// the test hook started the preview: show the screen
     pub show: bool,
-    /// Sky Swap's picture (None: a gradient), the file dialog picking one
+    /// New Sky's picture (None: a gradient), the file dialog picking one
     pub sky: Option<PathBuf>,
     dlg: Option<mpsc::Receiver<Option<PathBuf>>>,
 }
@@ -284,7 +286,7 @@ impl Lab {
         }
     }
 
-    /// Starts on Shot Lab (test hook).
+    /// Starts on Effects (test hook).
     pub fn first(&self) -> bool {
         self.hook.as_ref().is_some_and(|h| h.on)
     }
@@ -298,7 +300,7 @@ impl Lab {
         }
     }
 
-    /// Every frame: the library's clip, the player's finished Deep Track and auto framing runs; replies; the test
+    /// Every frame: the library's clip, the player's finished tracking and auto framing runs; replies; the test
     /// hook's steps.
     pub fn tick(
         &mut self,
@@ -362,7 +364,7 @@ impl Lab {
                             egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &px);
                         self.tex = Some((
                             *fx,
-                            self.ctx.load_texture("shot lab", img, Default::default()),
+                            self.ctx.load_texture("effects", img, Default::default()),
                         ));
                     }
                 }
@@ -375,7 +377,7 @@ impl Lab {
         if let Some(h) = &mut self.hook
             && self.src.is_some()
             && (!self.fx.subject() || self.trk.is_some())
-            && (self.fx != Fx::Overtake || self.frm.is_some())
+            && (self.fx != Fx::Passing || self.frm.is_some())
             && self.pre.is_none()
         {
             if h.pre {
@@ -416,7 +418,8 @@ impl Lab {
         Some((t, t.passes.get()?))
     }
 
-    /// Overtake's range: pass `i` from a second before its last detection behind to a second after its first ahead.
+    /// Passing Vehicle's range: pass `i` from a second before its last detection behind to a second after its first
+    /// ahead.
     fn around(&mut self, i: usize) {
         let r = (self.passes()).and_then(|(t, p)| {
             let (x, ts) = (p.get(i)?, t.times.get()?);
@@ -433,7 +436,7 @@ impl Lab {
         let s = self.src.as_ref().ok_or("no clip")?;
         let t = (self.trk.as_ref())
             .filter(|t| t.file == s.files[0])
-            .ok_or("Track a subject in the player first (Deep Track)")?;
+            .ok_or("Track a subject in the player first")?;
         Ok((t.k0, t.boxes(st)?))
     }
 
@@ -454,7 +457,7 @@ impl Lab {
                 *b.get((k0 + k as usize).checked_sub(*t0)?)?
             };
             Ok(match fx {
-                Fx::Passerby => {
+                Fx::Empty => {
                     // the ring spans the range: every `every`-th frame enters it
                     let n = p.n.clamp(2, 64);
                     shotlab::Median::new(&sx, w, h, n, f).hook(frames.div_ceil(n as u64).max(1))
@@ -469,7 +472,7 @@ impl Lab {
                     };
                     shotlab::Trails::new(&sx, w, h, f, light).hook([0.0, f64::INFINITY])
                 }
-                Fx::Stars => shotlab::Stack::new(&sx, w, h, p.max).hook(|_| Quat::IDENTITY),
+                Fx::Stack => shotlab::Stack::new(&sx, w, h, p.max).hook(|_| Quat::IDENTITY),
                 Fx::Delay => {
                     let n = ((p.span * fps).round() as u32 + 1).clamp(2, 64);
                     let d = track::dir(view.yaw, view.pitch);
@@ -479,13 +482,13 @@ impl Lab {
                     x.rev = p.rev;
                     x.hook()
                 }
-                Fx::Shadow | Fx::Loop => {
+                Fx::Freeze | Fx::Echo => {
                     let m = match fx {
-                        Fx::Shadow => Clones::Shadow {
+                        Fx::Freeze => Clones::Freeze {
                             gap: p.gap,
                             n: p.copies.clamp(1, 16),
                         },
-                        _ => Clones::Loop {
+                        _ => Clones::Echo {
                             lag: ((p.lag * fps).round() as u32).max(1),
                             n: p.copies.clamp(1, 8),
                         },
@@ -592,7 +595,7 @@ impl Lab {
         let subj = || -> Result<(Vec<shotlab::cut::Subj>, (gyro::Mode, f64)), String> {
             let t = (self.trk.as_ref())
                 .filter(|t| t.file == s.files[0])
-                .ok_or("Track a subject in the player first (Deep Track)")?;
+                .ok_or("Track a subject in the player first")?;
             let (ts, smp) = (
                 t.times.get().ok_or("no track")?,
                 t.smp.lock().unwrap_or_else(|e| e.into_inner()),
@@ -622,25 +625,25 @@ impl Lab {
                     .map_err(e)?,
                 own,
             ),
-            Fx::FlyLapse => (
-                vec![shotlab::cut::fly_lapse(0, a, b, p.speed, ramp, v, p.turns, 1.0).map_err(e)?],
+            Fx::Orbit => (
+                vec![shotlab::cut::orbit(0, a, b, p.speed, ramp, v, p.turns, 1.0).map_err(e)?],
                 own,
             ),
-            Fx::Flip => (
-                vec![shotlab::cut::flip(0, a, b, p.speed, ramp, v, p.turns).map_err(e)?],
+            Fx::Roll => (
+                vec![shotlab::cut::roll(0, a, b, p.speed, ramp, v, p.turns).map_err(e)?],
                 own,
             ),
-            Fx::Center | Fx::Spin | Fx::FlyOut | Fx::Dolly => {
+            Fx::Framing | Fx::Spin | Fx::PullOut | Fx::Dolly => {
                 let (x, st) = subj()?;
                 let c = match self.fx {
-                    Fx::Center => shotlab::cut::center_stage(0, a, b, &x, p.fill, aspect, 0.5),
+                    Fx::Framing => shotlab::cut::framing(0, a, b, &x, p.fill, aspect, 0.5),
                     Fx::Spin => shotlab::cut::spin(0, a, b, &x, p.fill, aspect, p.turns),
-                    Fx::FlyOut => shotlab::cut::fly_out(0, a, b, &x, p.fill, aspect, p.out),
+                    Fx::PullOut => shotlab::cut::pull_out(0, a, b, &x, p.fill, aspect, p.out),
                     _ => shotlab::cut::dolly(0, a, b, &x, p.fov, 0.5),
                 };
                 (vec![c.map_err(e)?], st)
             }
-            Fx::Overtake => {
+            Fx::Passing => {
                 let (t, ps) = self.passes().ok_or(NO_PASSES)?;
                 let x = ps
                     .get(p.pass)
@@ -654,7 +657,7 @@ impl Lab {
                     })
                     .collect();
                 // a key at every detection: the vehicle sweeps 100° and more past abeam within a second
-                let c = shotlab::cut::overtake(0, a, b, &v, p.fov, 0.1);
+                let c = shotlab::cut::passing(0, a, b, &v, p.fov, 0.1);
                 (vec![c.map_err(e)?], t.stab)
             }
             _ => return Err(format!("{} is a pass on the frames", self.fx.name())),
@@ -721,8 +724,8 @@ impl Lab {
         Ok(())
     }
 
-    /// Makes the preview on a thread: a pass over the range's last `SPAN` frames (Remove Passerby: `n` frames across
-    /// it, Sky Swap: `SKY_SPAN`) at `PW` wide, its last frame; an editing preset's timeline at four times through its
+    /// Makes the preview on a thread: a pass over the range's last `SPAN` frames (Empty Scene: `n` frames across it,
+    /// New Sky: `SKY_SPAN`) at `PW` wide, its last frame; an editing preset's timeline at four times through its
     /// views.
     pub fn preview(&mut self) {
         let Some(s) = self.src.clone() else { return };
@@ -741,7 +744,7 @@ impl Lab {
                 let r = fps.num as f64 / fps.den as f64;
                 let t = shotlab::Clip::open(&s.files[0])?.times;
                 let mut k0 = crate::clip::frame_at(&t, self.range[0]);
-                // Sky Swap starts its last frames before the out point: its maker stitches the first of them
+                // New Sky starts its last frames before the out point: its maker stitches the first of them
                 if self.fx == Fx::Sky {
                     let k1 = t.partition_point(|&x| x < self.range[1] - 1e-3);
                     k0 = k0.max(k1.saturating_sub(SKY_SPAN + 1));
@@ -766,7 +769,7 @@ impl Lab {
             self.p.n.clamp(2, 64) as usize,
         );
         thread::Builder::new()
-            .name("shot lab preview".into())
+            .name("effects preview".into())
             .spawn(move || {
                 let _a = crate::awake::hold();
                 let r = crate::export::scoped(&g.device, || {
@@ -786,7 +789,7 @@ impl Lab {
                                 .max(k0 + 1)
                                 - 1;
                             let mut ks: Vec<usize> = match fx {
-                                Fx::Passerby => {
+                                Fx::Empty => {
                                     (0..nm).map(|i| k0 + (k1 - k0) * i / (nm - 1)).collect()
                                 }
                                 _ => (k1.saturating_sub(SPAN).max(k0)..=k1).collect(),
@@ -800,15 +803,11 @@ impl Lab {
                                 stop()?;
                                 gate.take();
                                 let mut e = g.device.create_command_encoder(&Default::default());
-                                // Remove Passerby's preview: every frame into the median
+                                // Empty Scene's preview: every frame into the median
                                 h(export::Fx {
                                     enc: &mut e,
                                     tex,
-                                    k: if fx == Fx::Passerby {
-                                        0
-                                    } else {
-                                        (k - k0) as u64
-                                    },
+                                    k: if fx == Fx::Empty { 0 } else { (k - k0) as u64 },
                                     t: c.times[k] - c.times[k0],
                                 });
                                 gate = Some(GATE.read());
@@ -844,7 +843,7 @@ impl Lab {
                             want.sort_by_key(|w| w.0);
                             let ks: Vec<usize> = want.iter().map(|w| w.0).collect();
                             let grid = g.device.create_texture(&wgpu::TextureDescriptor {
-                                label: Some("shot lab preview"),
+                                label: Some("effects preview"),
                                 size: wgpu::Extent3d {
                                     width: 2 * CW,
                                     height: 2 * CH,
@@ -877,7 +876,7 @@ impl Lab {
                                     {
                                         let mut rp =
                                             e.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                                label: Some("shot lab preview"),
+                                                label: Some("effects preview"),
                                                 color_attachments: &[Some(
                                                     wgpu::RenderPassColorAttachment {
                                                         view: &gv,
@@ -927,7 +926,7 @@ impl Lab {
                 };
                 ctx.request_repaint();
             })
-            .expect("shot lab preview thread");
+            .expect("effects preview thread");
         self.pre = Some((self.fx, pre));
     }
 
@@ -935,7 +934,7 @@ impl Lab {
         egui::Panel::left("lab list")
             .default_size(190.0)
             .show(ui, |ui| {
-                ui.heading("Shot Lab");
+                ui.heading("Effects");
                 for (i, (f, n, _, d)) in FXS.iter().enumerate() {
                     if i == 8 {
                         ui.separator();
@@ -945,7 +944,7 @@ impl Lab {
                     let found = self.passes().map_or(0, |p| p.1.len());
                     if ui
                         .add_enabled(
-                            *f != Fx::Overtake || found > 0,
+                            *f != Fx::Passing || found > 0,
                             egui::Button::selectable(self.fx == *f, *n),
                         )
                         .on_hover_text(*d)
@@ -959,7 +958,7 @@ impl Lab {
                         && self.fx != *f
                     {
                         (self.fx, self.err) = (*f, None);
-                        if *f == Fx::Overtake {
+                        if *f == Fx::Passing {
                             self.around(if self.p.pass < found { self.p.pass } else { 0 });
                         }
                     }
@@ -975,7 +974,7 @@ impl Lab {
     fn panel(&mut self, ui: &mut egui::Ui, exp: crate::export::Set) {
         let Some(s) = self.src.clone() else {
             ui.label(
-                "Open an X5 video (.insv with both lenses) in the library: Shot Lab works on it.",
+                "Open an X5 video (.insv with both lenses) in the library: the effects work on it.",
             );
             return;
         };
@@ -991,7 +990,7 @@ impl Lab {
             );
             ui.label(format!("{:.2} s", s.dur));
         });
-        // Overtake's passes: when, which side
+        // Passing Vehicle's passes: when, which side
         let pl: Vec<String> = (self.passes().and_then(|(t, p)| Some((t.times.get()?, p)))).map_or(
             vec![],
             |(ts, p)| {
@@ -1037,7 +1036,7 @@ impl Lab {
                     ui.end_row();
                 };
                 match fx {
-                    Fx::Passerby => sl(ui, "Frames", egui::Slider::new(&mut p.n, 2..=64)),
+                    Fx::Empty => sl(ui, "Frames", egui::Slider::new(&mut p.n, 2..=64)),
                     Fx::Trails => {
                         sl(
                             ui,
@@ -1059,7 +1058,7 @@ impl Lab {
                         ui.checkbox(&mut p.light.add, "Add light (else lighten)");
                         ui.end_row();
                     }
-                    Fx::Stars => {
+                    Fx::Stack => {
                         ui.label("Stack");
                         ui.horizontal(|ui| {
                             ui.selectable_value(&mut p.max, false, "Mean (less noise)");
@@ -1085,7 +1084,7 @@ impl Lab {
                         });
                         ui.end_row();
                     }
-                    Fx::Shadow => {
+                    Fx::Freeze => {
                         sl(
                             ui,
                             "Spacing (subject widths)",
@@ -1093,7 +1092,7 @@ impl Lab {
                         );
                         sl(ui, "Copies", egui::Slider::new(&mut p.copies, 1..=16));
                     }
-                    Fx::Loop => {
+                    Fx::Echo => {
                         sl(ui, "Selves", egui::Slider::new(&mut p.copies, 1..=8));
                         sl(
                             ui,
@@ -1161,7 +1160,7 @@ impl Lab {
                             egui::Slider::new(&mut p.speed, 1.0..=16.0).suffix("×"),
                         );
                     }
-                    Fx::FlyLapse | Fx::Flip => {
+                    Fx::Orbit | Fx::Roll => {
                         sl(
                             ui,
                             "Speed",
@@ -1169,7 +1168,7 @@ impl Lab {
                         );
                         sl(ui, "Turns", egui::Slider::new(&mut p.turns, -4.0..=4.0));
                     }
-                    Fx::Center | Fx::Spin | Fx::FlyOut => {
+                    Fx::Framing | Fx::Spin | Fx::PullOut => {
                         sl(
                             ui,
                             "Subject height",
@@ -1178,7 +1177,7 @@ impl Lab {
                         if fx == Fx::Spin {
                             sl(ui, "Turns", egui::Slider::new(&mut p.turns, -4.0..=4.0));
                         }
-                        if fx == Fx::FlyOut {
+                        if fx == Fx::PullOut {
                             sl(
                                 ui,
                                 "Pull out over",
@@ -1191,7 +1190,7 @@ impl Lab {
                         "First field of view",
                         egui::Slider::new(&mut p.fov, 20.0..=150.0).suffix("°"),
                     ),
-                    Fx::Overtake => {
+                    Fx::Passing => {
                         ui.label("Vehicle");
                         egui::ComboBox::from_id_salt("lab pass")
                             .selected_text(pl.get(p.pass).map_or("", |x| x.as_str()))
@@ -1262,16 +1261,16 @@ impl Lab {
                 Some(t) => {
                     let n = t.smp.lock().unwrap_or_else(|e| e.into_inner()).len();
                     ui.label(format!(
-                        "Subject: the player's Deep Track run, {n} frames from frame {}.",
+                        "Subject: the player's tracking run, {n} frames from frame {}.",
                         t.k0
                     ));
                 }
                 None => {
-                    ui.colored_label(warn, "Track a subject in the player first (Deep Track)");
+                    ui.colored_label(warn, "Track a subject in the player first");
                 }
             }
         }
-        if fx == Fx::Overtake {
+        if fx == Fx::Passing {
             match self.passes() {
                 Some((_, p)) if !p.is_empty() => {
                     ui.label(format!(
@@ -1348,7 +1347,7 @@ impl Lab {
     }
 }
 
-/// Hands a Shot Lab request to the Export screen or the editor; true when it went to the editor.
+/// Hands an Effects request to the Export screen or the editor; true when it went to the editor.
 pub fn send(a: Ask, exp: &mut Exp, ed: &mut crate::editor::Editor) -> Result<bool, String> {
     match a {
         Ask::Export(s, x, r, j) => exp.lab(s, x, r, j).map(|_| false),
