@@ -4,7 +4,7 @@
 //! so the equirect is level and its heading fixed: what moves in it is the subjects (and parallax). Run with
 //! `--release`.
 
-use glam::{Vec2, Vec3};
+use glam::{Quat, Vec2, Vec3};
 use media::insv::{self, Meta, Trailer};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -1477,24 +1477,31 @@ fn privacy() {
 /// Labelled frames; plates with their frames.
 type Labels = (Vec<usize>, Vec<(usize, Region)>);
 
+/// The plate of a fixture line (`v[2..5]` its direction, `v[5..7]` its angular width and height on the equirect it
+/// was labelled on, `v[q..q + 4]` that equirect's pose, `Pose::q` x y z w) with its direction in the body. That is
+/// what stays put when the levelling changes (stab's gravity filter of 2026-11-20 moved the rides' labelled plates by
+/// up to 12° in the equirect); `c.poses[k].q.inverse()` turns it into today's equirect.
+fn plate(v: &[&str], q: usize) -> Region {
+    assert_eq!(v.len(), q + 4, "a labelled plate without its pose");
+    let x = |i: usize| v[i].parse::<f32>().unwrap();
+    Region {
+        dir: Quat::from_xyzw(x(q), x(q + 1), x(q + 2), x(q + 3))
+            * Vec3::new(x(2), x(3), x(4)).normalize(),
+        size: Vec2::new(x(5), x(6)),
+        score: 1.0,
+    }
+}
+
 /// Plates of a clip labelled by eye (`<clip>_plates.txt` in `X5_FIXTURES`: `f <k>` for each labelled frame, every plate
-/// on it as `p <k> <x> <y> <z> <w> <h>`, its direction and angular width and height); None without the file.
+/// on it as `p <k> <x> <y> <z> <w> <h> <qx> <qy> <qz> <qw>`, `plate`'s); None without the file.
 fn labels(name: &str) -> Option<Labels> {
     let s = std::fs::read_to_string(fixtures().join(format!("{name}_plates.txt"))).ok()?;
     let (mut f, mut p) = (vec![], vec![]);
     for l in s.lines() {
         let v: Vec<&str> = l.split_whitespace().collect();
-        let x = |i: usize| v[i].parse::<f32>().unwrap();
         match v.first() {
             Some(&"f") => f.push(v[1].parse().unwrap()),
-            Some(&"p") => p.push((
-                v[1].parse().unwrap(),
-                Region {
-                    dir: Vec3::new(x(2), x(3), x(4)).normalize(),
-                    size: Vec2::new(x(5), x(6)),
-                    score: 1.0,
-                },
-            )),
+            Some(&"p") => p.push((v[1].parse().unwrap(), plate(&v, 7))),
             _ => {}
         }
     }
@@ -1548,8 +1555,11 @@ fn plates() {
     let ft = face_tiles();
     let pmin = std::env::var("X5_PMIN").map_or(0.1, |v| v.parse().unwrap());
     let mut big = [0; 2];
-    for (name, (lf, lp)) in all {
+    for (name, (lf, mut lp)) in all {
         let c = clip(&d, name);
+        for (k, x) in lp.iter_mut().filter(|p| p.0 < c.n) {
+            x.dir = c.poses[*k].q.inverse() * x.dir;
+        }
         let rig = Rig::sized(&g, &c, 3840, W);
         let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
         let mut dec = Dec::sized(&g, &c, c.n, 3840);
@@ -1629,10 +1639,10 @@ fn plates() {
 /// Licence plates 30 px wide or more, which the clips of `plates` lack, against plates labelled by eye on bike rides
 /// (`X5_RIDES` = their folder; `rides_plates.txt` in `X5_FIXTURES`, never in git; skipped without either). A line a
 /// plate: clip, frame, direction, width and height in degrees, tier (A all characters legible, B some, C a bar), set
-/// (`held`: a ride the detector never trained on; `ride`: a ride it trained on, away from its training tiles). Searched
-/// as in `plates`, but only within half a second of a labelled frame, as the rides are long. Prints the plates the
-/// regions leave uncovered per set, tier and width; fails if there are no plates, or more than 10 % of all of them or
-/// of the readable ones (A, B) are left uncovered.
+/// (`held`: a ride the detector never trained on; `ride`: a ride it trained on, away from its training tiles), the
+/// pose it was labelled under (`plate`). Searched as in `plates`, but only within half a second of a labelled frame,
+/// as the rides are long. Prints the plates the regions leave uncovered per set, tier and width; fails if there are no
+/// plates, or more than 10 % of all of them or of the readable ones (A, B) are left uncovered.
 #[test]
 fn plates_rides() {
     let Some(d) = std::env::var_os("X5_RIDES").map(PathBuf::from) else {
@@ -1646,17 +1656,7 @@ fn plates_rides() {
     let mut clips = BTreeMap::<&str, Vec<(usize, Region, &str, &str)>>::new();
     for l in s.lines() {
         let v: Vec<&str> = l.split_whitespace().collect();
-        let x = |i: usize| v[i].parse::<f32>().unwrap();
-        clips.entry(v[0]).or_default().push((
-            v[1].parse().unwrap(),
-            Region {
-                dir: Vec3::new(x(2), x(3), x(4)).normalize(),
-                size: Vec2::new(x(5), x(6)),
-                score: 1.0,
-            },
-            v[7],
-            v[8],
-        ));
+        (clips.entry(v[0]).or_default()).push((v[1].parse().unwrap(), plate(&v, 9), v[7], v[8]));
     }
     const W: u32 = 7680;
     let ppd = W as f32 / 360.0;
@@ -1665,8 +1665,11 @@ fn plates_rides() {
     let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
     let mut by = BTreeMap::<String, [usize; 2]>::new();
     let (mut all, mut read) = ([0; 2], [0; 2]);
-    for (name, ps) in clips {
+    for (name, mut ps) in clips {
         let c = clip(&d, name.to_string().leak());
+        for p in &mut ps {
+            p.1.dir = c.poses[p.0].q.inverse() * p.1.dir;
+        }
         let near = (c.fps / 2.0) as usize;
         let last = (ps.iter().map(|p| p.0 + near).max().unwrap()).min(c.n - 1);
         let rig = Rig::sized(&g, &c, 3840, W);

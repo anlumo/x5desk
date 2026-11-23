@@ -208,8 +208,9 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   4090 track 568 → 701 and 537 → 590 (run the other way round), stab 805 → 738, `plates_rides` 1026 → 1485. On the
   4090 every decoded frame crosses its x4 link (held at gen 3) down and back up, and NVDEC's throughput there, alone
   on the card, swung between about 250 and 65 pictures a second from clip to clip (2880² clips; guess: the link).
-  Whether the 4090's tests keep NVDEC, decode in software again or on the Radeon is a decision. `plates_rides` fails on
-  main as with this: 66 of 85 plates uncovered, 28 of 32 readable (2 of 85 when last recorded), the same plates.
+  Whether the 4090's tests keep NVDEC, decode in software again or on the Radeon is a decision. `plates_rides` failed on
+  main with either decode, 66 of 85 plates uncovered, 28 of 32 readable: the labels' frame, not the decode
+  ("`plates_rides` 66 of 85" below).
 - [x] **No export on the RTX 4090.** NVIDIA's driver offers H.264 and H.265 decode only with DPB and output images
   coinciding. Crate video now decodes that way too (`decode::coincide`): a picture decodes into its DPB slot and the
   same decode submit copies it into the ring texture (the decode family needs transfer; NVIDIA's has it), so DPB
@@ -299,6 +300,36 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   reader does, so the test expects the file's samples. `encodes_v635_like_ffmpeg` and `rates_across_samples` held
   our AAC encoder to the installed FFmpeg's (9.1's gained 3–12 dB SNR); now to our own figures of October, judged
   then against FFmpeg 9.0.2, less 1 dB, with FFmpeg's printed beside them; ours unchanged.
+- [x] **`plates_rides` 66 of 85: the labels' frame, not the blur** (2026-11-23, `target/level-scratch/plates`). The
+  labelled plates (`rides_plates.txt` of 11-09, `v606` / `v627` / `v635_plates.txt` of 11-07) are directions in the
+  equirect as stitched then, with stab's direction-locked poses. 8868548 (stab's gravity filter on a vibrating mount)
+  levels the rides anew and so heads them anew (the lock keeps the first frame's heading), and the tests compared
+  today's regions with the old directions: at the 85 labelled frames the equirect turned by 0.07–11.9° (median 2.3°);
+  the 66 left uncovered moved by a median 1.16 of their width, the 19 still covered by 0.21 (at most 0.44). The blur
+  moves with the picture (the privacy pass searches the equirect stitched with the export's own poses), so exports
+  were never short of it. The poses at all labelled frames (`pq.rs` there) are the same at 0018c58 and 344ecfa, and at
+  8868548 and main: no other commit moves them. `plates_rides` alone on the 4090: 0018c58 2 of 85 (1164 s, software
+  decode), 344ecfa (8868548's parent) 2 of 85, 8868548 66 of 85, 28 of 32 readable (the same 66 as main), main 66 of
+  85 (1084 s; the Radeon the same, 861 s). Fixed in the tests (`footage.rs` `plate`): a labelled plate's line ends in
+  the pose its equirect was stitched with (`Pose::q`, x y z w), which takes it into the body, and that frame's pose
+  today takes it back, so stab may change again. **The fixtures need those poses:** `target/level-scratch/plates/fx`
+  holds `rides_plates.txt` and `v6*_plates.txt` with 0018c58's poses appended, labels unchanged (`py/withpose.py`), to
+  copy into `eval-fx`; the old files now fail with "a labelled plate without its pose". With them on main:
+  `plates_rides` 3 of 85, 0 of 32 readable (Radeon, 672 s; the 4090 the same three, in its footage suite: 11 passed,
+  2778 s): the two of before (718 frame 60, 693 frame 150, 32 and 49 px, bars) and 673 frame 2310 (30 px, a bar, on
+  the held-out night ride). That one is covered at 344ecfa and not at 8868548 or main with the poses applied (that
+  clip alone, Radeon): turned by 10.1° there, the picture still gives detections on nearly every searched frame
+  (0.1–0.74), but two sure ones (≥ 0.5, 30 px) instead of four, and the regions no longer cover it at frame 2310
+  (guess: `Hide`'s span for it ends short). `plates` (all under 30 px; on the Radeon 344ecfa / 8868548 / main with the
+  poses): v606 uncovered under 10 and 10–20 px 30 and 13 / 30 and 24 / 29 and 14 of 30 and 26, regions on no
+  labelled plate 0.17 / 0.43 / 0.11 deg² a labelled frame; v627 10–20 and 20–40 px 7 and 5 / 8 and 5 / 8 and 5 of 9
+  and 34, 0.19 / 0.10 / 0.10; plates found v606 315 / 270 / 270, v627 270 / 258 / 258, so the levelling changes what
+  the search finds there too (the 4090, 344ecfa / main with the poses: v606 10–20 px 14 / 18 of 26, 0.12 / 0.11 deg²,
+  313 / 283 found; v627 7 / 8 of 9, 0.19 / 0.10, 273 / 258). `plates_flags` 38 of 741 still blurred, 205 of 216 kept,
+  no mark uncovered, as recorded (its detections and labels were dumped in one frame; a fresh `flags_dets.txt` would
+  need the old poses too). The still checks (`score_stills.py`, Python on the ONNX files) run none of this code, and
+  no plate model or plate code changed since 0018c58: not rerun. Left: `plate_dump`'s `crops.jsonl` and plates-train's
+  `make_large_fx.py` don't carry the pose yet, so new labels would come without it.
 - [ ] **Wrap up.** `plates_flags`, `plates_rides`, `plates` and the still checks; `cargo fmt`; models/README
   (sha256, data, results), the About page and `PLAN.md`; commit, merge and push on the user's word.
 - [ ] **Decide:** remove the old yolo-v9 plate model files? They stay in the tree unbuilt, and
