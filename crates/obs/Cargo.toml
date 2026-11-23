@@ -2,7 +2,9 @@
 name = "obs"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+# GPL-2.0-or-later (LICENSE), unlike the rest of the workspace: it runs inside OBS and links libobs, which is
+# GPL-2.0-or-later. Only libc and crate live's `obs.rs` (dual-licensed for this) go into it.
+license = "GPL-2.0-or-later"
 
 # libx5desk_obs.so, installed as x5desk-obs.so (OBS names a module after its file). The rlib only makes `cargo test`
 # rebuild the library before tests/e2e.rs loads it into OBS.

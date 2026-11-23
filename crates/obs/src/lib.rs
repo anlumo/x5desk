@@ -1,3 +1,6 @@
+//! Copyright 2026 Andreas Monitzer. Licensed under the GNU General Public License, version 2 or (at your option) any
+//! later version (`LICENSE` beside `Cargo.toml`), unlike the rest of x5desk: it runs inside OBS and links libobs.
+//!
 //! OBS source plugin (PLAN.md §3.1): "X5 Camera (x5desk)" shows one source of the running app (360, reframed,
 //! lens, …), imported without a copy from the DMA-BUFs the app exports, plus its audio. The protocol is crate
 //! live's `obs.rs`, compiled into this library.

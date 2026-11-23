@@ -109,7 +109,8 @@ The release archive is built by `.github/release-linux.sh` in a Debian 13 contai
 docker run --rm -v "$PWD:/src" -e CARGO_HOME=/src/target/cargo -e RUST=1.98.1 -e DIR=x5desk-local-x86_64-linux -e CARGO_PROFILE_RELEASE_DEBUG=0 -e CARGO_PROFILE_RELEASE_STRIP=debuginfo debian:13 /src/.github/release-linux.sh
 ```
 
-The OBS source plugin is built separately and is not part of the release archive: `cargo build --release --locked -p
+The OBS source plugin is built separately and is not part of the release archive. It is licensed under the GPL,
+version 2 or later (`crates/obs/LICENSE`), as OBS requires of its plugins: `cargo build --release --locked -p
 obs` makes `target/release/libx5desk_obs.so`, which OBS loads as
 `~/.config/obs-studio/plugins/x5desk-obs/bin/64bit/x5desk-obs.so`.
 
@@ -119,7 +120,9 @@ by `X5_SAMPLES` and skip without it; the repository contains no footage.
 ## Licence
 
 x5desk is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE): you may use, change and share it for any
-non-commercial purpose.
+non-commercial purpose. The OBS source plugin (`crates/obs`) is the exception: it is licensed under the
+GPL, version 2 or later, and the one file it shares with the app (`crates/live/src/obs.rs`, the frame protocol
+between them) is available under either licence.
 
 That covers what you do with the app, not only its code: making videos for a commercial purpose with x5desk (paid
 work, footage for sale, a monetised channel) is a commercial use and not permitted. The licence makes no claim on what

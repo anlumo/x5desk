@@ -561,7 +561,7 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   (`capture::tests::real_writes`), `X5_CAMERA_ILOG=<dir>` with `X5_ILOG_EXPO=<iso>,<shutter>`
   (`capture::tests::real_ilog`). `x5desk mcp` takes `X5DESK_TEST` too (Agents, below). With the display off (DPMS),
   Wayland sends no frame callbacks and windows stall: run tests under XWayland (`env -u WAYLAND_DISPLAY`).
-- OBS plugin (`crates/obs`, `libx5desk_obs.so`, installed as `x5desk-obs.so`): source `x5desk_source`, reads the
+- OBS plugin (`crates/obs`, `libx5desk_obs.so`, installed as `x5desk-obs.so`; GPL-2.0-or-later, as OBS asks of its plugins, its only code from elsewhere crate live's `obs.rs`, dual-licensed for it): source `x5desk_source`, reads the
   app's socket (`$XDG_RUNTIME_DIR/x5desk/obs.sock`) with `live::obs::Client`; it announces the modifiers OBS imports and
   sends `done` only after OBS's GPU fence for that buffer.
 

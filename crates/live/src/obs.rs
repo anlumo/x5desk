@@ -1,6 +1,10 @@
 //! OBS frame protocol between the app (server: several sources, several clients) and our OBS
 //! plugin (client). Self-contained, std and libc only, so the plugin can share this file.
 //!
+//! Copyright 2026 Andreas Monitzer. This file alone is available under the PolyForm Noncommercial License 1.0.0
+//! (as all of x5desk) or, at your option, the GNU General Public License, version 2 or any later version: the GPL'd
+//! OBS plugin (`crates/obs`) compiles it in. SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR GPL-2.0-or-later
+//!
 //! A `SOCK_SEQPACKET` Unix socket, by default `$XDG_RUNTIME_DIR/x5desk/obs.sock`; one message per
 //! packet, native byte order (same host). Header [`Hdr`], then `len` bytes of payload; file
 //! descriptors travel with `SCM_RIGHTS`.
