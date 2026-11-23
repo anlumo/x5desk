@@ -32,6 +32,8 @@ struct Gpu {
     ad: wgpu::Adapter,
     dev: wgpu::Device,
     q: wgpu::Queue,
+    /// `hwaccel`'s ffmpeg arguments.
+    hw: Vec<String>,
 }
 
 /// A device opened like `video::Gpu` (every adapter feature: burn needs them, NV12 among them; the experimental
@@ -57,8 +59,16 @@ fn gpu() -> MutexGuard<'static, Gpu> {
             }),
         )
         .expect("device");
-        eprintln!("GPU: {}", ad.get_info().name);
-        Mutex::new(Gpu { inst, ad, dev, q })
+        let i = ad.get_info();
+        let hw = hwaccel(&i);
+        eprintln!("GPU: {}, ffmpeg {hw:?}", i.name);
+        Mutex::new(Gpu {
+            inst,
+            ad,
+            dev,
+            q,
+            hw,
+        })
     })
     .lock()
     .unwrap_or_else(|e| e.into_inner())
@@ -152,15 +162,32 @@ fn clip(d: &Path, name: &'static str) -> Clip {
     }
 }
 
-/// ffmpeg's hardware decoder on macOS (VideoToolbox); the software one on Linux: Vulkan Video (crate video's decoder)
-/// ran on the GPU the networks use and, while they ran, now and then returned a run of corrupt frames until the next key
-/// frame (half the pixels off by 17 levels on average; a different run in each process, none when decoding alone, where
-/// it matched the software decoder bit for bit), so the same test found other vehicles and plates from run to run.
-const HWACCEL: &str = if cfg!(target_os = "macos") {
-    "videotoolbox"
-} else {
-    "none"
-};
+/// ffmpeg's hardware decoder on adapter `ad`: VideoToolbox on macOS; on Linux one whose frames are the software
+/// decoder's, so that a test's results don't depend on the decode: NVDEC through CUDA on NVIDIA, whose Vulkan Video
+/// decode (620.73, RTX 4090) now and then leaves a picture unfinished and still signals it done, mostly beside
+/// host-to-device traffic, which FFmpeg's Vulkan decode doesn't catch (a run of corrupt frames up to the next key frame,
+/// which the stitcher's colour fit carried to the end of the clip: other vehicles and plates from run to run); Vulkan
+/// Video on that device elsewhere. The software decoder, with a note, where this ffmpeg can't open it.
+fn hwaccel(ad: &wgpu::AdapterInfo) -> Vec<String> {
+    let mut hw = match () {
+        _ if cfg!(target_os = "macos") => vec!["videotoolbox".into()],
+        _ if ad.vendor == 0x10de => vec!["cuda".into()],
+        _ => vec!["vulkan".into(), "-hwaccel_device".into(), ad.name.clone()],
+    };
+    hw.insert(0, "-hwaccel".into());
+    let ok = Command::new("ffmpeg")
+        .args(["-v", "error"])
+        .args(&hw)
+        .args(["-f", "lavfi", "-i", "nullsrc"])
+        .args(["-frames:v", "1", "-f", "null", "-"])
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!("ffmpeg can't open {}: software decode", hw[1..].join(" "));
+        hw.clear();
+    }
+    hw
+}
 
 /// Both lens streams as NV12 at S × S, frame by frame (two ffmpeg processes).
 struct Dec {
@@ -169,18 +196,20 @@ struct Dec {
 }
 
 impl Dec {
-    fn new(c: &Clip, n: usize) -> Dec {
-        Dec::sized(c, n, S)
+    fn new(g: &Gpu, c: &Clip, n: usize) -> Dec {
+        Dec::sized(g, c, n, S)
     }
 
     /// At `ls` × `ls`.
-    fn sized(c: &Clip, n: usize, ls: u32) -> Dec {
+    fn sized(g: &Gpu, c: &Clip, n: usize, ls: u32) -> Dec {
         // DUAL_STREAM_TRACK_REVERSE (4): track 0 holds lens 1
         let tracks = if c.m.stream == 4 { [1, 0] } else { [0, 1] };
         let kids = tracks
             .map(|t| {
                 Command::new("ffmpeg")
-                    .args(["-v", "error", "-hwaccel", HWACCEL, "-i"])
+                    .args(["-v", "error"])
+                    .args(&g.hw)
+                    .arg("-i")
                     .arg(&c.path)
                     .args(["-map", &format!("0:v:{t}"), "-frames:v", &n.to_string()])
                     .args(["-vf", &format!("scale={ls}:{ls}"), "-f", "rawvideo"])
@@ -432,7 +461,10 @@ fn look() {
     let g = gpu();
     let c = clip(&d, name);
     let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
-    let (rig, mut dec) = (Rig::new(&g, &c), Dec::new(&c, ks.iter().max().unwrap() + 1));
+    let (rig, mut dec) = (
+        Rig::new(&g, &c),
+        Dec::new(&g, &c, ks.iter().max().unwrap() + 1),
+    );
     let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
     for k in 0.. {
         if !dec.next() || k > *ks.iter().max().unwrap() {
@@ -546,7 +578,7 @@ fn subject() {
     // re-ID calibration: every key frame's people scored against the tracker's gallery (frame, yaw, pitch, height,
     // similarity to the subject, to the others)
     let (mut keyd, mut reid) = (vec![], String::new());
-    let mut dec = Dec::new(&c, n);
+    let mut dec = Dec::new(&g, &c, n);
     let t0 = Instant::now();
     for k in 0..n {
         assert!(dec.next(), "decode frame {k}");
@@ -795,7 +827,7 @@ fn subject() {
     let mut enc = files
         .clone()
         .map(|f| encoder(&fixtures().join(f), VW, VH, c.fps));
-    let mut dec = Dec::new(&c, n);
+    let mut dec = Dec::new(&g, &c, n);
     let sample = [n / 8, n / 3, n / 2, 2 * n / 3, n - 1];
     for k in 0..n {
         assert!(dec.next());
@@ -882,7 +914,7 @@ fn reid() {
     let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
     let rig = Rig::new(&g, &c);
     let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
-    let mut dec = Dec::new(&c, n);
+    let mut dec = Dec::new(&g, &c, n);
     // per key frame: (frame, is the subject, feature, box)
     let mut v: Vec<(usize, bool, Emb, (Vec3, Vec2))> = vec![];
     for (k, &(rd, rs, _)) in rf.iter().enumerate().take(n) {
@@ -1086,7 +1118,7 @@ fn sep() {
         let gap = (2.0 * c.fps).round() as usize;
         let rig = Rig::new(&g, &c);
         let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
-        let mut dec = Dec::new(&c, c.n);
+        let mut dec = Dec::new(&g, &c, c.n);
         // open tracklets (id, box); features (frame, tracklet, feature); tracklet pairs seen on one frame
         let (mut open, mut next) = (Vec::<(usize, (Vec3, Vec2))>::new(), 0);
         let (mut fs, mut co) = (Vec::<(usize, usize, Emb)>::new(), HashSet::new());
@@ -1292,7 +1324,7 @@ fn privacy() {
         );
         // pass 1: detections per frame; from the second frame on, the crops' and the network's own times (each
         // waited for), the first compiling the kernels
-        let mut dec = Dec::new(&c, n);
+        let mut dec = Dec::new(&g, &c, n);
         let (mut all, mut fms, mut crops, mut nets) = (vec![], vec![], vec![], vec![]);
         for k in 0..n {
             (ai.timing, ai.times) = (k > 0, Default::default());
@@ -1419,7 +1451,7 @@ fn privacy() {
                 pick.push(k);
             }
         }
-        let mut dec = Dec::new(&c, pick.iter().max().unwrap() + 1);
+        let mut dec = Dec::new(&g, &c, pick.iter().max().unwrap() + 1);
         for (k, reg) in reg.iter().enumerate().take(pick.iter().max().unwrap() + 1) {
             assert!(dec.next());
             if !pick.contains(&k) {
@@ -1520,7 +1552,7 @@ fn plates() {
         let c = clip(&d, name);
         let rig = Rig::sized(&g, &c, 3840, W);
         let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
-        let mut dec = Dec::sized(&c, c.n, 3840);
+        let mut dec = Dec::sized(&g, &c, c.n, 3840);
         let (mut h, mut tp, mut tf, mut found) = (Hide::plates(W), vec![], vec![], 0);
         for k in 0..c.n {
             assert!(dec.next());
@@ -1639,7 +1671,7 @@ fn plates_rides() {
         let last = (ps.iter().map(|p| p.0 + near).max().unwrap()).min(c.n - 1);
         let rig = Rig::sized(&g, &c, 3840, W);
         let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
-        let mut dec = Dec::sized(&c, last + 1, 3840);
+        let mut dec = Dec::sized(&g, &c, last + 1, 3840);
         let mut h = Hide::plates(W);
         for k in 0..=last {
             assert!(dec.next());
@@ -1814,7 +1846,7 @@ fn plate_views() {
         let last = (ks.last().unwrap() + near).min(c.n - 1);
         let rig = Rig::sized(&g, &c, 3840, W);
         let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
-        let mut dec = Dec::sized(&c, last + 1, 3840);
+        let mut dec = Dec::sized(&g, &c, last + 1, 3840);
         let mut h = Hide::plates(W);
         for k in 0..=last {
             assert!(dec.next());
@@ -1959,7 +1991,7 @@ fn plate_dump() {
         let last = (ks.last()).map_or(c.n - 1, |k| (k + near).min(c.n - 1));
         let rig = Rig::sized(&g, &c, 3840, 7680);
         let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
-        let mut dec = Dec::sized(&c, last + 1, 3840);
+        let mut dec = Dec::sized(&g, &c, last + 1, 3840);
         let mut n = 0;
         for k in 0..=last {
             assert!(dec.next());
@@ -2041,7 +2073,7 @@ fn highlights() {
         let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
         let mut sc = Scorer::new(dur);
         let mut fm = Framer::new(VW as f32 / VH as f32);
-        let mut dec = Dec::new(&c, n);
+        let mut dec = Dec::new(&g, &c, n);
         let t0 = Instant::now();
         for k in 0..n {
             assert!(dec.next());
@@ -2135,7 +2167,7 @@ fn highlights() {
             }
         }
         let last = want.iter().map(|w| w.2).max().unwrap();
-        let mut dec = Dec::new(&c, last + 1);
+        let mut dec = Dec::new(&g, &c, last + 1);
         for k in 0..=last {
             assert!(dec.next());
             for &(o, i, _) in want.iter().filter(|w| w.2 == k) {

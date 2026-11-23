@@ -149,8 +149,9 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   carried it to the end of the clip. This was the run-to-run "noise" of every unpaired GPU comparison so far; the
   networks and the NMS are bit-exact on the same input, except in the first four clips a process searches, where
   0.4–8 % of the detections differ in the third decimal from run to run (whichever clips come first; no rule outcome
-  changed; burn's kernel autotune at start-up is the suspect, unproven). Fix in `crates/track/tests/footage.rs` (software decode on Linux; `plate_views`
-  takes 1.8× as long; 1fb1159). The app's own export is clean: 12 exports with plates of two clips (722 at
+  changed; burn's kernel autotune at start-up is the suspect, unproven). First fix in `crates/track/tests/footage.rs`
+  (software decode on Linux; `plate_views` took 1.8× as long; 1fb1159); hardware decode again since, below. The
+  app's own export is clean: 12 exports with plates of two clips (722 at
   60 fps, 604 at 30 fps; `Keep::video`, on the Radeon 8060S) gave the same regions and the same video every time, and
   all 9,600 lens frames hashed match ffmpeg's software decode (`target/dec-scratch`, probe hooks in
   `probe-hooks.patch`). `crates/stab/tests/footage.rs` decoded the same way and got the same fix (bc5725e; its four tests pass on
@@ -195,8 +196,20 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   throughput the same within noise on both GPUs (crate video's `throughput` on the 4090 122.7 / 123.2 pairs/s, the
   Radeon 85.2 / 85.2; decode alone on the 4090 1916 × 1076 0.146 / 0.149 s per 240 frames with the decoder made each
   pass, v635's lenses 1.456 / 1.457 s); the Radeon's decode commands are the ones before, its output byte-identical
-  to FFmpeg's (crate video's tests, 3,206 decodes of the streams above). Left: NVIDIA's side (report drafted); the
-  footage tests of crates track and stab still decode in software, which they could leave now (a decision).
+  to FFmpeg's (crate video's tests, 3,206 decodes of the streams above). Left: NVIDIA's side (report drafted).
+  The footage tests of crates track and stab decode on their GPU again (2026-11-23, `target/level-scratch/hw`), through
+  a decoder whose frames are the software decoder's (their `hwaccel`): ffmpeg's NVDEC (`-hwaccel cuda`) on NVIDIA, its
+  Vulkan decode on the device by name elsewhere, software with a note where ffmpeg can't open either. Every frame they
+  read (the sample clips at 1920² and 3840², the 41 ride clips `plates_rides` and `plate_views` read, at 3840²: 279,472
+  pictures a pass) hashed as the software decode's: on the 4090 in three passes (alone, beside a CUDA upload loop,
+  alone), on the Radeon in one; FFmpeg's Vulkan decode on the 4090 beside the upload loop got 15,772 of 66,758 wrong
+  (the first 16 of them, each with wrong runs). The suites' figures are the software decode's on both GPUs (stab's
+  tracks and CSVs byte-identical). Time (release, s, software → hardware): Radeon track 520 → 270, stab 689 → 645;
+  4090 track 568 → 701 and 537 → 590 (run the other way round), stab 805 → 738, `plates_rides` 1026 → 1485. On the
+  4090 every decoded frame crosses its x4 link (held at gen 3) down and back up, and NVDEC's throughput there, alone
+  on the card, swung between about 250 and 65 pictures a second from clip to clip (2880² clips; guess: the link).
+  Whether the 4090's tests keep NVDEC, decode in software again or on the Radeon is a decision. `plates_rides` fails on
+  main as with this: 66 of 85 plates uncovered, 28 of 32 readable (2 of 85 when last recorded), the same plates.
 - [x] **No export on the RTX 4090.** NVIDIA's driver offers H.264 and H.265 decode only with DPB and output images
   coinciding. Crate video now decodes that way too (`decode::coincide`): a picture decodes into its DPB slot and the
   same decode submit copies it into the ring texture (the decode family needs transfer; NVIDIA's has it), so DPB
@@ -233,7 +246,8 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   - This card's Vulkan decode now and then stops a picture partway and signals it done (FFmpeg's Vulkan decode too,
     NVDEC through CUDA never). Crate video redoes such a decode before its frame or any that references it is handed
     out ("Corrupt frames from the hardware decoder": no wrong picture in 62,875 decodes under an upload loop, 816
-    redone); one still unfinished after 3 redos counts in `Decoder::failed`. The driver's fault, not the link's: held
+    redone); one still unfinished after 3 redos counts in `Decoder::failed`. Crate track's and stab's footage tests
+    decode there through ffmpeg's NVDEC (CUDA), never its Vulkan decode. The driver's fault, not the link's: held
     at gen 3 the OcuLink link (x4; at gen 4 under load 5–45 replay rollovers a second, and one 256 MiB upload wrong in
     7,968 words of about 900 GiB checked each way) shows no errors and no wrong word in about 670 GiB up and 590 GiB
     down, and the decode still fails, most beside host-to-device traffic. Report for NVIDIA drafted, not sent

@@ -20,6 +20,11 @@ are documented in `../insta360/re/` (`PROTOCOL.md`, `analysis/*.md`).
   in `X5_FIXTURES`, never in git) and skips each clip without them. Track test results depend on the kernels burn's
   autotune picks (other kernels round VitTrack's confidence across its thresholds differently): a cold cubecl slot (App,
   burn's cache) tunes them under whatever else runs on the GPU.
+- `track`'s and `stab`'s `tests/footage.rs` decode the lens streams with the ffmpeg CLI on the adapter the test runs
+  on, through a hardware decoder whose frames are the software decoder's, so their results don't depend on the decode
+  (`hwaccel`): NVDEC through CUDA on NVIDIA (its Vulkan Video decode now and then leaves a picture unfinished and still
+  signals it done, which FFmpeg's doesn't catch), Vulkan Video on that device by name elsewhere, VideoToolbox on macOS;
+  the software decoder, with a note, where ffmpeg can't open it.
 - Tests on numbered clips (`clip::tests::numbered`, made with the ffmpeg CLI: the B-frame, open-GOP and 10-bit tests of
   the app's `clip.rs`, movie's B-frame test) skip with a note when ffmpeg is missing or cannot make the clip (an encoder
   or filter it lacks, drawtext without fontconfig).

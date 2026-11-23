@@ -32,6 +32,8 @@ const THR: f64 = 3.0 * TAU / W as f64;
 struct Gpu {
     dev: wgpu::Device,
     q: wgpu::Queue,
+    /// `hwaccel`'s ffmpeg arguments.
+    hw: Vec<String>,
 }
 
 /// One device per test binary (NV12 sampling needs `TEXTURE_FORMAT_NV12`, macOS's R8 / RG8 planes nothing); the lock
@@ -54,8 +56,10 @@ fn gpu() -> MutexGuard<'static, Gpu> {
             ..Default::default()
         }))
         .expect("device");
-        eprintln!("GPU: {}", ad.get_info().name);
-        Mutex::new(Gpu { dev, q })
+        let i = ad.get_info();
+        let hw = hwaccel(&i);
+        eprintln!("GPU: {}, ffmpeg {hw:?}", i.name);
+        Mutex::new(Gpu { dev, q, hw })
     })
     .lock()
     .unwrap_or_else(|e| e.into_inner())
@@ -149,13 +153,30 @@ impl Clip {
     }
 }
 
-/// ffmpeg's hardware decoder on macOS (VideoToolbox); the software one on Linux: Vulkan Video on the GPU that also
-/// stitches returned runs of corrupt frames in crate track's footage tests (its `HWACCEL`), which decoded the same way.
-const HWACCEL: &str = if cfg!(target_os = "macos") {
-    "videotoolbox"
-} else {
-    "none"
-};
+/// ffmpeg's hardware decoder on adapter `ad`: VideoToolbox on macOS; on Linux one whose frames are the software
+/// decoder's: NVDEC through CUDA on NVIDIA, whose Vulkan Video decode (620.73, RTX 4090) now and then leaves a picture
+/// unfinished and still signals it done (runs of corrupt frames in crate track's footage tests, its `hwaccel`); Vulkan
+/// Video on that device elsewhere. The software decoder, with a note, where this ffmpeg can't open it.
+fn hwaccel(ad: &wgpu::AdapterInfo) -> Vec<String> {
+    let mut hw = match () {
+        _ if cfg!(target_os = "macos") => vec!["videotoolbox".into()],
+        _ if ad.vendor == 0x10de => vec!["cuda".into()],
+        _ => vec!["vulkan".into(), "-hwaccel_device".into(), ad.name.clone()],
+    };
+    hw.insert(0, "-hwaccel".into());
+    let ok = Command::new("ffmpeg")
+        .args(["-v", "error"])
+        .args(&hw)
+        .args(["-f", "lavfi", "-i", "nullsrc"])
+        .args(["-frames:v", "1", "-f", "null", "-"])
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!("ffmpeg can't open {}: software decode", hw[1..].join(" "));
+        hw.clear();
+    }
+    hw
+}
 
 /// Both lens streams as NV12 at S × S, frame by frame (two ffmpeg processes).
 struct Dec {
@@ -164,13 +185,15 @@ struct Dec {
 }
 
 impl Dec {
-    fn new(c: &Clip, frames: usize) -> Dec {
+    fn new(g: &Gpu, c: &Clip, frames: usize) -> Dec {
         // DUAL_STREAM_TRACK_REVERSE (4): track 0 holds lens 1
         let tracks = if c.m.stream == 4 { [1, 0] } else { [0, 1] };
         let kids = tracks
             .map(|t| {
                 Command::new("ffmpeg")
-                    .args(["-v", "error", "-hwaccel", HWACCEL, "-i"])
+                    .args(["-v", "error"])
+                    .args(&g.hw)
+                    .arg("-i")
                     .arg(&c.path)
                     .args([
                         "-map",
@@ -321,7 +344,7 @@ type Tracks = Vec<Vec<[[f32; 2]; 2]>>;
 
 /// Decodes frames 0..n and calls `f(k, rig)` with each uploaded.
 fn each(g: &Gpu, c: &Clip, n: usize, w: u32, h: u32, mut f: impl FnMut(usize, &Rig)) {
-    let (rig, mut dec) = (Rig::new(g, c, w, h), Dec::new(c, n));
+    let (rig, mut dec) = (Rig::new(g, c, w, h), Dec::new(g, c, n));
     let mut k = 0;
     while k < n && dec.next() {
         rig.upload(g, &dec.buf);
