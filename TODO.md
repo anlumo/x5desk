@@ -135,10 +135,36 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
     labelled spot (61 new regions, 42 on nothing by eye) and 9–10 ms more again. Skipping ring crops a vehicle crop
     already shows saves nothing (1.4 % of them lie 90 % inside one). Next if retried: hard negatives from the ring's
     own hits (their labels are clean, unlike the flags), then measure again.
-  - Unlevelled exports (stabilisation off): the camera's mount tilts the stitch's horizon by about 60° on the rides
-    (8–12° on the walks; from the IMU, not checked on an image), and every crop of the plate search is upright in the
-    pano, so the search there sees vehicles and plates on their side. Searching a levelled stitch and turning the
-    regions into the export's frame would fix the ring and the vehicle crops alike.
+  - Done: unlevelled exports (stabilisation off or free; 2026-11-23, `target/level-scratch/unlevel`). With
+    stabilisation off the rides' horizon tilts by 47–82° (the median of each clip's labelled frames, 61–66° on most;
+    the IMU's, and plain on the stitched frames of the sheets), the walks' by 8–12°, and the search there saw vehicles,
+    plates and faces on their side. Measured in the frame of such an export (`footage.rs` `X5_STAB=off`: labels and
+    regions turned into it, `Clip::out`; the RTX 4090; the search on its own stitch as main did, a scratch patch):
+    `plates_rides` 82 of 85 uncovered, 31 of 32 readable (levelled: 3 and 0); `plates` v606 under 10 and 10–20 px 30
+    and 22 of 30 and 26, v627 10–20 and 20–40 px 7 and 8 of 9 and 34; faces (`privacy`'s confident faces of the level
+    stitch against the regions found on the unlevelled one, turned) v606 54 of 1100, v627 19 of 1149, v635 0 of 112,
+    where a second level stitch (the horizon lock's) leaves 19 of 1100 and 4 of 1149 (the two stitches' own floor), and on
+    a ride (690's first 30 s, tilted 57°) 1419 of 1595 (the second level stitch's floor there: running at this writing, `unlevel/logs/ctl-faces690.log`), its searched frames
+    giving 407 faces against 1178 level. Now every privacy pass searches a stitch levelled by the gyro's gravity
+    whatever the export's stabilisation (`ai::level`: the export's own poses when level, else the horizon lock's with
+    the export's rolling-shutter term, so that a turn per frame takes the regions into the export's frame:
+    `Region::turn`, `Region::up`, which `track::Blur` and the flat `Blur` follow): the Export screen's jobs, editor
+    timelines and grabs, the MCP's `export` and `render_still` (`privacy_pass`) and the player's preview
+    (`ai::privacy`). After, stabilisation off: `plates_rides` 3 of 85, 0 of 32 readable (672 frame 270, 718 frame 60,
+    693 frame 150; C, 32–49 px); `plates` v606 29 and 14 of 30 and 26, v627 7 and 5 of 9 and 34, plates found 247 → 274
+    and 250 → 254, regions on no labelled plate 0.00 → 0.11 and 0.21 → 0.19 deg² a labelled frame; faces v606 2 of
+    1098, v627 1 of 1149, v635 0 of 111, the ride 0 of 1595 (all now on one stitch, as the levelled test). Levelled
+    exports are unchanged: their search frame is theirs, no turn (the levelled reruns of the new test binary on the 4090: `plates_rides` 3 of 85 uncovered, 0 of 32 readable; `plates` and `privacy` pass; ride 690's face control, two level stitches, 1 of 1595); `privacy_parity` (now all three cases levelled)
+    gives the old pass's regions bit for bit; the MCP's levelled exports and still (v635 and v606, 360 and flat, faces
+    and plates, on the Radeon) are byte-identical to main's binary's. `privacy_level` (app): a free export's regions are
+    the horizon lock's pass turned, exactly (v635 tilts 8.8° free). Cost: one horizon-lock path per pass (`level` in
+    the debug build: 100 ms on a minute at 60 fps, the export's own poses about as much), the stitch per searched
+    frame the same as before; the upright search finds more vehicles and so searches more crops: plate search per
+    searched frame on the 4090 v606 55.5 → 59.4 ms, v627 83.8 → 81.3, v635 54.8 → 58.5; the app's passes over four
+    ride seconds (8K, faces and plates, Radeon; a fifth, warming up, left out) 138 → 168 ms a searched frame, plate
+    detections over all five 102 → 702. Sheets: `unlevel/sheets` (main's and today's app, 8K exports with
+    stabilisation off, the labelled plates ringed): every labelled plate on them blurred after and none before; after
+    also blurs lettering on the rider's bag and parts of the rider, before blurred large patches of façade and road.
   - Tried and dropped: a crop where a live plate track is predicted (`target/crop-scratch/item2-track3.patch`). It
     closes 692 frame 56's gap, but on the reviewed views it trades 3 flagged blurs for 8 new ones (a parking sign's
     logo, bumper corners, a tail light) at +0.95 crops and +1.5 ms a searched frame, and 717's plate has no
@@ -328,8 +354,11 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   313 / 283 found; v627 7 / 8 of 9, 0.19 / 0.10, 273 / 258). `plates_flags` 38 of 741 still blurred, 205 of 216 kept,
   no mark uncovered, as recorded (its detections and labels were dumped in one frame; a fresh `flags_dets.txt` would
   need the old poses too). The still checks (`score_stills.py`, Python on the ONNX files) run none of this code, and
-  no plate model or plate code changed since 0018c58: not rerun. Left: `plate_dump`'s `crops.jsonl` and plates-train's
-  `make_large_fx.py` don't carry the pose yet, so new labels would come without it.
+  no plate model or plate code changed since 0018c58: not rerun. New labels carry their pose too (2026-11-23):
+  `plate_dump` writes each crop's equirect pose into `crops.jsonl` (`q`, `Pose::q` x y z w) and plates-train's
+  `make_large_fx.py` appends it to the fixture line (the original kept as `make_large_fx.py.orig`); a dry run on 669
+  frame 1200 (`target/level-scratch/unlevel/dry`) made a line `plate` reads, its plate in the body 0.022° from the
+  fixture's own label of it (labelled under 0018c58's poses), covered by `plates_rides`.
 - [ ] **Wrap up.** `plates_flags`, `plates_rides`, `plates` and the still checks; `cargo fmt`; models/README
   (sha256, data, results), the About page and `PLAN.md`; commit, merge and push on the user's word.
 - [ ] **Decide:** remove the old yolo-v9 plate model files? They stay in the tree unbuilt, and
@@ -712,4 +741,6 @@ Tests on the real X5 send only request types the app sends; never format the SD 
 
 - [ ] **RTX 4090 PCIe link.** Thousands of link replays; training stalls in `cuStreamSynchronize`, and a crop dump
   lost the device on 2026-11-10 (Xid 32 in ffmpeg's decoder). Cap the link at Gen3, or change the OcuLink cable or
-  adapter.
+  adapter. At gen 3 (2026-11-23, `target/level-scratch/unlevel`): ten track footage runs of 57–2117 s under the stall
+  watchdog, NVDEC decode, none stalled or lost the device; the replay counter stayed at 18,558 (5,015 rollovers) from
+  23:08 to 23:44 over the longest of them.

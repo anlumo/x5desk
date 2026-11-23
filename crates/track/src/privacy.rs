@@ -26,17 +26,28 @@ pub(crate) const NORM: Norm = Norm {
     bgr: true,
 };
 
-/// A face or plate on the sphere: centre, angular width and height (degrees; upright as `Cam::new(dir, Z)`), score.
+/// A face or plate on the sphere: centre, angular width and height (degrees; upright as `Cam::new(dir, up)`), score.
+/// Found upright on the equirect searched (`up` Z); turned into another frame (`turn`), upright as there.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Region {
     pub dir: Vec3,
     pub size: Vec2,
     pub score: f32,
+    pub up: Vec3,
 }
 
 impl Region {
     pub fn on(&self) -> (Vec3, Vec2) {
         (self.dir, self.size)
+    }
+
+    /// In the frame `q` turns the equirect's directions into.
+    pub fn turn(&self, q: Quat) -> Region {
+        Region {
+            dir: q * self.dir,
+            up: q * self.up,
+            ..*self
+        }
     }
 }
 
@@ -198,7 +209,12 @@ pub(crate) fn place(cam: &Cam, b: [f32; 4], s: f32, score: f32) -> (bool, Region
     let (dir, size) = cam.boxed(b);
     (
         b.iter().any(|v| v.abs() > 1.0 - 4.0 / s),
-        Region { dir, size, score },
+        Region {
+            dir,
+            size,
+            score,
+            up: Vec3::Z,
+        },
     )
 }
 
@@ -259,8 +275,8 @@ const BRIDGE: f32 = 0.5;
 
 /// Privacy regions of a clip: detections per frame (every frame, or every few: the tracks bridge them), linked over
 /// frames; faces and plates each in a `Hide` of their own. Directions are in the frame of the equirect they were found
-/// on: blur frames stitched with the same poses (another pose, say another stabilisation, moves them away from their
-/// regions).
+/// on: blur frames stitched with the same poses, or turn the regions into the frame of another (`Region::turn`; another
+/// pose, say another stabilisation, moves the picture away from them).
 #[derive(Default)]
 pub struct Hide {
     keys: Vec<(usize, Vec<Region>)>,
@@ -360,7 +376,7 @@ impl Hide {
         let g = |dir, r: Region| Region {
             dir,
             size: r.size * GROW + MARGIN,
-            score: r.score,
+            ..r
         };
         let tl = self.tracks(fps);
         for t in tl

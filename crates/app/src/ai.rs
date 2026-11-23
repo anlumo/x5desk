@@ -548,6 +548,33 @@ pub fn poses(
     }
 }
 
+/// The privacy search's poses and per frame its turn into the export's frame (`level`).
+pub type Level = (Option<Vec<stab::Pose>>, Option<Vec<Quat>>);
+
+/// The poses the privacy search stitches clip `c` with for an export stitched with `stab`, and per frame the turn from
+/// that equirect into the export's (None: the export's own poses, no turn). The search is level: its crops are upright
+/// in the equirect, and with stabilisation off or free the camera's mount tilts the horizon (by about 60° on the
+/// rides), which shows the detectors vehicles, plates and faces on their side. An export that isn't level searches the
+/// horizon lock's stitch (its σ, else `gyro::SMOOTH`) with the export's rolling-shutter term, none when off, so that the
+/// two stitches differ by a turn alone. Without IMU records, stabilisation off searches the export's own stitch.
+pub fn level(c: &effects::Clip, stab: (gyro::Mode, f64)) -> Result<Level, String> {
+    let ps = poses(c, stab)?;
+    let lv = match stab.0 {
+        Some(stab::Lock::Horizon | stab::Lock::Direction | stab::Lock::Forward) => None,
+        m => c.poses(stab::Lock::Horizon, m.map_or(gyro::SMOOTH, |_| stab.1)),
+    };
+    let Some(mut lv) = lv else {
+        return Ok((ps, None));
+    };
+    if ps.is_none() {
+        lv.iter_mut().for_each(|p| p.rs = Vec3::ZERO);
+    }
+    let t = (0..c.times.len())
+        .map(|k| c.pose(k, ps.as_deref()).q.inverse() * c.pose(k, Some(&lv)).q)
+        .collect();
+    Ok((Some(lv), Some(t)))
+}
+
 /// The stitch rotation of every frame of clip `c` stitched with `stab` (`effects::Clip::pose`).
 pub fn rots(c: &effects::Clip, stab: (gyro::Mode, f64)) -> Result<Vec<Quat>, String> {
     let ps = poses(c, stab)?;
@@ -737,9 +764,10 @@ pub fn pick(
     })
 }
 
-/// The faces and licence plates (`find`: faces, plates) on frame `k` of `file` stitched with `stab` (the viewer's
-/// frame), for the privacy preview: the regions, the faces first, and how many of them are faces. With plates the
-/// equirect is the export's `PLATES_W` wide, faces then on it too.
+/// The faces and licence plates (`find`: faces, plates) on frame `k` of `file` for the privacy preview, searched as the
+/// export's pass searches (`level`) and in the frame of `file` stitched with `stab` (the viewer's): the regions, the
+/// faces first, and how many of them are faces. With plates the equirect is the export's `PLATES_W` wide, faces then
+/// on it too.
 pub fn privacy(
     g: &Arc<Gpu>,
     cx: &stitch::Ctx,
@@ -749,9 +777,9 @@ pub fn privacy(
     [fa, pl]: [bool; 2],
 ) -> Result<(Vec<track::Region>, usize), String> {
     let c = effects::Clip::open(file)?;
-    let poses = poses(&c, stab)?;
+    let (poses, turn) = level(&c, stab)?;
     let tiles = track::face_tiles();
-    MODELS.with(g, false, None, |ai| {
+    let (r, n) = MODELS.with(g, false, None, |ai| {
         let mut out = (vec![], 0);
         let mut gate = Some(GATE.read());
         c.frames(
@@ -779,6 +807,10 @@ pub fn privacy(
             },
         )?;
         Ok(out)
+    })?;
+    Ok(match turn {
+        Some(t) => (r.iter().map(|x| x.turn(t[k])).collect(), n),
+        None => (r, n),
     })
 }
 

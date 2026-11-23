@@ -768,6 +768,7 @@ fn flat_blur() {
         dir: m * ray(at, mode, f, d, s),
         size: Vec2::splat(12.0),
         score: 1.0,
+        up: Vec3::Z,
     };
     let mut b = Blur::new(&g.device, wgpu::TextureFormat::Rgba8Unorm);
     let mut e = g.device.create_command_encoder(&Default::default());
@@ -847,6 +848,7 @@ fn hook_view() {
         dir: m * ray(Vec2::new(480.5, 120.5), mode, f, d, s),
         size: Vec2::splat(12.0),
         score: 1.0,
+        up: Vec3::Z,
     };
     let at = vs.map(|v| {
         let (m, mode, f, d) = proj(&v);
@@ -1912,11 +1914,12 @@ pub(super) fn sample(d: &Path) -> PathBuf {
 }
 
 /// `Keep::privacy` finds what the pass found before it was factored out of it (`old_privacy`), on a recording
-/// (`X5_SAMPLES`: v635, else its first `.insv`): faces over [0, 3] s, faces and plates over [1, 2] s with the horizon
-/// lock, plates over the second from `X5_PLATES_AT` (s, 1 by default; one with a plate: a second, as `Hide::plates`
-/// hides no plate found on one frame alone). Each kind is found in a case at least; the same frame times, regions (by their bits),
-/// note, last state and counts. The old pass runs twice: if those differ, the detectors aren't deterministic in this
-/// process and the test says so instead of comparing.
+/// (`X5_SAMPLES`: v635, else its first `.insv`): faces over [0, 3] s with the direction lock, faces and plates over
+/// [1, 2] s with the horizon lock, plates over the second from `X5_PLATES_AT` (s, 1 by default; one with a plate: a
+/// second, as `Hide::plates` hides no plate found on one frame alone) with the direction lock. Level exports alone: the
+/// pass of one that isn't searches a level stitch since (`privacy_level`). Each kind is found in a case at least; the
+/// same frame times, regions (by their bits), note, last state and counts. The old pass runs twice: if those differ,
+/// the detectors aren't deterministic in this process and the test says so instead of comparing.
 #[test]
 fn privacy_parity() {
     if no_cf_home() {
@@ -1945,10 +1948,11 @@ fn privacy_parity() {
         plates: false,
     };
     let horizon = Some((stab::Lock::Horizon, gyro::SMOOTH));
+    let direction = Some((stab::Lock::Direction, gyro::SMOOTH));
     let cases = [
-        ([true, false], None, [0.0, 3.0]),
+        ([true, false], direction, [0.0, 3.0]),
         ([true, true], horizon, [1.0, 2.0]),
-        ([false, true], None, [at, (at + 1.0).min(dur)]),
+        ([false, true], direction, [at, (at + 1.0).min(dur)]),
     ];
     let (mut k, ctx) = (Keep::default(), egui::Context::default());
     let mut found = [false; 2];
@@ -2023,4 +2027,67 @@ fn privacy_parity() {
         "faces, plates found: {found:?} on {}: no parity shown; X5_PLATES_AT: a time with a plate",
         spec.files[0].display()
     );
+}
+
+/// An export that isn't level blurs what a level one finds, turned into its frame (`ai::level`): on a recording
+/// (`X5_SAMPLES`: v635, else its first `.insv`), faces and plates over [0, 2] s, the pass of a free-stabilised export
+/// gives the regions of the horizon lock's pass (the same σ and rolling-shutter term), each turned by its frame's
+/// rotation from that stitch into the free one's, exactly, and the same counts; faces among them. The horizon lock's
+/// pass runs twice first: if those differ, the detectors aren't deterministic in this process and the test says so.
+#[test]
+fn privacy_level() {
+    if no_cf_home() {
+        return;
+    }
+    let Some(d) = std::env::var_os("X5_SAMPLES").map(PathBuf::from) else {
+        eprintln!("X5_SAMPLES unset: skipped");
+        return;
+    };
+    let f = sample(&d);
+    let (_l, g, cx) = gpu();
+    let (fps, dur) = probe(&f).unwrap();
+    let (stop, ab) = (AtomicBool::new(false), [0.0, dur.min(2.0)]);
+    let pass = |l| {
+        let s = Some((l, gyro::SMOOTH));
+        let fs = std::slice::from_ref(&f);
+        privacy_pass(
+            &g,
+            &cx,
+            fs,
+            s,
+            ab,
+            fps,
+            [true; 2],
+            Hold::Frame,
+            &stop,
+            None,
+            &mut |_, _| {},
+        )
+        .unwrap()
+    };
+    let h = pass(stab::Lock::Horizon);
+    assert!(
+        h.1 == pass(stab::Lock::Horizon).1,
+        "the detectors aren't deterministic in this process: two horizon-locked passes differ"
+    );
+    let fr = pass(stab::Lock::Free);
+    let c = effects::Clip::open(&f).unwrap();
+    let rot = |l| crate::ai::rots(&c, (Some(l), gyro::SMOOTH)).unwrap();
+    let (qf, qh) = (rot(stab::Lock::Free), rot(stab::Lock::Horizon));
+    let q = |k: usize| qf[k].inverse() * qh[k];
+    let want: Regs = (h.1.iter().enumerate())
+        .map(|(k, r)| r.iter().map(|x| x.turn(q(k))).collect())
+        .collect();
+    eprintln!(
+        "horizon lock {:?}, free {:?}; the free export's horizon tilts {:.1}° at frame 0",
+        h.2,
+        fr.2,
+        (q(0) * Vec3::Z).angle_between(Vec3::Z).to_degrees()
+    );
+    assert_eq!((&fr.0, fr.2), (&h.0, h.2));
+    assert!(
+        fr.1 == want,
+        "the free export's regions aren't the horizon lock's turned"
+    );
+    assert!(h.2[0] > 0, "no face found: nothing compared");
 }

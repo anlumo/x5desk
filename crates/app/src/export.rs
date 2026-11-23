@@ -3,8 +3,9 @@
 //! 360 or the player's view, H.265 8 / 10-bit or H.264 at a bitrate or a constant QP, the source's or another frame
 //! rate, RAFT or template seam, colour matching, stabilisation, a look and adjustments (crate fx). A frame grab is the
 //! same job into a JPEG (GPano for 360). Privacy blur: a pass first finds the faces and licence plates on the clip
-//! stitched as the export stitches it (crate track: YuNet on `face_tiles`, the plate detector on crops around YOLOX's
-//! vehicles; each linked over frames by a `Hide` of its own), then the job's effect hook blurs their regions:
+//! stitched level, as the export stitches it if that is level (crate track: YuNet on `face_tiles`, the plate detector
+//! on crops around YOLOX's vehicles; each linked over frames by a `Hide` of its own, turned into the export's frame),
+//! then the job's effect hook blurs their regions:
 //! `track::Blur` in a 360 frame, [`Blur`] in a flat view (an editor timeline: a pass per clip over its
 //! source span, each output frame blurred with its clip's regions in its view). The pass ([`privacy_pass`]) is the
 //! agents' too: their lanes run it from `Job::pre`, the models held per searched frame ([`Hold`]), the screen's for
@@ -1636,8 +1637,9 @@ fn detect(
 }
 
 /// The faces and licence plates (`[fa, pl]`) of source span `ab` (s) of clip `f` every `STEP` frames, found on the
-/// clip stitched with the poses the export stitches with (`PLATES_W` wide with plates, else `FACES_W`), each linked
-/// into regions for every frame by a `Hide` of its own, the models held as `hold` says. `stop` cancels it at the next
+/// clip stitched level (`ai::level`: with the poses the export stitches with when they are; `PLATES_W` wide with
+/// plates, else `FACES_W`), each linked into regions for every frame by a `Hide` of its own and turned into the
+/// export's frame, the models held as `hold` says. `stop` cancels it at the next
 /// searched frame (and a wait for the models, `Hold::Frame`); `say(i, n)`: i of n frames searched (0 before the models
 /// load); `ctx` repaints while they load. Returns the frame times, the regions per source frame (faces first) and its
 /// counts: face and plate detections, frames searched, face and plate tracks, frames blurred, frames.
@@ -1659,13 +1661,8 @@ pub(crate) fn privacy_pass(
         return Err("privacy blur: recordings in a file per lens are not supported yet".into());
     }
     let c = effects::Clip::open(&f[0])?;
-    let poses = match stab {
-        Some((l, s)) => Some(
-            c.poses(l, s)
-                .ok_or("privacy blur: no IMU record to stabilise with")?,
-        ),
-        None => None,
-    };
+    let (poses, turn) = crate::ai::level(&c, stab.map_or((None, 0.0), |(l, s)| (Some(l), s)))
+        .map_err(|e| format!("privacy blur: {e}"))?;
     let (k0, k1, ks) = keys(&c.times, ab);
     let (n, tiles) = (ks.len(), track::face_tiles());
     // a frame grab searches one frame: `Hide::plates` wants a plate seen twice, so its plates are judged as a photo's
@@ -1725,10 +1722,11 @@ pub(crate) fn privacy_pass(
     }?;
     let fps = fps.num as f32 / fps.den as f32;
     let [rf, rp] = hide.each_ref().map(|h| h.regions(c.times.len(), fps));
-    let r: Regs = rf
-        .into_iter()
-        .zip(rp)
-        .map(|(a, b)| [a, b].concat())
+    let r: Regs = (rf.into_iter().zip(rp).enumerate())
+        .map(|(k, (a, b))| match &turn {
+            Some(t) => a.iter().chain(&b).map(|x| x.turn(t[k])).collect(),
+            None => [a, b].concat(),
+        })
         .collect();
     let on = r[k0..=k1].iter().filter(|r| !r.is_empty()).count();
     let tr = hide.each_ref().map(|h| h.tracks(fps).len());
@@ -2052,7 +2050,7 @@ impl Blur {
                 (x.size.x / 2.0).to_radians().tan(),
                 (x.size.y / 2.0).to_radians().tan(),
             );
-            let c = track::Cam::new(x.dir, Vec3::Z, ext);
+            let c = track::Cam::new(x.dir, x.up, ext);
             // the quad: the feathered ellipse's outline (1.25 of it) in the view, or the whole frame where some of
             // it does not map (an equirect view, a region reaching behind the projection)
             let mut b = [s.x, s.y, 0.0, 0.0];

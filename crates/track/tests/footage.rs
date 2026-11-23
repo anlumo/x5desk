@@ -123,6 +123,26 @@ struct Clip {
     fps: f32,
     /// Per frame: direction lock (stab) and the X5's framing (panorama centre on lens 1).
     poses: Vec<Pose>,
+    /// `X5_STAB=off`: the poses of an export with stabilisation off (the framing alone), whose horizon tilts with the
+    /// camera's mount. The search still stitches level (`poses`, without their rolling-shutter term then, as the
+    /// export's own privacy pass), and the plate tests turn regions and labels into this frame (`turn`).
+    out: Option<Vec<Pose>>,
+}
+
+impl Clip {
+    /// Region `r` of frame `k` of the search's equirect in the export's frame (`out`).
+    fn turn(&self, k: usize, r: Region) -> Region {
+        (self.out.as_ref()).map_or(r, |o| r.turn(o[k].q.inverse() * self.poses[k].q))
+    }
+
+    /// The median tilt of the export's horizon over frames `ks` (degrees, the IMU's; 0 without `out`).
+    fn tilt(&self, ks: impl Iterator<Item = usize>) -> f64 {
+        let Some(o) = &self.out else { return 0.0 };
+        let up = |k: usize| o[k].q.inverse() * self.poses[k].q * Vec3::Z;
+        let mut t: Vec<f64> =
+            (ks.map(|k| up(k).angle_between(Vec3::Z).to_degrees() as f64)).collect();
+        pct(&mut t).0
+    }
 }
 
 fn clip(d: &Path, name: &'static str) -> Clip {
@@ -131,6 +151,7 @@ fn clip(d: &Path, name: &'static str) -> Clip {
     let tr = stab::Track::new(&t.imu().unwrap(), stab::KP, stab::KI);
     let ex = t.frames(insv::EXPOSURE).unwrap();
     let fr = Pose::euler(0.0, 0.0, if t.meta.stream == 4 { 180.0 } else { 0.0 });
+    let off = std::env::var("X5_STAB").is_ok_and(|v| v == "off");
     let poses = stab::poses(
         &tr,
         &ex,
@@ -139,7 +160,7 @@ fn clip(d: &Path, name: &'static str) -> Clip {
     .iter()
     .map(|p| Pose {
         q: p.q * fr.q,
-        rs: [p.rs; 2],
+        rs: [if off { Vec3::ZERO } else { p.rs }; 2],
     })
     .collect::<Vec<_>>();
     let n = media::mp4::Mp4::open(&path).unwrap().tracks[0]
@@ -147,6 +168,7 @@ fn clip(d: &Path, name: &'static str) -> Clip {
         .len()
         .min(poses.len());
     Clip {
+        out: off.then(|| vec![fr; poses.len()]),
         cal: Calib::parse(&t.meta.offset).unwrap(),
         fr: Frame {
             w: S,
@@ -1258,7 +1280,7 @@ fn sep() {
 /// Whether direction `w` lies in region `r`'s ellipse (the one `Blur` blurs, without its feather).
 fn inside(r: &Region, w: Vec3) -> bool {
     let t = (r.size / 2.0).to_array().map(|a| a.to_radians().tan());
-    Cam::new(r.dir, Vec3::Z, Vec2::new(t[0], t[1]))
+    Cam::new(r.dir, r.up, Vec2::new(t[0], t[1]))
         .px(w)
         .is_some_and(|p| p.length() <= 1.0)
 }
@@ -1267,7 +1289,7 @@ fn inside(r: &Region, w: Vec3) -> bool {
 /// lie in one.
 fn covered(r: &[Region], x: &Region) -> bool {
     let t = (x.size / 2.0).to_array().map(|a| a.to_radians().tan());
-    let c = Cam::new(x.dir, Vec3::Z, Vec2::new(t[0], t[1]));
+    let c = Cam::new(x.dir, x.up, Vec2::new(t[0], t[1]));
     std::iter::once(x.dir)
         .chain((0..8).map(|i| c.ray(Vec2::from_angle(i as f32 * std::f32::consts::FRAC_PI_4))))
         .all(|w| r.iter().any(|r| inside(r, w)))
@@ -1480,7 +1502,8 @@ type Labels = (Vec<usize>, Vec<(usize, Region)>);
 /// The plate of a fixture line (`v[2..5]` its direction, `v[5..7]` its angular width and height on the equirect it
 /// was labelled on, `v[q..q + 4]` that equirect's pose, `Pose::q` x y z w) with its direction in the body. That is
 /// what stays put when the levelling changes (stab's gravity filter of 2026-11-20 moved the rides' labelled plates by
-/// up to 12° in the equirect); `c.poses[k].q.inverse()` turns it into today's equirect.
+/// up to 12° in the equirect); `c.poses[k].q.inverse()` turns it into today's equirect, upright there (the plate's
+/// up is the world's, which a level equirect's Z is).
 fn plate(v: &[&str], q: usize) -> Region {
     assert_eq!(v.len(), q + 4, "a labelled plate without its pose");
     let x = |i: usize| v[i].parse::<f32>().unwrap();
@@ -1489,6 +1512,7 @@ fn plate(v: &[&str], q: usize) -> Region {
             * Vec3::new(x(2), x(3), x(4)).normalize(),
         size: Vec2::new(x(5), x(6)),
         score: 1.0,
+        up: Vec3::Z,
     }
 }
 
@@ -1513,9 +1537,10 @@ fn labels(name: &str) -> Option<Labels> {
 /// a few pixels wide), plates every 3rd frame (`plates`, score ≥ 0.1 as the export, or `X5_PMIN`) linked by `Hide`.
 /// Prints per width bin (pixels at 7680) the labelled plates the regions leave uncovered (`covered`), the area of the
 /// regions on labelled frames that hold no labelled plate, and the time per searched frame of the plate pass against
-/// the face pass on the same equirect. Fails if more than 10 % of the labelled plates 30 px wide or more (where
-/// characters start to read) are left uncovered. These labels hold none that wide, the widest is 27 px, so this check
-/// passes on nothing and only the printed bins measure anything: `plates_rides` tests the plates that wide.
+/// the face pass on the same equirect; with `X5_STAB=off` in the frame of an export with stabilisation off
+/// (`Clip::out`), and how far its horizon tilts. Fails if more than 10 % of the labelled plates 30 px wide or more
+/// (where characters start to read) are left uncovered. These labels hold none that wide, the widest is 27 px, so this
+/// check passes on nothing and only the printed bins measure anything: `plates_rides` tests the plates that wide.
 /// macOS: faces through Core ML, `X5_YUNET=burn` for burn's YuNet.
 #[test]
 fn plates() {
@@ -1559,6 +1584,7 @@ fn plates() {
         let c = clip(&d, name);
         for (k, x) in lp.iter_mut().filter(|p| p.0 < c.n) {
             x.dir = c.poses[*k].q.inverse() * x.dir;
+            *x = c.turn(*k, *x);
         }
         let rig = Rig::sized(&g, &c, 3840, W);
         let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
@@ -1589,7 +1615,9 @@ fn plates() {
             assert_eq!(on, ai.coreml, "Core ML asked for, burn ran");
         }
         drop(dec);
-        let reg = h.regions(c.n, c.fps);
+        let reg: Vec<Vec<Region>> = (h.regions(c.n, c.fps).into_iter().enumerate())
+            .map(|(k, r)| r.into_iter().map(|x| c.turn(k, x)).collect())
+            .collect();
         // per width bin: labelled, uncovered
         let mut b = [[0usize; 2]; 4];
         for (k, x) in lp.iter().filter(|p| p.0 < c.n) {
@@ -1619,13 +1647,15 @@ fn plates() {
         eprintln!(
             "{name}: {} frames searched, {found} plates, {} tracks; {} labelled frames, {} plates; uncovered per width \
              (px at {W}) <10 / 10-20 / 20-40 / 40+: {}; regions holding no labelled plate {:.2} deg² per labelled frame; \
-             ms per searched frame, median / p95: plates {p50:.1} / {p95:.1}, faces {f50:.1} / {f95:.1}",
+             ms per searched frame, median / p95: plates {p50:.1} / {p95:.1}, faces {f50:.1} / {f95:.1}; the export's \
+             horizon tilted {:.1}°",
             tp.len(),
             h.tracks(c.fps).len(),
             lf.len(),
             lp.len(),
             b.map(|[n, m]| format!("{m} of {n}")).join(" / "),
             fp / lf.len().max(1) as f32,
+            c.tilt(lf.iter().copied()),
         );
     }
     assert!(
@@ -1640,9 +1670,9 @@ fn plates() {
 /// (`X5_RIDES` = their folder; `rides_plates.txt` in `X5_FIXTURES`, never in git; skipped without either). A line a
 /// plate: clip, frame, direction, width and height in degrees, tier (A all characters legible, B some, C a bar), set
 /// (`held`: a ride the detector never trained on; `ride`: a ride it trained on, away from its training tiles), the
-/// pose it was labelled under (`plate`). Searched as in `plates`, but only within half a second of a labelled frame,
-/// as the rides are long. Prints the plates the regions leave uncovered per set, tier and width; fails if there are no
-/// plates, or more than 10 % of all of them or of the readable ones (A, B) are left uncovered.
+/// pose it was labelled under (`plate`). Searched as in `plates` (`X5_STAB` too), but only within half a second of a
+/// labelled frame, as the rides are long. Prints the plates the regions leave uncovered per set, tier and width; fails
+/// if there are no plates, or more than 10 % of all of them or of the readable ones (A, B) are left uncovered.
 #[test]
 fn plates_rides() {
     let Some(d) = std::env::var_os("X5_RIDES").map(PathBuf::from) else {
@@ -1669,6 +1699,13 @@ fn plates_rides() {
         let c = clip(&d, name.to_string().leak());
         for p in &mut ps {
             p.1.dir = c.poses[p.0].q.inverse() * p.1.dir;
+            p.1 = c.turn(p.0, p.1);
+        }
+        if c.out.is_some() {
+            let t = c.tilt(ps.iter().map(|p| p.0));
+            eprintln!(
+                "{name}: the export's horizon tilted {t:.1}° (median of the labelled frames)"
+            );
         }
         let near = (c.fps / 2.0) as usize;
         let last = (ps.iter().map(|p| p.0 + near).max().unwrap()).min(c.n - 1);
@@ -1687,7 +1724,9 @@ fn plates_rides() {
             h.push(k, ai.plates(&pano, pmin).unwrap());
         }
         drop(dec);
-        let reg = h.regions(c.n, c.fps);
+        let reg: Vec<Vec<Region>> = (h.regions(c.n, c.fps).into_iter().enumerate())
+            .map(|(k, r)| r.into_iter().map(|x| c.turn(k, x)).collect())
+            .collect();
         for (k, x, tier, set) in &ps {
             let (miss, w) = (!covered(&reg[*k], x) as usize, x.size.x * ppd);
             let bin = match w {
@@ -1762,6 +1801,7 @@ fn plates_flags() {
             dir: at(&v, 3),
             size: Vec2::new(num(v[6]), num(v[7])),
             score: num(v[8]),
+            up: Vec3::Z,
         });
     }
     let reg: BTreeMap<&str, Vec<Vec<Region>>> = (clips.into_iter())
@@ -1792,6 +1832,7 @@ fn plates_flags() {
                 dir: at(&v, 2),
                 size: Vec2::new(num(v[5]), num(v[6])),
                 score: 1.0,
+                up: Vec3::Z,
             },
         );
         if !covered(&reg[v[0]][k], &x) {
@@ -1957,8 +1998,9 @@ fn plate_views() {
 /// Training crops for the plate detector (`X5_PLATE_DUMP` = output folder; skipped without): the clips named in
 /// `X5_DUMP_CLIPS` (comma-separated, in `X5_SAMPLES`), every `X5_DUMP_EVERY`th frame (default 60) stitched as
 /// `plates` does, each plate crop as the detector sees it (`<clip>_<frame>_<i>.ppm`, RGB) with its candidate boxes of
-/// score ≥ 0.05 in `crops.jsonl` (crop pixels, the crop's direction and tangent extent). With `X5_DUMP_LIST`
-/// (`plate_views`' list) instead: the frames that test searches around the listed ones.
+/// score ≥ 0.05 in `crops.jsonl` (crop pixels, the crop's direction and tangent extent, the pose of the equirect it was
+/// cut from: `Pose::q` x y z w, which a label made from it carries, `plate`). With `X5_DUMP_LIST` (`plate_views`' list)
+/// instead: the frames that test searches around the listed ones.
 #[test]
 fn plate_dump() {
     let Some(out) = std::env::var_os("X5_PLATE_DUMP").map(PathBuf::from) else {
@@ -2023,16 +2065,21 @@ fn plate_dump() {
                         format!("[{:.1},{:.1},{:.1},{:.1},{sc:.3}]", b[0], b[1], b[2], b[3])
                     })
                     .collect();
+                let q = c.poses[k].q;
                 writeln!(
                     log,
                     "{{\"file\":\"{file}\",\"clip\":\"{name}\",\"frame\":{k},\"dir\":[{:.5},{:.5},{:.5}],\"ext\":[{:.5},{:.5}],\
-                     \"boxes\":[{}]}}",
+                     \"boxes\":[{}],\"q\":[{},{},{},{}]}}",
                     cam.f.x,
                     cam.f.y,
                     cam.f.z,
                     cam.ext.x,
                     cam.ext.y,
-                    boxes.join(",")
+                    boxes.join(","),
+                    q.x,
+                    q.y,
+                    q.z,
+                    q.w
                 )
                 .unwrap();
                 n += 1;

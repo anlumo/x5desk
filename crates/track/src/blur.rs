@@ -1,7 +1,7 @@
 //! Blurs privacy regions ([`crate::Region`]) in an equirect before encoding: a render pass from `src` into `dst`, the
 //! same size and in the stitcher's layout; `Rgba8Unorm` or `Rgba16Float` (any filterable colour format: the pipeline
-//! is made for `dst`'s). Each region is an ellipse on the sphere (its box's angular size, upright), blurred over a
-//! disc of a third of its smaller half extent and feathered over its last fifth.
+//! is made for `dst`'s). Each region is an ellipse on the sphere (its box's angular size, upright along its `up`),
+//! blurred over a disc of a third of its smaller half extent and feathered over its last fifth.
 
 use crate::Region;
 use glam::Vec3;
@@ -156,7 +156,7 @@ impl Blur {
         let (w, h) = (s.width as f32, s.height as f32);
         self.regs.clear();
         for x in r {
-            let c = crate::Cam::new(x.dir, Vec3::Z, crate::tan(x.size) / 2.0);
+            let c = crate::Cam::new(x.dir, x.up, crate::tan(x.size) / 2.0);
             let v = |v: Vec3, k: f32| [v.x, v.y, v.z, k];
             // the bound of the feathered ellipse: a cap of radius `a` around the centre, in columns and rows
             let a = (1.25 * c.ext.length()).atan();

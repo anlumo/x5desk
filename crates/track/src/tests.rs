@@ -927,6 +927,7 @@ fn hide() {
         dir: dir(10.0 * k as f32 / fps, -5.0),
         size: Vec2::new(3.0, 4.0),
         score: 0.9,
+        up: Vec3::Z,
     };
     let mut h = Hide::new();
     for k in (9..90).step_by(3) {
@@ -1275,12 +1276,14 @@ fn beats() {
     }
 }
 
-/// The blur on a checkerboard equirect (1 px squares, Rgba8Unorm) with regions in the middle, across the seam and on
-/// the zenith: pixels well inside each region come out flat (the squares averaged), pixels away from all are copied
-/// unchanged.
+/// The blur on a checkerboard equirect (1 px squares, Rgba8Unorm) with regions in the middle, across the seam, on the
+/// zenith and a wide one turned 60° about its centre (its `up`, as in an unlevelled export): pixels well inside each
+/// region come out flat (the squares averaged), pixels away from all, and where the wide one would lie upright, are
+/// copied unchanged.
 #[test]
 fn blur() {
     use crate::{Blur, Region};
+    use glam::Quat;
     let (_, _, dev, q) = open();
     let (w, h) = (512u32, 256u32);
     let px: Vec<u8> = (0..w * h)
@@ -1324,9 +1327,19 @@ fn blur() {
         dir: dir(y, p),
         size: Vec2::splat(s),
         score: 1.0,
+        up: Vec3::Z,
+    };
+    let wide = Region {
+        size: Vec2::new(40.0, 12.0),
+        ..r(-135.0, 0.0, 0.0)
     };
     // yaw 180 is the seam (column 0)
-    let regs = [r(0.0, 0.0, 20.0), r(180.0, -20.0, 20.0), r(0.0, 90.0, 30.0)];
+    let regs = [
+        r(0.0, 0.0, 20.0),
+        r(180.0, -20.0, 20.0),
+        r(0.0, 90.0, 30.0),
+        wide.turn(Quat::from_axis_angle(wide.dir, 60f32.to_radians())),
+    ];
     let mut b = Blur::new(&dev, wgpu::TextureFormat::Rgba8Unorm);
     let mut enc = dev.create_command_encoder(&Default::default());
     b.run(
@@ -1346,13 +1359,10 @@ fn blur() {
         ((x as u32).min(w - 1), (y.round() as u32).min(h - 1))
     };
     let v = |(x, y): (u32, u32)| o[((y * w + x) * 4) as usize] as i32;
+    let ext = |g: &Region| (g.size / 2.0).map(|a| a.to_radians().tan());
     for g in &regs {
         // inside: the centre and points 0.6 of the way to the edge, flat grey
-        let c = Cam::new(
-            g.dir,
-            Vec3::Z,
-            Vec2::splat((g.size.x / 2.0).to_radians().tan()),
-        );
+        let c = Cam::new(g.dir, g.up, ext(g));
         for p in [
             Vec2::ZERO,
             Vec2::new(0.6, 0.0),
@@ -1363,13 +1373,18 @@ fn blur() {
             assert!((x - 128).abs() < 40, "region {:?} at {p}: {x}", g.dir);
         }
     }
-    // away from all: unchanged
+    // away from all, and 0.6 of the way along the wide one's width were it upright: unchanged
     let mut same = 0;
-    for (y, p) in [(90.0, 0.0), (-90.0, 30.0), (45.0, -60.0), (120.0, 20.0)] {
-        let (x, yy) = at(dir(y, p));
+    let flat = Cam::new(wide.dir, Vec3::Z, ext(&wide)).ray(Vec2::new(0.6, 0.0));
+    for d in [(90.0, 0.0), (-90.0, 30.0), (45.0, -60.0), (120.0, 20.0)]
+        .map(|(y, p)| dir(y, p))
+        .into_iter()
+        .chain([flat])
+    {
+        let (x, yy) = at(d);
         same += (v((x, yy)) == px[((yy * w + x) * 4) as usize] as i32) as u32;
     }
-    assert_eq!(same, 4, "pixels outside the regions changed");
+    assert_eq!(same, 5, "pixels outside the regions changed");
 }
 
 /// macOS: YuNet through Core ML (FP16 on the Neural Engine) against burn's (f32 on the GPU) on the same crops of a
