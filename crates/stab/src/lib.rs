@@ -23,7 +23,7 @@
 //!   switches between 10 and 20 ms: gyro-vs-visual residual 0.0214°/frame at the record time, 0.0146 at
 //!   mid-exposure. With it the offset is +1.14 ms (v627) and +0.84 ms (v606) (v635: +2.5, poorly defined); without
 //!   it they disagree (−6.4 / −1.2 ms).
-//! - **Rolling shutter** ([`RS`], [`Opts::new`]): `rolling_shutter_time` (#25) is the readout in ms, along texture
+//! - **Rolling shutter** ([`RS`], [`Opts::new`]): the rolling shutter time (#25) is the readout in ms, along texture
 //!   rows, row 0 first, the same on both lenses. The inter-frame motion is most rigid, after moving every tracked
 //!   ray to its row's time, at a readout of 21.6 ms on v606 (trailer 21.24) and 12.1 ms on v627 (PureVideo, trailer
 //!   11.84). At the trailer's readout (v606) the rigid-fit residual is 0.956 px, 0.978 without the term; either
@@ -50,7 +50,7 @@
 //! - **Yaw** (not corrected: no magnetometer): gyro minus visual rotation over the clip leaves a bias about body Z
 //!   of 0.075°/s on v627; direction lock turns −1.9° in 22 s there (visual). On v606 (walking past near columns) the
 //!   same measures give 0.63°/s and −22.3° in 31 s, but parallax biases the visual rotation there (that fit also
-//!   puts 1.2°/s on the pitch axis), so the true drift is between. The trailer's `gyro_calib` (#31, seven f64,
+//!   puts 1.2°/s on the pitch axis), so the true drift is between. The trailer's gyro calibration (#31, seven f64,
 //!   the same in all three clips) matches none of these biases; it is not used.
 //! - IMU stamps come in batches of 16, 1 ms apart, at a true 1002 Hz: up to ~30 µs off, ignored.
 

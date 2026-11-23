@@ -86,11 +86,11 @@ pub struct St {
 enum Flow {
     Pair(Pending<()>),
     Wake(Pending<Camera>),
-    Ap(Pending<pb::options::WifiInfo>),
-    Join(String, Pending<msg::CameraWifiConnectionResult>),
+    Ap(Pending<pb::settings::Wifi>),
+    Join(String, Pending<msg::StationNote>),
     /// the station read: the Wi-Fi mode first (the camera kept for the next request), then the connection
     Mode(Camera, Pending<i32>),
-    Sta(Option<i32>, Pending<msg::WifiConnectionInfo>),
+    Sta(Option<i32>, Pending<msg::Station>),
 }
 
 /// How long the camera's user gets to allow the connection, how long a wake-up and a station-mode join may take (the
@@ -117,7 +117,7 @@ struct W {
     again: bool,
 }
 
-/// `AuthorizationStatus` and `AuthorizationResult` as the user reads them.
+/// `AuthorizeReply::status` and `AuthNote::outcome` as the user reads them.
 fn why(e: &Error) -> String {
     match e {
         Error::Unauthorized(2) | Error::Refused(3) => "the camera is busy".into(),
@@ -295,7 +295,7 @@ impl W {
                     ),
                     Step::Retry(e) => format!("connect failed ({e}), trying again"),
                     Step::Connected(_) => "connected".into(),
-                    Step::Options(o) => format!("camera answers: {}", o.camera_type),
+                    Step::Options(o) => format!("camera answers: {}", o.model),
                     Step::Synced(_) => "options read".into(),
                     Step::Auth(0) => "authorized".into(),
                     Step::Auth(1) => "allow this computer on the camera's screen".into(),
@@ -398,11 +398,8 @@ impl W {
             }),
             Flow::Join(s, p) => p.poll().map(|r| match r {
                 Ok(r) => {
-                    let ip = r
-                        .wifi_connection_info
-                        .map(|i| i.ip_addr)
-                        .unwrap_or_default();
-                    let k = r.wifi_connection_result;
+                    let ip = r.station.map(|i| i.ip).unwrap_or_default();
+                    let k = r.result;
                     self.st.sta = Some((k, s.clone(), ip.clone()));
                     let ok = matches!(k, 0 | 5);
                     (
@@ -427,8 +424,7 @@ impl W {
             Flow::Sta(m, p) => p.poll().map(|r| match r {
                 Ok(i) => {
                     let ap = *m == Some(msg::AP);
-                    self.st.sta =
-                        (!ap && !i.ip_addr.is_empty()).then_some((i.result, i.ssid, i.ip_addr));
+                    self.st.sta = (!ap && !i.ip.is_empty()).then_some((i.result, i.ssid, i.ip));
                     let n = match (ap, &self.st.sta) {
                         (true, _) => {
                             "the camera's Wi-Fi is in access-point mode: no station connection"
@@ -869,13 +865,13 @@ pub fn sim(sta: bool) -> Open {
 }
 
 /// The simulated X5's Wi-Fi: its mode ([`msg::AP`] at first), its station-mode connection.
-type Net = (i32, msg::WifiConnectionInfo);
+type Net = (i32, msg::Station);
 
 /// On HomeNet from an earlier session.
 fn home() -> Net {
-    let i = msg::WifiConnectionInfo {
+    let i = msg::Station {
         ssid: "HomeNet".into(),
-        ip_addr: "192.168.1.57".into(),
+        ip: "192.168.1.57".into(),
         result: 5,
         ..Default::default()
     };
@@ -910,55 +906,52 @@ fn answer(c: u16, q: &[u8], s: &ble::Sim, w: &mut Net) -> (u16, Vec<u8>) {
     };
     match c {
         code::GET_OPTIONS => {
-            let o = pb::Options {
-                camera_type: "Insta360 X5".into(),
-                wifi_info: Some(pb::options::WifiInfo {
+            let o = pb::Settings {
+                model: "Insta360 X5".into(),
+                wifi: Some(pb::settings::Wifi {
                     ssid: "X5 SIM001.OSC".into(),
                     password: "88888888".into(),
                     ..Default::default()
                 }),
                 ..Default::default()
             };
-            let r = pb::GetOptionsResp {
-                option_types: vec![],
-                value: Some(o),
+            let r = pb::ReadSettingsReply {
+                keys: vec![],
+                settings: Some(o),
             };
             (200, r.encode_to_vec())
         }
         code::CHECK_AUTH => {
-            // SUCCESS for BLE_CONNECT with the zero spelled out: the X5 sends a non-empty 8209 (PROTOCOL.md §5.2)
+            // OUTCOME_GRANTED for AUTH_OP_BLE with the zero spelled out: the X5 sends a non-empty 8209 (PROTOCOL.md §5.2)
             later(code::AUTH_RESULT, vec![8, 0]);
-            let r = pb::CheckAuthorizationResp {
-                authorization_status: 1,
-                ..Default::default()
-            };
+            let r = pb::AuthorizeReply { status: 1 };
             (200, r.encode_to_vec())
         }
         code::SET_WIFI_CONN => {
-            let i = msg::SetWifiConnectionInfo::decode(q)
+            let i = msg::JoinStation::decode(q)
                 .ok()
-                .and_then(|m| m.wifi_connection_info)
+                .and_then(|m| m.station)
                 .unwrap_or_default();
-            w.1 = msg::WifiConnectionInfo {
+            w.1 = msg::Station {
                 ssid: i.ssid,
-                ip_addr: "192.168.1.57".into(),
+                ip: "192.168.1.57".into(),
                 ..Default::default()
             };
-            let r = msg::CameraWifiConnectionResult {
-                wifi_connection_result: 0,
-                wifi_connection_info: Some(w.1.clone()),
+            let r = msg::StationNote {
+                result: 0,
+                station: Some(w.1.clone()),
             };
             later(code::WIFI_STATUS, r.encode_to_vec());
             (200, vec![])
         }
         code::SET_WIFI_MODE => {
-            w.0 = msg::SetWifiMode::decode(q).map_or(w.0, |m| m.wifi_mode);
+            w.0 = msg::WriteWifiMode::decode(q).map_or(w.0, |m| m.mode);
             (200, vec![])
         }
-        code::GET_WIFI_MODE => (200, msg::GetWifiModeResp { wifi_mode: w.0 }.encode_to_vec()),
+        code::GET_WIFI_MODE => (200, msg::WifiModeReply { mode: w.0 }.encode_to_vec()),
         code::GET_WIFI_CONN => {
-            let r = msg::GetWifiConnectionInfoResp {
-                wifi_connection_info: Some(w.1.clone()),
+            let r = msg::StationReply {
+                station: Some(w.1.clone()),
             };
             (200, r.encode_to_vec())
         }

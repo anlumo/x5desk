@@ -1113,7 +1113,7 @@ fn stop_own(sh: &Arc<Shared>) {
                         let v = match conf::shot(&rec.mode) {
                             Shot::Lapse(x) => cam.stop_timelapse(x).wait()?,
                             Shot::Rec(x) => cam.stop_capture(x).wait()?,
-                            _ => cam.stop_capture(pb::CaptureMode::Normal).wait()?,
+                            _ => cam.stop_capture(pb::RecordMode::Normal).wait()?,
                         };
                         return Ok(Stopped::Clip(v.uri));
                     }
@@ -2234,7 +2234,7 @@ mod tests {
         // the host's threads gone (the capture thread within 100 ms): only this test touches the state
         h.shutdown().await;
         tokio::time::sleep(Duration::from_millis(300)).await;
-        use pb::CameraCaptureState as C;
+        use pb::CaptureState as C;
         let st = |c: C, note: Option<&str>| capture::St {
             on: true,
             mode: Some("VIDEO_NORMAL".into()),
@@ -2257,25 +2257,25 @@ mod tests {
         };
         let set = |rec: &Rec| {
             let mut s = h.sh.st.lock().unwrap();
-            (s.cap, s.csid, s.judged) = (st(C::NormalCapture, None), 7, 7);
+            (s.cap, s.csid, s.judged) = (st(C::Recording, None), 7, 7);
             // the connection's report: the session gone
             (s.tsid, s.rec, s.ended) = (8, Some(rec.clone()), None);
         };
         set(&rec);
         let stop = "capture stopped: LowBattery";
-        h.sh.apply_cap(6, st(C::NotCapture, Some(stop)));
+        h.sh.apply_cap(6, st(C::Idle, Some(stop)));
         assert!(
             h.with(|s| s.rec.is_some() && s.csid == 7),
             "an older session's"
         );
-        h.sh.apply_cap(7, st(C::NotCapture, Some(stop)));
+        h.sh.apply_cap(7, st(C::Idle, Some(stop)));
         h.with(|s| {
             assert!(s.rec.is_none() && !capturing(s));
             assert_eq!(s.ended, Some((3, Err(stop.to_string()))));
         });
         // nor taken as the camera's now
         set(&rec);
-        h.sh.apply_cap(7, st(C::NormalCapture, None));
+        h.sh.apply_cap(7, st(C::Recording, None));
         assert!(h.with(|s| s.rec.is_some() && s.csid == 7 && !capturing(s)));
     }
 

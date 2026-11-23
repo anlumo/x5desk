@@ -1,9 +1,9 @@
 //! Read-only checks against a real X5 in USB app mode.
 //!
 //! x5 info                     identity, options, capture status, storage
-//! x5 ls                       all files (VIDEO_AND_PHOTO, DNG) and the file info list
+//! x5 ls                       all files (MEDIA_VIDEO_PHOTO, MEDIA_RAW) and the file info list
 //! x5 conf <out>               the capture-parameter JSON
-//! x5 favs                     favourite flags (GET_EDITINFO_LIST): path, flag, modify_timestamp
+//! x5 favs                     favourite flags (GET_EDITINFO_LIST): path, flag, modified
 //! x5 raw <code> [hex]         a request from `RO`, raw
 //! x5 thumb <uri> <out>        trailer thumbnail
 //! x5 burst <n>                thumbnails of the first n files, one by one, then all n in flight at once
@@ -61,33 +61,23 @@ fn main() -> link::Result<()> {
                     "identify ({:.0} ms): {id:?}",
                     t.elapsed().as_secs_f64() * 1e3
                 );
-                use pb::OptionType::*;
+                use pb::Setting::*;
                 let o = c
-                    .options(&[
-                        StorageState,
-                        StorageStateList,
-                        InternalSplicing,
-                        PhotoSubMode,
-                        VideoSubMode,
-                    ])
+                    .options(&[Storage, Storages, Stitching, PhotoMode, VideoMode])
                     .wait()?;
                 println!(
-                    "storage {:?}\nsplicing {} photo_sub_mode {:?} video_sub_mode {:?}",
-                    o.storage_state,
-                    o.enable_internal_splicing,
-                    o.photo_sub_mode(),
-                    o.video_sub_mode()
+                    "storage {:?}\nsplicing {} photo_mode {:?} video_mode {:?}",
+                    o.storage,
+                    o.stitching,
+                    o.photo_mode(),
+                    o.video_mode()
                 );
                 println!("capture status {:?}", c.capture_status().wait()?);
             }
             "ls" => {
                 let t = Instant::now();
-                let f = c
-                    .files(pb::MediaType::VideoAndPhoto, pb::CardLocation::StorClCamera)
-                    .wait()?;
-                let d = c
-                    .files(pb::MediaType::Dng, pb::CardLocation::StorClCamera)
-                    .wait()?;
+                let f = c.files(pb::Media::VideoPhoto, pb::Volume::Camera).wait()?;
+                let d = c.files(pb::Media::Raw, pb::Volume::Camera).wait()?;
                 println!(
                     "{} files + {} DNG in {:.0} ms",
                     f.len(),
@@ -98,7 +88,7 @@ fn main() -> link::Result<()> {
                     println!("{u}")
                 }
                 let t = Instant::now();
-                let fi = c.file_infos(pb::CardLocation::StorClCamera).wait()?;
+                let fi = c.file_infos(pb::Volume::Camera).wait()?;
                 let n = fi.iter().filter(|f| f.1.is_some()).count();
                 println!(
                     "file info: {} entries, {n} with metadata, {:.0} ms",
@@ -107,8 +97,8 @@ fn main() -> link::Result<()> {
                 );
                 if let Some((p, Some(m))) = fi.iter().find(|f| f.1.is_some()) {
                     println!(
-                        "{p}: size {} creation {} dimension {:?} total_time {} category {}",
-                        m.file_size, m.creation_time, m.dimension, m.total_time, m.file_category
+                        "{p}: size {} creation {} dims {:?} secs {} category {}",
+                        m.size, m.created, m.dims, m.secs, m.category
                     );
                 }
             }
@@ -128,22 +118,18 @@ fn main() -> link::Result<()> {
             }
             "favs" => {
                 let l = c.favorites().wait()?;
-                let f = l.edit_file_info_list.iter().filter(|e| {
-                    e.favorite_info
-                        .as_ref()
-                        .is_some_and(|f| f.playback_is_favorite)
-                });
+                let f = l
+                    .marks
+                    .iter()
+                    .filter(|e| e.favorite.as_ref().is_some_and(|f| f.on));
                 println!(
                     "edit info: {} files, {} favourites",
-                    l.edit_file_info_list.len(),
+                    l.marks.len(),
                     f.count()
                 );
-                for e in &l.edit_file_info_list {
-                    let f = e.favorite_info.unwrap_or_default();
-                    println!(
-                        "{} {} {}",
-                        e.file_path, f.playback_is_favorite, f.modify_timestamp
-                    );
+                for e in &l.marks {
+                    let f = e.favorite.unwrap_or_default();
+                    println!("{} {} {}", e.path, f.on, f.modified);
                 }
             }
             "conf" => {
@@ -161,9 +147,7 @@ fn main() -> link::Result<()> {
                 );
             }
             "burst" => {
-                let f = c
-                    .files(pb::MediaType::VideoAndPhoto, pb::CardLocation::StorClCamera)
-                    .wait()?;
+                let f = c.files(pb::Media::VideoPhoto, pb::Volume::Camera).wait()?;
                 let f = &f[..a[1].parse::<usize>().unwrap().min(f.len())];
                 let t = Instant::now();
                 let one: Vec<_> = f

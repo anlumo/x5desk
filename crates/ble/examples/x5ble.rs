@@ -13,7 +13,7 @@
 //!                                    the link and identity, read the Wi-Fi info (password masked), disconnect
 //! x5ble connect <suffix|address> [uuid] [wakeup]
 //!                                    `info`, then authorize (confirm on the camera), with `wakeup` switch on
-//!                                    `bt_wakeup_sw` (for `wake`), wait for the AP and print its credentials
+//!                                    `ble_wake` (for `wake`), wait for the AP and print its credentials
 //! ```
 //!
 //! `uuid` (or `X5_UUID`, also for `-`) is the persistent client id; without one a fresh id is made and printed.
@@ -264,12 +264,12 @@ fn step(s: &Step) -> String {
         },
         Step::Options(o) => format!(
             "identity {:?}, battery {:?}",
-            o.camera_type,
-            o.battery_info.as_ref().map(|b| b.battery_level)
+            o.model,
+            o.battery.as_ref().map(|b| b.level)
         ),
         Step::Synced(Ok(o)) => format!(
-            "option sync: bt_wakeup_sw {}, firmware {:?} / {:?}",
-            o.bt_wakeup_sw, o.firmware_revision, o.ota_pkg_version
+            "option sync: ble_wake {}, firmware {:?} / {:?}",
+            o.ble_wake, o.firmware, o.ota_version
         ),
         Step::Synced(Err(e)) => format!("option sync failed: {e}"),
         Step::Auth(s) => format!(
@@ -354,15 +354,15 @@ fn session(c: &ble::Camera, auth: Option<(String, bool)>) -> R {
         None => println!("no notification within 5 s (camera on USB or held by another phone?)"),
     }
     let o = w(c.options(&[48, 15, 11, 198]))?;
-    let sn = &o.serial_number;
+    let sn = &o.serial;
     println!(
         "model {:?}, serial …{}, firmware {:?} / {:?}, battery {:?}, connections {:?}",
-        o.camera_type,
+        o.model,
         &sn[sn.len().saturating_sub(6)..],
-        o.firmware_revision,
-        o.ota_pkg_version,
-        o.battery_info,
-        o.connection_status
+        o.firmware,
+        o.ota_version,
+        o.battery,
+        o.links
     );
     // PROTOCOL.md §11 X14: does the camera hand out the password before authorization?
     match w(c.wifi()) {
@@ -376,7 +376,7 @@ fn session(c: &ble::Camera, auth: Option<(String, bool)>) -> R {
             },
             w.channel,
             w.mode,
-            w.wifi_state
+            w.state
         ),
         Err(e) => println!("before authorization: {e}"),
     }
@@ -388,13 +388,13 @@ fn session(c: &ble::Camera, auth: Option<(String, bool)>) -> R {
     w(c.authorize(&uuid, Duration::from_secs(60)))?;
     println!("authorized after {:.1} s", t0.elapsed().as_secs_f64());
     if wakeup {
-        let on = ble::pb::Options {
-            bt_wakeup_sw: 1,
+        let on = ble::pb::Settings {
+            ble_wake: 1,
             ..Default::default()
         };
         w(c.set_options(&[97], on))?;
     }
-    println!("bt_wakeup_sw {}", w(c.options(&[97]))?.bt_wakeup_sw);
+    println!("ble_wake {}", w(c.options(&[97]))?.ble_wake);
     let t0 = Instant::now();
     let a = w(c.ap(Duration::from_secs(30)))?;
     println!(
@@ -404,7 +404,7 @@ fn session(c: &ble::Camera, auth: Option<(String, bool)>) -> R {
         a.password,
         a.channel,
         a.mode,
-        a.wifi_state
+        a.state
     );
     Ok(())
 }

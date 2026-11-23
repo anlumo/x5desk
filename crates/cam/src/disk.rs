@@ -314,10 +314,10 @@ pub fn list(root: &Path) -> io::Result<Vec<Item>> {
     uris.sort();
     let ed = fs::read(root.join("DCIM/.editinfo_list.list"))
         .ok()
-        .and_then(|b| pb::EditFileInfoList::decode(&b[..]).ok())
+        .and_then(|b| pb::FileMarks::decode(&b[..]).ok())
         .unwrap_or_default();
     // one trailer per item: grouped first to know each item's first file, then again with their metadata
-    let infos: Vec<(String, Option<pb::ExtraMetadata>)> = album::group(&uris, &[], &ed)
+    let infos: Vec<(String, Option<pb::Metadata>)> = album::group(&uris, &[], &ed)
         .into_iter()
         .map(|it| {
             let u = &it.uris[0];
@@ -328,17 +328,17 @@ pub fn list(root: &Path) -> io::Result<Vec<Item>> {
 }
 
 /// Date, length and size from a file's trailer (lenient: the camera's own fields), the size from the file system.
-fn meta(p: &Path) -> Option<pb::ExtraMetadata> {
+fn meta(p: &Path) -> Option<pb::Metadata> {
     let n = fs::metadata(p).ok()?.len();
     let m = Trailer::open(p).map(|t| t.meta).unwrap_or_default();
-    Some(pb::ExtraMetadata {
-        creation_time: m.created,
-        total_time_ms: m.duration_ms,
-        dimension: (m.dimension[0] > 0).then(|| pb::extra_metadata::Vector2 {
+    Some(pb::Metadata {
+        created: m.created,
+        ms: m.duration_ms,
+        dims: (m.dimension[0] > 0).then(|| pb::metadata::Pair {
             x: m.dimension[0] as i32,
             y: m.dimension[1] as i32,
         }),
-        file_size: n,
+        size: n,
         ..Default::default()
     })
 }

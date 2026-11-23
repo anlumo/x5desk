@@ -1,0 +1,92 @@
+// Interface messages for talking to the X5 camera over USB, Wi-Fi and Bluetooth, written for x5desk for
+// interoperability: authorization, the phone description and errors.
+syntax = "proto3";
+
+package cam;
+
+message Authorize {
+  string client       = 1;
+  Initiator initiator = 2;
+
+  enum Initiator {
+    INITIATOR_UNKNOWN = 0;
+  }
+}
+
+message AuthorizeReply {
+  Status status = 1;
+
+  enum Status {
+    STATUS_GRANTED = 0;
+  }
+}
+
+message AuthNote {
+  Outcome outcome = 1;
+  AuthOp op       = 2;
+
+  enum Outcome {
+    OUTCOME_GRANTED = 0;
+  }
+}
+
+enum AuthOp {
+  AUTH_OP_BLE = 0;
+}
+
+message Phone {
+  string maker = 2;
+  string os    = 4;
+}
+
+message Error {
+  Code code   = 1;
+  string text = 2;
+
+  enum Code {
+    CODE_UNKNOWN              = 0;
+    CODE_UNKNOWN_REQUEST      = 1;
+    CODE_BAD_PAYLOAD          = 2;
+    CODE_FAILED               = 3;
+    CODE_TOO_MANY_FILES       = 4;
+    CODE_BUSY                 = 5;
+    CODE_OK                   = 1000;
+    CODE_OFFSET_OUT_OF_RANGE  = 1001;
+    CODE_ZERO_LIMIT           = 1002;
+    CODE_BAD_MEDIA            = 1003;
+    CODE_NO_SUCH_FILE         = 1004;
+    CODE_NOT_A_MEDIA_FILE     = 1005;
+    CODE_NO_STORAGE           = 1006;
+    CODE_FILE_BUSY            = 1007;
+    CODE_FS_ERROR             = 1008;
+    CODE_LIMITED_MODE         = 1009;
+    CODE_CAMERA_STOPPED       = 1010;
+    CODE_CAMERA_STATE         = 1011;
+    CODE_PREVIEW_STATE        = 1012;
+    CODE_PREVIEW_FAILED       = 1013;
+    CODE_NO_RESOURCES         = 1014;
+    CODE_CAPTURE_STREAM       = 1015;
+    CODE_CAPTURE_TIMEOUT      = 1016;
+    CODE_CAPTURE_FAILED       = 1017;
+    CODE_STORAGE_FULL         = 1018;
+    CODE_SAVE_FAILED          = 1019;
+    CODE_RECORD_STREAM        = 1020;
+    CODE_OVERHEAT             = 1021;
+    CODE_HARDWARE             = 1022;
+    CODE_RELEASE_FAILED       = 1023;
+    CODE_SET_FAILED           = 1024;
+    CODE_UNSUPPORTED_SETTING  = 1025;
+    CODE_BAD_SETTING          = 1026;
+    CODE_GET_FAILED           = 1027;
+    CODE_EXTRA_FAILED         = 1028;
+    CODE_TIME_LEFT_FAILED     = 1029;
+    CODE_SECOND_STREAM        = 1030;
+    CODE_BAD_FILE_INDEX       = 1031;
+    CODE_BAD_FAVORITE         = 1032;
+    CODE_BAD_FILE_PATH        = 1033;
+    CODE_TRACKING_STREAM      = 1034;
+    CODE_FLIGHT_MODE          = 1035;
+    CODE_CONFIG_DELETE_FAILED = 1036;
+    CODE_CONFIG_REVISION      = 1037;
+  }
+}

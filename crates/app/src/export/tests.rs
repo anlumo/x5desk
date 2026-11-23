@@ -991,7 +991,7 @@ fn photo() {
     let jpg = std::fs::read(&src).unwrap();
     let insp = |cat: u8, name: &str| {
         let p = fixture(name);
-        // ExtraMetadata field 129 (varint), then a record header (format, kind, size) and the V3 footer
+        // metadata field 129 (varint), then a record header (format, kind, size) and the V3 footer
         let md = [0x88, 0x08, cat];
         let mut b = [&jpg[..], &md, &[0, media::insv::METADATA, 3, 0, 0, 0]].concat();
         let mut foot = [0u8; 72];

@@ -34,7 +34,7 @@ use std::{
     time::Duration,
 };
 
-/// Request codes (`MessageCode`, PROTOCOL.md §6.1).
+/// Request codes (PROTOCOL.md §6.1).
 pub mod code {
     pub const START_LIVE: u16 = 1;
     pub const STOP_LIVE: u16 = 2;
@@ -61,7 +61,7 @@ pub mod code {
     pub const FORMAT_STORAGE: u16 = 232;
 }
 
-/// Live-preview packet kinds (`StreamType`, §4.2, §8.11).
+/// Live-preview packet kinds (§4.2, §8.11).
 pub mod stream {
     /// H.264 Annex-B, one access unit per packet, both fisheyes side by side.
     pub const VIDEO: u8 = 0x20;
@@ -88,7 +88,7 @@ pub enum Error {
     Status(u16, Option<pb::Error>),
     Decode(prost::DecodeError),
     Http(String),
-    /// Wi-Fi authorization refused or not given (`AuthorizationStatus` / `AuthorizationResult`).
+    /// Wi-Fi authorization refused or not given (`AuthorizeReply::status` / `AuthNote::outcome`).
     Unauthorized(i32),
     Cancelled,
     /// The camera's file changed since the partial download; the partial file was removed.
@@ -107,7 +107,7 @@ impl fmt::Display for Error {
             Error::Timeout => f.write_str("timeout"),
             Error::Silent(n) => write!(f, "no answer to the sync in 30 s ({n} bytes received)"),
             Error::Closed => f.write_str("session closed"),
-            Error::Status(s, Some(e)) => write!(f, "status {s}: {:?} {}", e.code(), e.message),
+            Error::Status(s, Some(e)) => write!(f, "status {s}: {:?} {}", e.code(), e.text),
             Error::Status(s, None) => write!(f, "status {s}"),
             Error::Decode(e) => write!(f, "{e}"),
             Error::Http(e) => write!(f, "HTTP: {e}"),
@@ -182,27 +182,27 @@ impl Frame {
 /// arrives as `Other`.
 #[derive(Clone, Debug)]
 pub enum Note {
-    AutoSplit(pb::NotificationCaptureAutoSplit),
-    Battery(pb::BatteryInfo),
-    BatteryLow(pb::BatteryInfo),
-    Shutdown(pb::NotificationShutdown),
-    Storage(pb::NotificationCardUpdate),
+    AutoSplit(pb::SplitNote),
+    Battery(pb::Battery),
+    BatteryLow(pb::Battery),
+    Shutdown(pb::ShutdownNote),
+    Storage(pb::CardNote),
     StorageFull,
-    CaptureStopped(pb::NotificationCaptureStopped),
-    PictureState(pb::NotificationTakePictureStateUpdate),
-    CaptureStatus(pb::CaptureStatus),
-    Auth(pb::NotificationAuthorizationResult),
-    /// Temperature level (8214, `CAM_TEMPERATURE_VALUE`).
-    Temp(pb::TempState),
+    CaptureStopped(pb::StoppedNote),
+    PictureState(pb::PhotoNote),
+    CaptureStatus(pb::CaptureNote),
+    Auth(pb::AuthNote),
+    /// Temperature level (8214).
+    Temp(pb::TempNote),
     WifiStarted,
-    Posture(pb::NotificationCameraPostureUpdate),
-    RecordStatus(pb::RecordStatus),
-    LiveParams(pb::LiveStreamParamsUpdate),
-    SubMode(pb::NotifyCameraSubMode),
-    DeleteResult(pb::NotificationDeleteFileOperation),
-    StorageLocation(pb::NotificationStorageLocationChange),
-    Photo(pb::TakePictureResponse),
-    PhotoOptions(pb::NotificationPhotographyOptions),
+    Posture(pb::PostureNote),
+    RecordStatus(pb::RecordNote),
+    LiveParams(pb::LiveNote),
+    SubMode(pb::ModeNote),
+    DeleteResult(pb::DeleteNote),
+    StorageLocation(pb::VolumeNote),
+    Photo(pb::TakePhotoReply),
+    PhotoOptions(pb::ParamsNote),
     Other(u16, Vec<u8>),
 }
 
@@ -213,11 +213,11 @@ impl Note {
         }
         let n = match code {
             8194 => d(b, Note::AutoSplit),
-            8195 => d(b, |m: pb::NotificationBatteryUpdate| {
-                Note::Battery(m.battery_status.unwrap_or_default())
+            8195 => d(b, |m: pb::BatteryNote| {
+                Note::Battery(m.battery.unwrap_or_default())
             }),
-            8196 => d(b, |m: pb::NotificationBatteryLow| {
-                Note::BatteryLow(m.battery_status.unwrap_or_default())
+            8196 => d(b, |m: pb::BatteryLowNote| {
+                Note::BatteryLow(m.battery.unwrap_or_default())
             }),
             8197 => d(b, Note::Shutdown),
             8198 => d(b, Note::Storage),
@@ -279,11 +279,11 @@ pub struct Ident {
     pub model: String,
     pub serial: String,
     pub firmware: String,
-    pub battery: Option<pb::BatteryInfo>,
+    pub battery: Option<pb::Battery>,
 }
 
 /// Width, height and NV12 picture of a trailer thumbnail as the X5 sends it (fw v1.13.21; 1280×640 for videos,
-/// 2560×1280 for photos): a 40-byte header with `u32` 1 (YUV, `thumbnail_type`), the total size, and width / height
+/// 2560×1280 for photos): a 40-byte header with `u32` 1 (YUV, the thumbnail type), the total size, and width / height
 /// at offsets 16 / 20. `None` for any other layout, also for a size that is zero or odd (no whole 2 × 2 chroma
 /// blocks).
 pub fn nv12(b: &[u8]) -> Option<(u32, u32, &[u8])> {
@@ -303,8 +303,8 @@ pub fn nv12(b: &[u8]) -> Option<(u32, u32, &[u8])> {
 }
 
 pub enum Mode {
-    Photo(pb::PhotoSubMode),
-    Video(pb::VideoSubMode),
+    Photo(pb::PhotoMode),
+    Video(pb::VideoMode),
 }
 
 pub(crate) type Done = Box<dyn FnOnce(Result<Vec<u8>>) + Send>;
@@ -369,21 +369,23 @@ fn ver(s: &str) -> Vec<u32> {
 }
 
 fn ident(b: Vec<u8>) -> Result<Ident> {
-    let o = dec::<pb::GetOptionsResp>(b)?.value.unwrap_or_default();
+    let o = dec::<pb::ReadSettingsReply>(b)?
+        .settings
+        .unwrap_or_default();
     // fw = the lower of 110 / 114 if both are set, else the set one, else 30 (§1.4).
-    let (a, b) = (&o.ota_pkg_version, &o.box_ota_pkg_version);
+    let (a, b) = (&o.ota_version, &o.box_ota_version);
     let firmware = match (a.is_empty(), b.is_empty()) {
         (false, false) => std::cmp::min_by_key(a, b, |s| ver(s)),
         (false, true) => a,
         (true, false) => b,
-        _ => &o.firmware_revision,
+        _ => &o.firmware,
     }
     .clone();
     Ok(Ident {
-        model: o.camera_type,
-        serial: o.serial_number,
+        model: o.model,
+        serial: o.serial,
         firmware,
-        battery: o.battery_info,
+        battery: o.battery,
     })
 }
 
@@ -548,125 +550,116 @@ impl Camera {
 
     /// Model, serial, firmware and battery.
     pub fn identify(&self) -> Pending<Ident> {
-        let q = pb::GetOptions {
-            option_types: vec![48, 15, 30, 110, 114, 11],
+        let q = pb::ReadSettings {
+            keys: vec![48, 15, 30, 110, 114, 11],
         };
         self.send(code::GET_OPTIONS, q.encode_to_vec(), T, ident)
     }
 
-    /// The camera fills only the options it knows; it echoes their types in `GetOptionsResp`.
-    pub fn options(&self, ts: &[pb::OptionType]) -> Pending<pb::Options> {
-        let q = pb::GetOptions {
-            option_types: ts.iter().map(|&t| t as i32).collect(),
+    /// The camera fills only the settings it knows; it echoes their keys in `ReadSettingsReply`.
+    pub fn options(&self, ts: &[pb::Setting]) -> Pending<pb::Settings> {
+        let q = pb::ReadSettings {
+            keys: ts.iter().map(|&t| t as i32).collect(),
         };
         self.send(code::GET_OPTIONS, q.encode_to_vec(), T, |b| {
-            Ok(dec::<pb::GetOptionsResp>(b)?.value.unwrap_or_default())
+            Ok(dec::<pb::ReadSettingsReply>(b)?
+                .settings
+                .unwrap_or_default())
         })
     }
 
     pub fn set_options(
         &self,
-        ts: &[pb::OptionType],
-        v: pb::Options,
-    ) -> Pending<pb::SetOptionsResp> {
-        let q = pb::SetOptions {
-            option_types: ts.iter().map(|&t| t as i32).collect(),
-            value: Some(v),
+        ts: &[pb::Setting],
+        v: pb::Settings,
+    ) -> Pending<pb::WriteSettingsReply> {
+        let q = pb::WriteSettings {
+            keys: ts.iter().map(|&t| t as i32).collect(),
+            settings: Some(v),
         };
         self.call(code::SET_OPTIONS, &q, T)
     }
 
-    pub fn photo_options(
-        &self,
-        ts: &[pb::PhotographyOptionType],
-        m: pb::FunctionMode,
-    ) -> Pending<pb::GetPhotographyOptionsResp> {
-        let q = pb::GetPhotographyOptions {
-            option_types: ts.iter().map(|&t| t as i32).collect(),
-            function_mode: m as i32,
+    pub fn photo_options(&self, ts: &[pb::Param], m: pb::Profile) -> Pending<pb::ReadParamsReply> {
+        let q = pb::ReadParams {
+            keys: ts.iter().map(|&t| t as i32).collect(),
+            profile: m as i32,
         };
         self.call(code::GET_PHOTO_OPTIONS, &q, T)
     }
 
     pub fn set_photo_options(
         &self,
-        ts: &[pb::PhotographyOptionType],
-        v: pb::PhotographyOptions,
-        m: pb::FunctionMode,
-    ) -> Pending<pb::SetPhotographyOptionsResp> {
-        let q = pb::SetPhotographyOptions {
-            option_types: ts.iter().map(|&t| t as i32).collect(),
-            value: Some(v),
-            function_mode: m as i32,
+        ts: &[pb::Param],
+        v: pb::Params,
+        m: pb::Profile,
+    ) -> Pending<pb::WriteParamsReply> {
+        let q = pb::WriteParams {
+            keys: ts.iter().map(|&t| t as i32).collect(),
+            params: Some(v),
+            profile: m as i32,
         };
         self.call(code::SET_PHOTO_OPTIONS, &q, T)
     }
 
-    /// Idle is an empty status (`state` NOT_CAPTURE).
-    pub fn capture_status(&self) -> Pending<pb::CameraCaptureStatus> {
+    /// Idle is an empty status (`state` IDLE).
+    pub fn capture_status(&self) -> Pending<pb::CaptureStatus> {
         self.send(code::CAPTURE_STATUS, vec![], T, |b| {
-            Ok(dec::<pb::GetCurrentCaptureStatusResp>(b)?
-                .status
-                .unwrap_or_default())
+            Ok(dec::<pb::CaptureStatusReply>(b)?.status.unwrap_or_default())
         })
     }
 
     /// All URIs of one media type on one card location, paged 100 at a time (§7.3).
-    pub fn files(&self, mt: pb::MediaType, loc: pb::CardLocation) -> Pending<Vec<String>> {
+    pub fn files(&self, mt: pb::Media, loc: pb::Volume) -> Pending<Vec<String>> {
         self.job(move |c| {
             let mut v = vec![];
             loop {
-                let q = pb::GetFileList {
-                    media_type: mt as i32,
-                    start: v.len() as u32,
+                let q = pb::ListFiles {
+                    media: mt as i32,
+                    offset: v.len() as u32,
                     limit: 100,
-                    card_location: loc as i32,
+                    volume: loc as i32,
                 };
-                let r: pb::GetFileListResp = c.call(code::GET_FILE_LIST, &q, T).wait()?;
-                if r.uri.is_empty() {
+                let r: pb::ListFilesReply = c.call(code::GET_FILE_LIST, &q, T).wait()?;
+                if r.uris.is_empty() {
                     break Ok(v);
                 }
-                v.extend(r.uri);
-                if v.len() >= r.total_count as usize {
+                v.extend(r.uris);
+                if v.len() >= r.total as usize {
                     break Ok(v);
                 }
             }
         })
     }
 
-    /// Per-file `ExtraMetadata` of photos and main videos (no LRVs); `None` where the camera sent none (§7.5).
-    pub fn file_infos(
-        &self,
-        loc: pb::CardLocation,
-    ) -> Pending<Vec<(String, Option<pb::ExtraMetadata>)>> {
-        let q = pb::GetFileInfoList {
-            card_location: loc as i32,
-        };
+    /// Per-file `Metadata` of photos and main videos (no LRVs); `None` where the camera sent none (§7.5).
+    pub fn file_infos(&self, loc: pb::Volume) -> Pending<Vec<(String, Option<pb::Metadata>)>> {
+        let q = pb::ListEntries { volume: loc as i32 };
         self.send(code::GET_FILEINFO_LIST, q.encode_to_vec(), LONG, |b| {
-            let l = dec::<pb::FileInfoList>(b)?;
+            let l = dec::<pb::Entries>(b)?;
             let m = |b: &[u8]| {
                 (!b.is_empty())
-                    .then(|| pb::ExtraMetadata::decode(b).ok())
+                    .then(|| pb::Metadata::decode(b).ok())
                     .flatten()
             };
-            Ok(l.file_info
+            Ok(l.entries
                 .into_iter()
-                .map(|f| (f.file_path, m(&f.metadata)))
+                .map(|f| (f.path, m(&f.meta)))
                 .collect())
         })
     }
 
     /// One trailer record of a camera file (`ExtraType`, §7.6), raw.
     pub fn file_extra(&self, uri: &str, kind: u32) -> Pending<Vec<u8>> {
-        use pb::get_file_extra::{GyroOptions, gyro_options::*};
+        use pb::read_extra::{Gyro, gyro::*};
         // The app always sends an empty time range.
-        let g = GyroOptions {
-            range: Some(Range::TimeRange(TimeRange::default())),
+        let g = Gyro {
+            range: Some(Range::Time(Time::default())),
         };
-        let q = pb::GetFileExtra {
+        let q = pb::ReadExtra {
             uri: uri.into(),
-            extra_type: kind,
-            gyro_options: Some(g),
+            kind,
+            gyro: Some(g),
         };
         self.send(code::GET_FILE_EXTRA, q.encode_to_vec(), T, Ok)
     }
@@ -680,41 +673,41 @@ impl Camera {
     /// No GET_FILE_PACKAGE_FINISH follows: the app sends that only to delete log files, and the X5 answers 400.
     pub fn conf(&self) -> Pending<(i32, Vec<u8>)> {
         self.job(|c| {
-            let r: pb::GetFileResp = c
-                .call(code::GET_FILE, &pb::GetFile { file_type: 3 }, T)
+            let r: pb::LocateFileReply = c
+                .call(code::GET_FILE, &pb::LocateFile { kind: 3 }, T)
                 .wait()?;
             Ok((r.version, c.get(&r.uri).wait()?))
         })
     }
 
-    pub fn delete(&self, uris: Vec<String>) -> Pending<pb::DeleteFilesResp> {
-        self.call(code::DELETE_FILES, &pb::DeleteFiles { uri: uris }, LONG)
+    pub fn delete(&self, uris: Vec<String>) -> Pending<pb::DeleteFilesReply> {
+        self.call(code::DELETE_FILES, &pb::DeleteFiles { uris }, LONG)
     }
 
-    /// Per-file edit info; `favorite_info` holds the favourite flags.
-    pub fn favorites(&self) -> Pending<pb::EditFileInfoList> {
+    /// Per-file marks; `favorite` holds the favourite flags.
+    pub fn favorites(&self) -> Pending<pb::FileMarks> {
         self.send(code::GET_EDITINFO_LIST, vec![], T, dec)
     }
 
-    /// Sets favourite flags: `material_url` = file path, `favorite_flag` 0/1, `modify_timestamp` = local time in
+    /// Sets favourite flags: `path` = file path, `on` 0/1, `modified` = local time in
     /// s (newer wins); the app sends at most 100 per request.
-    pub fn set_favorites(&self, v: Vec<pb::SetFavorite>) -> Pending<()> {
+    pub fn set_favorites(&self, v: Vec<pb::FavoriteFlag>) -> Pending<()> {
         self.send(
             code::SET_FAVORITE,
-            pb::SetFavoriteList { set_favorite: v }.encode_to_vec(),
+            pb::SetFavorites { flags: v }.encode_to_vec(),
             T,
             unit,
         )
     }
 
     /// Camera storage (location 0) is erased with ERASE_SD_CARD, other locations with FORMAT_STORAGE.
-    pub fn format(&self, loc: pb::CardLocation) -> Pending<()> {
+    pub fn format(&self, loc: pb::Volume) -> Pending<()> {
         let t = Duration::from_secs(120);
         match loc {
-            pb::CardLocation::StorClCamera => self.send(code::ERASE_SD, vec![], t, unit),
+            pb::Volume::Camera => self.send(code::ERASE_SD, vec![], t, unit),
             l => self.send(
                 code::FORMAT_STORAGE,
-                pb::FormatStorage { location: l as i32 }.encode_to_vec(),
+                pb::FormatVolume { volume: l as i32 }.encode_to_vec(),
                 t,
                 unit,
             ),
@@ -723,87 +716,75 @@ impl Camera {
 
     /// Camera clock: unix seconds, offset from UTC in s, IANA zone; then the zone alone. Both go out now, ahead of
     /// anything sent after, and neither waits for an answer: the app's two `setOptionAsync` (§5.1 step 5, §5.3).
-    pub fn set_time(&self, unix: u64, tz_s: i32, tz: &str) -> [Pending<pb::SetOptionsResp>; 2] {
-        use pb::OptionType::*;
-        let o = |local_time, time_zone_seconds_from_gmt| pb::Options {
-            local_time,
-            time_zone_seconds_from_gmt,
-            geographic_time_zone: tz.into(),
+    pub fn set_time(&self, unix: u64, tz_s: i32, tz: &str) -> [Pending<pb::WriteSettingsReply>; 2] {
+        use pb::Setting::*;
+        let o = |clock, utc_offset| pb::Settings {
+            clock,
+            utc_offset,
+            zone: tz.into(),
             ..Default::default()
         };
         [
-            self.set_options(&[LocalTime, TimeZone, GeographicTimeZone], o(unix, tz_s)),
-            self.set_options(&[GeographicTimeZone], o(0, 0)),
+            self.set_options(&[Clock, UtcOffset, Zone], o(unix, tz_s)),
+            self.set_options(&[Zone], o(0, 0)),
         ]
     }
 
-    /// Switches the capture mode by setting the photo or video sub-mode option (§8.10).
-    pub fn set_mode(&self, m: Mode) -> Pending<pb::SetOptionsResp> {
-        let mut o = pb::Options::default();
+    /// Switches the capture mode by setting the photo or video mode (§8.10).
+    pub fn set_mode(&self, m: Mode) -> Pending<pb::WriteSettingsReply> {
+        let mut o = pb::Settings::default();
         let t = match m {
             Mode::Photo(p) => {
-                o.photo_sub_mode = p as i32;
-                pb::OptionType::PhotoSubMode
+                o.photo_mode = p as i32;
+                pb::Setting::PhotoMode
             }
             Mode::Video(v) => {
-                o.video_sub_mode = v as i32;
-                pb::OptionType::VideoSubMode
+                o.video_mode = v as i32;
+                pb::Setting::VideoMode
             }
         };
         self.set_options(&[t], o)
     }
 
-    /// A photo in the current photo sub-mode (`TakePicture{NORMAL | BURST, raw_capture_type}` as the app sends it).
-    pub fn take_photo(&self, q: pb::TakePicture) -> Pending<pb::TakePictureResponse> {
+    /// A photo in the current photo mode (`TakePhoto{KIND_SINGLE | KIND_BURST, format}` as the app sends it).
+    pub fn take_photo(&self, q: pb::TakePhoto) -> Pending<pb::TakePhotoReply> {
         self.call(code::TAKE_PICTURE, &q, LONG)
     }
 
-    /// Starts recording in the current video sub-mode, whose capture mode is `m` (NORMAL: the app's
+    /// Starts recording in the current video mode, whose record mode is `m` (RECORD_MODE_NORMAL: the app's
     /// `startNormalRecord`).
-    pub fn start_capture(&self, m: pb::CaptureMode) -> Pending<()> {
-        let q = pb::StartCapture {
-            mode: m as i32,
-            ..Default::default()
-        };
+    pub fn start_capture(&self, m: pb::RecordMode) -> Pending<()> {
+        let q = pb::StartRecording { mode: m as i32 };
         self.send(code::START_CAPTURE, q.encode_to_vec(), LONG, unit)
     }
 
     /// The new file's URI.
-    pub fn stop_capture(&self, m: pb::CaptureMode) -> Pending<pb::Video> {
-        let q = pb::StopCapture {
-            mode: m as i32,
-            ..Default::default()
-        };
+    pub fn stop_capture(&self, m: pb::RecordMode) -> Pending<pb::VideoFile> {
+        let q = pb::StopRecording { mode: m as i32 };
         self.send(code::STOP_CAPTURE, q.encode_to_vec(), LONG, |b| {
-            Ok(dec::<pb::StopCaptureResp>(b)?.video.unwrap_or_default())
+            Ok(dec::<pb::StopRecordingReply>(b)?.file.unwrap_or_default())
         })
     }
 
     /// Interval photos, Starlapse and timelapse video (msg 22 / 23).
-    pub fn start_timelapse(&self, m: pb::TimelapseMode) -> Pending<()> {
-        let q = pb::StartTimelapse {
-            mode: m as i32,
-            ..Default::default()
-        };
+    pub fn start_timelapse(&self, m: pb::LapseMode) -> Pending<()> {
+        let q = pb::StartLapse { mode: m as i32 };
         self.send(code::START_TIMELAPSE, q.encode_to_vec(), LONG, unit)
     }
 
-    pub fn stop_timelapse(&self, m: pb::TimelapseMode) -> Pending<pb::Video> {
-        let q = pb::StopTimelapse {
-            mode: m as i32,
-            ..Default::default()
-        };
+    pub fn stop_timelapse(&self, m: pb::LapseMode) -> Pending<pb::VideoFile> {
+        let q = pb::StopLapse { mode: m as i32 };
         self.send(code::STOP_TIMELAPSE, q.encode_to_vec(), LONG, |b| {
-            Ok(dec::<pb::StopTimelapseResp>(b)?.video.unwrap_or_default())
+            Ok(dec::<pb::StopLapseReply>(b)?.file.unwrap_or_default())
         })
     }
 
     /// Highlight mark in the running recording at `ms` since its start (the app's capture time).
     pub fn highlight(&self, ms: u64) -> Pending<()> {
-        let q = pb::SetKeyTimePoint {
-            timestamp: ms,
-            r#type: 0,
-            type_detail: "com.insta360.keyTime.highlight".into(),
+        let q = pb::Mark {
+            ms,
+            kind: 0,
+            tag: "com.insta360.keyTime.highlight".into(),
         };
         self.send(code::KEY_TIME_POINT, q.encode_to_vec(), T, unit)
     }
@@ -811,14 +792,13 @@ impl Camera {
     /// Starts the preview with the app's X5 parameters (§8.11). The camera ignores the requested resolution and
     /// announces the real one in [`Note::LiveParams`]; packets arrive as [`Event::Frame`].
     pub fn live_start(&self) -> Pending<()> {
-        let q = pb::StartLiveStream {
-            enable_video: true,
-            video_bitrate: 40,
+        let q = pb::StartPreview {
+            video: true,
+            bitrate: 40,
             resolution: 44,
-            enable_gyro: true,
-            video_bitrate1: 40,
-            resolution1: 34,
-            ..Default::default()
+            gyro: true,
+            bitrate2: 40,
+            resolution2: 34,
         };
         self.send(code::START_LIVE, q.encode_to_vec(), T, unit)
     }

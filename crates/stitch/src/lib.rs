@@ -23,7 +23,7 @@ use offset::PLEN;
 use wgpu::util::DeviceExt as _;
 
 /// Lens frame geometry: per-lens picture size (its `Src` rect) and the window crop applied by the camera before
-/// scaling (X5: calibration 5376², crop 5312², video 3840², `.lrv` 832², live preview 1328²; `window_crop_info` in the
+/// scaling (X5: calibration 5376², crop 5312², video 3840², `.lrv` 832², live preview 1328²; the window crop in the
 /// trailer, the `.lrv`'s own trailer and the live stream's notification 8234 alike).
 #[derive(Clone, Copy, Debug)]
 pub struct Frame {
@@ -31,7 +31,7 @@ pub struct Frame {
     pub h: u32,
     /// Square side of the per-lens window cut from the calibration frame (0 = no crop).
     pub crop: f32,
-    /// Window offset from the centred position (`window_crop_info.crop_offset_x/y`). The `.lrv` needs
+    /// Window offset from the centred position (the window crop's x / y offset). The `.lrv` needs
     /// −½(crop/832 − crop/3840) ≈ −2.5 more on both axes: its picture sits 0.4 px right of and below the `.insv`'s
     /// (best fit against the `.insv`, +2.2 dB; as if each stream's scaler sampled output pixel i at source i·crop/size).
     pub shift: [f32; 2],
@@ -77,7 +77,7 @@ const STRETCHES: u64 = 36;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Opts {
-    /// Seam blend width in degrees (`ExtraMetadata` `blend_Angle`, clamped to 0..16; app default 6).
+    /// Seam blend width in degrees (the trailer metadata's blend angle, clamped to 0..16; app default 6).
     pub blend: f64,
     pub flow: Option<Flow>,
     /// Colour matching between the lenses: weight of each new fit (1 = no smoothing); None = off.

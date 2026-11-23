@@ -432,7 +432,7 @@ impl Capture {
                     (Some((_, n)), Some(p)) => {
                         format!(
                             "{} × {} at {} fps, calibration {n} from the camera",
-                            p.res_width, p.res_height, p.res_fps
+                            p.width, p.height, p.fps
                         )
                     }
                     (Some((_, n)), None) => format!("calibration {n} from the camera"),
@@ -664,8 +664,7 @@ impl Capture {
                     };
                     ui.end_row();
                 };
-                let st = pb::CameraCaptureState::try_from(s.cap)
-                    .unwrap_or(pb::CameraCaptureState::NotCapture);
+                let st = pb::CaptureState::try_from(s.cap).unwrap_or(pb::CaptureState::Idle);
                 let t = s.since.map_or(String::new(), |t| {
                     let x = t.elapsed().as_secs();
                     format!(" {}:{:02}", x / 60, x % 60)
@@ -673,14 +672,14 @@ impl Capture {
                 row(
                     "State",
                     match st {
-                        pb::CameraCaptureState::NotCapture => "idle".into(),
+                        pb::CaptureState::Idle => "idle".into(),
                         x => format!("{}{t}", x.as_str_name().to_lowercase().replace('_', " ")),
                     },
                     false,
                 );
                 let photo = s.mode.as_deref().is_some_and(conf::photo);
-                let x = s.o.remaining_capture_time.max(s.po.remaining_time);
-                match (photo, s.o.remaining_pictures, x) {
+                let x = s.o.video_left.max(s.po.time_left);
+                match (photo, s.o.photos_left, x) {
                     (true, n, _) if n > 0 => row("Remaining", format!("{n} photos"), false),
                     (false, _, x) if x > 0 => row(
                         "Remaining",
@@ -689,31 +688,31 @@ impl Capture {
                     ),
                     _ => {}
                 }
-                if let Some(x) = &s.o.storage_state {
+                if let Some(x) = &s.o.storage {
                     row(
                         "Storage",
                         format!(
                             "{:.1} GB free of {:.1} GB",
-                            x.free_space as f64 / 1e9,
-                            x.total_space as f64 / 1e9
+                            x.free as f64 / 1e9,
+                            x.total as f64 / 1e9
                         ),
-                        x.free_space < 2_000_000_000,
+                        x.free < 2_000_000_000,
                     );
                 }
-                if let Some(b) = &s.o.battery_info {
+                if let Some(b) = &s.o.battery {
                     row("Battery", camera::battery(b), camera::low(b));
                 }
-                let temp = match (&s.temp, s.o.temp_value) {
+                let temp = match (&s.temp, s.o.temp) {
                     (Some(t), _) => Some((
                         format!(
                             "{} ({} °C)",
-                            t.temp_state()
+                            t.level()
                                 .as_str_name()
                                 .trim_start_matches("TEMP_")
                                 .to_lowercase(),
-                            t.temp_value
+                            t.celsius
                         ),
-                        t.temp_state >= pb::TemperatureState::TempHigh as i32,
+                        t.level >= pb::Temp::High as i32,
                     )),
                     (None, v) if v != 0 => Some((format!("{v} °C"), false)),
                     _ => None,
@@ -739,11 +738,11 @@ impl Capture {
         // what ran on an X5: a photo, a normal recording
         let ok = matches!(
             shot,
-            Shot::Photo(pb::take_picture::Mode::Normal)
-                | Shot::Rec(pb::CaptureMode::Normal)
+            Shot::Photo(pb::take_photo::Kind::Single)
+                | Shot::Rec(pb::RecordMode::Normal)
                 | Shot::None
         );
-        let low = s.o.battery_info.as_ref().is_some_and(camera::empty);
+        let low = s.o.battery.as_ref().is_some_and(camera::empty);
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             let (txt, can) = match shot {
@@ -772,7 +771,7 @@ impl Capture {
             if b.clicked() {
                 // the mode's own self-timer: its values read (another mode's stay after a failed read)
                 let timer = if conf::photo(m) && s.vals.as_deref() == Some(m) {
-                    s.po.photography_self_timer
+                    s.po.timer
                 } else {
                     0
                 };

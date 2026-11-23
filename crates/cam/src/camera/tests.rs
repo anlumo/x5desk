@@ -87,7 +87,7 @@ fn album_and_cache() {
     assert_eq!(i.id.as_ref().unwrap().model, "Insta360 X5");
     assert_eq!(i.wifi.unwrap().0, "X5 SIM001.OSC");
     assert!(i.skew.is_some_and(|s| (29..=31).contains(&s)));
-    assert_eq!(i.storage.unwrap().total_space, 500_000_000_000);
+    assert_eq!(i.storage.unwrap().total, 500_000_000_000);
     let v = album(&w);
     assert_eq!(v.len(), 5);
     let rec = v.iter().find(|i| i.uris[0].ends_with("_635.insv")).unwrap();
@@ -126,15 +126,15 @@ fn album_and_cache() {
     assert_eq!(std::fs::metadata(&e).unwrap().len(), 8 + 320 * 160 * 4);
 
     let sim = sim.lock().unwrap().clone().unwrap();
-    let b = pb::NotificationBatteryUpdate {
-        battery_status: Some(pb::BatteryInfo {
-            battery_level: 42,
+    let b = pb::BatteryNote {
+        battery: Some(pb::Battery {
+            level: 42,
             ..Default::default()
         }),
     };
     sim.note(8195, &b.encode_to_vec());
     wait(&w, 2.0, |u| match u {
-        Up::Info(i) if i.battery.as_ref().is_some_and(|b| b.battery_level == 42) => Some(()),
+        Up::Info(i) if i.battery.as_ref().is_some_and(|b| b.level == 42) => Some(()),
         _ => None,
     });
     // a file appeared (capture stopped): the album is listed again
@@ -142,10 +142,7 @@ fn album_and_cache() {
         .unwrap()
         .uris
         .push("/DCIM/Camera01/IMG_20260118_120546_00_649.jpg".into());
-    sim.note(
-        8201,
-        &pb::NotificationCaptureStopped::default().encode_to_vec(),
-    );
+    sim.note(8201, &pb::StoppedNote::default().encode_to_vec());
     assert_eq!(album(&w).len(), 6);
     sim.unplug();
     conn(&w, Conn::Off);
@@ -187,10 +184,11 @@ fn unsafe_names() {
             .all(|u| album::safe(album::name(u)))
     );
     f.lock().unwrap().uris.push("/DCIM/Camera01/nul.lrv".into());
-    sim.lock().unwrap().clone().unwrap().note(
-        8201,
-        &pb::NotificationCaptureStopped::default().encode_to_vec(),
-    );
+    sim.lock()
+        .unwrap()
+        .clone()
+        .unwrap()
+        .note(8201, &pb::StoppedNote::default().encode_to_vec());
     assert_eq!(album(&w).len(), 1);
 }
 
@@ -198,22 +196,22 @@ fn unsafe_names() {
 /// the screens show; 21 % and a charging camera do not.
 #[test]
 fn low_battery() {
-    use pb::battery_info::PowerType::{self, *};
+    use pb::battery::Power::{self, *};
     let f = card(&NAMES[..1]);
     let q = Arc::new(Mutex::new(dl::Queue::load(None)));
     let (w, sim) = spawn(&f, 50_000_000, q, Cache::at(None));
     w.tx.send(Cmd::Connect { clock: true }).unwrap();
     assert!(!low(conn(&w, Conn::On).battery.as_ref().unwrap()));
     let sim = sim.lock().unwrap().clone().unwrap();
-    let b = |l, p: PowerType| {
-        Some(pb::BatteryInfo {
-            battery_level: l,
-            power_type: p as i32,
+    let b = |l, p: Power| {
+        Some(pb::Battery {
+            level: l,
+            power: p as i32,
             ..Default::default()
         })
     };
-    let n = pb::NotificationBatteryLow {
-        battery_status: b(9, Battery),
+    let n = pb::BatteryLowNote {
+        battery: b(9, Battery),
     };
     sim.note(8196, &n.encode_to_vec());
     let s = wait(&w, 2.0, |u| match u {
@@ -228,9 +226,7 @@ fn low_battery() {
         (21, Battery, false),
         (9, Adapter, false),
     ] {
-        let n = pb::NotificationBatteryUpdate {
-            battery_status: b(l, p),
-        };
+        let n = pb::BatteryNote { battery: b(l, p) };
         sim.note(8195, &n.encode_to_vec());
         let i = wait(&w, 2.0, |u| match u {
             Up::Info(i) if i.battery == b(l, p) => Some(i),
@@ -285,20 +281,17 @@ fn connect_time() {
             "{k:?}"
         );
         assert_eq!(k.get(s[1] + 1), Some(&GET_FILE_LIST), "{k:?}");
-        let set: Vec<pb::SetOptions> = (s.iter())
-            .map(|&i| pb::SetOptions::decode(&l[i].1[..]).unwrap())
+        let set: Vec<pb::WriteSettings> = (s.iter())
+            .map(|&i| pb::WriteSettings::decode(&l[i].1[..]).unwrap())
             .collect();
         assert_eq!(
-            (&set[0].option_types[..], &set[1].option_types[..]),
+            (&set[0].keys[..], &set[1].keys[..]),
             (&[12, 13, 175][..], &[175][..])
         );
-        let o = set[0].value.as_ref().unwrap();
-        assert!(o.local_time.abs_diff(t) <= 5);
-        assert_eq!(
-            (o.time_zone_seconds_from_gmt, &*o.geographic_time_zone),
-            (off, &*tz)
-        );
-        assert_eq!(set[1].value.as_ref().unwrap().geographic_time_zone, tz);
+        let o = set[0].settings.as_ref().unwrap();
+        assert!(o.clock.abs_diff(t) <= 5);
+        assert_eq!((o.utc_offset, &*o.zone), (off, &*tz));
+        assert_eq!(set[1].settings.as_ref().unwrap().zone, tz);
         assert!(
             notes.len() == 1
                 && !notes[0].1
@@ -481,7 +474,7 @@ fn capture_hold() {
     until(&q, &|p| p.0 == St::Running && p.1 >= 1_000_000);
     let sim = sim.lock().unwrap().clone().unwrap();
     let st = |s: i32| {
-        pb::CaptureStatus {
+        pb::CaptureNote {
             state: s,
             ..Default::default()
         }
@@ -585,7 +578,7 @@ fn delete_passes() {
         let n: Vec<usize> = f.lock().unwrap().log[n0..]
             .iter()
             .filter(|l| l.1 == link::code::DELETE_FILES)
-            .map(|l| pb::DeleteFiles::decode(&l.2[..]).unwrap().uri.len())
+            .map(|l| pb::DeleteFiles::decode(&l.2[..]).unwrap().uris.len())
             .collect();
         (s, n, left)
     };
@@ -630,7 +623,7 @@ fn commands() {
     let dels: Vec<(Instant, Vec<String>)> = f.lock().unwrap().log[n0..]
         .iter()
         .filter(|l| l.1 == link::code::DELETE_FILES)
-        .map(|l| (l.0, pb::DeleteFiles::decode(&l.2[..]).unwrap().uri))
+        .map(|l| (l.0, pb::DeleteFiles::decode(&l.2[..]).unwrap().uris))
         .collect();
     assert_eq!(
         dels.iter().map(|d| d.1.len()).collect::<Vec<_>>(),
@@ -656,9 +649,9 @@ fn commands() {
         .rev()
         .find(|l| l.1 == link::code::SET_FAVORITE)
         .unwrap();
-    let s = &pb::SetFavoriteList::decode(&s.2[..]).unwrap().set_favorite[0];
-    assert_eq!((&*s.material_url, s.favorite_flag), (&*u, 1));
-    assert!((s.modify_timestamp - clock().1).abs() <= 2);
+    let s = &pb::SetFavorites::decode(&s.2[..]).unwrap().flags[0];
+    assert_eq!((&*s.path, s.on), (&*u, 1));
+    assert!((s.modified - clock().1).abs() <= 2);
 
     w.tx.send(Cmd::Format).unwrap();
     after(&w);
@@ -684,24 +677,21 @@ fn commands() {
             .filter(|&c| c != GET_FILE_EXTRA)
             .collect();
         assert_eq!(k, [SET_OPTIONS, SET_OPTIONS, GET_OPTIONS]);
-        let set: Vec<pb::SetOptions> = l
+        let set: Vec<pb::WriteSettings> = l
             .iter()
             .filter(|l| l.1 == link::code::SET_OPTIONS)
-            .map(|l| pb::SetOptions::decode(&l.2[..]).unwrap())
+            .map(|l| pb::WriteSettings::decode(&l.2[..]).unwrap())
             .collect();
         let (t, _, off, tz, _) = clock();
         assert_eq!(set.len(), 2);
         assert_eq!(
-            (&set[0].option_types[..], &set[1].option_types[..]),
+            (&set[0].keys[..], &set[1].keys[..]),
             (&[12, 13, 175][..], &[175][..])
         );
-        let o = set[0].value.as_ref().unwrap();
-        assert!(o.local_time.abs_diff(t) <= 2);
-        assert_eq!(
-            (o.time_zone_seconds_from_gmt, &*o.geographic_time_zone),
-            (off, &*tz)
-        );
-        assert_eq!(set[1].value.as_ref().unwrap().geographic_time_zone, tz);
+        let o = set[0].settings.as_ref().unwrap();
+        assert!(o.clock.abs_diff(t) <= 2);
+        assert_eq!((o.utc_offset, &*o.zone), (off, &*tz));
+        assert_eq!(set[1].settings.as_ref().unwrap().zone, tz);
     }
     drop(w);
 }
@@ -745,7 +735,7 @@ fn delete_recording() {
     connected(&w);
     let sim = sim.lock().unwrap().clone().unwrap();
     let st = |s: i32| {
-        pb::CaptureStatus {
+        pb::CaptureNote {
             state: s,
             ..Default::default()
         }
@@ -854,7 +844,7 @@ fn connect_no_clock() {
 /// files off limits; an interval or starlapse refuses it and leaves the album listed; idle, the Delete goes through.
 #[test]
 fn delete_unnoted() {
-    use pb::CameraCaptureState as C;
+    use pb::CaptureState as C;
     let f = card(&NAMES[..3]);
     let q = Arc::new(Mutex::new(dl::Queue::load(None)));
     let (w, sim) = spawn(&f, 50_000_000, q, Cache::at(None));
@@ -881,24 +871,24 @@ fn delete_unnoted() {
         println!("{st:?}: {s:?}, busy {busy}, {n:?}");
         (s, busy, n)
     };
-    let (s, busy, n) = del(C::NormalCapture);
+    let (s, busy, n) = del(C::Recording);
     assert!(
         s.1 && s.0.contains("recording") && busy && n == (1, 0),
         "{s:?}"
     );
     // its note that it stopped: the album listed again
     f.lock().unwrap().cap = 0;
-    let idle = pb::CaptureStatus::default().encode_to_vec();
+    let idle = pb::CaptureNote::default().encode_to_vec();
     sim.note(8208, &idle);
     album(&w);
-    for st in [C::StarlapseShooting, C::IntervalShootingCapture] {
+    for st in [C::Starlapse, C::IntervalPhotos] {
         let (s, busy, n) = del(st);
         assert!(
             s.1 && s.0.contains("recording") && !busy && n == (1, 0),
             "{s:?}"
         );
     }
-    let (s, _, n) = del(C::NotCapture);
+    let (s, _, n) = del(C::Idle);
     assert_eq!(s, (format!("deleted {0} of {0} files", u.len()), false));
     // its fresh listing may have asked for the status too by now
     assert!(n.0 >= 1 && n.1 > 0, "{n:?}");

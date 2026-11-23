@@ -69,7 +69,7 @@ fn write(p: &Path, frames: u32, side: u32, bad: Option<u32>) -> io::Result<()> {
     f.write_all(&trailer(frames))
 }
 
-/// The trailer: `ExtraMetadata` (camera, calibration, dual track, dual fisheye, H.264, rate, frames), its record
+/// The trailer: metadata (camera, calibration, dual track, dual fisheye, H.264, rate, frames), its record
 /// header, the V3 footer.
 fn trailer(frames: u32) -> Vec<u8> {
     fn varint(b: &mut Vec<u8>, mut v: u64) {

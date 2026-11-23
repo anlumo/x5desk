@@ -210,7 +210,7 @@ pub struct Proto {
     /// not started since boot (`WIFI_UNINITIALIZED`). The app joins a saved AP directly, without BLE, while more than
     /// 30 s are left and [`Proto::pwd`] equals the saved password's version.
     pub wifi: u8,
-    /// `Options.WifiInfo.passwd_version` of the current AP password.
+    /// The camera's version number of the current AP password.
     pub pwd: u8,
 }
 

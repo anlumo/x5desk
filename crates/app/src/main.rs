@@ -708,8 +708,7 @@ impl eframe::App for App {
                 }
                 // the X5 shut down at 9 % with no word from the app (2026-10-23): a low battery shows on every screen,
                 // the capture worker's level first (it polls every 10 s)
-                if let Some(b) =
-                    (self.cap.st.o.battery_info.as_ref()).or(self.cam.info.battery.as_ref())
+                if let Some(b) = (self.cap.st.o.battery.as_ref()).or(self.cam.info.battery.as_ref())
                     && camera::low(b)
                 {
                     ui.add_space(16.0);

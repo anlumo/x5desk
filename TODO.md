@@ -57,7 +57,7 @@ comparison page <https://claude.ai/artifact/WzKEEXqGvqmLj1ojXMq9p8>). Their figu
   thumbnail) to check the IMU axes and the Mahony gains independently. golblick: FFT correlation, global 256 × 128
   then 512 × 256, 47 of 48 X5 stills aligned. Done as stab footage test `level` (2026-11-20): the thumbnail is the
   camera's levelled equirect (NV12 1280 × 640, BT.709, framed on lens 1 like ours) of the frame 2.97 s in where the
-  camera marks `trim_start` 3 s, 1 s into a dash-cam segment, else frame 0; our horizon-levelled stitch of it is
+  camera marks the trim start (#154) 3 s, 1 s into a dash-cam segment, else frame 0; our horizon-levelled stitch of it is
   aligned by correlation (yaw × tilt ±30° at 160 × 80, then 320 × 160 and 640 × 320; a known turn comes back within
   0.02°). 47 of 48 clips aligned (`X5_LEVEL`). Handheld / stick (12): residual tilt unrelated to the camera's tilt
   (−30…77°), so axes and signs hold. Scooter rides (35 dash-cam clips, 0.3–0.7 g of vibration) were 6.0° rms, up to
@@ -361,7 +361,7 @@ voice denoise on editor timelines and exports (RNNoise), library search (TinyCLI
 
 - [x] **Wind noise on every export.** Library exports take the editor's RNNoise (`Set::denoise` into
   `export::Edit::denoise`): the Export screen's Audio row, the MCP `export` tool's `denoise` (0–1; catalog: denoise).
-  Off by default: the vendor's app wind-reduces recordings whose trailer `audio_mode` (#61) is 9, AI wind reduction,
+  Off by default: the vendor's app wind-reduces recordings whose trailer audio mode (#61) is 9, AI wind reduction,
   but all 46 X5 files we have carry 9 (firmware 1.7.43–1.13.21), so the mark tells nothing apart, and at strength 1 a
   ride without speech exports nearly silent. Those recordings are dual mono (L = R). Score (no clean reference) on the
   five ride dates, wind and motor whine, no speech; speech only in 910, 631 and 605: at strength 1 both RNNoise and
@@ -698,13 +698,13 @@ Tests on the real X5 send only request types the app sends; never format the SD 
 - [ ] **Wi-Fi tests in station mode** on the home network, which needs its credentials from the user. Never join the
   camera's own access point: it takes this machine offline.
 - [ ] **Activation.** How the firmware reacts to option 19 = 0 or 100 (`SET_OPTIONS[19]`): does it lock features?
-- [ ] **Settings the app never writes for the X5.** Does the camera accept `MUTE`, `FLICKER_GLOBAL`,
-  `CAMERA_LANGUAGE`, `VIDEO_ENCODE_TYPE` and `BUTTON_PRESS_OPTIONS`?
+- [ ] **Settings the app never writes for the X5.** Does the camera accept options 14 (mute), 76 (flicker),
+  88 (language), 66 (video encoding) and 17 (button press)?
 - [ ] **Self-timer.** x5desk counts down on the host and the camera stores option 26: does the camera wait as well
   (a double delay)?
-- [ ] **Unconfirmed on X5 firmware.** Favourites sync (msg 176 / 201); AEB grouping and its `hdr_process_type`; the
-  trailer records EDITOR 18, APEI 26 and HIGHLIGHT 10 on real files; which capture setting gives `audio_mode` 9, 10
-  or 11.
+- [ ] **Unconfirmed on X5 firmware.** Favourites sync (msg 176 / 201); AEB grouping and its HDR processing type (trailer #74); the
+  trailer records EDITOR 18, APEI 26 and HIGHLIGHT 10 on real files; which capture setting gives audio mode 9, 10 or
+  11.
 - [ ] **Firmware file.** Format and signature checks of the X5 `.bin`; msg 235 is in the catalog, but the traced
   upload sends no control message before `/upload_fw`. Only matters for firmware updates.
 

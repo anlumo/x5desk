@@ -1,6 +1,6 @@
 //! A simulated X5 for runs without the camera (tests, the `replay=` hook): link's simulated camera, so the real I/O
 //! thread, framing, session and the app's workers all run. It answers what the app asks (identity, options with the
-//! live calibration and the media clock, capture status, photography options, `/CONF`) and, on START_LIVE_STREAM,
+//! live calibration and the media clock, capture status, params, `/CONF`) and, on START_LIVE_STREAM,
 //! streams a recorded live preview (`x5 live` output: `<p>.h264` with `<p>.timestamps.txt`, IMU in `<p>.30`) at its
 //! recorded timestamps in real time, looping, on its own camera clock, in pairs as the X5 sends it over USB. Writes and capture commands are logged and
 //! answered 200, nothing more.
@@ -62,7 +62,7 @@ impl Rec {
 /// What the simulated camera serves.
 pub struct Replay {
     pub rec: Rec,
-    /// MEDIA_OFFSET_V3 and the live window crop (side, offset) it was calibrated with
+    /// the v3 calibration (setting `calib_v3`) and the live window crop (side, offset) it was calibrated with
     pub cal: String,
     pub crop: (u32, [i32; 2]),
     pub conf: Option<Vec<u8>>,
@@ -73,17 +73,17 @@ pub struct Replay {
 }
 
 impl Replay {
-    /// The recording `h264`, the calibration of `insv` (a file from the same camera: its offset_v3, which the X5 also
-    /// reports as MEDIA_OFFSET_V3, and its window crop), `/CONF` from `conf`.
+    /// The recording `h264`, the calibration of `insv` (a file from the same camera: its v3 calibration string, which the
+    /// X5 also reports as setting `calib_v3`, and its window crop), `/CONF` from `conf`.
     pub fn open(h264: &Path, insv: &Path, conf: Option<&Path>) -> Result<Replay, String> {
         let t = media::insv::Trailer::open(insv).map_err(|e| format!("{}: {e}", insv.display()))?;
         let mut b = vec![];
         t.get(media::insv::METADATA, &mut b)
             .map_err(|e| e.to_string())?;
-        let x = pb::ExtraMetadata::decode(&b[..]).map_err(|e| e.to_string())?;
+        let x = pb::Metadata::decode(&b[..]).map_err(|e| e.to_string())?;
         Ok(Replay {
             rec: Rec::load(h264)?,
-            cal: x.offset_v3,
+            cal: x.calib_v3,
             crop: (
                 t.meta.crop as u32,
                 [t.meta.shift[0] as i32, t.meta.shift[1] as i32],
@@ -120,19 +120,18 @@ fn stream(r: Arc<Replay>, s: Sim, e: Instant, stop: Arc<AtomicBool>) {
     let lap = rec.span() + 33 * (z as u64 + 1);
     let imu = rec.imu.as_chunks::<{ 56 * 40 }>().0;
     let its = |c: &[u8]| i64::from_le_bytes(c[c.len() - 56..][..8].try_into().unwrap()) as u64;
-    let note = pb::LiveStreamParamsUpdate {
-        res_width: 2656,
-        res_height: 1328,
-        res_fps: 30,
-        window_crop_info: Some(pb::WindowCropInfo {
-            src_width: 5376,
-            src_height: 5376,
-            dst_width: r.crop.0,
-            dst_height: r.crop.0,
-            crop_offset_x: r.crop.1[0],
-            crop_offset_y: r.crop.1[1],
+    let note = pb::LiveNote {
+        width: 2656,
+        height: 1328,
+        fps: 30,
+        crop: Some(pb::Crop {
+            src_w: 5376,
+            src_h: 5376,
+            dst_w: r.crop.0,
+            dst_h: r.crop.0,
+            x: r.crop.1[0],
+            y: r.crop.1[1],
         }),
-        ..Default::default()
     };
     s.note(8234, &note.encode_to_vec());
     for k in 0u64.. {
@@ -183,62 +182,58 @@ fn handler(
         let ok = |m: &dyn Fn() -> Vec<u8>| (200, m());
         match c {
             code::GET_OPTIONS => ok(&|| {
-                let o = pb::Options {
-                    camera_type: "Insta360 X5".into(),
-                    serial_number: "SIM0001".into(),
-                    firmware_revision: "v1.13.21".into(),
-                    battery_info: Some(pb::BatteryInfo {
-                        battery_level: r.battery,
+                let o = pb::Settings {
+                    model: "Insta360 X5".into(),
+                    serial: "SIM0001".into(),
+                    firmware: "v1.13.21".into(),
+                    battery: Some(pb::Battery {
+                        level: r.battery,
                         ..Default::default()
                     }),
-                    storage_state: Some(pb::StorageState {
-                        free_space: 400_000_000_000,
-                        total_space: 512_000_000_000,
+                    storage: Some(pb::Storage {
+                        free: 400_000_000_000,
+                        total: 512_000_000_000,
                         ..Default::default()
                     }),
-                    media_offset_v3: r.cal.clone(),
-                    media_time: clock(e) as i64,
-                    video_sub_mode: pb::VideoSubMode::VideoNormal as i32,
-                    focus_sensor: pb::SensorDevice::All as i32,
-                    enable_internal_splicing: true,
-                    remaining_capture_time: 7200,
-                    temp_value: 41,
+                    calib_v3: r.cal.clone(),
+                    media_clock: clock(e) as i64,
+                    video_mode: pb::VideoMode::VideoNormal as i32,
+                    lens: pb::Lens::Both as i32,
+                    stitching: true,
+                    video_left: 7200,
+                    temp: 41,
                     ..Default::default()
                 };
-                pb::GetOptionsResp {
-                    option_types: vec![],
-                    value: Some(o),
+                pb::ReadSettingsReply {
+                    keys: vec![],
+                    settings: Some(o),
                 }
                 .encode_to_vec()
             }),
             code::GET_PHOTO_OPTIONS => ok(&|| {
-                let x = pb::photography_options::ExposureOptions {
-                    program: pb::photography_options::exposure_options::Program::FullAuto as i32,
+                let x = pb::params::Exposure {
+                    program: pb::params::exposure::Program::FullAuto as i32,
                     ..Default::default()
                 };
-                let o = pb::PhotographyOptions {
-                    // RES_2880_2880P30: 5.7K30, numbered by the lens
-                    record_resolution: 10,
+                let o = pb::Params {
+                    // RESOLUTION_2880_2880_30: 5.7K30, numbered by the lens
+                    resolution: 10,
                     video_exposure: Some(x),
-                    still_exposure: Some(x),
-                    remaining_time: 7200,
+                    photo_exposure: Some(x),
+                    time_left: 7200,
                     ..Default::default()
                 };
-                pb::GetPhotographyOptionsResp {
-                    value: Some(o),
-                    ..Default::default()
-                }
-                .encode_to_vec()
+                pb::ReadParamsReply { params: Some(o) }.encode_to_vec()
             }),
             code::GET_FILE if r.conf.is_some() => ok(&|| {
-                pb::GetFileResp {
+                pb::LocateFileReply {
                     uri: "/CONF".into(),
                     version: 71,
                 }
                 .encode_to_vec()
             }),
             code::GET_FILE => (500, vec![]),
-            code::GET_FILE_LIST => ok(&|| pb::GetFileListResp::default().encode_to_vec()),
+            code::GET_FILE_LIST => ok(&|| pb::ListFilesReply::default().encode_to_vec()),
             code::START_LIVE => {
                 if let Some(s) = sim.lock().unwrap().clone()
                     && live.is_none()

@@ -17,7 +17,7 @@
 //! `be81` read / write, `be82` notify, `be83` read), MTU 517. While the camera is attached over USB in app mode it
 //! acknowledges every write and sends nothing (the app's error 4001). Unplugged, its first notification (a heartbeat,
 //! `07 00 00 00 05 00 00`) comes at once, `GET_OPTIONS` and the Wi-Fi query answer, authorization succeeds and
-//! `bt_wakeup_sw` can be set. In standby (short press, screen dark) it keeps advertising `X5 <token>` and answers
+//! `ble_wake` can be set. In standby (short press, screen dark) it keeps advertising `X5 <token>` and answers
 //! `GET_OPTIONS`. [`Ble::wake_up`] (2026-10-25, camera asleep with Wi-Fi off): found at once, the connect takes about
 //! 35 s (the camera turns its Wi-Fi on just before it completes, against under 1 s while its Wi-Fi still counts down),
 //! then authorized on the first ask (never 7) and 8215; `SET_STANDBY_MODE{WAKE_UP}` (56) answers 400. The screen
@@ -53,7 +53,7 @@ use std::{
 };
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
-/// Message codes used on BLE (`MessageCode`): requests below 8192, notifications from 8192.
+/// Message codes used on BLE: requests below 8192, notifications from 8192.
 pub mod code {
     pub const SET_OPTIONS: u16 = 7;
     pub const GET_OPTIONS: u16 = 8;
@@ -78,54 +78,50 @@ pub mod code {
     pub const WIFI_CLOSED: u16 = 8300;
 }
 
-/// Camera messages the BLE session uses that `proto` does not compile yet; tags from `re/proto/` (the files named on
-/// each type).
+/// Camera messages only the BLE session uses: Wi-Fi mode, station mode, scans.
 pub mod msg {
     use prost::Message;
 
-    /// `WifiMode` / `Options.WifiInfo.Mode`.
+    /// Wi-Fi modes (also `Settings.wifi.mode`).
     pub const AP: i32 = 0;
     pub const STA: i32 = 1;
 
-    /// `commands/get_wifi_mode.proto`
     #[derive(Clone, PartialEq, Message)]
-    pub struct GetWifiModeResp {
+    pub struct WifiModeReply {
         #[prost(int32, tag = "1")]
-        pub wifi_mode: i32,
+        pub mode: i32,
     }
 
-    /// `commands/set_wifi_mode.proto`; the app always sends `place_holder` 1.
+    /// `marker`: always 1, as the app sends it.
     #[derive(Clone, PartialEq, Message)]
-    pub struct SetWifiMode {
+    pub struct WriteWifiMode {
         #[prost(uint32, tag = "1")]
-        pub place_holder: u32,
+        pub marker: u32,
         #[prost(int32, tag = "2")]
-        pub wifi_mode: i32,
+        pub mode: i32,
         #[prost(string, tag = "3")]
-        pub country_code: String,
+        pub country: String,
     }
 
-    /// `wifi_mode.proto`, notification 8247.
+    /// Notification 8247.
     #[derive(Clone, PartialEq, Message)]
-    pub struct WifiModeResult {
+    pub struct WifiModeNote {
         #[prost(int32, tag = "1")]
-        pub wifi_mode: i32,
+        pub mode: i32,
         #[prost(int32, tag = "2")]
-        pub err_code: i32,
+        pub error: i32,
     }
 
-    /// `wifi_restart.proto`
     #[derive(Clone, PartialEq, Message)]
     pub struct RestartWifi {
         #[prost(uint32, tag = "1")]
-        pub restart_channel: u32,
+        pub channel: u32,
     }
 
-    /// `wifi_connection_info.proto`: the camera's station-mode (home network) connection. `result`:
-    /// `WifiConnectionResult` (0 success, 1 timeout, 2 connect failed, 3 wrong password, 4 no IP, 5 connected, 6 not
-    /// found, … 11 channel forbidden).
+    /// The camera's station-mode (home network) connection. `result`: 0 success, 1 timeout, 2 connect failed,
+    /// 3 wrong password, 4 no IP, 5 connected, 6 not found, … 11 channel forbidden.
     #[derive(Clone, PartialEq, Message)]
-    pub struct WifiConnectionInfo {
+    pub struct Station {
         #[prost(string, tag = "1")]
         pub ssid: String,
         #[prost(string, tag = "2")]
@@ -133,70 +129,67 @@ pub mod msg {
         #[prost(string, tag = "3")]
         pub password: String,
         #[prost(string, tag = "4")]
-        pub ip_addr: String,
+        pub ip: String,
         #[prost(int32, tag = "5")]
         pub result: i32,
         #[prost(int32, tag = "6")]
-        pub is_auth_wifi: i32,
+        pub auth: i32,
     }
 
-    /// `commands/set_wifi_connection_info.proto`
     #[derive(Clone, PartialEq, Message)]
-    pub struct SetWifiConnectionInfo {
+    pub struct JoinStation {
         #[prost(message, optional, tag = "1")]
-        pub wifi_connection_info: Option<WifiConnectionInfo>,
+        pub station: Option<Station>,
     }
 
-    /// `commands/get_wifi_connection_info.proto`: the same layout.
-    pub type GetWifiConnectionInfoResp = SetWifiConnectionInfo;
+    /// The same layout.
+    pub type StationReply = JoinStation;
 
-    /// `notifications/camera_wifi_connection_result.proto`, notification 8232.
+    /// Notification 8232.
     #[derive(Clone, PartialEq, Message)]
-    pub struct CameraWifiConnectionResult {
+    pub struct StationNote {
         #[prost(int32, tag = "1")]
-        pub wifi_connection_result: i32,
+        pub result: i32,
         #[prost(message, optional, tag = "2")]
-        pub wifi_connection_info: Option<WifiConnectionInfo>,
+        pub station: Option<Station>,
     }
 
-    /// The same file, notification 8300; `close_type` 0 normal, 1 shutdown, 2 firmware update.
+    /// Notification 8300; `cause` 0 normal, 1 shutdown, 2 firmware update.
     #[derive(Clone, PartialEq, Message)]
-    pub struct WifiCloseInfo {
+    pub struct WifiClosedNote {
         #[prost(int32, tag = "1")]
-        pub close_type: i32,
+        pub cause: i32,
     }
 
-    /// `commands/get_wifi_scan_info.proto`
     #[derive(Clone, PartialEq, Message)]
-    pub struct GetWifiScanInfo {
+    pub struct ScanWifi {
         #[prost(int32, tag = "1")]
         pub interval: i32,
         #[prost(int32, tag = "2")]
         pub count: i32,
     }
 
-    /// `wifi_scan_info.proto`
     #[derive(Clone, PartialEq, Message)]
-    pub struct WifiScanInfo {
+    pub struct WifiNetwork {
         #[prost(string, tag = "1")]
         pub bssid: String,
         #[prost(uint32, tag = "2")]
         pub frequency: u32,
         #[prost(int32, tag = "3")]
-        pub signal_level: i32,
+        pub signal: i32,
         #[prost(string, tag = "4")]
         pub flags: String,
         #[prost(string, tag = "5")]
         pub ssid: String,
     }
 
-    /// `wifi_scan_info.proto`, notification 8249.
+    /// Notification 8249.
     #[derive(Clone, PartialEq, Message)]
-    pub struct WifiScanInfoList {
+    pub struct WifiNetworks {
         #[prost(message, repeated, tag = "1")]
-        pub wifi_info: Vec<WifiScanInfo>,
+        pub networks: Vec<WifiNetwork>,
         #[prost(int32, tag = "2")]
-        pub list_count: i32,
+        pub count: i32,
     }
 }
 
@@ -217,10 +210,10 @@ pub enum Error {
     /// A response status other than 200, with the camera's error body if it sent one. 505: busy switching Wi-Fi.
     Status(u16, Option<pb::Error>),
     Decode(prost::DecodeError),
-    /// `CHECK_AUTHORIZATION` answered neither AUTHORIZED nor UNAUTHORIZED (`AuthorizationStatus`: 2 busy,
+    /// `CHECK_AUTHORIZATION` answered neither 0 (granted) nor 1 (not authorized) (`AuthorizeReply::status`: 2 busy,
     /// 3–6 held by another phone / watch / bike computer / remote, 7 asleep).
     Unauthorized(i32),
-    /// The answer on the camera's screen (`AuthorizationResult`: 1 rejected, 2 timed out, 3 busy).
+    /// The answer on the camera's screen (`AuthNote::outcome`: 1 rejected, 2 timed out, 3 busy).
     Refused(i32),
     /// Wake advertising needs BlueZ, and a serial suffix of at most 6 bytes.
     Unsupported,
@@ -244,7 +237,7 @@ impl fmt::Display for Error {
             Error::Timeout => f.write_str("timeout"),
             Error::Closed => f.write_str("link closed"),
             Error::Desync => f.write_str("stream desync"),
-            Error::Status(s, Some(e)) => write!(f, "status {s}: {:?} {}", e.code(), e.message),
+            Error::Status(s, Some(e)) => write!(f, "status {s}: {:?} {}", e.code(), e.text),
             Error::Status(s, None) => write!(f, "status {s}"),
             Error::Decode(e) => write!(f, "{e}"),
             Error::Unauthorized(s) => write!(f, "not authorized ({s})"),
@@ -388,12 +381,12 @@ impl Adv {
 /// those: the schemas are the same on every link).
 #[derive(Debug)]
 pub enum Note {
-    Auth(pb::NotificationAuthorizationResult),
+    Auth(pb::AuthNote),
     WifiStarted,
-    WifiMode(msg::WifiModeResult),
-    WifiStatus(msg::CameraWifiConnectionResult),
-    WifiScan(msg::WifiScanInfoList),
-    WifiClosed(msg::WifiCloseInfo),
+    WifiMode(msg::WifiModeNote),
+    WifiStatus(msg::StationNote),
+    WifiScan(msg::WifiNetworks),
+    WifiClosed(msg::WifiClosedNote),
     Other(u16, Vec<u8>),
 }
 
@@ -437,9 +430,9 @@ pub enum Step {
     Retry(Error),
     Connected(Link),
     /// The identity `GET_OPTIONS[48, 15, 11, 198]`: the camera's software answers.
-    Options(pb::Options),
-    /// The app's option sync on BLE, `bt_wakeup_sw` among it.
-    Synced(Result<pb::Options>),
+    Options(pb::Settings),
+    /// The app's option sync on BLE, `ble_wake` among it.
+    Synced(Result<pb::Settings>),
     /// A `CHECK_AUTHORIZATION` answer: 0 authorized, 1 waits for the user, 7 asleep (asked again every 2 s).
     Auth(i32),
     /// No 8215 within the time: `OPEN_CAMERA_WIFI` sent.
@@ -594,7 +587,7 @@ fn woken(
 }
 
 /// The app's option sync on BLE (`CameraSupportConfig.getSupportOptionsListV2`): firmware, activation time, channel
-/// list, media offset, sensor info, `bt_wakeup_sw`, BLE and box versions, OTA versions, charge box, cloud busy,
+/// list, media offset, sensor info, `ble_wake`, BLE and box versions, OTA versions, charge box, cloud busy,
 /// splicing, offsets, heat shell, battery, quick reader, P2P, watermark, dash cam, screen battery, storage, idle
 /// analysis, live broadcast.
 const SYNC: [i32; 26] = [
@@ -639,7 +632,7 @@ fn session(c: &Camera, uuid: &str, t: Duration, step: &mut dyn FnMut(Step)) -> R
 fn auth(c: &Camera, uuid: &str, t: Duration, step: &mut dyn FnMut(Step)) -> Result<()> {
     let end = Instant::now() + t;
     let mut w = c.note(code::AUTH_RESULT, t, true);
-    let s = c.check_auth(uuid).wait()?.authorization_status;
+    let s = c.check_auth(uuid).wait()?.status;
     step(Step::Auth(s));
     match s {
         0 => return Ok(()),
@@ -647,8 +640,8 @@ fn auth(c: &Camera, uuid: &str, t: Duration, step: &mut dyn FnMut(Step)) -> Resu
         s => return Err(Error::Unauthorized(s)),
     }
     loop {
-        let n = pb::NotificationAuthorizationResult::decode(&w.wait()?[..])?;
-        match (n.authorization_operation_type, n.authorization_result) {
+        let n = pb::AuthNote::decode(&w.wait()?[..])?;
+        match (n.op, n.outcome) {
             (0, 0) => return Ok(()),
             (0, r) if r != 4 => return Err(Error::Refused(r)),
             _ => {}
@@ -781,38 +774,38 @@ impl Camera {
         p
     }
 
-    /// `GET_OPTIONS`: the camera's [`pb::Options`] with the given `OptionType`s set (identity: `[48, 15, 11, 198]`).
-    pub fn options(&self, types: &[i32]) -> Pending<pb::Options> {
-        let q = pb::GetOptions {
-            option_types: types.into(),
-        };
+    /// `GET_OPTIONS`: the camera's [`pb::Settings`] with the given [`pb::Setting`]s filled (identity: `[48, 15, 11, 198]`).
+    pub fn options(&self, types: &[i32]) -> Pending<pb::Settings> {
+        let q = pb::ReadSettings { keys: types.into() };
         self.send(code::GET_OPTIONS, q.encode_to_vec(), T, |b| {
-            Ok(dec::<pb::GetOptionsResp>(b)?.value.unwrap_or_default())
+            Ok(dec::<pb::ReadSettingsReply>(b)?
+                .settings
+                .unwrap_or_default())
         })
     }
 
-    /// `SET_OPTIONS`, e.g. `bt_wakeup_sw` (97) = 1 so that [`wake`] works once the camera sleeps.
-    pub fn set_options(&self, types: &[i32], o: pb::Options) -> Pending<()> {
-        let q = pb::SetOptions {
-            option_types: types.into(),
-            value: Some(o),
+    /// `SET_OPTIONS`, e.g. `ble_wake` (97) = 1 so that [`wake`] works once the camera sleeps.
+    pub fn set_options(&self, types: &[i32], o: pb::Settings) -> Pending<()> {
+        let q = pb::WriteSettings {
+            keys: types.into(),
+            settings: Some(o),
         };
         self.send(code::SET_OPTIONS, q.encode_to_vec(), T, unit)
     }
 
     /// `CHECK_AUTHORIZATION` with the client's persistent id (the same one the Wi-Fi session uses), as an Android
     /// phone like `link`. UNAUTHORIZED makes the camera ask its user.
-    pub fn check_auth(&self, uuid: &str) -> Pending<pb::CheckAuthorizationResp> {
-        let q = pb::CheckAuthorization {
-            id: uuid.into(),
-            initiator_type: 2,
-            ..Default::default()
+    pub fn check_auth(&self, uuid: &str) -> Pending<pb::AuthorizeReply> {
+        let q = pb::Authorize {
+            client: uuid.into(),
+            initiator: 2,
         };
         self.call(code::CHECK_AUTH, &q)
     }
 
-    /// The app's authorization step (PROTOCOL.md §5.2): `CHECK_AUTHORIZATION`; on UNAUTHORIZED wait up to `t` for the
-    /// user's answer on the camera (8209 for BLE_CONNECT; PENDING keeps waiting; an empty body is SUCCESS).
+    /// The app's authorization step (PROTOCOL.md §5.2): `CHECK_AUTHORIZATION`; on status 1 (not authorized) wait up to `t`
+    /// for the user's answer on the camera (8209 for AUTH_OP_BLE; outcome 4, pending, keeps waiting; an empty body is
+    /// OUTCOME_GRANTED).
     pub fn authorize(&self, uuid: &str, t: Duration) -> Pending<()> {
         let uuid = uuid.to_string();
         self.flow(move |c| auth(c, &uuid, t, &mut |_| {}))
@@ -824,38 +817,38 @@ impl Camera {
     }
 
     /// The access point's SSID, password (plaintext on the X5), channel, mode and state: `GET_OPTIONS[36, 37, 43]`.
-    pub fn wifi(&self) -> Pending<pb::options::WifiInfo> {
-        let q = pb::GetOptions {
-            option_types: vec![36, 37, 43],
+    pub fn wifi(&self) -> Pending<pb::settings::Wifi> {
+        let q = pb::ReadSettings {
+            keys: vec![36, 37, 43],
         };
         self.send(code::GET_OPTIONS, q.encode_to_vec(), T, |b| {
-            let o = dec::<pb::GetOptionsResp>(b)?.value.unwrap_or_default();
-            Ok(o.wifi_info.unwrap_or_default())
+            let o = dec::<pb::ReadSettingsReply>(b)?
+                .settings
+                .unwrap_or_default();
+            Ok(o.wifi.unwrap_or_default())
         })
     }
 
     /// `GET_WIFI_MODE`: [`msg::AP`], [`msg::STA`], …
     pub fn wifi_mode(&self) -> Pending<i32> {
         self.send(code::GET_WIFI_MODE, vec![], T, |b| {
-            Ok(dec::<msg::GetWifiModeResp>(b)?.wifi_mode)
+            Ok(dec::<msg::WifiModeReply>(b)?.mode)
         })
     }
 
     /// `SET_WIFI_MODE`; `country` (ISO code) may be empty. The camera then sends 8247 and, for AP, 8215.
     pub fn set_wifi_mode(&self, mode: i32, country: &str) -> Pending<()> {
-        let q = msg::SetWifiMode {
-            place_holder: 1,
-            wifi_mode: mode,
-            country_code: country.into(),
+        let q = msg::WriteWifiMode {
+            marker: 1,
+            mode,
+            country: country.into(),
         };
         self.send(code::SET_WIFI_MODE, q.encode_to_vec(), T, unit)
     }
 
     /// `OPEN_CAMERA_WIFI`, on `channel` if not 0. The app only uses it to reset the channel or from its settings.
     pub fn open_wifi(&self, channel: u32) -> Pending<()> {
-        let q = msg::RestartWifi {
-            restart_channel: channel,
-        };
+        let q = msg::RestartWifi { channel };
         let b = if channel > 0 {
             q.encode_to_vec()
         } else {
@@ -865,11 +858,9 @@ impl Camera {
     }
 
     /// `GET_WIFI_CONNECTION_INFO`: the camera's station-mode connection (SSID, address), not its own AP.
-    pub fn wifi_conn(&self) -> Pending<msg::WifiConnectionInfo> {
+    pub fn wifi_conn(&self) -> Pending<msg::Station> {
         self.send(code::GET_WIFI_CONN, vec![], T, |b| {
-            Ok(dec::<msg::GetWifiConnectionInfoResp>(b)?
-                .wifi_connection_info
-                .unwrap_or_default())
+            Ok(dec::<msg::StationReply>(b)?.station.unwrap_or_default())
         })
     }
 
@@ -877,7 +868,7 @@ impl Camera {
     /// 8215 (AP up; one seen earlier counts, else `OPEN_CAMERA_WIFI` once and wait again), make sure the mode is AP
     /// (`SET_WIFI_MODE` and a new 8215, at least 50 s when the camera is busy switching), then read the
     /// credentials. Join the SSID and use `link::Camera::wifi` with the same UUID.
-    pub fn ap(&self, t: Duration) -> Pending<pb::options::WifiInfo> {
+    pub fn ap(&self, t: Duration) -> Pending<pb::settings::Wifi> {
         self.flow(move |c| {
             match c.note(code::WIFI_START, t, false).wait() {
                 Err(Error::Timeout) => {
@@ -900,16 +891,11 @@ impl Camera {
 
     /// Station mode, the app's net-prov pipeline (PROTOCOL.md §2.9): `SET_WIFI_MODE{STA}`, `PHONE_INFO`,
     /// `SET_WIFI_CONNECTION_INFO{ssid, password}`, then the camera's join result (8232) within `t` (the app: 40 s).
-    /// `PHONE_INFO` says device UNKNOWN, manufacturer "x5desk", the OS as version (the app sends its Android build
+    /// `PHONE_INFO` says maker "x5desk", the OS as version (the app sends its Android build
     /// values; whether the camera cares is unknown).
-    pub fn station(
-        &self,
-        ssid: &str,
-        password: &str,
-        t: Duration,
-    ) -> Pending<msg::CameraWifiConnectionResult> {
-        let q = msg::SetWifiConnectionInfo {
-            wifi_connection_info: Some(msg::WifiConnectionInfo {
+    pub fn station(&self, ssid: &str, password: &str, t: Duration) -> Pending<msg::StationNote> {
+        let q = msg::JoinStation {
+            station: Some(msg::Station {
                 ssid: ssid.into(),
                 password: password.into(),
                 ..Default::default()
@@ -918,10 +904,9 @@ impl Camera {
         self.flow(move |c| {
             let w = c.note(code::WIFI_STATUS, 3 * T + t, true);
             c.set_wifi_mode(msg::STA, "").wait()?;
-            let p = pb::PhoneInfo {
-                manufacturer: "x5desk".into(),
-                os_version: std::env::consts::OS.into(),
-                ..Default::default()
+            let p = pb::Phone {
+                maker: "x5desk".into(),
+                os: std::env::consts::OS.into(),
             };
             c.send(code::PHONE_INFO, p.encode_to_vec(), T, unit)
                 .wait()?;
@@ -932,10 +917,10 @@ impl Camera {
     }
 
     /// `GET_WIFI_SCAN_LIST` (interval 0, count 1, as the app): the networks the camera sees, from 8249 within `t`.
-    pub fn wifi_scan(&self, t: Duration) -> Pending<msg::WifiScanInfoList> {
+    pub fn wifi_scan(&self, t: Duration) -> Pending<msg::WifiNetworks> {
         self.flow(move |c| {
             let w = c.note(code::WIFI_SCAN_LIST, T + t, true);
-            let q = msg::GetWifiScanInfo {
+            let q = msg::ScanWifi {
                 interval: 0,
                 count: 1,
             };
@@ -954,7 +939,7 @@ impl Camera {
 }
 
 /// The phone-side wake advertisement for a sleeping camera (PROTOCOL.md §2.6), running until dropped. The camera
-/// needs `bt_wakeup_sw` on. The app scans for `X5 <suffix>` meanwhile (it gives up after 30 s) and keeps advertising
+/// needs `ble_wake` on. The app scans for `X5 <suffix>` meanwhile (it gives up after 30 s) and keeps advertising
 /// through the BLE session until the AP join starts; [`Ble::wake_up`] does all of it.
 pub struct Wake {
     stop: Arc<AtomicBool>,
@@ -1127,18 +1112,15 @@ mod tests {
             Note::new(code::WIFI_START, &[]),
             Note::WifiStarted
         ));
-        // Empty 8209: the proto3 encoding of {SUCCESS, BLE_CONNECT} (PROTOCOL.md §5.2).
+        // Empty 8209: the proto3 encoding of {OUTCOME_GRANTED, AUTH_OP_BLE} (PROTOCOL.md §5.2).
         let Note::Auth(a) = Note::new(code::AUTH_RESULT, &[]) else {
             panic!()
         };
-        assert_eq!(
-            (a.authorization_result, a.authorization_operation_type),
-            (0, 0)
-        );
+        assert_eq!((a.outcome, a.op), (0, 0));
         let Note::WifiMode(m) = Note::new(code::WIFI_MODE_CHANGE, &[8, 1]) else {
             panic!()
         };
-        assert_eq!(m.wifi_mode, msg::STA);
+        assert_eq!(m.mode, msg::STA);
         assert!(matches!(
             Note::new(code::AUTH_RESULT, &[0xFF]),
             Note::Other(8209, _)

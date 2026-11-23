@@ -128,12 +128,12 @@ fn fixtures() -> PathBuf {
     d
 }
 
-/// The stitching inputs of an `.insv` trailer: the V3 "extra info" block's record type 1 is the `ExtraMetadata`
+/// The stitching inputs of an `.insv` trailer: the V3 "extra info" block's record type 1 is the metadata
 /// protobuf (PROTOCOL.md §9.4/§9.5). Port of insta360-stitch's reader; the app's own lives in `media`.
 #[derive(Default, Debug)]
 struct Meta {
     offset: String,
-    /// offset_v3: the string the camera also reports as MEDIA_OFFSET_V3, the live preview's calibration
+    /// #54, the v3 calibration: the string the camera also reports as setting `calib_v3`, the live preview's calibration
     v3: String,
     crop: f32,
     shift: [f32; 2],
@@ -1687,8 +1687,8 @@ fn lrv() {
 }
 
 /// Live preview capture (`X5_LIVE`: raw H.264 2656 × 1328, both lenses side by side, no trailer). Its calibration
-/// comes from the camera: the app's capture screen takes MEDIA_OFFSET_V6, else _V3 (`getPlayerOffsetData`); the
-/// sample camera answers _V3 only, the string the v635 trailer (same camera) holds as offset_v3, so that is used,
+/// comes from the camera: the app's capture screen takes setting `calib_v6`, else `calib_v3`; the sample camera
+/// answers `calib_v3` only, the string the v635 trailer (same camera) holds as its v3 calibration, so that is used,
 /// with the window crop of notification 8234 (5376 → 5312, as in the files). Plausibility on frame 30: a light on the
 /// seam seen by both lenses, its direction in each per hypothesis (which half holds lens 0; v3 vs v6); the stitch
 /// and a view of the light go to the fixtures.

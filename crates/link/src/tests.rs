@@ -34,26 +34,23 @@ fn wire(code: u16, id: u32, body: &[u8]) -> Vec<u8> {
 fn encodings() {
     let (c, rx) = fake();
     let _p = c.options(&[
-        pb::OptionType::CameraType,
-        pb::OptionType::SerialNumber,
-        pb::OptionType::BatteryInfo,
-        pb::OptionType::ConnectionStatus,
+        pb::Setting::Model,
+        pb::Setting::Serial,
+        pb::Setting::Battery,
+        pb::Setting::Links,
     ]);
     let (k, b) = req(&rx);
     assert_eq!(
         wire(k, 1, &b),
         hex("19 00 00 00 04 00 00 08 00 02 01 00 00 80 00 00 08 30 08 0f 08 0b 08 c6 01")
     );
-    let _p = c.files(
-        pb::MediaType::VideoAndPhoto,
-        pb::CardLocation::StorClCameraSd,
-    );
+    let _p = c.files(pb::Media::VideoPhoto, pb::Volume::Sd);
     let (k, b) = req(&rx);
     assert_eq!(
         wire(k, 7, &b),
         hex("16 00 00 00 04 00 00 0d 00 02 07 00 00 80 00 00 08 02 18 64 20 03")
     );
-    let _p = c.file_infos(pb::CardLocation::StorClCameraSd);
+    let _p = c.file_infos(pb::Volume::Sd);
     let (k, b) = req(&rx);
     assert_eq!(
         wire(k, 10, &b),
@@ -79,48 +76,43 @@ fn encodings() {
     assert_eq!(wire(k, 12, &b), w);
     let _p = c.live_start();
     assert_eq!(req(&rx), (1, hex("10 01 30 28 38 2c 40 01 48 28 50 22")));
-    let _p = c.start_capture(pb::CaptureMode::Normal);
+    let _p = c.start_capture(pb::RecordMode::Normal);
     assert_eq!(req(&rx), (4, hex("08 01")));
-    let _p = c.stop_capture(pb::CaptureMode::Normal);
+    let _p = c.stop_capture(pb::RecordMode::Normal);
     assert_eq!(req(&rx), (5, hex("10 01")));
-    let _p = c.start_capture(pb::CaptureMode::PureVideo);
+    let _p = c.start_capture(pb::RecordMode::Pure);
     assert_eq!(req(&rx), (4, hex("08 0b")));
-    let _p = c.start_timelapse(pb::TimelapseMode::TimelapseIntervalShooting);
+    let _p = c.start_timelapse(pb::LapseMode::Interval);
     assert_eq!(req(&rx), (22, hex("08 02")));
-    let _p = c.stop_timelapse(pb::TimelapseMode::MobileTimelapseVideo);
+    let _p = c.stop_timelapse(pb::LapseMode::Video);
     assert_eq!(req(&rx), (23, hex("08 01")));
-    let _p = c.set_mode(Mode::Video(pb::VideoSubMode::VideoNormal));
+    let _p = c.set_mode(Mode::Video(pb::VideoMode::VideoNormal));
     assert_eq!(req(&rx), (7, hex("08 29 12 00")));
-    let _p = c.set_mode(Mode::Photo(pb::PhotoSubMode::PhotoSingle));
+    let _p = c.set_mode(Mode::Photo(pb::PhotoMode::PhotoSingle));
     assert_eq!(req(&rx), (7, hex("08 28 12 00")));
-    let _p = c.format(pb::CardLocation::StorClCamera);
+    let _p = c.format(pb::Volume::Camera);
     assert_eq!(req(&rx), (24, vec![]));
-    let _p = c.format(pb::CardLocation::StorClCameraSd);
+    let _p = c.format(pb::Volume::Sd);
     assert_eq!(req(&rx), (232, hex("08 03")));
-    let _p = c.take_photo(pb::TakePicture::default());
+    let _p = c.take_photo(pb::TakePhoto::default());
     assert_eq!(req(&rx), (3, vec![]));
-    // burst with PureShot: mode 3, raw_capture_type 3
-    let _p = c.take_photo(pb::TakePicture {
-        mode: pb::take_picture::Mode::Burst as i32,
-        raw_capture_type: pb::RawCaptureType::Pureshot as i32,
-        ..Default::default()
+    // burst with PureShot: kind 3, format 3
+    let _p = c.take_photo(pb::TakePhoto {
+        kind: pb::take_photo::Kind::Burst as i32,
+        format: pb::Format::Pureshot as i32,
     });
     assert_eq!(req(&rx), (3, hex("08 03 20 03")));
     let _p = c.highlight(1500);
     let (k, b) = req(&rx);
     assert_eq!((k, &b[..4]), (60, &hex("08 dc 0b 1a")[..]));
-    let _p = c.set_favorites(vec![pb::SetFavorite {
-        favorite_flag: 1,
-        material_url: uri.into(),
-        modify_timestamp: 5,
-        ..Default::default()
+    let _p = c.set_favorites(vec![pb::FavoriteFlag {
+        on: 1,
+        path: uri.into(),
+        modified: 5,
     }]);
     let (k, b) = req(&rx);
     assert_eq!(
-        (
-            k,
-            pb::SetFavoriteList::decode(&b[..]).unwrap().set_favorite[0].favorite_flag
-        ),
+        (k, pb::SetFavorites::decode(&b[..]).unwrap().flags[0].on),
         (176, 1)
     );
     // Time: 2025-01-01 12:00:00 UTC, +3600 s, Europe/Vienna; two requests (§5.3), both out before any answer (this
@@ -141,10 +133,9 @@ fn encodings() {
         )
     );
     assert_eq!(req(&rx).0, code::CAPTURE_STATUS);
-    let q = pb::CheckAuthorization {
-        id: "01234567-89ab-cdef-0123-456789abcdef".into(),
-        initiator_type: 2,
-        ..Default::default()
+    let q = pb::Authorize {
+        client: "01234567-89ab-cdef-0123-456789abcdef".into(),
+        initiator: 2,
     };
     let w = hex(
         "38 00 00 00 04 00 00 27 00 02 04 00 00 80 00 00 0a 24 30 31 32 33 34 35 36 37 2d 38 39 61 62 2d 63 64 65 66 \
@@ -156,15 +147,15 @@ fn encodings() {
 #[test]
 fn ident_firmware() {
     let o = |a: &str, b: &str| {
-        let v = pb::Options {
-            ota_pkg_version: a.into(),
-            box_ota_pkg_version: b.into(),
-            firmware_revision: "r".into(),
+        let v = pb::Settings {
+            ota_version: a.into(),
+            box_ota_version: b.into(),
+            firmware: "r".into(),
             ..Default::default()
         };
         ident(
-            pb::GetOptionsResp {
-                value: Some(v),
+            pb::ReadSettingsReply {
+                settings: Some(v),
                 ..Default::default()
             }
             .encode_to_vec(),
@@ -259,10 +250,10 @@ impl Link for Cam {
         self.log.lock().unwrap().push(format!("req {code}"));
         match code {
             8 => {
-                let o = pb::Options {
-                    camera_type: "Insta360 X5".into(),
-                    serial_number: "SERIAL".into(),
-                    firmware_revision: "v1.13.21".into(),
+                let o = pb::Settings {
+                    model: "Insta360 X5".into(),
+                    serial: "SERIAL".into(),
+                    firmware: "v1.13.21".into(),
                     ..Default::default()
                 };
                 reply(
@@ -270,16 +261,16 @@ impl Link for Cam {
                     200,
                     id,
                     true,
-                    &pb::GetOptionsResp {
-                        option_types: vec![48, 15, 30],
-                        value: Some(o),
+                    &pb::ReadSettingsReply {
+                        keys: vec![48, 15, 30],
+                        settings: Some(o),
                     }
                     .encode_to_vec(),
                 )
             }
             13 => {
-                let q = pb::GetFileList::decode(body).unwrap();
-                let uri = (q.start..150.min(q.start + q.limit))
+                let q = pb::ListFiles::decode(body).unwrap();
+                let uri = (q.offset..150.min(q.offset + q.limit))
                     .map(|i| format!("/DCIM/Camera01/IMG_{i:03}.jpg"))
                     .collect();
                 reply(
@@ -287,10 +278,9 @@ impl Link for Cam {
                     200,
                     id,
                     true,
-                    &pb::GetFileListResp {
-                        uri,
-                        total_count: 150,
-                        ..Default::default()
+                    &pb::ListFilesReply {
+                        uris: uri,
+                        total: 150,
                     }
                     .encode_to_vec(),
                 )
@@ -298,24 +288,24 @@ impl Link for Cam {
             38 => {
                 // Fragmented: the method/status of the last fragment counts.
                 let fi = (0..300)
-                    .map(|i| pb::FileInfo {
-                        file_path: format!("/f{i}"),
-                        metadata: vec![],
+                    .map(|i| pb::Entry {
+                        path: format!("/f{i}"),
+                        meta: vec![],
                     })
                     .collect();
-                let b = pb::FileInfoList {
-                    file_info: fi,
-                    card_location: 0,
+                let b = pb::Entries {
+                    entries: fi,
+                    volume: 0,
                 }
                 .encode_to_vec();
                 let (x, y) = b.split_at(b.len() / 2);
                 note(
                     &mut v,
                     8195,
-                    &pb::NotificationBatteryUpdate {
-                        battery_status: Some(pb::BatteryInfo {
-                            battery_level: 80,
-                            battery_scale: 100,
+                    &pb::BatteryNote {
+                        battery: Some(pb::Battery {
+                            level: 80,
+                            scale: 100,
                             ..Default::default()
                         }),
                     }
@@ -329,10 +319,10 @@ impl Link for Cam {
                 note(
                     &mut v,
                     8234,
-                    &pb::LiveStreamParamsUpdate {
-                        res_width: 2656,
-                        res_height: 1328,
-                        res_fps: 30,
+                    &pb::LiveNote {
+                        width: 2656,
+                        height: 1328,
+                        fps: 30,
                         ..Default::default()
                     }
                     .encode_to_vec(),
@@ -349,7 +339,7 @@ impl Link for Cam {
                 200,
                 id,
                 true,
-                &pb::GetFileResp {
+                &pb::LocateFileReply {
                     uri: "/CONF".into(),
                     version: 71,
                 }
@@ -435,11 +425,11 @@ fn session(direct: bool) {
         ("Insta360 X5", "SERIAL", "v1.13.21")
     );
     let f = c
-        .files(pb::MediaType::VideoAndPhoto, pb::CardLocation::StorClCamera)
+        .files(pb::Media::VideoPhoto, pb::Volume::Camera)
         .wait()
         .unwrap();
     assert_eq!((f.len(), &*f[149]), (150, "/DCIM/Camera01/IMG_149.jpg"));
-    let fi = c.file_infos(pb::CardLocation::StorClCamera).wait().unwrap();
+    let fi = c.file_infos(pb::Volume::Camera).wait().unwrap();
     assert_eq!(
         (fi.len(), &*fi[299].0, fi[0].1.is_none()),
         (300, "/f299", true)
@@ -447,11 +437,11 @@ fn session(direct: bool) {
     let Event::Note(Note::Battery(b)) = ev.recv().unwrap() else {
         panic!()
     };
-    assert_eq!(b.battery_level, 80);
+    assert_eq!(b.level, 80);
     let Err(Error::Status(500, Some(e))) = c.raw(99, vec![], T).wait() else {
         panic!()
     };
-    assert_eq!(e.code(), pb::error::ErrorCode::ExecuteError);
+    assert_eq!(e.code(), pb::error::Code::Failed);
     assert!(matches!(
         c.raw(98, vec![], Duration::from_millis(300)).wait(),
         Err(Error::Timeout)
@@ -461,7 +451,7 @@ fn session(direct: bool) {
     let Event::Note(Note::LiveParams(p)) = ev.recv().unwrap() else {
         panic!()
     };
-    assert_eq!((p.res_width, p.res_height), (2656, 1328));
+    assert_eq!((p.width, p.height), (2656, 1328));
     for i in 0..3 {
         let Event::Frame(f) = ev.recv().unwrap() else {
             panic!()
@@ -527,8 +517,8 @@ fn session_direct_http() {
 }
 
 /// Wi-Fi transport on real sockets against a local camera: UCD on one port (sync after queued heartbeats;
-/// CHECK_AUTHORIZATION, refused unless CHECK_TYPE came first, answers UNAUTHORIZED, then 8209s: a REJECT for
-/// another operation type, PENDING, then empty = user confirmed), HTTP on another (range start honoured, body to
+/// CHECK_AUTHORIZATION, refused unless CHECK_TYPE came first, answers 1 (not authorized), then 8209s: a refusal for
+/// another operation, outcome 4 (pending), then empty = user confirmed), HTTP on another (range start honoured, body to
 /// EOF, then the server closes, as with `Connection: close`).
 #[test]
 fn wifi_sockets() {
@@ -570,23 +560,19 @@ fn wifi_sockets() {
                     cs.push(code);
                     match code {
                         39 => {
-                            let r = pb::CheckAuthorizationResp {
-                                authorization_status: if cs[0] == 8 { 1 } else { 2 },
-                                ..Default::default()
+                            let r = pb::AuthorizeReply {
+                                status: if cs[0] == 8 { 1 } else { 2 },
                             };
                             reply(&mut v, 200, id, true, &r.encode_to_vec());
                             for (r, o) in [(1, 1), (4, 0)] {
-                                let n = pb::NotificationAuthorizationResult {
-                                    authorization_result: r,
-                                    authorization_operation_type: o,
-                                };
+                                let n = pb::AuthNote { outcome: r, op: o };
                                 note(&mut v, 8209, &n.encode_to_vec());
                             }
                             note(&mut v, 8209, &[]);
                         }
                         8 => {
-                            let o = pb::Options {
-                                camera_type: "Insta360 X5".into(),
+                            let o = pb::Settings {
+                                model: "Insta360 X5".into(),
                                 ..Default::default()
                             };
                             reply(
@@ -594,9 +580,9 @@ fn wifi_sockets() {
                                 200,
                                 id,
                                 true,
-                                &pb::GetOptionsResp {
-                                    option_types: vec![48],
-                                    value: Some(o),
+                                &pb::ReadSettingsReply {
+                                    keys: vec![48],
+                                    settings: Some(o),
                                 }
                                 .encode_to_vec(),
                             )
@@ -793,10 +779,9 @@ fn sim_frames() {
     let big: Vec<u8> = (0..600_000u32).map(|i| i as u8).collect();
     s.frame(stream::VIDEO, 0, &big);
     s.frame(stream::GYRO, 278164, &[1; 112]);
-    let t = pb::TempState {
-        temp_state: pb::TemperatureState::TempHigh as i32,
-        temp_value: 61,
-        ..Default::default()
+    let t = pb::TempNote {
+        level: pb::Temp::High as i32,
+        celsius: 61,
     };
     s.note(8214, &t.encode_to_vec());
     let mut got = vec![];

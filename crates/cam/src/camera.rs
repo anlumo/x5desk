@@ -62,8 +62,8 @@ pub struct Info {
     pub plug: Option<Plug>,
     pub conn: Conn,
     pub id: Option<link::Ident>,
-    pub battery: Option<pb::BatteryInfo>,
-    pub storage: Option<pb::StorageState>,
+    pub battery: Option<pb::Battery>,
+    pub storage: Option<pb::Storage>,
     /// SSID and password of the camera's access point
     pub wifi: Option<(String, String)>,
     /// camera clock minus the computer's, s
@@ -228,7 +228,7 @@ const FLY: usize = 3;
 const SCAN: Duration = Duration::from_secs(2);
 
 /// Capture states that put the files off limits: the video ones (the app's `CaptureType.isVideoType`, §7.12; wire 1
-/// `NORMAL_CAPTURE` is a video). Photos, the self-timer and pre-recording leave the files alone.
+/// `RECORDING` is a video). Photos, the self-timer and pre-recording leave the files alone.
 fn rec(state: i32) -> bool {
     matches!(state, 1 | 2 | 7 | 9 | 11..=13 | 17 | 18 | 20..=24 | 29..=31 | 33)
 }
@@ -278,7 +278,7 @@ struct W {
 /// garbled (a timeout, the link gone, an undecodable reply), the note for success, and a connect's notes, which wait
 /// for it.
 struct Clk {
-    p: Vec<link::Pending<pb::SetOptionsResp>>,
+    p: Vec<link::Pending<pb::WriteSettingsReply>>,
     err: Option<Error>,
     lost: bool,
     ok: String,
@@ -376,31 +376,28 @@ fn zone() -> (i32, i32) {
 }
 
 /// Level in % (the X5 reports 0..100 with scale 0) and whether it charges.
-pub fn level(b: &pb::BatteryInfo) -> (u32, bool) {
-    let l = match b.battery_scale {
-        0 => b.battery_level,
-        s => b.battery_level * 100 / s,
+pub fn level(b: &pb::Battery) -> (u32, bool) {
+    let l = match b.scale {
+        0 => b.level,
+        s => b.level * 100 / s,
     };
-    (
-        l,
-        b.power_type == pb::battery_info::PowerType::Adapter as i32,
-    )
+    (l, b.power == pb::battery::Power::Adapter as i32)
 }
 
 /// Low enough to warn, on every screen: 20 % or less and not charging. The X5 shut down at level 9 (2026-10-23), so
 /// its gauge's last tenth is not to be trusted; twice that leaves time to stop or plug it in.
-pub fn low(b: &pb::BatteryInfo) -> bool {
+pub fn low(b: &pb::Battery) -> bool {
     let (l, c) = level(b);
     l <= 20 && !c
 }
 
 /// Too low to start a recording or timelapse: 5 % or less and not charging (the app's rule).
-pub fn empty(b: &pb::BatteryInfo) -> bool {
+pub fn empty(b: &pb::Battery) -> bool {
     let (l, c) = level(b);
     l <= 5 && !c
 }
 
-pub fn battery(b: &pb::BatteryInfo) -> String {
+pub fn battery(b: &pb::Battery) -> String {
     let (l, c) = level(b);
     format!(
         "{l} %{}",
@@ -743,18 +740,14 @@ impl W {
     /// Battery, storage, Wi-Fi and clock.
     fn opts(&mut self) {
         let Some(c) = &self.cam else { return };
-        use pb::OptionType::*;
-        match c
-            .options(&[BatteryInfo, StorageState, WifiInfo, LocalTime])
-            .wait()
-        {
+        use pb::Setting::*;
+        match c.options(&[Battery, Storage, Wifi, Clock]).wait() {
             Ok(o) => {
                 let i = &mut self.info;
-                i.battery = o.battery_info.or(i.battery.take());
-                i.storage = o.storage_state;
-                i.wifi = o.wifi_info.map(|w| (w.ssid, w.password));
-                i.skew = (o.local_time > 0)
-                    .then(|| (o.local_time as i64).saturating_sub(clock().0 as i64));
+                i.battery = o.battery.or(i.battery.take());
+                i.storage = o.storage;
+                i.wifi = o.wifi.map(|w| (w.ssid, w.password));
+                i.skew = (o.clock > 0).then(|| (o.clock as i64).saturating_sub(clock().0 as i64));
             }
             Err(e) => self.note(format!("options: {e}"), true),
         }
@@ -793,7 +786,7 @@ impl W {
     }
 
     /// [`W::album`] with the camera's capture status if it was just read.
-    fn list(&mut self, st: Option<link::Result<pb::CameraCaptureStatus>>) {
+    fn list(&mut self, st: Option<link::Result<pb::CaptureStatus>>) {
         self.relist = None;
         let t = Instant::now();
         if let Some(r) = self.info.src.clone() {
@@ -810,9 +803,9 @@ impl W {
             if rec(st.unwrap_or_else(|| c.capture_status().wait())?.state) {
                 return Ok(None);
             }
-            use pb::{CardLocation::StorClCamera as L, MediaType as M};
-            let mut u = c.files(M::VideoAndPhoto, L).wait()?;
-            u.extend(c.files(M::Dng, L).wait()?);
+            use pb::{Media as M, Volume::Camera as L};
+            let mut u = c.files(M::VideoPhoto, L).wait()?;
+            u.extend(c.files(M::Raw, L).wait()?);
             // a host joins the names to its download folder: one that is no safe file name stays out of the album
             let bad: Vec<String> = u.extract_if(.., |u| !album::safe(album::name(u))).collect();
             let fi = c.file_infos(L).wait()?;
@@ -1044,7 +1037,7 @@ impl W {
             // the app's passes (PROTOCOL.md §7.8): batches of 200 URIs 150 ms apart, one by one from a batch that
             // fails on, a failure of one ends it; then the leftovers of a fresh listing, five passes at most
             Cmd::Delete(u) => (|| {
-                use pb::{CardLocation::StorClCamera as L, MediaType as M};
+                use pb::{Media as M, Volume::Camera as L};
                 let mut left = u.clone();
                 for _ in 0..5 {
                     let (mut i, mut n) = (0, 200);
@@ -1065,8 +1058,8 @@ impl W {
                         break;
                     }
                     let mut l: HashSet<String> =
-                        cam.files(M::VideoAndPhoto, L).wait()?.into_iter().collect();
-                    l.extend(cam.files(M::Dng, L).wait()?);
+                        cam.files(M::VideoPhoto, L).wait()?.into_iter().collect();
+                    l.extend(cam.files(M::Raw, L).wait()?);
                     left.retain(|x| l.contains(x));
                     if left.is_empty() {
                         break;
@@ -1082,18 +1075,17 @@ impl W {
             Cmd::Fav(v) => (|| {
                 let ts = clock().1;
                 for ch in v.chunks(100) {
-                    let f = ch.iter().map(|(u, f)| pb::SetFavorite {
-                        favorite_flag: *f as u32,
-                        material_url: u.clone(),
-                        modify_timestamp: ts,
-                        ..Default::default()
+                    let f = ch.iter().map(|(u, f)| pb::FavoriteFlag {
+                        on: *f as u32,
+                        path: u.clone(),
+                        modified: ts,
                     });
                     cam.set_favorites(f.collect()).wait()?;
                 }
                 Ok(format!("favourite flag set on {} files", v.len()))
             })(),
             Cmd::Format => cam
-                .format(pb::CardLocation::StorClCamera)
+                .format(pb::Volume::Camera)
                 .wait()
                 .map(|_| "SD card formatted".into()),
             _ => return,

@@ -133,14 +133,14 @@ fn skew(s: i64) -> String {
     }
 }
 
-fn storage(s: &pb::StorageState) -> String {
-    use pb::CardState::*;
-    match s.card_state() {
-        StorCsPass => format!("{} free of {}", mb(s.free_space), mb(s.total_space)),
-        StorCsNocard => "no SD card".into(),
-        StorCsNospace => "SD card full".into(),
-        StorCsInvalidFormat => "SD card needs formatting".into(),
-        StorCsFormatting => "formatting".into(),
+fn storage(s: &pb::Storage) -> String {
+    use pb::Card::*;
+    match s.card() {
+        Ok => format!("{} free of {}", mb(s.free), mb(s.total)),
+        Missing => "no SD card".into(),
+        Full => "SD card full".into(),
+        Unformatted => "SD card needs formatting".into(),
+        Formatting => "formatting".into(),
         x => format!("{x:?}"),
     }
 }
@@ -581,7 +581,7 @@ impl Cam {
             }
             if let Some(s) = &i.storage {
                 ui.separator();
-                let used = 1.0 - s.free_space as f32 / s.total_space.max(1) as f32;
+                let used = 1.0 - s.free as f32 / s.total.max(1) as f32;
                 ui.add(
                     egui::ProgressBar::new(used)
                         .desired_width(220.0)
@@ -1081,7 +1081,7 @@ impl Cam {
                 );
                 row(
                     "Clock",
-                    // the X5 leaves LOCAL_TIME out of its answer (fw v1.13.21)
+                    // the X5 leaves the clock out of its answer (fw v1.13.21)
                     i.skew.map_or("not reported by the camera".into(), skew),
                 );
             });

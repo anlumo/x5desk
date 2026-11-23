@@ -247,37 +247,32 @@ mod tests {
         a.dev = crate::Dev("sim/X5".into());
         let (b, ev, sim) = Ble::sim(vec![a], |c, q, s| match c {
             code::GET_OPTIONS => {
-                let o = pb::Options {
-                    wifi_info: Some(pb::options::WifiInfo {
+                let o = pb::Settings {
+                    wifi: Some(pb::settings::Wifi {
                         ssid: "X5 SIM001.OSC".into(),
                         password: "88888888".into(),
                         ..Default::default()
                     }),
                     ..Default::default()
                 };
-                let r = pb::GetOptionsResp {
-                    option_types: vec![],
-                    value: Some(o),
+                let r = pb::ReadSettingsReply {
+                    keys: vec![],
+                    settings: Some(o),
                 };
                 (200, r.encode_to_vec())
             }
             code::CHECK_AUTH => {
                 // UNAUTHORIZED, then the user allows it on the camera
                 s.note(code::AUTH_RESULT, &[8, 0, 16, 0]);
-                let r = pb::CheckAuthorizationResp {
-                    authorization_status: 1,
-                    ..Default::default()
-                };
+                let r = pb::AuthorizeReply { status: 1 };
                 (200, r.encode_to_vec())
             }
             code::SET_WIFI_CONN => {
-                let i = msg::SetWifiConnectionInfo::decode(q)
-                    .unwrap()
-                    .wifi_connection_info;
-                let r = msg::CameraWifiConnectionResult {
-                    wifi_connection_result: 0,
-                    wifi_connection_info: i.map(|i| msg::WifiConnectionInfo {
-                        ip_addr: "192.0.2.7".into(),
+                let i = msg::JoinStation::decode(q).unwrap().station;
+                let r = msg::StationNote {
+                    result: 0,
+                    station: i.map(|i| msg::Station {
+                        ip: "192.0.2.7".into(),
                         password: String::new(),
                         ..i
                     }),
@@ -313,11 +308,8 @@ mod tests {
             .station("Home", "secret", Duration::from_secs(2))
             .wait()
             .unwrap();
-        let i = r.wifi_connection_info.unwrap();
-        assert_eq!(
-            (r.wifi_connection_result, &*i.ssid, &*i.ip_addr),
-            (0, "Home", "192.0.2.7")
-        );
+        let i = r.station.unwrap();
+        assert_eq!((r.result, &*i.ssid, &*i.ip), (0, "Home", "192.0.2.7"));
         assert!(matches!(
             c.wifi_mode().wait(),
             Err(Error::Status(500, None))

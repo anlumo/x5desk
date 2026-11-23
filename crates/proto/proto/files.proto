@@ -1,0 +1,122 @@
+// Interface messages for talking to the X5 camera over USB, Wi-Fi and Bluetooth, written for x5desk for
+// interoperability: file lists, per-file metadata and trailer records, deletion, favourites, formatting.
+syntax = "proto3";
+
+package cam;
+
+message ListFiles {
+  Media media   = 1;
+  uint32 offset = 2;
+  uint32 limit  = 3;
+  Volume volume = 4;
+}
+
+message ListFilesReply {
+  repeated string uris = 1;
+  uint32 total         = 2;
+}
+
+enum Media {
+  MEDIA_VIDEO       = 0;
+  MEDIA_VIDEO_PHOTO = 2;
+  MEDIA_RAW         = 3;
+}
+
+enum Volume {
+  VOLUME_CAMERA = 0;
+  VOLUME_SD     = 3;
+}
+
+message ListEntries {
+  Volume volume = 1;
+}
+
+message Entries {
+  repeated Entry entries = 1;
+  int32 volume           = 2;
+}
+
+message Entry {
+  string path = 1;
+  bytes meta  = 2;
+}
+
+message Metadata {
+  uint64 created    = 7;
+  uint64 size       = 9;
+  uint32 secs       = 10;
+  Pair dims         = 19;
+  string calib_v3   = 54;
+  uint32 ms         = 93;
+  Category category = 129;
+
+  message Pair {
+    int32 x = 1;
+    int32 y = 2;
+  }
+
+  enum Category {
+    CATEGORY_UNKNOWN = 0;
+  }
+}
+
+message ReadExtra {
+  string uri  = 1;
+  uint32 kind = 2;
+  Gyro gyro   = 3;
+
+  message Gyro {
+    oneof range {
+      Time time = 2;
+    }
+
+    message Time {}
+  }
+}
+
+message DeleteFiles {
+  repeated string uris = 1;
+}
+
+message DeleteFilesReply {}
+
+message LocateFile {
+  FileKind kind = 1;
+}
+
+message LocateFileReply {
+  string uri    = 1;
+  int32 version = 2;
+}
+
+enum FileKind {
+  FILE_KIND_UNKNOWN = 0;
+}
+
+message FileMarks {
+  repeated FileMark marks = 1;
+}
+
+message FileMark {
+  string path       = 1;
+  Favorite favorite = 2;
+}
+
+message Favorite {
+  bool on        = 1;
+  int64 modified = 2;
+}
+
+message FavoriteFlag {
+  uint32 on      = 2;
+  string path    = 3;
+  int64 modified = 4;
+}
+
+message SetFavorites {
+  repeated FavoriteFlag flags = 1;
+}
+
+message FormatVolume {
+  Volume volume = 1;
+}

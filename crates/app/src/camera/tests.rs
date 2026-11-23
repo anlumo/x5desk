@@ -10,7 +10,7 @@ use std::{
     time::{Instant, UNIX_EPOCH},
 };
 
-/// A camera that reports its clock (LOCAL_TIME; the X5 leaves it out): the Clock row shows the skew read on connect
+/// A camera that reports its clock (setting `clock`; the X5 leaves it out): the Clock row shows the skew read on connect
 /// until the clock is set, then the clock as set, by the time "camera clock set to …" is noted; the same after Sync
 /// time; after a refused sync it shows the clock still behind, after one that took the clock and refused the zone the
 /// clock as set, next to the refusal.

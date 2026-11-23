@@ -89,15 +89,15 @@ pub struct St {
     /// 360 (`Sphere06C`), else a single lens
     pub both: bool,
     pub mode: Option<String>,
-    pub po: pb::PhotographyOptions,
-    pub o: pb::Options,
+    pub po: pb::Params,
+    pub o: pb::Settings,
     pub cap: i32,
     /// capturing since (this computer's clock); the camera's capture time then, s
     pub since: Option<Instant>,
-    pub temp: Option<pb::TempState>,
+    pub temp: Option<pb::TempNote>,
     /// calibration string and the option it came from
     pub cal: Option<(String, &'static str)>,
-    pub params: Option<pb::LiveStreamParamsUpdate>,
+    pub params: Option<pb::LiveNote>,
     /// CLOCK_MONOTONIC ns − camera ns, and the round trip it was measured with, ms
     pub off: Option<(i64, f64)>,
     pub live: bool,
@@ -105,7 +105,7 @@ pub struct St {
     /// notifications seen, the last one
     pub notes: u64,
     pub last: String,
-    /// the mode whose photography options the last load read (`po` is that mode's); none while it failed
+    /// the mode whose params the last load read (`po` is that mode's); none while it failed
     pub vals: Option<String>,
     /// the newest asked command's number and outcome ([`Cmd::Ask`]), kept across sessions
     pub out: Option<(u64, Out)>,
@@ -118,7 +118,7 @@ impl St {
     pub fn cur(&self, m: &conf::Mode, k: &str) -> Option<String> {
         let photo = self.mode.as_deref().is_some_and(conf::photo);
         let sl = conf::slot(k)?;
-        let x = conf::get(sl, &self.po, self.o.enable_internal_splicing, photo);
+        let x = conf::get(sl, &self.po, self.o.stitching, photo);
         m.keys
             .iter()
             .find(|q| q.name == k)?
@@ -145,20 +145,20 @@ impl St {
 
 /// Capture states with a running clip (`camera::rec`'s video states plus the timelapse ones): the shutter stops them.
 pub fn running(s: i32) -> bool {
-    use pb::CameraCaptureState as C;
+    use pb::CaptureState as C;
     !matches!(
-        C::try_from(s).unwrap_or(C::NotCapture),
-        C::NotCapture
-            | C::SingleShooting
-            | C::HdrShooting
-            | C::SelfTimerShooting
-            | C::SettingsNewValue
-            | C::BurstShooting
-            | C::AebNightShooting
-            | C::SinglePowerPanoShooting
-            | C::HdrPowerPanoShooting
-            | C::PreRecord
-            | C::PreRecordStop
+        C::try_from(s).unwrap_or(C::Idle),
+        C::Idle
+            | C::TakingPhoto
+            | C::TakingHdrPhoto
+            | C::SelfTimer
+            | C::ApplyingSettings
+            | C::TakingBurst
+            | C::TakingNightPhoto
+            | C::TakingPano
+            | C::TakingHdrPano
+            | C::PreRecording
+            | C::PreRecordingStopped
     )
 }
 
@@ -339,7 +339,7 @@ impl W {
 
     /// The camera's capture state read before a command (a stale one would let a change in under a recording): the
     /// state, or the refusal's words when it cannot be read (nothing sent).
-    fn status_first(&mut self, c: &Camera) -> Result<pb::CameraCaptureStatus, Out> {
+    fn status_first(&mut self, c: &Camera) -> Result<pb::CaptureStatus, Out> {
         c.capture_status().wait().map_err(|e| {
             let n = format!("the camera's capture state could not be read ({e}): nothing sent");
             self.note(n.clone(), true);
@@ -353,7 +353,7 @@ impl W {
             Ok(x) => x,
             Err(no) => return Ok(Some(no)),
         };
-        self.cap(x.state, x.capture_time as u64);
+        self.cap(x.state, x.elapsed as u64);
         Ok(running(x.state).then(|| {
             let n = format!("the camera captures: no {what} until it stops");
             self.note(n.clone(), true);
@@ -380,32 +380,22 @@ impl W {
         let Some(c) = self.cam.clone() else { return };
         self.st.vals = None;
         let r = (|| {
-            use pb::OptionType::*;
+            use pb::Setting::*;
             let o = c
                 .options(&[
-                    PhotoSubMode,
-                    VideoSubMode,
-                    InstapanoFocusSensor,
-                    BatteryInfo,
-                    StorageState,
-                    RemainingCaptureTime,
-                    RemainingPictures,
-                    InternalSplicing,
-                    TempValue,
+                    PhotoMode, VideoMode, Lens, Battery, Storage, VideoLeft, PhotosLeft, Stitching,
+                    Temp,
                 ])
                 .wait()?;
             let s = &mut self.st;
-            s.both = !matches!(
-                o.focus_sensor(),
-                pb::SensorDevice::Front | pb::SensorDevice::Rear
-            );
+            s.both = !matches!(o.lens(), pb::Lens::Front | pb::Lens::Rear);
             s.mode = conf::current(&o);
             s.o = o;
             // a camera already recording: the elapsed time and highlight marks count from its capture time (s)
             let x = c.capture_status().wait()?;
             (s.cap, s.cap_at) = (x.state, Some(Instant::now()));
-            s.since = running(x.state)
-                .then(|| Instant::now() - Duration::from_secs(x.capture_time as u64));
+            s.since =
+                running(x.state).then(|| Instant::now() - Duration::from_secs(x.elapsed as u64));
             if s.conf.is_none() && !self.bad {
                 let (v, b) = c.conf().wait()?;
                 match Conf::parse(v, &b) {
@@ -425,7 +415,7 @@ impl W {
         }
     }
 
-    /// The current mode's photography options: every type its settings use, and the remaining time.
+    /// The current mode's params: every key its settings use, and the remaining time.
     fn values(&mut self, c: &Camera) -> link::Result<()> {
         let s = &mut self.st;
         let (Some(m), Some(cf)) = (&s.mode, &s.conf) else {
@@ -435,7 +425,7 @@ impl W {
             return Ok(());
         };
         let p = conf::photo(m);
-        let mut ts = vec![pb::PhotographyOptionType::RemainingTime];
+        let mut ts = vec![pb::Param::TimeLeft];
         if let Some(md) = cf.block(s.both).and_then(|b| b.mode(m)) {
             for k in &md.keys {
                 for &t in conf::slot(&k.name).map_or(&[][..], |x| conf::types(x, p)) {
@@ -445,7 +435,7 @@ impl W {
                 }
             }
         }
-        s.po = c.photo_options(&ts, fm).wait()?.value.unwrap_or_default();
+        s.po = c.photo_options(&ts, fm).wait()?.params.unwrap_or_default();
         s.vals = Some(m.clone());
         Ok(())
     }
@@ -458,24 +448,17 @@ impl W {
             Some(Err(link::Error::Closed)) | Some(Ok(())) | None => {}
             Some(Err(e)) => self.note(format!("camera clock: {e}"), true),
         }
-        use pb::OptionType::*;
-        let ts = [
-            BatteryInfo,
-            StorageState,
-            RemainingCaptureTime,
-            RemainingPictures,
-            TempValue,
-        ];
+        use pb::Setting::*;
+        let ts = [Battery, Storage, VideoLeft, PhotosLeft, Temp];
         if let Ok(o) = c.options(&ts).wait() {
             let x = &mut self.st.o;
-            x.battery_info = o.battery_info.or(x.battery_info.take());
-            x.storage_state = o.storage_state.or(x.storage_state.take());
-            (x.remaining_capture_time, x.remaining_pictures, x.temp_value) =
-                (o.remaining_capture_time, o.remaining_pictures, o.temp_value);
+            x.battery = o.battery.or(x.battery.take());
+            x.storage = o.storage.or(x.storage.take());
+            (x.video_left, x.photos_left, x.temp) = (o.video_left, o.photos_left, o.temp);
         }
         // the capture state too (a notification of it can be missed), and the mode's values while a load failed
         if let Ok(x) = c.capture_status().wait() {
-            self.cap(x.state, x.capture_time as u64)
+            self.cap(x.state, x.elapsed as u64)
         }
         // a failed load tried again at most once a minute (a /CONF that did not parse not fetched again)
         let m = self.st.mode.as_deref();
@@ -490,20 +473,14 @@ impl W {
         }
     }
 
-    /// The live calibration (MEDIA_OFFSET_V6, else _V3, else the v1 string: the app's order), the camera clock against
-    /// this computer's (the fastest of 5 MEDIA_TIME round trips), then the preview.
+    /// The live calibration (`calib_v6`, else `calib_v3`, else the v1 string `calib`: the app's order), the camera
+    /// clock against this computer's (the fastest of 5 `media_clock` round trips), then the preview.
     fn live(&mut self, c: &Camera) -> link::Result<()> {
-        use pb::OptionType::*;
-        let o = c
-            .options(&[MediaOffsetV6, MediaOffsetV3, MediaOffset])
-            .wait()?;
-        self.st.cal = [
-            (o.media_offset_v6, "MEDIA_OFFSET_V6"),
-            (o.media_offset_v3, "MEDIA_OFFSET_V3"),
-            (o.media_offset, "MEDIA_OFFSET"),
-        ]
-        .into_iter()
-        .find(|x| !x.0.is_empty());
+        use pb::Setting::*;
+        let o = c.options(&[CalibV6, CalibV3, Calib]).wait()?;
+        self.st.cal = [(o.calib_v6, "v6"), (o.calib_v3, "v3"), (o.calib, "v1")]
+            .into_iter()
+            .find(|x| !x.0.is_empty());
         if self.st.cal.is_none() {
             self.note("the camera reported no lens calibration", true);
         }
@@ -515,13 +492,13 @@ impl W {
         Ok(())
     }
 
-    /// The camera clock against this computer's: 5 MEDIA_TIME round trips (ms since the camera booted, the stream's
+    /// The camera clock against this computer's: 5 `media_clock` round trips (ms since the camera booted, the stream's
     /// clock), the fastest of these and of the earlier ones counts. Busy USB (a download, thumbnails) slows them.
     fn sync(&mut self, c: &Camera) -> link::Result<()> {
         let mut best = self.st.off;
         for _ in 0..5 {
             let t0 = mono();
-            let m = c.options(&[pb::OptionType::MediaTime]).wait()?.media_time;
+            let m = c.options(&[pb::Setting::MediaClock]).wait()?.media_clock;
             let t1 = mono();
             let rtt = (t1 - t0) as f64 * 1e-6;
             if m > 0 && best.is_none_or(|b| rtt < b.1) {
@@ -579,11 +556,11 @@ impl W {
         }
         match w {
             Write::Photo(q) => c
-                .call::<pb::SetPhotographyOptionsResp>(code::SET_PHOTO_OPTIONS, &q, T)
+                .call::<pb::WriteParamsReply>(code::SET_PHOTO_OPTIONS, &q, T)
                 .wait()
                 .map(drop)?,
             Write::Opts(q) => c
-                .call::<pb::SetOptionsResp>(code::SET_OPTIONS, &q, T)
+                .call::<pb::WriteSettingsReply>(code::SET_OPTIONS, &q, T)
                 .wait()
                 .map(drop)?,
         }
@@ -609,13 +586,12 @@ impl W {
                 Out::No(n)
             }
             Shot::Photo(p) => {
-                let q = pb::TakePicture {
-                    mode: p as i32,
-                    raw_capture_type: self.st.po.raw_capture_type,
-                    ..Default::default()
+                let q = pb::TakePhoto {
+                    kind: p as i32,
+                    format: self.st.po.format,
                 };
                 let r = c.take_photo(q).wait()?;
-                let u = r.image.map(|i| i.uri).unwrap_or_default();
+                let u = r.photo.map(|i| i.uri).unwrap_or_default();
                 self.note(format!("photo taken {u}"), false);
                 Out::Sent(Some(u).filter(|u| !u.is_empty()))
             }
@@ -645,11 +621,11 @@ impl W {
             Ok(x) => x,
             Err(no) => return Ok(no),
         };
-        self.cap(x.state, x.capture_time as u64);
+        self.cap(x.state, x.elapsed as u64);
         let no = match (running(x.state), on) {
             (true, true) => Some("the camera captures already: nothing started"),
             (false, false) => Some("the camera does not capture: nothing to stop"),
-            (false, true) if self.st.o.battery_info.as_ref().is_some_and(camera::empty) => {
+            (false, true) if self.st.o.battery.as_ref().is_some_and(camera::empty) => {
                 Some("battery at 5 % or less: charge the camera to record")
             }
             _ => None,
@@ -700,22 +676,20 @@ impl W {
         s.notes += 1;
         s.last = format!("{n:?}").chars().take(80).collect();
         match n {
-            Note::Battery(b) | Note::BatteryLow(b) => s.o.battery_info = Some(b),
-            Note::CaptureStatus(x) => self.cap(x.state, x.capture_time as u64),
+            Note::Battery(b) | Note::BatteryLow(b) => s.o.battery = Some(b),
+            Note::CaptureStatus(x) => self.cap(x.state, x.elapsed as u64),
             Note::Temp(t) => s.temp = Some(t),
             Note::LiveParams(p) => s.params = Some(p),
             Note::PictureState(p) => {
-                let x = format!("photo: {:?}", p.state());
+                let x = format!("photo: {:?}", p.stage());
                 self.note(x, false);
             }
             Note::CaptureStopped(x) => {
-                let e = x.err_code();
+                let e = x.cause();
                 self.note(format!("capture stopped: {e:?}"), true);
                 self.load();
             }
-            Note::Shutdown(x) => {
-                self.note(format!("the camera shuts down: {:?}", x.error_code()), true)
-            }
+            Note::Shutdown(x) => self.note(format!("the camera shuts down: {:?}", x.cause()), true),
             Note::StorageFull => self.note("the SD card is full", true),
             Note::Storage(_) | Note::SubMode(_) | Note::PhotoOptions(_) | Note::Photo(_) => {
                 self.load()

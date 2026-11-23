@@ -75,9 +75,9 @@ fn flows() {
         t.elapsed().as_secs_f64()
     );
     let (c, q) = log.lock().unwrap().last().cloned().unwrap();
-    let a = pb::CheckAuthorization::decode(&q[..]).unwrap();
+    let a = pb::Authorize::decode(&q[..]).unwrap();
     assert_eq!(
-        (c, &*a.id, a.initiator_type),
+        (c, &*a.client, a.initiator),
         (code::CHECK_AUTH, "client-id", 2)
     );
     b.tx.send(Cmd::Ap).unwrap();
@@ -85,10 +85,7 @@ fn flows() {
     assert_eq!(b.st.ap, Some(("X5 SIM001.OSC".into(), "88888888".into())));
     let (c, q) = log.lock().unwrap().last().cloned().unwrap();
     assert_eq!(c, code::GET_OPTIONS);
-    assert_eq!(
-        pb::GetOptions::decode(&q[..]).unwrap().option_types,
-        [36, 37, 43]
-    );
+    assert_eq!(pb::ReadSettings::decode(&q[..]).unwrap().keys, [36, 37, 43]);
     let n = log.lock().unwrap().len();
     b.tx.send(Cmd::Join("HomeNet".into(), "secret pw".into()))
         .unwrap();
@@ -105,12 +102,12 @@ fn flows() {
         [code::SET_WIFI_MODE, code::PHONE_INFO, code::SET_WIFI_CONN]
     );
     assert_eq!(
-        msg::SetWifiMode::decode(&l[0].1[..]).unwrap().wifi_mode,
+        msg::WriteWifiMode::decode(&l[0].1[..]).unwrap().mode,
         msg::STA
     );
-    let i = msg::SetWifiConnectionInfo::decode(&l[2].1[..])
+    let i = msg::JoinStation::decode(&l[2].1[..])
         .unwrap()
-        .wifi_connection_info
+        .station
         .unwrap();
     assert_eq!((&*i.ssid, &*i.password), ("HomeNet", "secret pw"));
     assert_eq!(b.addr, "192.168.1.57");
@@ -136,7 +133,7 @@ fn flows() {
 /// network and the address, which fills the pane's address in.
 #[test]
 fn station_read() {
-    let none = (msg::STA, msg::WifiConnectionInfo::default());
+    let none = (msg::STA, msg::Station::default());
     for (w, sta, note) in [
         (
             Net::default(),

@@ -286,21 +286,21 @@ mod tests {
         h
     }
 
-    fn wifi() -> pb::options::WifiInfo {
-        pb::options::WifiInfo {
+    fn wifi() -> pb::settings::Wifi {
+        pb::settings::Wifi {
             ssid: "X5 ABCDEF.OSC".into(),
             password: "12345678".into(),
             channel: 149,
-            wifi_state: 2,
+            state: 2,
             ..Default::default()
         }
     }
 
-    fn opts(w: pb::options::WifiInfo) -> pb::GetOptionsResp {
-        pb::GetOptionsResp {
-            option_types: vec![36, 37, 43],
-            value: Some(pb::Options {
-                wifi_info: Some(w),
+    fn opts(w: pb::settings::Wifi) -> pb::ReadSettingsReply {
+        pb::ReadSettingsReply {
+            keys: vec![36, 37, 43],
+            settings: Some(pb::Settings {
+                wifi: Some(w),
                 ..Default::default()
             }),
         }
@@ -333,16 +333,11 @@ mod tests {
         );
         // Answers, out of order.
         m.ok(10, &());
-        m.ok(9, &msg::GetWifiConnectionInfoResp::default());
+        m.ok(9, &msg::StationReply::default());
         m.ok(8, &());
-        m.ok(
-            7,
-            &msg::GetWifiModeResp {
-                wifi_mode: msg::STA,
-            },
-        );
-        m.ok(6, &pb::CheckAuthorizationResp::default());
-        // Response header from ble.md §10 (status 200, id 5) with a GetOptionsResp body.
+        m.ok(7, &msg::WifiModeReply { mode: msg::STA });
+        m.ok(6, &pb::AuthorizeReply::default());
+        // Response header from ble.md §10 (status 200, id 5) with a ReadSettingsReply body.
         let mut v = hex("00 00 00 00 04 00 00 c8 00 02 05 00 00 80 00 00");
         v.extend(opts(wifi()).encode_to_vec());
         v[0] = v.len() as u8;
@@ -351,8 +346,8 @@ mod tests {
             m.s.feed(b).unwrap()
         }
         assert_eq!(w.wait().unwrap(), wifi());
-        // AUTHORIZED is the proto3 default: an empty body (PROTOCOL.md §5.2).
-        assert_eq!(a.wait().unwrap().authorization_status, 0);
+        // STATUS_GRANTED is the proto3 default: an empty body (PROTOCOL.md §5.2).
+        assert_eq!(a.wait().unwrap().status, 0);
         assert_eq!(g.wait().unwrap(), msg::STA);
         s.wait().unwrap();
         i.wait().unwrap();
@@ -360,8 +355,8 @@ mod tests {
 
         // Ids are taken when the session handles the request.
         let mut m = sim(Some(false));
-        let on = pb::Options {
-            bt_wakeup_sw: 1,
+        let on = pb::Settings {
+            ble_wake: 1,
             ..Default::default()
         };
         for (id, f) in [
@@ -398,7 +393,7 @@ mod tests {
         let p = m.c.raw(code::GET_OPTIONS, vec![], Duration::from_secs(5));
         m.pump();
         // The first notification is plain UCD, so the session stays in UCD framing. Error response with
-        // `Error{EXECUTE_ERROR}` (PROTOCOL.md §4.10), then 8209 REJECT and 8195 BATTERY_UPDATE (§4.10).
+        // `Error{CODE_FAILED}` (PROTOCOL.md §4.10), then 8209 (refused) and 8195 (battery) (§4.10).
         let b = hex("12 00 00 00 04 00 00 f4 01 02 01 00 00 80 00 00 08 03 \
              12 00 00 00 04 00 00 11 20 02 05 00 00 c0 00 00 08 01 \
              16 00 00 00 04 00 00 03 20 02 05 00 00 c0 00 00 0a 04 10 50 18 64");
@@ -411,10 +406,7 @@ mod tests {
         let Event::Note(_, Note::Auth(a)) = m.ev.try_recv().unwrap() else {
             panic!()
         };
-        assert_eq!(
-            (a.authorization_result, a.authorization_operation_type),
-            (1, 0)
-        );
+        assert_eq!((a.outcome, a.op), (1, 0));
         let Event::Note(_, Note::Other(8195, body)) = m.ev.try_recv().unwrap() else {
             panic!()
         };
@@ -432,10 +424,7 @@ mod tests {
         let Event::Note(_, Note::Auth(a)) = m.ev.try_recv().unwrap() else {
             panic!()
         };
-        assert_eq!(
-            (a.authorization_result, a.authorization_operation_type),
-            (1, 2)
-        );
+        assert_eq!((a.outcome, a.op), (1, 2));
         assert!(matches!(
             m.s.feed(&hex("03 00 00 00 04 00 00")),
             Err(Error::Desync)
@@ -496,7 +485,7 @@ mod tests {
             &mut v,
             4,
             &resp(200, 1),
-            &msg::GetWifiModeResp { wifi_mode: msg::AP }.encode_to_vec(),
+            &msg::WifiModeReply { mode: msg::AP }.encode_to_vec(),
         );
         let mut f = vec![0x55];
         wire::frame(&mut f, 6, 0x40, &v);
@@ -513,14 +502,8 @@ mod tests {
         let o = m.out();
         assert_eq!(o.len(), 1);
         assert_eq!(&o[0][7..9], &code::CHECK_AUTH.to_le_bytes());
-        m.ok(
-            1,
-            &pb::CheckAuthorizationResp {
-                authorization_status: 1,
-                ..Default::default()
-            },
-        );
-        // PENDING keeps waiting; the success the camera sends may be an empty body (PROTOCOL.md §5.2).
+        m.ok(1, &pb::AuthorizeReply { status: 1 });
+        // Outcome 4 (pending) keeps waiting; the success the camera sends may be an empty body (PROTOCOL.md §5.2).
         m.notify(code::AUTH_RESULT, &hex("08 04"));
         m.notify(code::AUTH_RESULT, &[]);
         m.step();
@@ -531,13 +514,7 @@ mod tests {
         let a = m.c.authorize(UUID, Duration::from_secs(5));
         m.step();
         m.step();
-        m.ok(
-            1,
-            &pb::CheckAuthorizationResp {
-                authorization_status: 1,
-                ..Default::default()
-            },
-        );
+        m.ok(1, &pb::AuthorizeReply { status: 1 });
         m.notify(code::AUTH_RESULT, &hex("08 01"));
         assert!(matches!(a.wait(), Err(Error::Refused(1))));
 
@@ -546,13 +523,7 @@ mod tests {
         let a = m.c.authorize(UUID, Duration::from_secs(5));
         m.step();
         m.step();
-        m.ok(
-            1,
-            &pb::CheckAuthorizationResp {
-                authorization_status: 3,
-                ..Default::default()
-            },
-        );
+        m.ok(1, &pb::AuthorizeReply { status: 3 });
         assert!(matches!(a.wait(), Err(Error::Unauthorized(3))));
     }
 
@@ -568,12 +539,7 @@ mod tests {
             m.out(),
             [hex("10 00 00 00 04 00 00 96 00 02 01 00 00 80 00 00")]
         );
-        m.ok(
-            1,
-            &msg::GetWifiModeResp {
-                wifi_mode: msg::STA,
-            },
-        );
+        m.ok(1, &msg::WifiModeReply { mode: msg::STA });
         m.step(); // fresh waiter for 8215
         m.step();
         assert_eq!(
@@ -619,10 +585,10 @@ mod tests {
             )]
         );
         m.ok(3, &());
-        let res = msg::CameraWifiConnectionResult {
-            wifi_connection_result: 5,
-            wifi_connection_info: Some(msg::WifiConnectionInfo {
-                ip_addr: "10.0.0.7".into(),
+        let res = msg::StationNote {
+            result: 5,
+            station: Some(msg::Station {
+                ip: "10.0.0.7".into(),
                 ..Default::default()
             }),
         };
@@ -656,15 +622,15 @@ mod tests {
                 "19 00 00 00 04 00 00 08 00 02 01 00 00 80 00 00 08 30 08 0f 08 0b 08 c6 01"
             )]
         );
-        let id = pb::Options {
-            camera_type: "Insta360 X5".into(),
+        let id = pb::Settings {
+            model: "Insta360 X5".into(),
             ..Default::default()
         };
         m.ok(
             1,
-            &pb::GetOptionsResp {
-                option_types: vec![48],
-                value: Some(id.clone()),
+            &pb::ReadSettingsReply {
+                keys: vec![48],
+                settings: Some(id.clone()),
             },
         );
         // SYNCING_OPTIONS: the BLE option list alone; the app's GET_CURRENT_CAPTURE_STATUS stays local for an X5.
@@ -672,17 +638,17 @@ mod tests {
         let o = m.out();
         assert_eq!(o.len(), 1);
         assert_eq!(&o[0][7..9], &code::GET_OPTIONS.to_le_bytes());
-        let q = pb::GetOptions::decode(body(&o[0])).unwrap();
-        assert_eq!(q.option_types, crate::SYNC);
-        let on = pb::Options {
-            bt_wakeup_sw: 1,
+        let q = pb::ReadSettings::decode(body(&o[0])).unwrap();
+        assert_eq!(q.keys, crate::SYNC);
+        let on = pb::Settings {
+            ble_wake: 1,
             ..Default::default()
         };
         m.ok(
             2,
-            &pb::GetOptionsResp {
-                option_types: vec![97],
-                value: Some(on.clone()),
+            &pb::ReadSettingsReply {
+                keys: vec![97],
+                settings: Some(on.clone()),
             },
         );
         // CHECK_AUTHORIZATION, id 3 straight after the sync: asleep, asked again after 2 s, then authorized (empty
@@ -694,13 +660,7 @@ mod tests {
         m.step(); // waiter for 8209
         m.step();
         assert_eq!(m.out(), [auth.clone()]);
-        m.ok(
-            3,
-            &pb::CheckAuthorizationResp {
-                authorization_status: 7,
-                ..Default::default()
-            },
-        );
+        m.ok(3, &pb::AuthorizeReply { status: 7 });
         let t0 = Instant::now();
         m.step();
         m.step();
@@ -731,9 +691,9 @@ mod tests {
         m.s.id = 10;
         let (p, steps) = wake(&m, Duration::from_millis(50));
         m.step();
-        m.ok(11, &pb::GetOptionsResp::default());
+        m.ok(11, &pb::ReadSettingsReply::default());
         m.step();
-        m.ok(12, &pb::GetOptionsResp::default());
+        m.ok(12, &pb::ReadSettingsReply::default());
         m.step();
         m.step();
         m.ok(13, &());
@@ -760,18 +720,12 @@ mod tests {
         let mut m = sim(Some(false));
         let (p, _steps) = wake(&m, Duration::from_secs(5));
         m.step();
-        m.ok(1, &pb::GetOptionsResp::default());
+        m.ok(1, &pb::ReadSettingsReply::default());
         m.step();
-        m.ok(2, &pb::GetOptionsResp::default());
+        m.ok(2, &pb::ReadSettingsReply::default());
         m.step();
         m.step();
-        m.ok(
-            3,
-            &pb::CheckAuthorizationResp {
-                authorization_status: 3,
-                ..Default::default()
-            },
-        );
+        m.ok(3, &pb::AuthorizeReply { status: 3 });
         assert!(matches!(p.wait(), Err(Error::Unauthorized(3))));
     }
 }

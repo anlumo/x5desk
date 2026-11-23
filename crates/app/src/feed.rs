@@ -484,7 +484,7 @@ pub struct Feed {
     tgt: Option<Tgt>,
     stamp: Option<Stamp>,
     pub stats: Stats,
-    /// CLOCK_MONOTONIC ns − camera ns: from GET_OPTIONS MEDIA_TIME round trips
+    /// CLOCK_MONOTONIC ns − camera ns: from GET_OPTIONS `media_clock` round trips
     pub off: Option<i64>,
     /// packets the link dropped because the decode thread fell behind
     pub lost: u64,
@@ -571,7 +571,7 @@ impl Feed {
         }
     }
 
-    /// The calibration string (MEDIA_OFFSET_V6 / _V3 / the v1 one, `Calib::parse`) and where it came from.
+    /// The calibration string (v6 / v3 / v1, `Calib::parse`) and which one it is.
     pub fn cal(&mut self, s: &str, from: &str) -> Result<(), String> {
         self.cal = Some(Calib::parse(s)?);
         self.from = from.into();
@@ -580,13 +580,13 @@ impl Feed {
     }
 
     /// The stream's parameters (notification 8234): lens picture size and the window crop.
-    pub fn params(&mut self, p: &link::pb::LiveStreamParamsUpdate) {
-        let Some(c) = &p.window_crop_info else { return };
+    pub fn params(&mut self, p: &link::pb::LiveNote) {
+        let Some(c) = &p.crop else { return };
         let fr = Frame {
-            w: p.res_width / 2,
-            h: p.res_height,
-            crop: c.dst_width as f32,
-            shift: [c.crop_offset_x as f32, c.crop_offset_y as f32],
+            w: p.width / 2,
+            h: p.height,
+            crop: c.dst_w as f32,
+            shift: [c.x as f32, c.y as f32],
         };
         if (fr.w, fr.h, fr.crop, fr.shift) != (self.fr.w, self.fr.h, self.fr.crop, self.fr.shift)
             && fr.w > 0

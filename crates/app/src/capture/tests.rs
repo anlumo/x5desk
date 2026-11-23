@@ -67,7 +67,7 @@ fn until(c: &mut Capture, secs: f64, f: impl Fn(&Capture) -> bool) {
 }
 
 /// 10 s of the replayed preview in a 1280 × 720 viewer polled at 60 Hz: every picture decoded, nearly every one
-/// shown, the calibration from MEDIA_OFFSET_V3, the clock synced, and a picture that is not black.
+/// shown, the calibration from setting `calib_v3`, the clock synced, and a picture that is not black.
 #[test]
 fn replay_path() {
     let Some(r) = recording() else { return };
@@ -109,7 +109,7 @@ fn replay_path() {
     let (k, s) = (f.counts(), &f.stats);
     println!("replay: {}", f.report());
     assert!(f.err().is_none(), "{:?}", f.err());
-    assert_eq!(f.from, "MEDIA_OFFSET_V3");
+    assert_eq!(f.from, "v3");
     assert_eq!(k.bad, 0);
     // real time on a shared host and GPU: the numbers above say how it went, these only that it flowed
     assert!(k.dec >= 270, "{} decoded in 10 s", k.dec);
@@ -117,7 +117,7 @@ fn replay_path() {
     assert!(s.g2g.n >= 200, "the camera clock: {:?}", c.st.off);
     assert!(s.stitch.n > 0, "no GPU timestamps");
     assert_eq!(
-        c.st.params.as_ref().map(|p| (p.res_width, p.res_height)),
+        c.st.params.as_ref().map(|p| (p.width, p.height)),
         Some((2656, 1328))
     );
     // the view, and the whole sphere at the same size; into `X5_FIXTURES` for a look if set
@@ -285,7 +285,7 @@ fn commands() {
     let (_g, _w, mut c) = rig(&r, false);
     until(&mut c, 10.0, |c| c.st.conf.is_some() && c.st.mode.is_some());
     let n0 = r.log.lock().unwrap().len();
-    let po = c.st.po.clone();
+    let po = c.st.po;
     let sets: Vec<(&str, Slot, String)> = {
         let s = &c.st;
         let md = (s.conf.as_ref().and_then(|x| x.block(s.both)))
@@ -340,7 +340,7 @@ fn commands() {
     println!("sent {sent:?}");
     assert_eq!(sent, [&vec![9; sets.len()][..], &[7, 4, 60]].concat());
     let body = |k: u16, i: usize| log.iter().filter(|l| l.0 == k).nth(i).unwrap().1.clone();
-    let fm = pb::FunctionMode::NormalVideo;
+    let fm = pb::Profile::VideoNormal;
     let e = |s, v| match conf::write(s, v, &po, fm, false).unwrap() {
         Write::Photo(m) => m.encode_to_vec(),
         Write::Opts(m) => m.encode_to_vec(),
@@ -349,22 +349,22 @@ fn commands() {
         assert_eq!(body(9, i), e(*s, v), "{k} {v}");
         if *s == Slot::Iso {
             // the camera's program (the replay's FULL_AUTO) and shutter go along with the ISO
-            let q = pb::SetPhotographyOptions::decode(&body(9, i)[..]).unwrap();
-            let x = q.value.unwrap().video_exposure.unwrap();
+            let q = pb::WriteParams::decode(&body(9, i)[..]).unwrap();
+            let x = q.params.unwrap().video_exposure.unwrap();
             assert_eq!((x.program, x.iso), (5, conf::val(*s, v).unwrap() as u32));
         }
     }
-    // SET_OPTIONS {VIDEO_SUB_MODE: VIDEO_PURE (11)}
+    // SET_OPTIONS {video_mode: VIDEO_PURE (11)}
     assert_eq!(body(7, 0), [0x08, 0x29, 0x12, 0x03, 0xc8, 0x02, 0x0b]);
-    // START_CAPTURE {NORMAL}: the simulated camera stays in VIDEO_NORMAL
+    // START_CAPTURE {RECORD_MODE_NORMAL}: the simulated camera stays in VIDEO_NORMAL
     assert_eq!(body(4, 0), [0x08, 0x01]);
-    let k = pb::SetKeyTimePoint::decode(&body(60, 0)[..]).unwrap();
-    assert_eq!(k.type_detail, "com.insta360.keyTime.highlight");
+    let k = pb::Mark::decode(&body(60, 0)[..]).unwrap();
+    assert_eq!(k.tag, "com.insta360.keyTime.highlight");
 }
 
 /// The real X5 over USB (`X5_CAMERA` set; read-only apart from the preview's start and stop): 30 s of its live
 /// preview through the camera worker, the capture worker and the decode thread into a 1600 × 800 viewer at 60 Hz;
-/// the calibration it reports against the v635 file's offset_v3 (`X5_SAMPLES`; same camera: the string the stitch
+/// the calibration it reports against the v635 file's v3 calibration (`X5_SAMPLES`; same camera: the string the stitch
 /// crate's live test checked the seam with); its `/CONF` and mode; the notifications; a clean stop and close. The
 /// equirect and a view across the seam (not levelled) go to `X5_FIXTURES` if set.
 #[test]
@@ -453,23 +453,23 @@ fn real_camera() {
         let t = media::insv::Trailer::open(d.join("v635.insv")).unwrap();
         let mut b = vec![];
         t.get(media::insv::METADATA, &mut b).unwrap();
-        let v3 = pb::ExtraMetadata::decode(&b[..]).unwrap().offset_v3;
+        let v3 = pb::Metadata::decode(&b[..]).unwrap().calib_v3;
         println!(
-            "the camera's {from} is the v635 file's offset_v3: {}",
+            "the camera's {from} calibration is the v635 file's: {}",
             v3 == cal
         );
     }
     let p = s.params.expect("8234");
-    let wc = p.window_crop_info.unwrap_or_default();
+    let wc = p.crop.unwrap_or_default();
     println!(
         "stream {} × {} at {} fps, window {}² of {}² offset ({}, {}); camera clock round trip {:?} ms",
-        p.res_width,
-        p.res_height,
-        p.res_fps,
-        wc.dst_width,
-        wc.src_width,
-        wc.crop_offset_x,
-        wc.crop_offset_y,
+        p.width,
+        p.height,
+        p.fps,
+        wc.dst_w,
+        wc.src_w,
+        wc.x,
+        wc.y,
         s.off.map(|o| o.1)
     );
     let cf = s.conf.clone().expect("/CONF");
@@ -483,12 +483,10 @@ fn real_camera() {
             .as_deref()
             .and_then(|m| cf.block(s.both)?.mode(m))
             .map_or(0, |m| m.keys.len()),
-        s.o.battery_info.as_ref().map(camera::battery),
-        s.o.storage_state
-            .as_ref()
-            .map(|x| (x.free_space, x.total_space)),
+        s.o.battery.as_ref().map(camera::battery),
+        s.o.storage.as_ref().map(|x| (x.free, x.total)),
         s.temp,
-        s.o.temp_value,
+        s.o.temp,
         s.notes,
         s.last
     );
@@ -650,11 +648,10 @@ impl Real {
     }
 
     fn files(&self) -> Result<Vec<String>, String> {
-        use pb::{CardLocation::StorClCamera as L, MediaType as M};
-        let mut v =
-            (self.cam.files(M::VideoAndPhoto, L).wait()).map_err(|e| format!("files: {e}"))?;
+        use pb::{Media as M, Volume::Camera as L};
+        let mut v = (self.cam.files(M::VideoPhoto, L).wait()).map_err(|e| format!("files: {e}"))?;
         // the X5 lists a photo's DNG under both media types
-        for u in (self.cam.files(M::Dng, L).wait()).map_err(|e| format!("files: {e}"))? {
+        for u in (self.cam.files(M::Raw, L).wait()).map_err(|e| format!("files: {e}"))? {
             if !v.contains(&u) {
                 v.push(u)
             }
@@ -662,16 +659,11 @@ impl Real {
         Ok(v)
     }
 
-    /// What the tests change and set back: the sub-modes, in-camera stitching, and the photography options of the
+    /// What the tests change and set back: the sub-modes, in-camera stitching, and the params of the
     /// photo and video modes they use (every type the shown settings read).
     fn snap(&self) -> String {
-        use pb::OptionType::*;
-        let o = self.cam.options(&[
-            PhotoSubMode,
-            VideoSubMode,
-            InternalSplicing,
-            InstapanoFocusSensor,
-        ]);
+        use pb::Setting::*;
+        let o = self.cam.options(&[PhotoMode, VideoMode, Stitching, Lens]);
         let mut s = format!("{:?}\n", o.wait());
         let mut ts = vec![];
         for (_, sl, _) in conf::KEYS {
@@ -681,8 +673,8 @@ impl Real {
                 }
             }
         }
-        for fm in [pb::FunctionMode::NormalImage, pb::FunctionMode::NormalVideo] {
-            let v = self.cam.photo_options(&ts, fm).wait().map(|r| r.value);
+        for fm in [pb::Profile::PhotoSingle, pb::Profile::VideoNormal] {
+            let v = self.cam.photo_options(&ts, fm).wait().map(|r| r.params);
             s += &format!("{fm:?}: {v:?}\n");
         }
         s
@@ -730,17 +722,12 @@ impl Real {
             .cam
             .photo_options(conf::types(sl, photo), conf::func(&m).unwrap())
             .wait();
-        let o = self.cam.options(&[pb::OptionType::InternalSplicing]).wait();
+        let o = self.cam.options(&[pb::Setting::Stitching]).wait();
         let (po, o) = (
             po.map_err(|e| e.to_string())?,
             o.map_err(|e| e.to_string())?,
         );
-        let x = conf::get(
-            sl,
-            &po.value.unwrap_or_default(),
-            o.enable_internal_splicing,
-            photo,
-        );
+        let x = conf::get(sl, &po.params.unwrap_or_default(), o.stitching, photo);
         if !conf::val(sl, v).is_some_and(|y| conf::same(x, y)) {
             return Err(format!("{k} = {v}: the camera reads back {x}"));
         }
@@ -762,7 +749,7 @@ impl Real {
         }
         let o = self
             .cam
-            .options(&[pb::OptionType::PhotoSubMode, pb::OptionType::VideoSubMode])
+            .options(&[pb::Setting::PhotoMode, pb::Setting::VideoMode])
             .wait();
         let o = o.map_err(|e| e.to_string())?;
         if conf::current(&o).as_deref() != Some(m) {
@@ -903,7 +890,7 @@ impl Real {
             && running(s.state)
         {
             bad.push(format!("a capture still ran ({:?}): stopped", s.state()));
-            if let Ok(v) = self.cam.stop_capture(pb::CaptureMode::Normal).wait() {
+            if let Ok(v) = self.cam.stop_capture(pb::RecordMode::Normal).wait() {
                 self.made.push(v.uri)
             }
             self.pump(3.0, |_| false);
@@ -1124,10 +1111,8 @@ fn real_writes() {
                 return Err(format!("favourite {on}: the album does not show it"));
             }
             let l = r.cam.favorites().wait().map_err(|e| e.to_string())?;
-            let f = l.edit_file_info_list.iter().find(|e| e.file_path == flag);
-            let f = f
-                .and_then(|e| e.favorite_info)
-                .map(|f| f.playback_is_favorite);
+            let f = l.marks.iter().find(|e| e.path == flag);
+            let f = f.and_then(|e| e.favorite).map(|f| f.on);
             println!(
                 "  favourite {on} on {flag}: {}; the camera's list says {f:?} ({} favourites); notifications: {}",
                 if refused {
@@ -1135,9 +1120,9 @@ fn real_writes() {
                 } else {
                     "the album shows it"
                 },
-                l.edit_file_info_list
+                l.marks
                     .iter()
-                    .filter(|e| e.favorite_info.is_some_and(|f| f.playback_is_favorite))
+                    .filter(|e| e.favorite.is_some_and(|f| f.on))
                     .count(),
                 codes(&r.notes.lock().unwrap()[k..])
             );
@@ -1211,9 +1196,9 @@ fn real_writes() {
     let mut bad: Vec<String> = res.err().into_iter().collect();
     if let Some((u, f)) = fav0
         && r.cam.favorites().wait().is_ok_and(|l| {
-            l.edit_file_info_list.iter().any(|e| {
-                e.file_path == u && e.favorite_info.is_some_and(|x| x.playback_is_favorite) != f
-            })
+            l.marks
+                .iter()
+                .any(|e| e.path == u && e.favorite.is_some_and(|x| x.on) != f)
         })
     {
         bad.push(format!("favourite of {u} not back at {f}: set back"));

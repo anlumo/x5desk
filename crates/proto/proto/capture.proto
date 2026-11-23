@@ -1,0 +1,141 @@
+// Interface messages for talking to the X5 camera over USB, Wi-Fi and Bluetooth, written for x5desk for
+// interoperability: photos, recordings, timelapses, highlight marks, the preview, the capture state.
+syntax = "proto3";
+
+package cam;
+
+import "params.proto";
+
+message TakePhoto {
+  Kind kind     = 1;
+  Format format = 4;
+
+  enum Kind {
+    KIND_SINGLE    = 0;
+    KIND_BURST     = 3;
+    KIND_AEB_NIGHT = 4;
+  }
+}
+
+message TakePhotoReply {
+  PhotoFile photo = 1;
+}
+
+message PhotoFile {
+  string uri  = 1;
+  uint64 size = 2;
+}
+
+message VideoFile {
+  string uri = 1;
+}
+
+message StartRecording {
+  RecordMode mode = 1;
+}
+
+message StopRecording {
+  RecordMode mode = 2;
+}
+
+message StopRecordingReply {
+  VideoFile file = 1;
+}
+
+message StartLapse {
+  LapseMode mode = 1;
+}
+
+message StopLapse {
+  LapseMode mode = 1;
+}
+
+message StopLapseReply {
+  VideoFile file = 1;
+}
+
+enum RecordMode {
+  RECORD_MODE_UNKNOWN       = 0;
+  RECORD_MODE_NORMAL        = 1;
+  RECORD_MODE_BULLETTIME    = 2;
+  RECORD_MODE_HDR           = 3;
+  RECORD_MODE_TIMESHIFT     = 4;
+  RECORD_MODE_SUPER         = 5;
+  RECORD_MODE_LOOPRECORDING = 6;
+  RECORD_MODE_SELFIE        = 10;
+  RECORD_MODE_PURE          = 11;
+  RECORD_MODE_DASHCAM       = 12;
+  RECORD_MODE_GIMBAL        = 13;
+}
+
+enum LapseMode {
+  LAPSE_MODE_MIXED     = 0;
+  LAPSE_MODE_VIDEO     = 1;
+  LAPSE_MODE_INTERVAL  = 2;
+  LAPSE_MODE_STARLAPSE = 5;
+}
+
+message Mark {
+  uint64 ms  = 1;
+  Kind kind  = 2;
+  string tag = 3;
+
+  enum Kind {
+    KIND_INSTANT = 0;
+  }
+}
+
+enum CaptureState {
+  IDLE                  = 0;
+  RECORDING             = 1;
+  TIMELAPSE_RECORDING   = 2;
+  INTERVAL_PHOTOS       = 3;
+  TAKING_PHOTO          = 4;
+  TAKING_HDR_PHOTO      = 5;
+  SELF_TIMER            = 6;
+  BULLET_TIME_RECORDING = 7;
+  APPLYING_SETTINGS     = 8;
+  HDR_RECORDING         = 9;
+  TAKING_BURST          = 10;
+  STATIC_TIMELAPSE      = 11;
+  INTERVAL_RECORDING    = 12;
+  TIMESHIFT_RECORDING   = 13;
+  TAKING_NIGHT_PHOTO    = 14;
+  TAKING_PANO           = 15;
+  TAKING_HDR_PANO       = 16;
+  SUPER_RECORDING       = 17;
+  LOOP_RECORDING        = 18;
+  STARLAPSE             = 19;
+  FPV_RECORDING         = 20;
+  CINEMA_RECORDING      = 21;
+  SLOWMO_RECORDING      = 22;
+  SELFIE_RECORDING      = 23;
+  PURE_RECORDING        = 24;
+  PRE_RECORDING         = 25;
+  TIMED_RECORDING       = 26;
+  TIMED_INTERVAL_PHOTOS = 27;
+  PRE_RECORDING_STOPPED = 28;
+  DASHCAM_RECORDING     = 29;
+  GIMBAL_RECORDING      = 30;
+  CAPTURE_31            = 31;
+  TAKING_PANO_SWEEP     = 32;
+  CONCERT_RECORDING     = 33;
+}
+
+message CaptureStatus {
+  CaptureState state = 1;
+  uint32 elapsed     = 2;
+}
+
+message CaptureStatusReply {
+  CaptureStatus status = 1;
+}
+
+message StartPreview {
+  bool video             = 2;
+  uint32 bitrate         = 6;
+  Resolution resolution  = 7;
+  bool gyro              = 8;
+  uint32 bitrate2        = 9;
+  Resolution resolution2 = 10;
+}

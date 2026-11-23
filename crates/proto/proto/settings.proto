@@ -1,0 +1,174 @@
+// Interface messages for talking to the X5 camera over USB, Wi-Fi and Bluetooth, written for x5desk for
+// interoperability: camera settings by number, their reads and writes.
+syntax = "proto3";
+
+package cam;
+
+message Settings {
+  uint32 video_left      = 9;
+  uint32 photos_left     = 10;
+  Battery battery        = 11;
+  uint64 clock           = 12;
+  int32 utc_offset       = 13;
+  string serial          = 15;
+  Storage storage        = 20;
+  string calib           = 22;
+  int64 media_clock      = 29;
+  string firmware        = 30;
+  Wifi wifi              = 36;
+  PhotoMode photo_mode   = 40;
+  VideoMode video_mode   = 41;
+  string model           = 48;
+  int32 temp             = 77;
+  string calib_v3        = 81;
+  Lens lens              = 82;
+  BleWake ble_wake       = 97;
+  string ota_version     = 110;
+  string box_ota_version = 114;
+  bool stitching         = 135;
+  string calib_v6        = 170;
+  string zone            = 175;
+  Links links            = 198;
+
+  message Wifi {
+    string ssid     = 1;
+    string password = 2;
+    int32 channel   = 3;
+    Mode mode       = 4;
+    State state     = 5;
+
+    enum Mode {
+      MODE_AP = 0;
+    }
+
+    enum State {
+      STATE_UNKNOWN = 0;
+    }
+  }
+
+  enum BleWake {
+    BLE_WAKE_OFF = 0;
+  }
+}
+
+enum Setting {
+  SETTING_UNKNOWN     = 0;
+  SETTING_VIDEO_LEFT  = 9;
+  SETTING_PHOTOS_LEFT = 10;
+  SETTING_BATTERY     = 11;
+  SETTING_CLOCK       = 12;
+  SETTING_UTC_OFFSET  = 13;
+  SETTING_SERIAL      = 15;
+  SETTING_STORAGE     = 20;
+  SETTING_CALIB       = 22;
+  SETTING_MEDIA_CLOCK = 29;
+  SETTING_WIFI        = 36;
+  SETTING_PHOTO_MODE  = 40;
+  SETTING_VIDEO_MODE  = 41;
+  SETTING_MODEL       = 48;
+  SETTING_TEMP        = 77;
+  SETTING_CALIB_V3    = 81;
+  SETTING_LENS        = 82;
+  SETTING_STITCHING   = 135;
+  SETTING_CALIB_V6    = 170;
+  SETTING_ZONE        = 175;
+  SETTING_STORAGES    = 176;
+  SETTING_LINKS       = 198;
+}
+
+message ReadSettings {
+  repeated Setting keys = 1 [packed = false];
+}
+
+message ReadSettingsReply {
+  repeated Setting keys = 1 [packed = false];
+  Settings settings     = 2;
+}
+
+message WriteSettings {
+  repeated Setting keys = 1 [packed = false];
+  Settings settings     = 2;
+}
+
+message WriteSettingsReply {}
+
+message Battery {
+  Power power  = 1;
+  uint32 level = 2;
+  uint32 scale = 3;
+
+  enum Power {
+    POWER_BATTERY = 0;
+    POWER_ADAPTER = 1;
+  }
+}
+
+message Storage {
+  Card card    = 1;
+  uint64 free  = 2;
+  uint64 total = 3;
+}
+
+enum Card {
+  CARD_OK          = 0;
+  CARD_MISSING     = 1;
+  CARD_FULL        = 2;
+  CARD_UNFORMATTED = 3;
+  CARD_LOCKED      = 4;
+  CARD_ERROR       = 5;
+  CARD_FORMATTING  = 6;
+  CARD_MOUNTING    = 7;
+  CARD_UNMOUNTED   = 8;
+}
+
+enum Lens {
+  LENS_UNKNOWN = 0;
+  LENS_FRONT   = 1;
+  LENS_REAR    = 2;
+  LENS_BOTH    = 3;
+}
+
+message Links {}
+
+enum PhotoMode {
+  PHOTO_SINGLE     = 0;
+  PHOTO_HDR        = 1;
+  PHOTO_INTERVAL   = 2;
+  PHOTO_BURST      = 3;
+  PHOTO_AEB_NIGHT  = 4;
+  PHOTO_PANO       = 5;
+  PHOTO_PANO_HDR   = 6;
+  PHOTO_STARLAPSE  = 7;
+  PHOTO_PANO_SWEEP = 8;
+  PHOTO_PRO        = 9;
+  PHOTO_SELFIE     = 10;
+  PHOTO_FPV        = 11;
+  PHOTO_NONE       = 100;
+}
+
+enum VideoMode {
+  VIDEO_NORMAL        = 0;
+  VIDEO_BULLETTIME    = 1;
+  VIDEO_TIMELAPSE     = 2;
+  VIDEO_HDR           = 3;
+  VIDEO_TIMESHIFT     = 4;
+  VIDEO_SUPER         = 5;
+  VIDEO_LOOPRECORDING = 6;
+  VIDEO_FPV           = 7;
+  VIDEO_CINEMA        = 8;
+  VIDEO_SLOWMO        = 9;
+  VIDEO_SELFIE        = 10;
+  VIDEO_PURE          = 11;
+  VIDEO_LIVE          = 12;
+  VIDEO_LIVE_ONBOARD  = 13;
+  VIDEO_DASHCAM       = 14;
+  VIDEO_GIMBAL        = 15;
+  VIDEO_OTHER_16      = 16;
+  VIDEO_PRO           = 17;
+  VIDEO_FOLLOW        = 18;
+  VIDEO_TEMPLATE      = 19;
+  VIDEO_OTHER_20      = 20;
+  VIDEO_DOLLY_ZOOM    = 21;
+  VIDEO_CONCERT       = 22;
+  VIDEO_NONE          = 100;
+}

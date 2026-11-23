@@ -133,13 +133,13 @@ async fn keys(c: &Cli) -> Vec<String> {
 
 /// Nothing ever set the camera's clock or erased its card.
 fn clockless(h: &Host) {
-    use pb::OptionType::*;
+    use pb::Setting::*;
     for (_, c, b) in fake(h).lock().unwrap().log.iter() {
         assert!(![code::ERASE_SD, code::FORMAT_STORAGE].contains(c), "{c}");
         if *c == code::SET_OPTIONS {
-            let q = pb::SetOptions::decode(&b[..]).unwrap();
-            for t in [LocalTime, TimeZone, GeographicTimeZone] {
-                assert!(!q.option_types.contains(&(t as i32)), "{t:?}: {q:?}");
+            let q = pb::WriteSettings::decode(&b[..]).unwrap();
+            for t in [Clock, UtcOffset, Zone] {
+                assert!(!q.keys.contains(&(t as i32)), "{t:?}: {q:?}");
             }
         }
     }
@@ -318,7 +318,7 @@ async fn capture() {
         (&st["capturing"], &st["started_by_this_host"]),
         (&json!(true), &json!(true))
     );
-    assert_eq!(st["capture_state"], "NORMAL_CAPTURE");
+    assert_eq!(st["capture_state"], "RECORDING");
     assert_eq!(
         ok(&c, "status", json!({})).await["camera"]["recording"],
         true
@@ -419,7 +419,7 @@ async fn capture() {
     // a sub-mode the protocol does not know reads as VIDEO_NORMAL: untested all the same
     let note = |h: &Host| {
         let l = fake(h).lock().unwrap().link.clone().unwrap();
-        l.note(8275, &pb::NotifyCameraSubMode::default().encode_to_vec())
+        l.note(8275, &pb::ModeNote::default().encode_to_vec())
     };
     fake(&h).lock().unwrap().capture.as_mut().unwrap().video = 99;
     note(&h);
@@ -694,10 +694,10 @@ async fn end_stops_recording() {
     // the user's own recording is not this host's to stop
     let h = host("read,local,camera").await;
     let c = on(&h).await;
-    fake(&h).lock().unwrap().cap = pb::CameraCaptureState::NormalCapture as i32;
+    fake(&h).lock().unwrap().cap = pb::CaptureState::Recording as i32;
     let l = fake(&h).lock().unwrap().link.clone().unwrap();
-    let s = pb::CaptureStatus {
-        state: pb::CameraCaptureState::NormalCapture as i32,
+    let s = pb::CaptureNote {
+        state: pb::CaptureState::Recording as i32,
         ..Default::default()
     };
     l.note(8208, &s.encode_to_vec());
@@ -829,7 +829,7 @@ async fn reconnect_unread() {
     assert!(h.with(|s| s.rec.is_some()), "kept");
     fake(&h).lock().unwrap().refuse.clear();
     let l = fake(&h).lock().unwrap().link.clone().unwrap();
-    l.note(8275, &pb::NotifyCameraSubMode::default().encode_to_vec());
+    l.note(8275, &pb::ModeNote::default().encode_to_vec());
     let st = ok(&c, "capture_status", json!({})).await;
     assert_eq!(
         (&st["capturing"], &st["started_by_this_host"]),

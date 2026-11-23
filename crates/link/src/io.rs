@@ -157,27 +157,26 @@ impl<L: Link> Io<L> {
         Ok(self.l.send(ucd::HB)?)
     }
 
-    /// Wi-Fi only, in the app's order (§5.1): CHECK_TYPE (GET_OPTIONS), then CHECK_AUTHORIZATION; on UNAUTHORIZED
-    /// wait for the user to confirm on the camera (8209; PENDING keeps waiting).
+    /// Wi-Fi only, in the app's order (§5.1): CHECK_TYPE (GET_OPTIONS), then CHECK_AUTHORIZATION; on status 1 (not
+    /// authorized) wait for the user to confirm on the camera (8209; outcome 4, pending, keeps waiting).
     fn authorize(&mut self, uuid: &str) -> Result<()> {
         let call = |s: &mut Self, code, q: Vec<u8>| {
             let (tx, rx) = sync_channel(1);
             s.request(code, &q, 10 * SEC, Box::new(move |r| drop(tx.send(r))))?;
             s.pump(11 * SEC, |_| rx.try_recv().ok())?
         };
-        let q = pb::GetOptions {
-            option_types: vec![48, 15, 11, 198],
+        let q = pb::ReadSettings {
+            keys: vec![48, 15, 11, 198],
         };
         call(self, crate::code::GET_OPTIONS, q.encode_to_vec())?;
         // An 8209 may arrive right behind the response.
         self.auth = None;
-        let q = pb::CheckAuthorization {
-            id: uuid.into(),
-            initiator_type: 2,
-            ..Default::default()
+        let q = pb::Authorize {
+            client: uuid.into(),
+            initiator: 2,
         };
         let b = call(self, crate::code::CHECK_AUTH, q.encode_to_vec())?;
-        match pb::CheckAuthorizationResp::decode(&b[..])?.authorization_status {
+        match pb::AuthorizeReply::decode(&b[..])?.status {
             0 => Ok(()),
             1 => match self.pump(60 * SEC, |s| s.auth.take().filter(|&r| r != 4))? {
                 0 => Ok(()),
@@ -319,13 +318,13 @@ impl<L: Link> Io<L> {
                     None => Cow::Borrowed(body),
                 };
                 if note {
-                    // An empty body is {SUCCESS, BLE_CONNECT} (§5.2); other operation types are not about this
+                    // An empty body is {OUTCOME_GRANTED, AUTH_OP_BLE} (§5.2); other operation types are not about this
                     // connection.
                     if code == 8209
-                        && let Ok(n) = pb::NotificationAuthorizationResult::decode(&*b)
-                        && n.authorization_operation_type == 0
+                        && let Ok(n) = pb::AuthNote::decode(&*b)
+                        && n.op == 0
                     {
-                        self.auth = Some(n.authorization_result)
+                        self.auth = Some(n.outcome)
                     }
                     let _ = self.ev.send(Event::Note(Note::new(code, &b)));
                 } else if let Some(i) = self.reqs.iter().position(|r| r.0 == id) {

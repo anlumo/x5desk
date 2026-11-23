@@ -1,9 +1,9 @@
 //! Insta360 trailer ("extra info" V3) of `.insv` / `.insp` / `.lrv` files (re/analysis/formats.md §3): the
-//! `ExtraMetadata` protobuf (record 1), IMU samples (record 3), per-frame exposure (records 4 and 12) and raw access
+//! metadata protobuf (record 1; the camera link reads part of it as `Metadata`), IMU samples (record 3), per-frame exposure (records 4 and 12) and raw access
 //! to every other record. The parsers also take record payloads fetched remotely (`GET_FILE_EXTRA`).
 //!
 //! Verified on X5 footage (firmware 1.7.43): timestamps are µs on the camera clock; the IMU runs at ~1 kHz;
-//! `pts_type` 2 (`VIDEO_PTS_EXPOSURE_FILE`): exposure item k with `t == first_frame` is video frame 0.
+//! time stamp type (#64) 2, exposure file: exposure item k with `t == first_frame` is video frame 0.
 
 use crate::{bad, read_at};
 use std::{fs::File, io, path::Path};
@@ -29,18 +29,18 @@ pub struct Rec {
     pub size: u32,
 }
 
-/// `file_group_info` (tag 26). The X5 sets `identify` to the main file's camera path in the main file and its
+/// The file group (tag 26). The X5 sets `identify` to the main file's camera path in the main file and its
 /// `.lrv` alike (index 0 and 1): that pairs them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Group {
-    /// `SubMediaType` (0 VIDEO_NORMAL, 20 VIDEO_PURE, …)
+    /// the file's mode (0 normal video, 20 PureVideo, …)
     pub kind: u32,
     pub index: u32,
     pub identify: String,
     pub total: u32,
 }
 
-/// The `ExtraMetadata` fields the app uses. Tag numbers as #N; enums as raw values (formats_extra_info.proto).
+/// The metadata fields the app uses. Tag numbers as #N; enums as raw values.
 #[derive(Clone, Debug, Default)]
 pub struct Meta {
     pub serial: String,   // #1
@@ -70,14 +70,14 @@ pub struct Meta {
     pub thumb: u32,
     /// #132 1 H.264, 2 H.265, 3 MJPEG.
     pub codec: u32,
-    /// Best calibration string: #111 offset_v6 > #54 v3 > #5 v1 (the app's order).
+    /// Best calibration string: #111 v6 > #54 v3 > #5 v1 (the app's order).
     pub offset: String,
-    /// #136 OffsetVersion the camera captured with (4 = V6).
+    /// #136 calibration version the camera captured with (4 = V6).
     pub offset_version: u32,
-    /// #27 window_crop_info: square window cut from the calibration frame, and its offset from centre.
+    /// #27 window crop: square window cut from the calibration frame, and its offset from centre.
     pub crop: f32,
     pub shift: [f32; 2],
-    /// #128 blend_Angle in degrees; the camera writes 0 and the app keeps its 6° default unless > 0.
+    /// #128 blend angle in degrees; the camera writes 0 and the app keeps its 6° default unless > 0.
     pub blend: Option<f64>,
     /// #62 gyro record holds raw 20-byte items (else 56-byte processed ones).
     pub raw_gyro: bool,
@@ -277,7 +277,7 @@ pub fn imu(b: &[u8], m: &Meta) -> Vec<Imu> {
 }
 
 impl Meta {
-    /// Parses the `ExtraMetadata` protobuf; unknown or malformed trailing fields are ignored.
+    /// Parses the metadata protobuf; unknown or malformed trailing fields are ignored.
     pub fn parse(md: &[u8]) -> Meta {
         let mut m = Meta {
             acc_range: 8,
@@ -464,7 +464,7 @@ mod tests {
             assert_eq!(mt.resolution, [v.width, v.height], "{name}");
             assert_eq!(mt.stream, if lrv { 1 } else { 4 }, "{name}");
             assert_eq!(mt.category, 2, "{name}");
-            // total_time_ms is within one frame of the MP4 duration (v606: one frame longer); the .lrv carries its
+            // the duration in ms (#93) is within one frame of the MP4 duration (v606: one frame longer); the .lrv carries its
             // main file's metadata, while its own track is 2 frames shorter
             let (movie, fps) = (
                 m.duration as f64 / m.timescale as f64,

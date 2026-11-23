@@ -218,16 +218,14 @@ fn card() {
     )
     .unwrap();
     fs::write(r.join("DCIM/.trash/VID_20260101_000000_00_001.insv"), b"z").unwrap();
-    let ed = pb::EditFileInfoList {
-        edit_file_info_list: vec![pb::EditFileInfo {
-            file_path: "/storage/DCIM/Camera01/VID_20260116_152935_00_606.insv".into(),
-            favorite_info: Some(pb::FavoriteInfo {
-                playback_is_favorite: true,
-                modify_timestamp: 1,
+    let ed = pb::FileMarks {
+        marks: vec![pb::FileMark {
+            path: "/storage/DCIM/Camera01/VID_20260116_152935_00_606.insv".into(),
+            favorite: Some(pb::Favorite {
+                on: true,
+                modified: 1,
             }),
-            ..Default::default()
         }],
-        ..Default::default()
     };
     fs::write(r.join("DCIM/.editinfo_list.list"), ed.encode_to_vec()).unwrap();
     let t = Instant::now();

@@ -379,7 +379,7 @@ impl Conn {
             .rev()
             .map(|(t, e)| json!({ "text": t, "error": e }))
             .collect();
-        let state = pb::CameraCaptureState::try_from(st.cap).map(|c| c.as_str_name().to_string());
+        let state = pb::CaptureState::try_from(st.cap).map(|c| c.as_str_name().to_string());
         let next = match (cap, shot_kind(&m)) {
             (true, _) => "capture_record stop stops it; capture_record wait waits for its end",
             (false, "photo") => "capture_photo takes a photo; capture_mode switches the mode",
@@ -404,12 +404,12 @@ impl Conn {
                 .map(|t| t.saturating_duration_since(Instant::now()).as_secs()),
             "battery_percent": b.map(|b| cc::level(b).0),
             "charging": b.map(|b| cc::level(b).1),
-            "storage_free_bytes": i.storage.as_ref().map(|s| s.free_space),
-            "remaining_photos": st.o.remaining_pictures,
-            "remaining_video_s": st.o.remaining_capture_time.max(st.po.remaining_time),
+            "storage_free_bytes": i.storage.as_ref().map(|s| s.free),
+            "remaining_photos": st.o.photos_left,
+            "remaining_video_s": st.o.video_left.max(st.po.time_left),
             "temperature": st.temp.map(|t| json!({
-                "state": t.temp_state().as_str_name(),
-                "value": t.temp_value,
+                "state": t.level().as_str_name(),
+                "value": t.celsius,
             })),
             "modes": ms,
             "settings": sets,
@@ -617,7 +617,7 @@ impl Conn {
         }
         // the X5 leaves the self-timer to the app
         let t = match a.self_timer.unwrap_or(true) {
-            true => st.po.photography_self_timer.min(TIMER),
+            true => st.po.timer.min(TIMER),
             false => 0,
         };
         if t > 0 {

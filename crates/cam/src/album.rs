@@ -132,8 +132,8 @@ pub fn key_of(u: &str) -> String {
 /// (matched by directory and name, the edit list's paths need not carry the listing's prefix; else by name alone).
 pub fn group(
     uris: &[String],
-    infos: &[(String, Option<pb::ExtraMetadata>)],
-    ed: &pb::EditFileInfoList,
+    infos: &[(String, Option<pb::Metadata>)],
+    ed: &pb::FileMarks,
 ) -> Vec<Item> {
     let mut v: Vec<Item> = vec![];
     let mut at = HashMap::new();
@@ -150,19 +150,16 @@ pub fn group(
             v[i].uris.push(u.clone())
         }
     }
-    let info: HashMap<&str, &pb::ExtraMetadata> = infos
+    let info: HashMap<&str, &pb::Metadata> = infos
         .iter()
         .filter_map(|(p, m)| Some((p.as_str(), m.as_ref()?)))
         .collect();
     let fav: HashMap<&str, bool> = ed
-        .edit_file_info_list
+        .marks
         .iter()
         .map(|e| {
-            let f = e.favorite_info.as_ref();
-            (
-                tail(&e.file_path),
-                f.is_some_and(|f| f.playback_is_favorite),
-            )
+            let f = e.favorite.as_ref();
+            (tail(&e.path), f.is_some_and(|f| f.on))
         })
         .collect();
     for it in &mut v {
@@ -180,13 +177,13 @@ pub fn group(
             None => Kind::Other,
         };
         if let Some(m) = info.get(u.as_str()) {
-            it.date = m.creation_time;
-            it.ms = match m.total_time_ms {
-                0 => m.total_time as u64 * 1000,
+            it.date = m.created;
+            it.ms = match m.ms {
+                0 => m.secs as u64 * 1000,
                 t => t as u64,
             };
-            it.dim = m.dimension.map_or([0; 2], |d| [d.x as u32, d.y as u32]);
-            it.size = m.file_size;
+            it.dim = m.dims.map_or([0; 2], |d| [d.x as u32, d.y as u32]);
+            it.size = m.size;
         }
         if it.date == 0 {
             it.date = name_date(name(u));
@@ -437,12 +434,12 @@ pub fn date(d: u64) -> String {
 mod tests {
     use super::*;
 
-    fn meta(t: u64, size: u64, ms: u32, d: [i32; 2]) -> Option<pb::ExtraMetadata> {
-        Some(pb::ExtraMetadata {
-            creation_time: t,
-            file_size: size,
-            total_time_ms: ms,
-            dimension: Some(pb::extra_metadata::Vector2 { x: d[0], y: d[1] }),
+    fn meta(t: u64, size: u64, ms: u32, d: [i32; 2]) -> Option<pb::Metadata> {
+        Some(pb::Metadata {
+            created: t,
+            size,
+            ms,
+            dims: Some(pb::metadata::Pair { x: d[0], y: d[1] }),
             ..Default::default()
         })
     }
@@ -475,16 +472,14 @@ mod tests {
             ),
             (u[7].clone(), None),
         ];
-        let ed = pb::EditFileInfoList {
-            edit_file_info_list: vec![pb::EditFileInfo {
-                file_path: "/mnt/sd/DCIM/Camera01/VID_20260116_152935_00_603.insv".into(),
-                favorite_info: Some(pb::FavoriteInfo {
-                    playback_is_favorite: true,
-                    modify_timestamp: 1,
+        let ed = pb::FileMarks {
+            marks: vec![pb::FileMark {
+                path: "/mnt/sd/DCIM/Camera01/VID_20260116_152935_00_603.insv".into(),
+                favorite: Some(pb::Favorite {
+                    on: true,
+                    modified: 1,
                 }),
-                ..Default::default()
             }],
-            ..Default::default()
         };
         let v = group(&u, &infos, &ed);
         assert_eq!(v.len(), 6);

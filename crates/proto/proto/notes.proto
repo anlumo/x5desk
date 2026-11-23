@@ -1,0 +1,110 @@
+// Interface messages for talking to the X5 camera over USB, Wi-Fi and Bluetooth, written for x5desk for
+// interoperability: notifications the camera sends on its own.
+syntax = "proto3";
+
+package cam;
+
+import "settings.proto";
+import "capture.proto";
+
+message BatteryNote {
+  Battery battery = 1;
+}
+
+message BatteryLowNote {
+  Battery battery = 1;
+}
+
+message ShutdownNote {
+  Cause cause = 1;
+
+  enum Cause {
+    CAUSE_BATTERY_EMPTY     = 0;
+    CAUSE_OVERHEAT          = 1;
+    CAUSE_FACTORY_TEST_DONE = 2;
+  }
+}
+
+message StoppedNote {
+  Cause cause = 1;
+
+  enum Cause {
+    CAUSE_TIME_LIMIT           = 0;
+    CAUSE_CARD_FULL            = 1;
+    CAUSE_OTHER                = 2;
+    CAUSE_FILE_LIMIT           = 3;
+    CAUSE_SLOW_CARD            = 4;
+    CAUSE_MUX_ERROR            = 5;
+    CAUSE_DROPPED_FRAMES       = 6;
+    CAUSE_BATTERY_LOW          = 7;
+    CAUSE_CARD_FRAGMENTED      = 8;
+    CAUSE_OVERHEAT             = 9;
+    CAUSE_BATTERY_LOW_AT_START = 10;
+    CAUSE_CARD_FULL_AT_START   = 11;
+    CAUSE_OVERHEAT_AT_START    = 12;
+    CAUSE_BUSY_AT_START        = 13;
+    CAUSE_FIRMWARE_UPDATE      = 14;
+    CAUSE_TRANSFER             = 15;
+    CAUSE_PANO_SWEEP_STALLED   = 16;
+  }
+}
+
+message PhotoNote {
+  Stage stage = 1;
+
+  enum Stage {
+    STAGE_EXPOSING = 0;
+    STAGE_ENCODING = 1;
+    STAGE_SAVING   = 2;
+  }
+}
+
+message CaptureNote {
+  CaptureState state = 1;
+  uint32 elapsed     = 2;
+}
+
+message TempNote {
+  Temp level    = 1;
+  int32 celsius = 2;
+}
+
+enum Temp {
+  TEMP_LOW      = 0;
+  TEMP_WARM     = 1;
+  TEMP_MEDIUM   = 2;
+  TEMP_HIGH     = 3;
+  TEMP_CRITICAL = 4;
+}
+
+message PostureNote {}
+
+message ModeNote {}
+
+message SplitNote {}
+
+message RecordNote {}
+
+message DeleteNote {}
+
+message LiveNote {
+  uint32 width  = 2;
+  uint32 height = 3;
+  uint32 fps    = 4;
+  Crop crop     = 6;
+}
+
+message Crop {
+  uint32 src_w = 1;
+  uint32 src_h = 2;
+  uint32 dst_w = 3;
+  uint32 dst_h = 4;
+  int32 x      = 5;
+  int32 y      = 6;
+}
+
+message ParamsNote {}
+
+message VolumeNote {}
+
+message CardNote {}

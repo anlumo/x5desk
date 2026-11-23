@@ -1,5 +1,5 @@
-//! Insta360 lens calibration ("offset") strings, as found in `ExtraMetadata.offset{,_v2,_v3,_v6}` of each file's
-//! trailer.
+//! Insta360 lens calibration ("offset") strings, as found in the metadata of each file's trailer (v1, v2, v3,
+//! v6).
 //!
 //! Layout and models from `Insta360Lens::OffsetParser::Parse` / `ins::internal::*Projection::Project`
 //! (`../insta360/re/analysis/stitchmath/offset.md`). The version lives in the last token: `v >> 16` (0 = v1, where the

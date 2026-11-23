@@ -10,7 +10,7 @@ use std::sync::Mutex;
 /// The notifications the status shows: capture state and time, battery (low), temperature, a stopped capture.
 #[test]
 fn notes() {
-    use pb::CameraCaptureState as C;
+    use pb::CaptureState as C;
     let (tx, _rx) = mpsc::channel();
     let mut w = W {
         cam: None,
@@ -22,38 +22,35 @@ fn notes() {
         retry: None,
     };
     let cap = |s: C, t| {
-        Note::CaptureStatus(pb::CaptureStatus {
+        Note::CaptureStatus(pb::CaptureNote {
             state: s as i32,
-            capture_time: t,
-            ..Default::default()
+            elapsed: t,
         })
     };
-    w.on(cap(C::NormalCapture, 12));
+    w.on(cap(C::Recording, 12));
     let s = w.st.since.unwrap().elapsed().as_secs_f64();
     assert!(running(w.st.cap) && (12.0..12.5).contains(&s), "{s}");
-    w.on(Note::Battery(pb::BatteryInfo {
-        battery_level: 9,
+    w.on(Note::Battery(pb::Battery {
+        level: 9,
         ..Default::default()
     }));
-    assert!(camera::low(w.st.o.battery_info.as_ref().unwrap()));
-    let t = pb::TempState {
-        temp_state: pb::TemperatureState::TempHigh as i32,
-        temp_value: 61,
-        ..Default::default()
+    assert!(camera::low(w.st.o.battery.as_ref().unwrap()));
+    let t = pb::TempNote {
+        level: pb::Temp::High as i32,
+        celsius: 61,
     };
     w.on(Note::Temp(t));
     assert_eq!(w.st.temp, Some(t));
-    w.on(cap(C::NotCapture, 0));
+    w.on(cap(C::Idle, 0));
     assert!(!running(w.st.cap) && w.st.since.is_none());
-    w.on(Note::CaptureStopped(pb::NotificationCaptureStopped {
-        err_code: pb::notification_capture_stopped::ErrorCode::LowBattery as i32,
-        ..Default::default()
+    w.on(Note::CaptureStopped(pb::StoppedNote {
+        cause: pb::stopped_note::Cause::BatteryLow as i32,
     }));
     let (n, e) = w.st.note.clone().unwrap();
-    assert!(e && n.contains("LowBattery"), "{n}");
+    assert!(e && n.contains("BatteryLow"), "{n}");
     assert_eq!(w.st.notes, 5);
     // photos and the self-timer leave the files alone; timelapses run until stopped
-    assert!(!running(C::SingleShooting as i32) && running(C::TimelapseCapture as i32));
+    assert!(!running(C::TakingPhoto as i32) && running(C::TimelapseRecording as i32));
 }
 
 /// A reload after the session closed (a release racing a notification's reload) notes nothing.
@@ -87,10 +84,10 @@ const CONF: &str = r#"{"Sphere06C": {
 /// The simulated camera's state: its mode (a video sub-mode, `None`: PHOTO_SINGLE), exposure program, capture state
 /// (a start or stop changes it), battery, and every request.
 struct Fake {
-    video: Option<pb::VideoSubMode>,
-    prog: pb::photography_options::exposure_options::Program,
-    state: pb::CameraCaptureState,
-    battery: pb::BatteryInfo,
+    video: Option<pb::VideoMode>,
+    prog: pb::params::exposure::Program,
+    state: pb::CaptureState,
+    battery: pb::Battery,
     log: Vec<(u16, Vec<u8>)>,
     /// requests answered with status 500, or with bytes that do not decode
     refuse: Vec<u16>,
@@ -101,11 +98,11 @@ type Shared = Arc<Mutex<Fake>>;
 
 fn fake() -> Shared {
     Arc::new(Mutex::new(Fake {
-        video: Some(pb::VideoSubMode::VideoNormal),
-        prog: pb::photography_options::exposure_options::Program::FullAuto,
-        state: pb::CameraCaptureState::NotCapture,
-        battery: pb::BatteryInfo {
-            battery_level: 80,
+        video: Some(pb::VideoMode::VideoNormal),
+        prog: pb::params::exposure::Program::FullAuto,
+        state: pb::CaptureState::Idle,
+        battery: pb::Battery {
+            level: 80,
             ..Default::default()
         },
         log: vec![],
@@ -124,7 +121,7 @@ fn rig(f: &Shared) -> (Worker, Camera, Sim) {
     let req = move |code: u16, b: &[u8]| {
         let mut f = f2.lock().unwrap();
         f.log.push((code, b.to_vec()));
-        use pb::CameraCaptureState as C;
+        use pb::CaptureState as C;
         if f.refuse.contains(&code) {
             return (500, vec![]);
         }
@@ -132,56 +129,53 @@ fn rig(f: &Shared) -> (Worker, Camera, Sim) {
             return (200, vec![0xff; 3]);
         }
         match code {
-            code::GET_OPTIONS => ok(pb::GetOptionsResp {
-                option_types: vec![],
-                value: Some(pb::Options {
-                    video_sub_mode: f.video.unwrap_or(pb::VideoSubMode::VideoNone) as i32,
-                    focus_sensor: pb::SensorDevice::All as i32,
-                    battery_info: Some(f.battery),
+            code::GET_OPTIONS => ok(pb::ReadSettingsReply {
+                keys: vec![],
+                settings: Some(pb::Settings {
+                    video_mode: f.video.unwrap_or(pb::VideoMode::VideoNone) as i32,
+                    lens: pb::Lens::Both as i32,
+                    battery: Some(f.battery),
                     ..Default::default()
                 }),
             }),
-            code::CAPTURE_STATUS => ok(pb::GetCurrentCaptureStatusResp {
-                status: Some(pb::CameraCaptureStatus {
+            code::CAPTURE_STATUS => ok(pb::CaptureStatusReply {
+                status: Some(pb::CaptureStatus {
                     state: f.state as i32,
                     ..Default::default()
                 }),
             }),
-            code::GET_PHOTO_OPTIONS => ok(pb::GetPhotographyOptionsResp {
-                value: Some(pb::PhotographyOptions {
-                    video_exposure: Some(pb::photography_options::ExposureOptions {
+            code::GET_PHOTO_OPTIONS => ok(pb::ReadParamsReply {
+                params: Some(pb::Params {
+                    video_exposure: Some(pb::params::Exposure {
                         program: f.prog as i32,
                         ..Default::default()
                     }),
                     ..Default::default()
                 }),
-                ..Default::default()
             }),
-            code::GET_FILE => ok(pb::GetFileResp {
+            code::GET_FILE => ok(pb::LocateFileReply {
                 uri: "/CONF".into(),
                 version: 71,
             }),
             code::START_CAPTURE => {
-                f.state = C::NormalCapture;
+                f.state = C::Recording;
                 (200, vec![])
             }
             code::START_TIMELAPSE => {
-                f.state = C::TimelapseCapture;
+                f.state = C::TimelapseRecording;
                 (200, vec![])
             }
-            code::TAKE_PICTURE => ok(pb::TakePictureResponse {
-                image: Some(pb::Photo {
+            code::TAKE_PICTURE => ok(pb::TakePhotoReply {
+                photo: Some(pb::PhotoFile {
                     uri: "/DCIM/Camera01/IMG_20261104_120000_00_002.insp".into(),
                     ..Default::default()
                 }),
-                ..Default::default()
             }),
             code::STOP_CAPTURE | code::STOP_TIMELAPSE => {
-                f.state = C::NotCapture;
-                ok(pb::StopCaptureResp {
-                    video: Some(pb::Video {
+                f.state = C::Idle;
+                ok(pb::StopRecordingReply {
+                    file: Some(pb::VideoFile {
                         uri: "/DCIM/Camera01/VID_20261104_120000_00_001.insv".into(),
-                        ..Default::default()
                     }),
                 })
             }
@@ -228,14 +222,14 @@ fn set_allowed() {
         Cmd::Set("exposure_bias".into(), "-0.3".into()),
         &WRITES,
     );
-    let po = pb::PhotographyOptions {
-        video_exposure: Some(pb::photography_options::ExposureOptions {
+    let po = pb::Params {
+        video_exposure: Some(pb::params::Exposure {
             program: 5,
             ..Default::default()
         }),
         ..Default::default()
     };
-    let fm = pb::FunctionMode::NormalVideo;
+    let fm = pb::Profile::VideoNormal;
     let want = |s, v| match conf::write(s, v, &po, fm, false).unwrap() {
         Write::Photo(m) => m.encode_to_vec(),
         Write::Opts(m) => m.encode_to_vec(),
@@ -250,7 +244,7 @@ fn set_allowed() {
         assert!(l.is_empty() && e && n.contains("not allowed"), "{l:?} {n}");
     }
     // the camera switched to MANUAL (another client, its own buttons): the mode's values read again
-    f.lock().unwrap().prog = pb::photography_options::exposure_options::Program::Manual;
+    f.lock().unwrap().prog = pb::params::exposure::Program::Manual;
     w.tx.send(Cmd::Cam(1, Some(c.clone()))).unwrap();
     assert_eq!(next(&w).allowed("exposure_iso"), ["100", "400", "800"]);
     let (_, l) = run(
@@ -259,10 +253,10 @@ fn set_allowed() {
         Cmd::Set("exposure_iso".into(), "400".into()),
         &WRITES,
     );
-    let q = pb::SetPhotographyOptions::decode(&l[0].1[..]).unwrap();
-    assert_eq!(q.value.unwrap().video_exposure.unwrap().iso, 400);
+    let q = pb::WriteParams::decode(&l[0].1[..]).unwrap();
+    assert_eq!(q.params.unwrap().video_exposure.unwrap().iso, 400);
     // a mode without that setting (TIMELAPSE has none here)
-    f.lock().unwrap().video = Some(pb::VideoSubMode::VideoTimelapse);
+    f.lock().unwrap().video = Some(pb::VideoMode::VideoTimelapse);
     w.tx.send(Cmd::Cam(1, Some(c.clone()))).unwrap();
     assert_eq!(next(&w).mode.as_deref(), Some("VIDEO_TIMELAPSE"));
     let (st, l) = run(
@@ -313,12 +307,12 @@ fn start_stop() {
     assert!(st.note.unwrap().0.starts_with("recorded /DCIM/"));
     // the camera started recording by itself (its button): a Start the screen sent before it knew sends nothing,
     // and the state shows the recording
-    f.lock().unwrap().state = pb::CameraCaptureState::NormalCapture;
+    f.lock().unwrap().state = pb::CaptureState::Recording;
     let st = step(Cmd::Start, &[], rec);
     assert!(running(st.cap) && st.since.is_some());
     step(Cmd::Stop, &[code::STOP_CAPTURE], None);
     step(Cmd::Stop, &[], stop);
-    f.lock().unwrap().video = Some(pb::VideoSubMode::VideoTimelapse);
+    f.lock().unwrap().video = Some(pb::VideoMode::VideoTimelapse);
     w.tx.send(Cmd::Cam(1, Some(c.clone()))).unwrap();
     assert_eq!(next(&w).mode.as_deref(), Some("VIDEO_TIMELAPSE"));
     step(Cmd::Start, &[code::START_TIMELAPSE], None);
@@ -339,18 +333,18 @@ fn start_stop() {
 /// Start disabled): the level as the battery notification reports it, as the screen has it. A stop still goes out.
 #[test]
 fn battery_start() {
-    use pb::battery_info::PowerType::{self, *};
+    use pb::battery::Power::{self, *};
     let f = fake();
     let (w, c, _sim) = rig(&f);
-    let bat = |l: u32, p: PowerType| {
-        let b = pb::BatteryInfo {
-            battery_level: l,
-            power_type: p as i32,
+    let bat = |l: u32, p: Power| {
+        let b = pb::Battery {
+            level: l,
+            power: p as i32,
             ..Default::default()
         };
         f.lock().unwrap().battery = b;
         w.tx.send(Cmd::Note(Note::Battery(b))).unwrap();
-        assert!(next(&w).o.battery_info == Some(b));
+        assert!(next(&w).o.battery == Some(b));
     };
     for (l, p, ok) in [
         (5, Battery, false),
@@ -370,12 +364,12 @@ fn battery_start() {
         }
     }
     // a recording that runs at 5 % stops
-    f.lock().unwrap().state = pb::CameraCaptureState::NormalCapture;
+    f.lock().unwrap().state = pb::CaptureState::Recording;
     bat(5, Battery);
     let (_, s) = run(&w, &f, Cmd::Stop, &SHUTTER);
     assert_eq!(s.len(), 1);
     // a timelapse is held to the same rule
-    f.lock().unwrap().video = Some(pb::VideoSubMode::VideoTimelapse);
+    f.lock().unwrap().video = Some(pb::VideoMode::VideoTimelapse);
     w.tx.send(Cmd::Cam(1, Some(c.clone()))).unwrap();
     next(&w);
     let (_, s) = run(&w, &f, Cmd::Start, &SHUTTER);

@@ -582,8 +582,8 @@ fn summary(i: &Info) -> Value {
         "battery_percent": b.map(|b| cc::level(b).0),
         "charging": b.map(|b| cc::level(b).1),
         "low_battery": b.map(cc::low),
-        "storage_free_bytes": i.storage.as_ref().map(|s| s.free_space),
-        "storage_total_bytes": i.storage.as_ref().map(|s| s.total_space),
+        "storage_free_bytes": i.storage.as_ref().map(|s| s.free),
+        "storage_total_bytes": i.storage.as_ref().map(|s| s.total),
         "recording": i.busy,
         "album_source": source(i),
     })

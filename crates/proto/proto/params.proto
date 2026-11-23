@@ -1,0 +1,269 @@
+// Interface messages for talking to the X5 camera over USB, Wi-Fi and Bluetooth, written for x5desk for
+// interoperability: per-mode capture parameters by number, their reads and writes.
+syntax = "proto3";
+
+package cam;
+
+message Params {
+  sint32 ev                        = 7;
+  Color color                      = 18;
+  Exposure photo_exposure          = 20;
+  Exposure video_exposure          = 21;
+  uint32 iso_max                   = 24;
+  Format format                    = 25;
+  uint32 timer                     = 26;
+  uint32 brackets                  = 27;
+  uint32 duration                  = 29;
+  Aspect aspect                    = 30;
+  Resolution resolution            = 31;
+  Fov fov                          = 33;
+  uint32 speed                     = 37;
+  uint32 white_balance             = 39;
+  PhotoResolution photo_resolution = 40;
+  uint32 time_left                 = 41;
+  uint32 burst_count               = 44;
+  uint32 burst_secs                = 51;
+  LensExposure lens_exposure       = 61;
+  bool hdr                         = 63;
+  Horizon horizon                  = 70;
+  bool low_light                   = 71;
+  bool log                         = 72;
+  PhotoHdr photo_hdr               = 77;
+  uint32 p3                        = 86;
+
+  message Exposure {
+    Program program = 1;
+    uint32 iso      = 2;
+    double shutter  = 3;
+
+    enum Program {
+      PROGRAM_AUTO             = 0;
+      PROGRAM_ISO_PRIORITY     = 1;
+      PROGRAM_SHUTTER_PRIORITY = 2;
+      PROGRAM_MANUAL           = 3;
+      PROGRAM_ADAPTIVE         = 4;
+      PROGRAM_FULL_AUTO        = 5;
+    }
+  }
+
+  enum Horizon {
+    HORIZON_OFF = 0;
+  }
+
+  enum PhotoHdr {
+    PHOTO_HDR_OFF = 0;
+    PHOTO_HDR_ON  = 1;
+    PHOTO_HDR_AEB = 2;
+  }
+
+  enum LensExposure {
+    LENS_EXPOSURE_OFF = 0;
+  }
+}
+
+enum Param {
+  PARAM_UNKNOWN          = 0;
+  PARAM_EV               = 7;
+  PARAM_COLOR            = 18;
+  PARAM_PHOTO_EXPOSURE   = 20;
+  PARAM_VIDEO_EXPOSURE   = 21;
+  PARAM_ISO_MAX          = 24;
+  PARAM_FORMAT           = 25;
+  PARAM_TIMER            = 26;
+  PARAM_BRACKETS         = 27;
+  PARAM_DURATION         = 29;
+  PARAM_ASPECT           = 30;
+  PARAM_RESOLUTION       = 31;
+  PARAM_FOV              = 33;
+  PARAM_SPEED            = 37;
+  PARAM_WHITE_BALANCE    = 39;
+  PARAM_PHOTO_RESOLUTION = 40;
+  PARAM_TIME_LEFT        = 41;
+  PARAM_BURST_COUNT      = 44;
+  PARAM_BURST_SECS       = 51;
+  PARAM_LENS_EXPOSURE    = 61;
+  PARAM_HDR              = 63;
+  PARAM_HORIZON          = 70;
+  PARAM_LOW_LIGHT        = 71;
+  PARAM_LOG              = 72;
+  PARAM_PHOTO_HDR        = 77;
+  PARAM_P3               = 86;
+}
+
+enum Profile {
+  PROFILE_DEFAULT             = 0;
+  PROFILE_VIDEO_LIVE          = 1;
+  PROFILE_VIDEO_TIMELAPSE     = 2;
+  PROFILE_PHOTO_INTERVAL      = 3;
+  PROFILE_VIDEO_BULLETTIME    = 4;
+  PROFILE_PHOTO_BURST         = 5;
+  PROFILE_PHOTO_SINGLE        = 6;
+  PROFILE_VIDEO_NORMAL        = 7;
+  PROFILE_PHOTO_HDR           = 8;
+  PROFILE_VIDEO_HDR           = 9;
+  PROFILE_VIDEO_TIMESHIFT     = 12;
+  PROFILE_PHOTO_AEB_NIGHT     = 13;
+  PROFILE_VIDEO_SUPER         = 16;
+  PROFILE_VIDEO_LOOPRECORDING = 17;
+  PROFILE_PHOTO_STARLAPSE     = 18;
+  PROFILE_VIDEO_SELFIE        = 22;
+  PROFILE_VIDEO_PURE          = 27;
+  PROFILE_VIDEO_DASHCAM       = 63;
+  PROFILE_VIDEO_GIMBAL        = 64;
+}
+
+message ReadParams {
+  repeated Param keys = 1 [packed = false];
+  Profile profile     = 2;
+}
+
+message ReadParamsReply {
+  Params params = 2;
+}
+
+message WriteParams {
+  repeated Param keys = 1 [packed = false];
+  Params params       = 2;
+  Profile profile     = 3;
+}
+
+message WriteParamsReply {}
+
+enum Resolution {
+  RESOLUTION_3840_1920_30      = 0;
+  RESOLUTION_2560_1280_30      = 1;
+  RESOLUTION_1920_960_30       = 2;
+  RESOLUTION_2880_2880_30      = 10;
+  RESOLUTION_3840_1920_60      = 11;
+  RESOLUTION_3840_1920_50      = 12;
+  RESOLUTION_2880_2880_25      = 19;
+  RESOLUTION_2880_2880_24      = 20;
+  RESOLUTION_3840_2160_60      = 23;
+  RESOLUTION_3840_2160_30      = 24;
+  RESOLUTION_2720_1530_100     = 25;
+  RESOLUTION_1920_1080_120     = 28;
+  RESOLUTION_1920_1080_30      = 29;
+  RESOLUTION_4000_3000_30      = 31;
+  RESOLUTION_2720_1530_60      = 38;
+  RESOLUTION_2720_1530_30      = 39;
+  RESOLUTION_1920_1080_60      = 40;
+  RESOLUTION_2720_2040_30      = 41;
+  RESOLUTION_1920_1440_30      = 42;
+  RESOLUTION_3840_2160_25      = 48;
+  RESOLUTION_3840_2160_24      = 49;
+  RESOLUTION_2720_1530_25      = 50;
+  RESOLUTION_2720_1530_24      = 51;
+  RESOLUTION_1920_1080_25      = 52;
+  RESOLUTION_1920_1080_24      = 53;
+  RESOLUTION_4000_3000_25      = 54;
+  RESOLUTION_4000_3000_24      = 55;
+  RESOLUTION_2720_2040_25      = 56;
+  RESOLUTION_2720_2040_24      = 57;
+  RESOLUTION_1920_1440_25      = 58;
+  RESOLUTION_1920_1440_24      = 59;
+  RESOLUTION_1920_1440_60      = 62;
+  RESOLUTION_1080_1920_30      = 64;
+  RESOLUTION_1440_1920_30      = 65;
+  RESOLUTION_1440_1920_60      = 67;
+  RESOLUTION_1080_1920_60      = 68;
+  RESOLUTION_1080_1920_25      = 71;
+  RESOLUTION_1920_1080_50      = 81;
+  RESOLUTION_1080_1920_50      = 82;
+  RESOLUTION_1080_1920_24      = 85;
+  RESOLUTION_1080_1920_120     = 88;
+  RESOLUTION_3840_2160_50      = 92;
+  RESOLUTION_3840_1920_24      = 97;
+  RESOLUTION_3840_1920_25      = 98;
+  RESOLUTION_2720_1530_50      = 100;
+  RESOLUTION_2160_3840_60      = 122;
+  RESOLUTION_2160_3840_50      = 123;
+  RESOLUTION_2160_3840_30      = 124;
+  RESOLUTION_2160_3840_25      = 125;
+  RESOLUTION_2160_3840_24      = 126;
+  RESOLUTION_1530_2720_60      = 132;
+  RESOLUTION_1530_2720_50      = 133;
+  RESOLUTION_1530_2720_30      = 134;
+  RESOLUTION_1530_2720_25      = 135;
+  RESOLUTION_1530_2720_24      = 136;
+  RESOLUTION_1530_2720_100     = 149;
+  RESOLUTION_1920_1080_100     = 150;
+  RESOLUTION_1080_1920_100     = 151;
+  RESOLUTION_3840_3840_24      = 165;
+  RESOLUTION_3840_3840_25      = 166;
+  RESOLUTION_3840_3840_30      = 167;
+  RESOLUTION_3840_1920_48      = 208;
+  RESOLUTION_2720_2040_60      = 215;
+  RESOLUTION_2720_2040_50      = 216;
+  RESOLUTION_2720_1530_120     = 217;
+  RESOLUTION_1920_1440_50      = 218;
+  RESOLUTION_3840_1920_100     = 250;
+  RESOLUTION_2880_2880_50      = 251;
+  RESOLUTION_2880_2880_60      = 252;
+  RESOLUTION_1530_2720_120     = 261;
+  RESOLUTION_3040_760_240      = 262;
+  RESOLUTION_2160_1080_30      = 277;
+  RESOLUTION_3000_4000_30      = 278;
+  RESOLUTION_3000_4000_25      = 279;
+  RESOLUTION_3000_4000_24      = 280;
+  RESOLUTION_2720_2720_60      = 288;
+  RESOLUTION_2720_2720_50      = 289;
+  RESOLUTION_2720_2720_30      = 291;
+  RESOLUTION_2720_2720_25      = 292;
+  RESOLUTION_2720_2720_24      = 293;
+  RESOLUTION_1440_1920_50      = 294;
+  RESOLUTION_1440_1920_25      = 296;
+  RESOLUTION_1440_1920_24      = 297;
+  RESOLUTION_1920_1920_60      = 299;
+  RESOLUTION_1920_1920_50      = 300;
+  RESOLUTION_1920_1920_30      = 302;
+  RESOLUTION_1920_1920_25      = 303;
+  RESOLUTION_1920_1920_24      = 304;
+  RESOLUTION_5632_5632_30      = 306;
+  RESOLUTION_5760_1440_120     = 307;
+  RESOLUTION_2040_2720_60      = 308;
+  RESOLUTION_2040_2720_50      = 309;
+  RESOLUTION_2040_2720_30      = 311;
+  RESOLUTION_2040_2720_25      = 312;
+  RESOLUTION_2040_2720_24      = 313;
+  RESOLUTION_2880_2880_30_PLUS = 317;
+  RESOLUTION_2880_2880_25_PLUS = 318;
+  RESOLUTION_2880_2880_24_PLUS = 319;
+  RESOLUTION_360_2880_2880_48  = 338;
+  RESOLUTION_3840_1920_120     = 348;
+}
+
+enum PhotoResolution {
+  PHOTO_RESOLUTION_6912_3456  = 0;
+  PHOTO_RESOLUTION_5984_5984  = 10;
+  PHOTO_RESOLUTION_11968_5984 = 11;
+  PHOTO_RESOLUTION_5952_2976  = 12;
+}
+
+enum Color {
+  COLOR_STANDARD = 0;
+  COLOR_VIVID    = 2;
+  COLOR_FLAT     = 3;
+}
+
+enum Format {
+  FORMAT_PLAIN        = 0;
+  FORMAT_PURESHOT     = 3;
+  FORMAT_PURESHOT_RAW = 4;
+}
+
+enum Fov {
+  FOV_WIDE        = 0;
+  FOV_LINEAR      = 1;
+  FOV_ULTRAWIDE   = 2;
+  FOV_ACTION_VIEW = 4;
+  FOV_MAX_VIEW    = 10;
+  FOV_DEWARP      = 13;
+  FOV_MEGA_VIEW   = 14;
+}
+
+enum Aspect {
+  ASPECT_16_9    = 0;
+  ASPECT_1_1     = 1;
+  ASPECT_9_16    = 2;
+  ASPECT_235_100 = 5;
+}

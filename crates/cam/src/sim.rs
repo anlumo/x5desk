@@ -42,7 +42,7 @@ pub struct Card {
     pub mute: Vec<u16>,
     /// the camera clock SET_OPTIONS set and when; until then 30 s ahead of this computer's
     pub clk: Option<(u64, Instant)>,
-    /// a SET_OPTIONS without LOCAL_TIME (the sync's second, the zone alone) answered with status 500 (the clock's is
+    /// a SET_OPTIONS without the clock (the sync's second, the zone alone) answered with status 500 (the clock's is
     /// taken)
     pub zone: bool,
     /// the capture state CAPTURE_STATUS answers (no notification goes with a change)
@@ -60,14 +60,14 @@ pub struct Card {
 pub type Fake = Arc<Mutex<Card>>;
 
 /// The fake camera's capture: sub-modes as the camera sends them (raw: VIDEO_NONE for a photo mode, values it may not
-/// know), its lens (`focus_sensor`), the photography options per function mode (a write sets the fields its types
+/// know), its lens (`lens`), the params per profile (a write sets the fields its keys
 /// name), the next file number. A photo adds an `.insp`, a stop a clip and its proxy; a start and a stop send the
 /// capture state (8208), a photo 8311.
 pub struct Capt {
     pub video: i32,
     pub photo: i32,
     pub focus: i32,
-    pub po: HashMap<i32, pb::PhotographyOptions>,
+    pub po: HashMap<i32, pb::Params>,
     pub n: u32,
     /// a stop's answer names no file (as an interval's or a starlapse's may)
     pub nameless: bool,
@@ -118,29 +118,29 @@ pub const CONF: &str = r#"{"Sphere06C": {
 impl Capt {
     /// PHOTO_SINGLE, 360, FULL_AUTO, the settings at the first of their values.
     pub fn new() -> Capt {
-        let e = pb::photography_options::ExposureOptions {
-            program: pb::photography_options::exposure_options::Program::FullAuto as i32,
+        let e = pb::params::Exposure {
+            program: pb::params::exposure::Program::FullAuto as i32,
             ..Default::default()
         };
         let v = |s, x| conf::val(s, x).unwrap();
-        let o = pb::PhotographyOptions {
+        let o = pb::Params {
             video_exposure: Some(e),
-            still_exposure: Some(e),
-            record_resolution: v(Slot::Res, "3840_1920_30") as i32,
-            exposure_bias: v(Slot::Ev, "0") as i32,
+            photo_exposure: Some(e),
+            resolution: v(Slot::Res, "3840_1920_30") as i32,
+            ev: v(Slot::Ev, "0") as i32,
             ..Default::default()
         };
-        let po = [pb::FunctionMode::NormalImage, pb::FunctionMode::NormalVideo]
+        let po = [pb::Profile::PhotoSingle, pb::Profile::VideoNormal]
             .into_iter()
             .chain(conf::func("PHOTO_HDR"))
             .chain(conf::func("VIDEO_PURE"))
             .chain(conf::func("VIDEO_TIMELAPSE"))
-            .map(|f| (f as i32, o.clone()))
+            .map(|f| (f as i32, o))
             .collect();
         Capt {
-            video: pb::VideoSubMode::VideoNone as i32,
-            photo: pb::PhotoSubMode::PhotoSingle as i32,
-            focus: pb::SensorDevice::All as i32,
+            video: pb::VideoMode::VideoNone as i32,
+            photo: pb::PhotoMode::PhotoSingle as i32,
+            focus: pb::Lens::Both as i32,
             po,
             n: 1,
             nameless: false,
@@ -172,35 +172,33 @@ pub fn capture(c: &mut Card) {
 }
 
 /// The fields of `from` its write's types `ts` name, into `to` (what a camera keeps of a SET_PHOTO_OPTIONS).
-fn merge(to: &mut pb::PhotographyOptions, from: &pb::PhotographyOptions, ts: &[i32]) {
-    use pb::PhotographyOptionType as T;
+fn merge(to: &mut pb::Params, from: &pb::Params, ts: &[i32]) {
+    use pb::Param as T;
     for t in ts.iter().filter_map(|&t| T::try_from(t).ok()) {
         match t {
-            T::VideoExposureOptions => to.video_exposure = from.video_exposure,
-            T::StillExposureOptions => to.still_exposure = from.still_exposure,
-            T::ExposureBias => to.exposure_bias = from.exposure_bias,
-            T::WhiteBalanceValue => to.white_balance_value = from.white_balance_value,
-            T::VideoIsoTopLimit => to.video_iso_top_limit = from.video_iso_top_limit,
-            T::VideoGammaMode => to.gamma_mode = from.gamma_mode,
-            T::PanoExposureMode => to.pano_exposure_mode = from.pano_exposure_mode,
-            T::ILogSwitch => to.i_log_switch = from.i_log_switch,
-            T::HdrSwitchStatus => to.hdr_switch_status = from.hdr_switch_status,
-            T::PureVideoEnhancType => to.purevideo_enhanc_switch = from.purevideo_enhanc_switch,
-            T::RecordResolution => to.record_resolution = from.record_resolution,
+            T::VideoExposure => to.video_exposure = from.video_exposure,
+            T::PhotoExposure => to.photo_exposure = from.photo_exposure,
+            T::Ev => to.ev = from.ev,
+            T::WhiteBalance => to.white_balance = from.white_balance,
+            T::IsoMax => to.iso_max = from.iso_max,
+            T::Color => to.color = from.color,
+            T::LensExposure => to.lens_exposure = from.lens_exposure,
+            T::Log => to.log = from.log,
+            T::Hdr => to.hdr = from.hdr,
+            T::LowLight => to.low_light = from.low_light,
+            T::Resolution => to.resolution = from.resolution,
             T::PhotoResolution => to.photo_resolution = from.photo_resolution,
-            T::RawCaptureType => to.raw_capture_type = from.raw_capture_type,
-            T::PhotoHdrType => to.hdr_mode = from.hdr_mode,
-            T::AebCaptureNum => to.aeb_capture_num = from.aeb_capture_num,
-            T::PhotographySelfTimer => to.photography_self_timer = from.photography_self_timer,
-            T::AccelerateFrequency => to.accelerate_frequency = from.accelerate_frequency,
-            T::BurstCaptureNum => to.burst_capture_num = from.burst_capture_num,
-            T::BurstCaptureTime => to.burst_capture_time = from.burst_capture_time,
-            T::FovType => to.fov_type = from.fov_type,
-            T::FlowstateHorizonEnable => {
-                to.flowstate_horizon_enable = from.flowstate_horizon_enable
-            }
-            T::PhotoSizeId => to.photo_size_id = from.photo_size_id,
-            T::P3Switch => to.p3_switch = from.p3_switch,
+            T::Format => to.format = from.format,
+            T::PhotoHdr => to.photo_hdr = from.photo_hdr,
+            T::Brackets => to.brackets = from.brackets,
+            T::Timer => to.timer = from.timer,
+            T::Speed => to.speed = from.speed,
+            T::BurstCount => to.burst_count = from.burst_count,
+            T::BurstSecs => to.burst_secs = from.burst_secs,
+            T::Fov => to.fov = from.fov,
+            T::Horizon => to.horizon = from.horizon,
+            T::Aspect => to.aspect = from.aspect,
+            T::P3 => to.p3 = from.p3,
             _ => {}
         }
     }
@@ -256,48 +254,48 @@ pub fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'st
         let ok = |m: &dyn Fn() -> Vec<u8>| (200, m());
         match code {
             link::code::GET_OPTIONS => ok(&|| {
-                let o = pb::Options {
-                    camera_type: "Insta360 X5".into(),
-                    serial_number: "SIM0001".into(),
-                    firmware_revision: "v1.13.21".into(),
-                    battery_info: Some(pb::BatteryInfo {
-                        battery_level: c.battery.unwrap_or(80),
+                let o = pb::Settings {
+                    model: "Insta360 X5".into(),
+                    serial: "SIM0001".into(),
+                    firmware: "v1.13.21".into(),
+                    battery: Some(pb::Battery {
+                        level: c.battery.unwrap_or(80),
                         ..Default::default()
                     }),
-                    video_sub_mode: c.capture.as_ref().map_or(0, |k| k.video),
-                    photo_sub_mode: c.capture.as_ref().map_or(0, |k| k.photo),
-                    focus_sensor: c.capture.as_ref().map_or(0, |k| k.focus),
-                    storage_state: Some(pb::StorageState {
-                        free_space: 100_000_000_000,
-                        total_space: 500_000_000_000,
+                    video_mode: c.capture.as_ref().map_or(0, |k| k.video),
+                    photo_mode: c.capture.as_ref().map_or(0, |k| k.photo),
+                    lens: c.capture.as_ref().map_or(0, |k| k.focus),
+                    storage: Some(pb::Storage {
+                        free: 100_000_000_000,
+                        total: 500_000_000_000,
                         ..Default::default()
                     }),
-                    wifi_info: Some(match &c.ap {
-                        Some((s, p)) => pb::options::WifiInfo {
+                    wifi: Some(match &c.ap {
+                        Some((s, p)) => pb::settings::Wifi {
                             ssid: s.clone(),
                             password: p.clone(),
                             ..Default::default()
                         },
-                        None => pb::options::WifiInfo {
+                        None => pb::settings::Wifi {
                             ssid: "X5 SIM001.OSC".into(),
                             password: "88888888".into(),
                             ..Default::default()
                         },
                     }),
-                    local_time: c
+                    clock: c
                         .clk
                         .map_or(clock().0 + 30, |(t, at)| t + at.elapsed().as_secs()),
                     ..Default::default()
                 };
-                pb::GetOptionsResp {
-                    option_types: vec![],
-                    value: Some(o),
+                pb::ReadSettingsReply {
+                    keys: vec![],
+                    settings: Some(o),
                 }
                 .encode_to_vec()
             }),
             link::code::GET_FILE_LIST => {
-                let q = pb::GetFileList::decode(b).unwrap();
-                let dng = q.media_type == pb::MediaType::Dng as i32;
+                let q = pb::ListFiles::decode(b).unwrap();
+                let dng = q.media == pb::Media::Raw as i32;
                 let all: Vec<&String> = c
                     .uris
                     .iter()
@@ -305,14 +303,13 @@ pub fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'st
                     .collect();
                 let page = all
                     .iter()
-                    .skip(q.start as usize)
+                    .skip(q.offset as usize)
                     .take(q.limit as usize)
                     .map(|u| u.to_string())
                     .collect();
-                let r = pb::GetFileListResp {
-                    uri: page,
-                    total_count: all.len() as u32,
-                    ..Default::default()
+                let r = pb::ListFilesReply {
+                    uris: page,
+                    total: all.len() as u32,
                 };
                 (200, r.encode_to_vec())
             }
@@ -324,22 +321,22 @@ pub fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'st
                     .map(|u| {
                         let n = album::name(u);
                         let p: Vec<&str> = n.split('_').collect();
-                        let m = pb::ExtraMetadata {
-                            creation_time: format!("{}{}", p[1], p[2]).parse().unwrap(),
-                            file_size: c.data.get(u).map_or(1000, |d| d.len() as u64),
-                            total_time_ms: if n.ends_with(".insv") { 61_000 } else { 0 },
-                            dimension: Some(pb::extra_metadata::Vector2 { x: 7680, y: 3840 }),
+                        let m = pb::Metadata {
+                            created: format!("{}{}", p[1], p[2]).parse().unwrap(),
+                            size: c.data.get(u).map_or(1000, |d| d.len() as u64),
+                            ms: if n.ends_with(".insv") { 61_000 } else { 0 },
+                            dims: Some(pb::metadata::Pair { x: 7680, y: 3840 }),
                             ..Default::default()
                         };
-                        pb::FileInfo {
-                            file_path: u.clone(),
-                            metadata: m.encode_to_vec(),
+                        pb::Entry {
+                            path: u.clone(),
+                            meta: m.encode_to_vec(),
                         }
                     })
                     .collect();
-                let r = pb::FileInfoList {
-                    file_info: fi,
-                    card_location: 0,
+                let r = pb::Entries {
+                    entries: fi,
+                    volume: 0,
                 };
                 (200, r.encode_to_vec())
             }
@@ -347,24 +344,20 @@ pub fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'st
                 let l = c
                     .favs
                     .iter()
-                    .map(|(u, f)| pb::EditFileInfo {
-                        file_path: u.clone(),
-                        favorite_info: Some(pb::FavoriteInfo {
-                            playback_is_favorite: *f,
-                            modify_timestamp: 1,
+                    .map(|(u, f)| pb::FileMark {
+                        path: u.clone(),
+                        favorite: Some(pb::Favorite {
+                            on: *f,
+                            modified: 1,
                         }),
-                        ..Default::default()
                     })
                     .collect();
-                let r = pb::EditFileInfoList {
-                    edit_file_info_list: l,
-                    ..Default::default()
-                };
+                let r = pb::FileMarks { marks: l };
                 (200, r.encode_to_vec())
             }
             link::code::GET_FILE_EXTRA => {
-                let q = pb::GetFileExtra::decode(b).unwrap();
-                match c.uris.contains(&q.uri) && q.extra_type == 2 {
+                let q = pb::ReadExtra::decode(b).unwrap();
+                match c.uris.contains(&q.uri) && q.kind == 2 {
                     true => match &c.th {
                         Some((v, p)) => (200, if q.uri.ends_with(".jpg") { p } else { v }.clone()),
                         None => (200, ramp.clone()),
@@ -374,50 +367,50 @@ pub fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'st
             }
             link::code::DELETE_FILES => {
                 let q = pb::DeleteFiles::decode(b).unwrap();
-                let (c, many) = (&mut *c, q.uri.len() > 1);
+                let (c, many) = (&mut *c, q.uris.len() > 1);
                 let is = |u: &String, m: u8| c.stuck.get(u) == Some(&m);
-                if q.uri.iter().any(|u| is(u, 3) || many && is(u, 1)) {
+                if q.uris.iter().any(|u| is(u, 3) || many && is(u, 1)) {
                     return (500, vec![]);
                 }
-                c.uris.retain(|u| !q.uri.contains(u) || many && is(u, 2));
+                c.uris.retain(|u| !q.uris.contains(u) || many && is(u, 2));
                 // a camera's deleted file is gone: no bytes, no flag
                 if c.capture.is_some() {
                     let left = c.uris.clone();
                     c.data.retain(|u, _| u == "/CONF" || left.contains(u));
                     c.favs.retain(|f| left.contains(&f.0));
                 }
-                (200, pb::DeleteFilesResp::default().encode_to_vec())
+                (200, pb::DeleteFilesReply::default().encode_to_vec())
             }
             link::code::SET_OPTIONS => {
-                let q = pb::SetOptions::decode(b).unwrap();
-                let has = |t: pb::OptionType| q.option_types.contains(&(t as i32));
-                let v = q.value.clone().unwrap_or_default();
-                match has(pb::OptionType::LocalTime) {
-                    true => c.clk = Some((v.local_time, Instant::now())),
+                let q = pb::WriteSettings::decode(b).unwrap();
+                let has = |t: pb::Setting| q.keys.contains(&(t as i32));
+                let v = q.settings.clone().unwrap_or_default();
+                match has(pb::Setting::Clock) {
+                    true => c.clk = Some((v.clock, Instant::now())),
                     false if c.zone => return (500, vec![]),
                     false => {}
                 }
                 if let Some(k) = &mut c.capture {
-                    if has(pb::OptionType::PhotoSubMode) {
-                        (k.photo, k.video) = (v.photo_sub_mode, pb::VideoSubMode::VideoNone as i32)
+                    if has(pb::Setting::PhotoMode) {
+                        (k.photo, k.video) = (v.photo_mode, pb::VideoMode::VideoNone as i32)
                     }
-                    if has(pb::OptionType::VideoSubMode) {
-                        k.video = v.video_sub_mode
+                    if has(pb::Setting::VideoMode) {
+                        k.video = v.video_mode
                     }
                 }
-                (200, pb::SetOptionsResp::default().encode_to_vec())
+                (200, pb::WriteSettingsReply::default().encode_to_vec())
             }
             link::code::CAPTURE_STATUS => ok(&|| {
-                let s = pb::CameraCaptureStatus {
+                let s = pb::CaptureStatus {
                     state: c.cap,
                     ..Default::default()
                 };
-                pb::GetCurrentCaptureStatusResp { status: Some(s) }.encode_to_vec()
+                pb::CaptureStatusReply { status: Some(s) }.encode_to_vec()
             }),
             link::code::SET_FAVORITE => {
-                for s in pb::SetFavoriteList::decode(b).unwrap().set_favorite {
-                    c.favs.retain(|f| f.0 != s.material_url);
-                    c.favs.push((s.material_url, s.favorite_flag == 1));
+                for s in pb::SetFavorites::decode(b).unwrap().flags {
+                    c.favs.retain(|f| f.0 != s.path);
+                    c.favs.push((s.path, s.on == 1));
                 }
                 (200, vec![])
             }
@@ -436,7 +429,7 @@ fn note(c: &Card, n: u16, b: &[u8]) {
 
 /// The capture state, as the camera sends it when it changes (8208).
 fn state(c: &Card) {
-    let s = pb::CaptureStatus {
+    let s = pb::CaptureNote {
         state: c.cap,
         ..Default::default()
     };
@@ -446,46 +439,38 @@ fn state(c: &Card) {
 /// The capture requests of a card with capture ([`Capt`]); `f`: the card's own handle (a late capture state).
 fn capt(f: &Fake, c: &mut Card, code: u16, b: &[u8]) -> (u16, Vec<u8>) {
     use link::code::*;
-    use pb::CameraCaptureState as C;
+    use pb::CaptureState as C;
     let k = c.capture.as_mut().unwrap();
     match code {
         GET_FILE => (
             200,
-            pb::GetFileResp {
+            pb::LocateFileReply {
                 uri: "/CONF".into(),
                 version: 71,
             }
             .encode_to_vec(),
         ),
         GET_PHOTO_OPTIONS => {
-            let q = pb::GetPhotographyOptions::decode(b).unwrap_or_default();
-            let r = pb::GetPhotographyOptionsResp {
-                value: k.po.get(&q.function_mode).cloned(),
-                ..Default::default()
+            let q = pb::ReadParams::decode(b).unwrap_or_default();
+            let r = pb::ReadParamsReply {
+                params: k.po.get(&q.profile).cloned(),
             };
             (200, r.encode_to_vec())
         }
         SET_PHOTO_OPTIONS => {
-            let q = pb::SetPhotographyOptions::decode(b).unwrap_or_default();
-            let to = k.po.entry(q.function_mode).or_default();
-            merge(to, &q.value.unwrap_or_default(), &q.option_types);
-            (
-                200,
-                pb::SetPhotographyOptionsResp::default().encode_to_vec(),
-            )
+            let q = pb::WriteParams::decode(b).unwrap_or_default();
+            let to = k.po.entry(q.profile).or_default();
+            merge(to, &q.params.unwrap_or_default(), &q.keys);
+            (200, pb::WriteParamsReply::default().encode_to_vec())
         }
         TAKE_PICTURE => {
             let u = k.name("IMG", "00", "insp");
             k.n += 1;
-            let p = pb::Photo {
+            let p = pb::PhotoFile {
                 uri: u.clone(),
-                file_size: 4096,
-                ..Default::default()
+                size: 4096,
             };
-            let r = pb::TakePictureResponse {
-                image: Some(p),
-                ..Default::default()
-            };
+            let r = pb::TakePhotoReply { photo: Some(p) };
             c.uris.push(u.clone());
             c.data.insert(u, Arc::new(vec![7; 4096]));
             note(c, 8311, &r.encode_to_vec());
@@ -493,8 +478,8 @@ fn capt(f: &Fake, c: &mut Card, code: u16, b: &[u8]) -> (u16, Vec<u8>) {
         }
         START_CAPTURE | START_TIMELAPSE => {
             let to = match code {
-                START_CAPTURE => C::NormalCapture,
-                _ => C::TimelapseCapture,
+                START_CAPTURE => C::Recording,
+                _ => C::TimelapseRecording,
             } as i32;
             match k.lag {
                 None => {
@@ -517,19 +502,16 @@ fn capt(f: &Fake, c: &mut Card, code: u16, b: &[u8]) -> (u16, Vec<u8>) {
             let (v, l) = (k.name("VID", "00", "insv"), k.name("LRV", "01", "lrv"));
             let named = !k.nameless;
             k.n += 1;
-            c.cap = C::NotCapture as i32;
+            c.cap = C::Idle as i32;
             for u in [&v, &l] {
                 c.uris.push(u.clone());
                 c.data.insert(u.clone(), Arc::new(vec![9; 8192]));
             }
-            let video = named.then(|| pb::Video {
-                uri: v,
-                ..Default::default()
-            });
+            let video = named.then_some(pb::VideoFile { uri: v });
             state(c);
             match code {
-                STOP_CAPTURE => (200, pb::StopCaptureResp { video }.encode_to_vec()),
-                _ => (200, pb::StopTimelapseResp { video }.encode_to_vec()),
+                STOP_CAPTURE => (200, pb::StopRecordingReply { file: video }.encode_to_vec()),
+                _ => (200, pb::StopLapseReply { file: video }.encode_to_vec()),
             }
         }
         _ => (200, vec![]),
