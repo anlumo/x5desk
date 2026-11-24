@@ -38,11 +38,11 @@ pub(crate) enum Cmd {
     Find(String, std::time::Instant, SyncSender<Result<Adv>>),
 }
 
-/// Connect timeout (the app: 20 s).
+/// Connect timeout.
 const CONNECT: Duration = Duration::from_secs(20);
-/// How long the camera gets to send its first notification (the legacy app stack's limit, ble.md §5.1).
+/// How long the camera gets to send its first notification.
 const FIRST: Duration = Duration::from_secs(5);
-/// Spacing between frames (the app's send throttle, PROTOCOL.md §2.3).
+/// Spacing between frames.
 const GAP: Duration = Duration::from_millis(4);
 /// How often a link asks whether it is still up where a lost event could hide its end (btleplug's own backends).
 const LIVE: Duration = Duration::from_secs(2);
@@ -256,9 +256,9 @@ async fn seen(a: &Adapter, e: CentralEvent, ids: &mut Ids) -> Option<Adv> {
     Some(v)
 }
 
-/// The camera service and its write / notify characteristics (ble.md §4.6): walking the characteristics, the
-/// notify one is the first with NOTIFY, the write one the last with READ and WRITE up to it. Android walks in handle
-/// order; btleplug sorts by UUID, so a read / write characteristic after the notify one is taken too.
+/// The camera service and its write / notify characteristics: in handle order, the notify one is the first with
+/// NOTIFY, the write one the last with READ and WRITE up to it. btleplug sorts by UUID, so a read / write
+/// characteristic after the notify one is taken too.
 fn pick(ss: &BTreeSet<Service>) -> Option<(&Service, &Characteristic, &Characteristic)> {
     let s = ss.iter().find(|s| s.uuid.to_string().contains("be80"))?;
     let rw = CharPropFlags::READ | CharPropFlags::WRITE;
@@ -361,7 +361,7 @@ async fn conn(a: Adapter, d: Dev, ev: Sender<Event>, done: SyncSender<Result<Cam
         // dropped with the link, which ends the pump
         let mut aux = JoinSet::new();
         aux.spawn(pump(p.clone(), p.notifications().await.map_err(os)?, ntx));
-        // The app waits 200 ms after the MTU exchange before it subscribes (ble.md §4.5).
+        // 200 ms between the MTU exchange and the subscription.
         time::sleep(Duration::from_millis(200)).await;
         p.subscribe(rx).await.map_err(os)?;
         let t0 = Instant::now();
@@ -381,8 +381,8 @@ async fn conn(a: Adapter, d: Dev, ev: Sender<Event>, done: SyncSender<Result<Cam
             tx: tx.uuid,
             rx: rx.uuid,
             mtu: p.mtu(),
-            // The legacy app stack switches to UCP when the first notification starts `ff 06 41` (ble.md §5.1).
-            ucp: first
+            // wrapped when the first notification starts `ff 06 41`.
+            wrap: first
                 .as_ref()
                 .is_some_and(|f| f.1.starts_with(&[0xFF, 6, 0x41])),
             first,
@@ -399,7 +399,7 @@ async fn conn(a: Adapter, d: Dev, ev: Sender<Event>, done: SyncSender<Result<Cam
     let n = (l.mtu as usize).saturating_sub(3).clamp(20, wire::CHUNK);
     let (pid, rx) = (p.id(), l.rx);
     let mut s = Sess::new(d.clone(), ev.clone());
-    s.ucp = Some(l.ucp);
+    s.wrap = Some(l.wrap);
     let mut e = l.first.as_ref().and_then(|f| s.feed(&f.1).err());
     let (otx, mut ops) = unbounded_channel();
     // A caller that stopped waiting drops the camera here, which closes it.
@@ -413,7 +413,7 @@ async fn conn(a: Adapter, d: Dev, ev: Sender<Event>, done: SyncSender<Result<Cam
         for f in s.out.drain(..) {
             time::sleep_until(last + GAP).await;
             for c in f.chunks(n) {
-                // The app drops the rest of a frame whose write fails (PROTOCOL.md §2.3); its request times out.
+                // The rest of a frame whose write fails is dropped; its request times out.
                 if p.write(&tx, c, WriteType::WithResponse).await.is_err() {
                     break;
                 }

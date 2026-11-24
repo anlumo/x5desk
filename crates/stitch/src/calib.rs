@@ -1,9 +1,6 @@
-//! Insta360 lens calibration ("offset") strings, as found in the metadata of each file's trailer (v1, v2, v3,
-//! v6).
+//! Insta360 lens calibration strings, as found in the metadata of each file's trailer (v1, v2, v3, v6).
 //!
-//! Layout and models from `Insta360Lens::OffsetParser::Parse` / `ins::internal::*Projection::Project`
-//! (`../insta360/re/analysis/stitchmath/offset.md`). The version lives in the last token: `v >> 16` (0 = v1, where the
-//! token is `lens_ver << 8 | lens_type`).
+//! The version lives in the last token: `v >> 16` (0 = v1, where the token is `lens_ver << 8 | lens_type`).
 
 use crate::{Flow, Frame};
 
@@ -13,7 +10,7 @@ pub enum Model {
     /// v1/v2: `r = θ·(a0 + a1θ + a2θ² + a3θ³)`, pixel = c + f·r·(cos φ, sin φ).
     Poly { f: f64, a: [f64; 4] },
     /// v3/v6: Mei unified model `m = (X, Y)/(Z + ξ|P|)` plus radial-tangential distortion;
-    /// 5 coefficients (k1 k2 k3 p1 p2) for v3, 13 (`RadtanDistortPro`) for v6.
+    /// 5 coefficients (k1 k2 k3 p1 p2) for v3, 13 for v6.
     Omni {
         xi: f64,
         fx: f64,
@@ -42,7 +39,7 @@ pub struct Calib {
     pub lens: [Lens; 2],
 }
 
-/// Lens type 113 (X5, "A3"): FOV and the v1 polynomial normalised to radians (`ins::Lens::getCoeff`).
+/// Lens type 113 (X5, "A3"): FOV and the v1 polynomial normalised to radians.
 const X5_TYPE: u32 = 113;
 const X5_FOV: f64 = 200.0;
 const X5_POLY: [f64; 4] = [1.0, -0.15262551, 0.22872608, -0.076451022];
@@ -156,9 +153,9 @@ impl Calib {
     pub(crate) fn pack(&self, fr: Frame, blend: f64, flow: Option<&Flow>) -> [f32; PLEN] {
         let mut p = [0f32; PLEN];
         p[2] = (blend / 2.0) as f32;
-        p[3] = (blend.max(15.0) / 2.0) as f32; // X5 nadir widening (TemplateBlenderImpl::getAlpha)
+        p[3] = (blend.max(15.0) / 2.0) as f32; // X5 nadir widening
         if let Some(b) = flow {
-            // SeamlessBlenderImpl belt: rows span A0..A1 = -200..200° along the seam, columns gnomonic across it
+            // belt: rows span A0..A1 = -200..200° along the seam, columns gnomonic across it
             let d = 400.0 / (b.rows - 1) as f64;
             p[4] = 1.0;
             p[5] = b.cols as f32;
@@ -176,7 +173,7 @@ impl Calib {
         } else {
             self.side
         };
-        // ins::OffsetConvert::convertOffset: c -= (src - dst)/2 + crop_offset, then rescale dst -> texture
+        // c -= (src - dst)/2 + crop_offset, then rescale dst -> texture
         let s = fr.w as f64 / crop;
         let c0 = [0, 1].map(|k| (self.side - crop) / 2.0 + fr.shift[k] as f64);
         let lim = (self.fov / 2.0).to_radians();
@@ -241,7 +238,7 @@ fn mul(a: [[f64; 3]; 3], b: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
     std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum()))
 }
 
-/// v3: k1 k2 k3 p1 p2 (OpenCV radtan); v6: `RadtanDistortPro`, d5/d6 swap the p roles.
+/// v3: k1 k2 k3 p1 p2 (OpenCV radtan); v6: 13 coefficients, d5/d6 swap the p roles.
 fn distort(mx: f64, my: f64, d: &[f64]) -> [f64; 2] {
     let r2 = mx * mx + my * my;
     if d.len() == 5 {
@@ -275,7 +272,6 @@ mod tests {
         );
     }
 
-    // reference values: re/analysis/stitchmath/offset_model.py (matches the emulated library)
     #[test]
     fn versions() {
         for (s, v) in [(V1, 1), (V3, 3), (V6, 6)] {

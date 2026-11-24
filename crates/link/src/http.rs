@@ -1,7 +1,7 @@
-//! HTTP/1.1 GETs from the camera's server over N connections, each writing its byte range at its offset
-//! (PROTOCOL.md §7.7, §8.10). The camera honours a range's start but streams to EOF and never closes a tunnel
-//! connection, so every connection is cut locally at its range end. A file download keeps its data in
-//! `<dst>.part` and the missing ranges in `<dst>.part.todo`; a later download of the same file resumes from them.
+//! HTTP/1.1 GETs from the camera's server over N connections, each writing its byte range at its offset. The camera
+//! honours a range's start but streams to EOF and never closes a tunnel connection, so every connection is cut locally
+//! at its range end. A file download keeps its data in `<dst>.part` and the missing ranges in `<dst>.part.todo`; a
+//! later download of the same file resumes from them.
 
 use crate::{Done, Error, Result};
 use std::{

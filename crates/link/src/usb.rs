@@ -1,6 +1,6 @@
-//! USB app mode (PROTOCOL.md §8): vendor interface 0, bulk OUT 0x01 / IN 0x81; HTTP through the SocketTunnel.
+//! USB app mode: vendor interface 0, bulk OUT 0x01 / IN 0x81; HTTP through the socket tunnel.
 
-use crate::{Error, Link, Msg, Pool, Result, ucd};
+use crate::{Error, Link, Msg, Pool, Result, wire};
 use futures_core::Stream;
 use nusb::{
     DeviceInfo, Endpoint, Interface, MaybeFuture,
@@ -19,14 +19,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Each camera packet ends in a short USB packet (§8.3), so one read returns at most one whole packet; tunnel
-/// packets carry up to 512 KiB.
+/// Each camera packet ends in a short USB packet, so one read returns at most one whole packet; tunnel packets carry up
+/// to 512 KiB.
 const RX: usize = 1 << 20;
-/// Window the host grants each tunnel connection beyond what it consumed, and the step at which it re-announces
-/// it (the app's values, §8.6).
+/// Window the host grants each tunnel connection beyond what it consumed, and the step at which it re-announces it.
 const WIN: u64 = 0xA0_0000;
 const STEP: u64 = 0x20_0000;
-/// Minimum gap between two packets (both app stacks throttle sends, §3.6).
+/// Minimum gap between two packets.
 const GAP: Duration = Duration::from_millis(4);
 
 pub(crate) struct Usb {
@@ -37,7 +36,7 @@ pub(crate) struct Usb {
     /// Tunnel connections and the window last announced for each.
     tun: Vec<(u32, u64)>,
     first: bool,
-    /// The connection that carried RESET_ALL, until it answers.
+    /// The connection that carried the reset flag (0x20), until it answers.
     gate: Option<u32>,
     stop: Arc<AtomicBool>,
     rd: Option<JoinHandle<()>>,
@@ -54,12 +53,12 @@ pub enum Plug {
     App,
 }
 
-/// The PID is not fixed (the app checks the VID only); Webcam Mode shares the VID but has no vendor interface. As a
-/// disk the X5 is `070a:4027` (§8.1), the vendor id of its USB stack, not Insta360's: the product string tells, as in
-/// the app's mass-storage test. macOS sets a device's configuration only for a driver of its own, and none takes the
-/// X5's app mode (`2e1a:0002`): it stays unconfigured, without interfaces, until [`Usb::open`] configures it. The X5
-/// gives up after about 15 s without a session ("switching mode failed") and goes back to `070a:4027`. Webcam Mode
-/// has its UVC interfaces there too (the system's composite driver configures it).
+/// The PID is not fixed, so only the VID counts; Webcam Mode shares the VID but has no vendor interface. As a disk the
+/// X5 is `070a:4027`, the vendor id of its USB stack, not Insta360's: the product string tells. macOS sets a device's
+/// configuration only for a driver of its own, and none takes the X5's app mode (`2e1a:0002`): it stays unconfigured,
+/// without interfaces, until [`Usb::open`] configures it. The X5 gives up after about 15 s without a session
+/// ("switching mode failed") and goes back to `070a:4027`. Webcam Mode has its UVC interfaces there too (the system's
+/// composite driver configures it).
 fn plug(d: &DeviceInfo) -> Plug {
     match d.vendor_id() {
         0x2e1a | 0x4255
@@ -186,7 +185,7 @@ impl Usb {
         let iface = claim(&dev)?;
         let out = iface.endpoint::<Bulk, Out>(0x01)?;
         let mut inp = iface.endpoint::<Bulk, In>(0x81)?;
-        // Reads pending before anything is sent (§8.9).
+        // Reads pending before anything is sent.
         for _ in 0..4 {
             let mut b = inp.allocate(RX);
             b.set_requested_len(RX);
@@ -241,7 +240,7 @@ impl Usb {
     fn tunnel(&mut self, c: u32, flags: u16, win: u64, data: &[u8]) -> io::Result<()> {
         let mut v = std::mem::take(&mut self.v);
         v.clear();
-        ucd::tunnel(&mut v, c, flags, win, data);
+        wire::tunnel(&mut v, c, flags, win, data);
         let r = self.send(&v);
         self.v = v;
         r
@@ -249,7 +248,7 @@ impl Usb {
 }
 
 impl Link for Usb {
-    /// One UCD packet per bulk OUT submission, never coalesced, no ZLP (§8.3).
+    /// One packet per bulk OUT submission, never coalesced, no ZLP.
     fn send(&mut self, p: &[u8]) -> io::Result<()> {
         if let Some(w) = (self.last + GAP).checked_duration_since(Instant::now()) {
             thread::sleep(w)
@@ -272,7 +271,7 @@ impl Link for Usb {
     }
 
     fn http_open(&mut self, c: u32, q: &[u8]) -> io::Result<()> {
-        // NEW_CON | DATA | WINDOW; the session's first connection also resets the camera's stale ones (0x20).
+        // open | data | window; the session's first connection also resets the camera's stale ones (0x20).
         let f = if self.first { 0x2d } else { 0x0d };
         if self.first {
             self.gate = Some(c);
@@ -307,7 +306,7 @@ impl Link for Usb {
         self.tunnel(c, 0x02, w, &[])
     }
 
-    /// The camera applies RESET_ALL asynchronously. After a session that left connections streaming, it answered
+    /// The camera applies the reset asynchronously. After a session that left connections streaming, it answered
     /// the resetting connection only after ~270 ms, and connections opened in that time never got an answer
     /// (6 of 6 resumed downloads stalled; 0 of 4 once later connections waited for the first answer).
     fn busy(&self) -> bool {

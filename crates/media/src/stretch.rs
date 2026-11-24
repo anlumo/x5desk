@@ -1,11 +1,11 @@
-//! Time-stretch with the pitch kept (WSOLA, Verhelst & Roelands 1993): speed s plays the input s times as fast.
-//! Hann frames of 21 ms overlap by half on the output; each frame is taken near its ideal input position, where it
-//! continues the previous frame best (normalised cross-correlation on the channel sum, ±5.3 ms around a centre that
-//! cancels the last frame's offset: single frames stray up to 10.7 ms, their offsets average out). A frame plays at
-//! 1×, so it is placed by its middle: the middle's ideal input time is that of its output instant (exact through speed
-//! changes). On average output sample j plays input time j · s, so pictures stay in sync. Speeds outside
-//! [`MIN`, `MAX`] play as silence of the same duration (as the Insta360 app does); speed changes take effect at the
-//! input position where they were given, so the output lasts Σ input / speed exactly. Frame sizes assume 48 kHz.
+//! Time-stretch with the pitch kept (WSOLA, Verhelst & Roelands 1993): speed s plays the input s times as fast. Hann
+//! frames of 21 ms overlap by half on the output; each frame is taken near its ideal input position, where it continues
+//! the previous frame best (normalised cross-correlation on the channel sum, ±5.3 ms around a centre that cancels the
+//! last frame's offset: single frames stray up to 10.7 ms, their offsets average out). A frame plays at 1×, so it is
+//! placed by its middle: the middle's ideal input time is that of its output instant (exact through speed changes). On
+//! average output sample j plays input time j · s, so pictures stay in sync. Speeds outside [`MIN`, `MAX`] play as
+//! silence of the same duration; speed changes take effect at the input position where they were given, so the output
+//! lasts Σ input / speed exactly. Frame sizes assume 48 kHz.
 
 use std::collections::VecDeque;
 

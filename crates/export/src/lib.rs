@@ -368,7 +368,7 @@ impl Head {
         let tr = Trailer::open(f0)
             .map_err(|e| format!("{}: no Insta360 trailer ({e})", f0.display()))?;
         let meta = tr.meta.clone();
-        let cal = Calib::parse(&meta.offset)?;
+        let cal = Calib::parse(&meta.calib)?;
         let (mut mp4, mut v, mut aac) = (vec![], vec![], None);
         for (i, p) in files.iter().enumerate() {
             let m = Mp4::open(p).map_err(|e| format!("{}: {e}", p.display()))?;
@@ -389,7 +389,7 @@ impl Head {
                 f0.display()
             ));
         };
-        // DUAL_STREAM_TRACK_REVERSE: the first track holds lens 1
+        // reversed dual track (#131 = 4): the first track holds lens 1
         let lens = if meta.stream == 4 { [b, a] } else { [a, b] };
         let tk = |(i, t): (usize, usize)| &mp4[i].tracks[t];
         let t0 = tk(lens[0]);

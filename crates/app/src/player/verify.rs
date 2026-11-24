@@ -347,7 +347,7 @@ fn proxy(d: &Path, s0: usize, n: usize) -> PathBuf {
         out.with_extension(format!("{id}.mp4")),
         out.with_extension(format!("{id}.part")),
     );
-    // DUAL_STREAM_TRACK_REVERSE: track 1 holds lens 0
+    // reversed dual track (#131 = 4): track 1 holds lens 0
     let cut = |t: usize, o: &str| {
         format!("[0:v:{t}]trim=start_frame={s0},setpts=PTS-STARTPTS,scale=832:832{o}")
     };

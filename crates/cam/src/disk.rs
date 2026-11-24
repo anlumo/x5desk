@@ -1,13 +1,12 @@
 //! USB mass storage: the X5 in its U-disk mode, or its card in a reader, is a block device that udisks2 mounts (under
 //! `/run/media/$USER/`). Mounted volumes come from `/proc/self/mountinfo`: one is the camera when its block device's
-//! USB ancestor calls itself `Insta360 …` (the app's test is the product string, PROTOCOL.md §8.1), and one under a
-//! removable-media mount point counts as a card when it holds a `DCIM` tree. Its files are listed as the app lists
-//! them (§8.7) and grouped like the camera's album, with each main file's trailer metadata and thumbnail and the
-//! favourites of `DCIM/.editinfo_list.list`. Imports go through the download queue (`dl`) as [`copy`]: resumable from
-//! `<dst>.part`. On macOS the mount table is the kernel's (`getfsstat` without waiting, so a share whose server went
-//! away holds nothing up), the volumes are block devices under `/Volumes`, and the USB ancestor is looked up in the
-//! IOKit registry, up from the disk's IOMedia. Elsewhere no card is found (the test hook's directories still count),
-//! and a card's files list and import as on Linux.
+//! USB ancestor calls itself `Insta360 …` (its product string), and one under a removable-media mount point counts as a
+//! card when it holds a `DCIM` tree. Its camera files (`media`) are listed and grouped like the camera's album, with
+//! each main file's trailer metadata and thumbnail and the favourites of `DCIM/.editinfo_list.list`. Imports go through
+//! the download queue (`dl`) as [`copy`]: resumable from `<dst>.part`. On macOS the mount table is the kernel's
+//! (`getfsstat` without waiting, so a share whose server went away holds nothing up), the volumes are block devices
+//! under `/Volumes`, and the USB ancestor is looked up in the IOKit registry, up from the disk's IOMedia. Elsewhere no
+//! card is found (the test hook's directories still count), and a card's files list and import as on Linux.
 
 use crate::album::{self, Item};
 use link::{Error, Prog, pb};
@@ -272,7 +271,7 @@ fn usb(dev: &str) -> Option<String> {
     s.starts_with("Insta360").then_some(s)
 }
 
-/// A file the app collects from a card (`DocumentFileUtils`): its prefixes and extensions, no `__`, 4–6 parts.
+/// A camera file on a card: its prefixes and extensions, no `__`, 4–6 parts.
 fn media(n: &str) -> bool {
     let e = n.rsplit_once('.').map_or("", |e| e.1).to_ascii_lowercase();
     ["VID_", "PRO_VID_", "LRV_", "PRO_LRV_", "IMG_", "LIV_"]
@@ -343,7 +342,7 @@ fn meta(p: &Path) -> Option<pb::Metadata> {
     })
 }
 
-/// The trailer's thumbnail (the NV12 record the camera serves as `GET_FILE_EXTRA` 2) scaled to the album's box.
+/// The trailer's thumbnail (the NV12 record the camera serves as `READ_EXTRA` 2) scaled to the album's box.
 pub fn thumb(p: &Path) -> Option<(u32, u32, Vec<u8>)> {
     let mut b = vec![];
     Trailer::open(p).ok()?.get(insv::THUMBNAIL, &mut b).ok()?;

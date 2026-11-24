@@ -1,6 +1,6 @@
 //! A simulated X5 for tests of the camera worker and of what sits on it: a fake card (files, bytes, favourites, a
 //! clock, requests refused or never answered; capture when asked for: `/CONF`, modes, settings, photos and clips, the
-//! notifications that go with them) behind link's simulated camera, its real I/O thread, UCD framing and tunnel HTTP;
+//! notifications that go with them) behind link's simulated camera, its real I/O thread, packet framing and tunnel HTTP;
 //! a worker connected to it, and waits for what the worker reports.
 
 use crate::{
@@ -40,16 +40,16 @@ pub struct Card {
     pub refuse: Vec<u16>,
     /// request codes never answered
     pub mute: Vec<u16>,
-    /// the camera clock SET_OPTIONS set and when; until then 30 s ahead of this computer's
+    /// the camera clock WRITE_SETTINGS set and when; until then 30 s ahead of this computer's
     pub clk: Option<(u64, Instant)>,
-    /// a SET_OPTIONS without the clock (the sync's second, the zone alone) answered with status 500 (the clock's is
+    /// a WRITE_SETTINGS without the clock (the sync's second, the zone alone) answered with status 500 (the clock's is
     /// taken)
     pub zone: bool,
     /// the capture state CAPTURE_STATUS answers (no notification goes with a change)
     pub cap: i32,
-    /// the access point's SSID and password GET_OPTIONS reports; none: `X5 SIM001.OSC`, `88888888`
+    /// the access point's SSID and password READ_SETTINGS reports; none: `X5 SIM001.OSC`, `88888888`
     pub ap: Option<(String, String)>,
-    /// the battery level GET_OPTIONS reports (%); none: 80
+    /// the battery level READ_SETTINGS reports (%); none: 80
     pub battery: Option<u32>,
     /// the newest session's control, for the notifications capture sends ([`spawn`] keeps it; a host of its own too)
     pub link: Option<link::Sim>,
@@ -171,7 +171,7 @@ pub fn capture(c: &mut Card) {
         .insert("/CONF".into(), Arc::new(CONF.as_bytes().to_vec()));
 }
 
-/// The fields of `from` its write's types `ts` name, into `to` (what a camera keeps of a SET_PHOTO_OPTIONS).
+/// The fields of `from` its write's types `ts` name, into `to` (what a camera keeps of a WRITE_PARAMS).
 fn merge(to: &mut pb::Params, from: &pb::Params, ts: &[i32]) {
     use pb::Param as T;
     for t in ts.iter().filter_map(|&t| T::try_from(t).ok()) {
@@ -253,7 +253,7 @@ pub fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'st
         }
         let ok = |m: &dyn Fn() -> Vec<u8>| (200, m());
         match code {
-            link::code::GET_OPTIONS => ok(&|| {
+            link::code::READ_SETTINGS => ok(&|| {
                 let o = pb::Settings {
                     model: "Insta360 X5".into(),
                     serial: "SIM0001".into(),
@@ -293,7 +293,7 @@ pub fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'st
                 }
                 .encode_to_vec()
             }),
-            link::code::GET_FILE_LIST => {
+            link::code::LIST_FILES => {
                 let q = pb::ListFiles::decode(b).unwrap();
                 let dng = q.media == pb::Media::Raw as i32;
                 let all: Vec<&String> = c
@@ -313,7 +313,7 @@ pub fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'st
                 };
                 (200, r.encode_to_vec())
             }
-            link::code::GET_FILEINFO_LIST => {
+            link::code::LIST_ENTRIES => {
                 let fi = c
                     .uris
                     .iter()
@@ -340,7 +340,7 @@ pub fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'st
                 };
                 (200, r.encode_to_vec())
             }
-            link::code::GET_EDITINFO_LIST => {
+            link::code::READ_FAVORITES => {
                 let l = c
                     .favs
                     .iter()
@@ -355,7 +355,7 @@ pub fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'st
                 let r = pb::FileMarks { marks: l };
                 (200, r.encode_to_vec())
             }
-            link::code::GET_FILE_EXTRA => {
+            link::code::READ_EXTRA => {
                 let q = pb::ReadExtra::decode(b).unwrap();
                 match c.uris.contains(&q.uri) && q.kind == 2 {
                     true => match &c.th {
@@ -381,7 +381,7 @@ pub fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'st
                 }
                 (200, pb::DeleteFilesReply::default().encode_to_vec())
             }
-            link::code::SET_OPTIONS => {
+            link::code::WRITE_SETTINGS => {
                 let q = pb::WriteSettings::decode(b).unwrap();
                 let has = |t: pb::Setting| q.keys.contains(&(t as i32));
                 let v = q.settings.clone().unwrap_or_default();
@@ -407,7 +407,7 @@ pub fn handler(f: Fake) -> impl FnMut(u16, &[u8]) -> (u16, Vec<u8>) + Send + 'st
                 };
                 pb::CaptureStatusReply { status: Some(s) }.encode_to_vec()
             }),
-            link::code::SET_FAVORITE => {
+            link::code::SET_FAVORITES => {
                 for s in pb::SetFavorites::decode(b).unwrap().flags {
                     c.favs.retain(|f| f.0 != s.path);
                     c.favs.push((s.path, s.on == 1));
@@ -442,7 +442,7 @@ fn capt(f: &Fake, c: &mut Card, code: u16, b: &[u8]) -> (u16, Vec<u8>) {
     use pb::CaptureState as C;
     let k = c.capture.as_mut().unwrap();
     match code {
-        GET_FILE => (
+        LOCATE_FILE => (
             200,
             pb::LocateFileReply {
                 uri: "/CONF".into(),
@@ -450,20 +450,20 @@ fn capt(f: &Fake, c: &mut Card, code: u16, b: &[u8]) -> (u16, Vec<u8>) {
             }
             .encode_to_vec(),
         ),
-        GET_PHOTO_OPTIONS => {
+        READ_PARAMS => {
             let q = pb::ReadParams::decode(b).unwrap_or_default();
             let r = pb::ReadParamsReply {
                 params: k.po.get(&q.profile).cloned(),
             };
             (200, r.encode_to_vec())
         }
-        SET_PHOTO_OPTIONS => {
+        WRITE_PARAMS => {
             let q = pb::WriteParams::decode(b).unwrap_or_default();
             let to = k.po.entry(q.profile).or_default();
             merge(to, &q.params.unwrap_or_default(), &q.keys);
             (200, pb::WriteParamsReply::default().encode_to_vec())
         }
-        TAKE_PICTURE => {
+        TAKE_PHOTO => {
             let u = k.name("IMG", "00", "insp");
             k.n += 1;
             let p = pb::PhotoFile {
@@ -476,9 +476,9 @@ fn capt(f: &Fake, c: &mut Card, code: u16, b: &[u8]) -> (u16, Vec<u8>) {
             note(c, 8311, &r.encode_to_vec());
             (200, r.encode_to_vec())
         }
-        START_CAPTURE | START_TIMELAPSE => {
+        START_RECORDING | START_LAPSE => {
             let to = match code {
-                START_CAPTURE => C::Recording,
+                START_RECORDING => C::Recording,
                 _ => C::TimelapseRecording,
             } as i32;
             match k.lag {
@@ -498,7 +498,7 @@ fn capt(f: &Fake, c: &mut Card, code: u16, b: &[u8]) -> (u16, Vec<u8>) {
             }
             (200, vec![])
         }
-        STOP_CAPTURE | STOP_TIMELAPSE => {
+        STOP_RECORDING | STOP_LAPSE => {
             let (v, l) = (k.name("VID", "00", "insv"), k.name("LRV", "01", "lrv"));
             let named = !k.nameless;
             k.n += 1;
@@ -510,7 +510,7 @@ fn capt(f: &Fake, c: &mut Card, code: u16, b: &[u8]) -> (u16, Vec<u8>) {
             let video = named.then_some(pb::VideoFile { uri: v });
             state(c);
             match code {
-                STOP_CAPTURE => (200, pb::StopRecordingReply { file: video }.encode_to_vec()),
+                STOP_RECORDING => (200, pb::StopRecordingReply { file: video }.encode_to_vec()),
                 _ => (200, pb::StopLapseReply { file: video }.encode_to_vec()),
             }
         }

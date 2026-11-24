@@ -1,4 +1,4 @@
-//! The X5's microphone in Webcam Mode (PLAN.md §3.2: UAC 1 beside the UVC interfaces, stereo, 48 kHz, S16) through
+//! The X5's microphone in Webcam Mode (UAC 1 beside the UVC interfaces, stereo, 48 kHz, S16) through
 //! cpal: ALSA's direct hardware device of the card "Insta360 X5", each period timed on CLOCK_MONOTONIC.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

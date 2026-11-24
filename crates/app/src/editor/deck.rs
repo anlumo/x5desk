@@ -39,7 +39,7 @@ impl Info {
         let meta = media::insv::Trailer::open(first)
             .map_err(|e| format!("no Insta360 trailer ({e})"))?
             .meta;
-        if meta.offset.is_empty() {
+        if meta.calib.is_empty() {
             return Err("no lens calibration in the trailer".into());
         }
         Ok(Info {

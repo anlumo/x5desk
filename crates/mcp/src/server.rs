@@ -906,7 +906,7 @@ fn file_info(p: &Path) -> Result<Value, String> {
                 "fps": x.fps,
                 "frames": x.frames,
                 "gps": gps,
-                "flowstate": x.flowstate,
+                "stabilised_in_camera": x.stabilised,
             }),
         );
     }

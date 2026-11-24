@@ -3,11 +3,11 @@
 //! ```text
 //! x5ble scan [secs]                  every device advertising for secs (10), X5s marked
 //! x5ble wake <suffix> [uuid|-] [hold] [pause] [standby]
-//!                                    the app's wake-up (`Ble::wake_up`): wake advertisement, find "X5 <suffix>",
-//!                                    hold secs (0) with only the advertisement up, connect, the app's session up to
-//!                                    "camera ready" (asleep: CHECK_AUTHORIZATION 7, asked again), pause secs (0)
-//!                                    after each step; `standby` then sends SET_STANDBY_MODE{WAKE_UP} (56), which the
-//!                                    app never sends. Prints each step and each change in the camera's
+//!                                    the wake-up (`Ble::wake_up`): wake advertisement, find "X5 <suffix>", hold
+//!                                    secs (0) with only the advertisement up, connect, the session up to the
+//!                                    camera's Wi-Fi (asleep: AUTHORIZE 7, asked again), pause secs (0) after each
+//!                                    step; `standby` then sends request 56 (standby mode, wake up). Prints each
+//!                                    step and each change in the camera's
 //!                                    advertisement with its time, then keeps the link 10 s for notifications
 //! x5ble info <suffix|address>        find "X5 <suffix>" (30 s; an address `AA:BB:…` skips the scan), connect, print
 //!                                    the link and identity, read the Wi-Fi info (password masked), disconnect
@@ -126,7 +126,7 @@ fn line(a: &Adv) -> String {
     for (c, d) in &a.mfr {
         s += &format!(" mfr {c:04x}:[{}]", hex(d));
     }
-    if let Some(p) = a.proto() {
+    if let Some(p) = a.ap_state() {
         let w = match p.wifi {
             0 => "off".into(),
             255 => "not started".into(),
@@ -234,9 +234,9 @@ fn wake(s: &str, uuid: String, hold: Duration, pause: Duration, standby: bool) -
     }
     let c = c?;
     if standby {
-        // SetStandbyMode{STANDBY_MODE_WAKE_UP}.
+        // Request 56 {1: 2}: standby mode, wake up.
         let r = w(c.raw(56, vec![0x08, 0x02], Duration::from_secs(10)));
-        println!("{:.2} s: SET_STANDBY_MODE(WAKE_UP): {r:?}", at());
+        println!("{:.2} s: standby mode wake up (56): {r:?}", at());
     }
     let end = Instant::now() + Duration::from_secs(10);
     while Instant::now() < end && !STOP.load(Relaxed) {
@@ -262,18 +262,18 @@ fn step(s: &Step) -> String {
             ),
             None => "connected, no notification within 5 s".into(),
         },
-        Step::Options(o) => format!(
+        Step::Ident(o) => format!(
             "identity {:?}, battery {:?}",
             o.model,
             o.battery.as_ref().map(|b| b.level)
         ),
         Step::Synced(Ok(o)) => format!(
-            "option sync: ble_wake {}, firmware {:?} / {:?}",
+            "settings sync: ble_wake {}, firmware {:?} / {:?}",
             o.ble_wake, o.firmware, o.ota_version
         ),
-        Step::Synced(Err(e)) => format!("option sync failed: {e}"),
+        Step::Synced(Err(e)) => format!("settings sync failed: {e}"),
         Step::Auth(s) => format!(
-            "CHECK_AUTHORIZATION {s}{}",
+            "AUTHORIZE {s}{}",
             match s {
                 0 => " (authorized)",
                 1 => " (confirm on the camera)",
@@ -281,7 +281,7 @@ fn step(s: &Step) -> String {
                 _ => "",
             }
         ),
-        Step::OpenWifi => "no 8215 within 30 s: OPEN_CAMERA_WIFI".into(),
+        Step::OpenWifi => "no 8215 within 30 s: OPEN_WIFI".into(),
         Step::Ready => "8215: camera ready, wake advertisement off".into(),
     }
 }
@@ -341,8 +341,8 @@ fn connect(s: &str, auth: Option<(String, bool)>) -> R {
 fn session(c: &ble::Camera, auth: Option<(String, bool)>) -> R {
     let l = c.link();
     println!(
-        "service {} tx {} rx {} mtu {} ucp {}",
-        l.service, l.tx, l.rx, l.mtu, l.ucp
+        "service {} tx {} rx {} mtu {} wrap {}",
+        l.service, l.tx, l.rx, l.mtu, l.wrap
     );
     match &l.first {
         Some((t, d)) => println!(
@@ -350,10 +350,9 @@ fn session(c: &ble::Camera, auth: Option<(String, bool)>) -> R {
             t.as_secs_f64() * 1e3,
             hex(d)
         ),
-        // The app's error 4001 for this names the battery, U-Disk mode and another phone.
         None => println!("no notification within 5 s (camera on USB or held by another phone?)"),
     }
-    let o = w(c.options(&[48, 15, 11, 198]))?;
+    let o = w(c.settings(&[48, 15, 11, 198]))?;
     let sn = &o.serial;
     println!(
         "model {:?}, serial …{}, firmware {:?} / {:?}, battery {:?}, connections {:?}",
@@ -364,7 +363,7 @@ fn session(c: &ble::Camera, auth: Option<(String, bool)>) -> R {
         o.battery,
         o.links
     );
-    // PROTOCOL.md §11 X14: does the camera hand out the password before authorization?
+    // Does the camera hand out the password before authorization?
     match w(c.wifi()) {
         Ok(w) => println!(
             "before authorization: ssid {:?}, password {}, channel {}, mode {}, state {}",
@@ -392,9 +391,9 @@ fn session(c: &ble::Camera, auth: Option<(String, bool)>) -> R {
             ble_wake: 1,
             ..Default::default()
         };
-        w(c.set_options(&[97], on))?;
+        w(c.set_settings(&[97], on))?;
     }
-    println!("ble_wake {}", w(c.options(&[97]))?.ble_wake);
+    println!("ble_wake {}", w(c.settings(&[97]))?.ble_wake);
     let t0 = Instant::now();
     let a = w(c.ap(Duration::from_secs(30)))?;
     println!(

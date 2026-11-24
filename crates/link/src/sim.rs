@@ -2,7 +2,7 @@
 //! transport that syncs like the X5, hands every request to a closure and serves HTTP through the socket tunnel the
 //! way the X5 does (range start honoured, body to EOF in paced chunks, connections never closed by the camera).
 
-use crate::{Camera, Error, Event, Link, Msg, Result, start, ucd};
+use crate::{Camera, Error, Event, Link, Msg, Result, start, wire};
 use std::{
     io,
     sync::{
@@ -32,7 +32,7 @@ impl Sim {
         h[2] = 2;
         // end | camera→phone
         h[3..7].copy_from_slice(&(3u32 << 30).to_le_bytes());
-        ucd::put(&mut v, 4, &h, body);
+        wire::put(&mut v, 4, &h, body);
         let _ = self.0.send(Msg::Rx(v));
     }
 
@@ -42,7 +42,7 @@ impl Sim {
         let mut h = [0; 9];
         h[0] = kind;
         h[1..].copy_from_slice(&ts.to_le_bytes());
-        ucd::put(&mut v, 1, &h, data);
+        wire::put(&mut v, 1, &h, data);
         let _ = self.0.send(Msg::Rx(v));
     }
 
@@ -64,13 +64,13 @@ struct Cam {
 impl Link for Cam {
     fn send(&mut self, p: &[u8]) -> io::Result<()> {
         let mut v = vec![];
-        if p == ucd::SYNC {
-            v.extend(ucd::HB);
-            v.extend(ucd::SYNC);
-        } else if let Ok(Some((ucd::Pkt::Msg { code, id, body, .. }, _))) = ucd::next(p) {
+        if p == wire::SYNC {
+            v.extend(wire::HB);
+            v.extend(wire::SYNC);
+        } else if let Ok(Some((wire::Pkt::Msg { code, id, body, .. }, _))) = wire::next(p) {
             let (s, b) = (self.req)(code, body);
             if s != 0 {
-                ucd::msg(&mut v, s, id, true, &b);
+                wire::msg(&mut v, s, id, true, &b);
             }
         }
         if !v.is_empty() {
@@ -93,7 +93,7 @@ impl Link for Cam {
         thread::spawn(move || {
             let send = |d: &[u8]| {
                 let mut v = vec![];
-                ucd::tunnel(&mut v, c, 0x04, 0, d);
+                wire::tunnel(&mut v, c, 0x04, 0, d);
                 tx.send(Msg::Rx(v)).is_ok()
             };
             let Some(f) = f.filter(|f| a < f.len()) else {

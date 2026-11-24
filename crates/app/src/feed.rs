@@ -1,7 +1,7 @@
-//! The camera's live preview (milestone 3): its side-by-side H.264 (both fisheyes, lens 0 left, PROTOCOL.md §8.11)
-//! decoded by crate video on a thread of its own, stitched by crate stitch's preview straight from the two halves of
-//! each decoder picture with the camera's live calibration, levelled by the stream's IMU. A [`Feed`] is a live
-//! source (`live::Source`) too: the Capture viewer and the live outputs show the same picture.
+//! The camera's live preview (milestone 3): its side-by-side H.264 (both fisheyes, lens 0 left) decoded by crate video
+//! on a thread of its own, stitched by crate stitch's preview straight from the two halves of each decoder picture with
+//! the camera's live calibration, levelled by the stream's IMU. A [`Feed`] is a live source (`live::Source`) too: the
+//! Capture viewer and the live outputs show the same picture.
 //!
 //! Hand-over: the decode thread queues pictures; a consumer takes them in turn as they fall due ([`pick`]), which
 //! releases the older ones. While the live outputs run they hold the hand-over and the viewer shows what they take:
@@ -484,7 +484,7 @@ pub struct Feed {
     tgt: Option<Tgt>,
     stamp: Option<Stamp>,
     pub stats: Stats,
-    /// CLOCK_MONOTONIC ns − camera ns: from GET_OPTIONS `media_clock` round trips
+    /// CLOCK_MONOTONIC ns − camera ns: from READ_SETTINGS `media_clock` round trips
     pub off: Option<i64>,
     /// packets the link dropped because the decode thread fell behind
     pub lost: u64,
@@ -659,7 +659,7 @@ impl Feed {
             return false;
         };
         if self.pv.is_none() {
-            // the camera writes blend angle 0 into its files; 6° is the app's default
+            // the camera writes blend angle 0 into its files; the default, 6°, applies
             self.pv = Some(Preview::new(
                 &self.cx,
                 cal,

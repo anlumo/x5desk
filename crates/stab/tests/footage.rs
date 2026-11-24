@@ -99,7 +99,7 @@ fn clip(d: &Path, name: &'static str) -> Clip {
 
 fn clip_at(path: PathBuf, name: &'static str) -> Clip {
     let t = Trailer::open(&path).unwrap();
-    let cal = Calib::parse(&t.meta.offset).unwrap();
+    let cal = Calib::parse(&t.meta.calib).unwrap();
     Clip {
         name,
         n: media::mp4::Mp4::open(&path).unwrap().tracks[0]
@@ -186,7 +186,7 @@ struct Dec {
 
 impl Dec {
     fn new(g: &Gpu, c: &Clip, frames: usize) -> Dec {
-        // DUAL_STREAM_TRACK_REVERSE (4): track 0 holds lens 1
+        // reversed dual track (#131 = 4): track 0 holds lens 1
         let tracks = if c.m.stream == 4 { [1, 0] } else { [0, 1] };
         let kids = tracks
             .map(|t| {
@@ -1556,7 +1556,7 @@ fn level() {
                     .collect()
             })
             .collect();
-        // the thumbnail's time: trim_start, else 1 s into a dash-cam segment (VIDEO_DASH_CAM), else frame 0
+        // the thumbnail's time: trim_start, else 1 s into a dash-cam segment (VIDEO_DASHCAM), else frame 0
         let ts = match (c.m.trim[0], c.m.group.kind) {
             (0, 23) => 1.0,
             (t, _) => t as f64 * 1e-3,

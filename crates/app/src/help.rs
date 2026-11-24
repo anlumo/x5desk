@@ -188,8 +188,8 @@ fn guide(p: Page) -> &'static [&'static str] {
              automatically (Auto-connect); battery and card space show at the top, and a low battery warns on every \
              screen.",
             concat!(
-                "Album: the camera's files grouped the way the official app groups them, with thumbnails. Select with \
-                 click, ",
+                "Album: the camera's files with thumbnails, each recording or photo one item (its lens files, proxy \
+                 and raw together). Select with click, ",
                 cmd!(),
                 "+click and Shift+click; Download copies the files into the download folder, four connections at a \
                  time; a stopped download resumes where it stopped, also after a restart. Favourite and Delete act on \

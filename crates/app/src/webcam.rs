@@ -1,6 +1,6 @@
-//! The X5's Webcam Mode as a source (PLAN.md §3.2): its MJPEG over UVC (`media::uvc`) decoded on a thread of its own
-//! (`media::mjpeg`), uploaded, and drawn: the 2880 × 1440 in-camera equirect through crate stitch's preview (`Ctx::pano`, every view mode), the
-//! 1920 × 1080 flat picture as it is. Offline it replays a raw MJPEG capture at the camera's 30 fps.
+//! The X5's Webcam Mode as a source: its MJPEG over UVC (`media::uvc`) decoded on a thread of its own (`media::mjpeg`),
+//! uploaded, and drawn: the 2880 × 1440 in-camera equirect through crate stitch's preview (`Ctx::pano`, every view
+//! mode), the 1920 × 1080 flat picture as it is. Offline it replays a raw MJPEG capture at the camera's 30 fps.
 //!
 //! Hand-over as the live preview's (`feed`): up to 3 decoded pictures queue, each due at its JPEG's arrival plus the
 //! slowest decode of the last 32, and a consumer takes them in turn ([`feed::pick`]); while the live outputs run they

@@ -1,6 +1,6 @@
-//! The wake advertisement through BlueZ's `LEAdvertisingManager1` (PROTOCOL.md §2.10): we export one
-//! `org.bluez.LEAdvertisement1` object, register it, and answer BlueZ's `GetAll` and `Release` on a raw D-Bus
-//! channel. A blocking `RegisterAdvertisement` would deadlock: BlueZ reads our properties before it replies.
+//! The wake advertisement through BlueZ's `LEAdvertisingManager1`: we export one `org.bluez.LEAdvertisement1` object,
+//! register it, and answer BlueZ's `GetAll` and `Release` on a raw D-Bus channel. A blocking `RegisterAdvertisement`
+//! would deadlock: BlueZ reads our properties before it replies.
 
 use crate::{Error, Result, Wake, os, wire};
 use dbus::{
@@ -41,10 +41,10 @@ pub(crate) fn start(suffix: &str) -> Result<Wake> {
     Ok(w)
 }
 
-/// The advertisement's properties: the app's Android advertisement, connectable, with flags and the one
-/// manufacturer record. Android puts the flags `02 01 02` (general discoverable) in front of every connectable
-/// advertisement; BlueZ sends flags only for a discoverable one (from the adapter's setting, or here
-/// `Discoverable`), and on a dual-mode adapter they come out the same. 3 + 28 bytes: the whole legacy 31.
+/// The advertisement's properties: a phone's advertisement, connectable, with flags and the one manufacturer record.
+/// Android puts the flags `02 01 02` (general discoverable) in front of every connectable advertisement; BlueZ sends
+/// flags only for a discoverable one (from the adapter's setting, or here `Discoverable`), and on a dual-mode adapter
+/// they come out the same. 3 + 28 bytes: the whole legacy 31.
 fn props(d: [u8; 24]) -> PropMap {
     let v = |x: Box<dyn RefArg>| Variant(x);
     let md = HashMap::from([(wire::APPLE, v(Box::new(d.to_vec())))]);
@@ -52,8 +52,7 @@ fn props(d: [u8; 24]) -> PropMap {
         ("Type".into(), v(Box::new("peripheral".to_string()))),
         ("Discoverable".into(), v(Box::new(true))),
         ("ManufacturerData".into(), v(Box::new(md))),
-        // The app's settings: low-latency mode (100 ms) and TX_POWER_HIGH (1 dBm on Android; BlueZ applies it when
-        // the adapter lists CanSetTxPower).
+        // A 100 ms interval at 1 dBm (BlueZ applies the power when the adapter lists CanSetTxPower).
         ("MinInterval".into(), v(Box::new(100u32))),
         ("MaxInterval".into(), v(Box::new(100u32))),
         ("TxPower".into(), v(Box::new(1i16))),
@@ -167,7 +166,7 @@ mod tests {
             .downcast_ref::<Vec<u8>>()
             .unwrap();
         assert_eq!(b[..], d[..]);
-        // On air as the app sends it: flags `02 01 02`, then `1b ff 4c 00` and the 24 bytes (PROTOCOL.md §2.6).
+        // On air: flags `02 01 02`, then `1b ff 4c 00` and the 24 bytes.
         let mut air = vec![2, 1, 2, 1 + 2 + b.len() as u8, 0xFF];
         air.extend(wire::APPLE.to_le_bytes());
         air.extend(b);

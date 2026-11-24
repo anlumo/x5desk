@@ -1,10 +1,10 @@
 //! Camera screen: the X5 over USB or Wi-Fi. The camera worker (`cam::camera`) owns the link: it follows USB hotplug,
 //! connects (automatically if wanted; the sync runs on the link's thread and a disconnect or quit cancels it), reads
-//! identity, battery, storage, Wi-Fi and clock, sets the camera clock (on every connect of the app's own, as the app
-//! does, its answers not waited for), lists the album, fetches thumbnails (disk cache first, the ones on screen
-//! first), runs the download queue and the camera commands, and follows the camera's notifications. The UI sends it
-//! commands and draws what it reports. The Capture screen shares the session through [`cam::camera::Tap`]: the
-//! handle, and the live-preview packets and notifications, which the events thread hands it directly.
+//! identity, battery, storage, Wi-Fi and clock, sets the camera clock (on every connect of the app's own, its answers
+//! not waited for), lists the album, fetches thumbnails (disk cache first, the ones on screen first), runs the download
+//! queue and the camera commands, and follows the camera's notifications. The UI sends it commands and draws what it
+//! reports. The Capture screen shares the session through [`cam::camera::Tap`]: the handle, and the live-preview
+//! packets and notifications, which the events thread hands it directly.
 //!
 //! The album can show a mounted card instead (`disk`: the X5 in USB mass-storage mode, or its card in a reader): the
 //! worker watches the mount table, lists the card's DCIM with the same grouping, reads thumbnails from the trailers,

@@ -326,7 +326,7 @@ fn commands() {
         }
     };
     let t = Instant::now();
-    while want(code::KEY_TIME_POINT)(&r) == 0 {
+    while want(code::MARK)(&r) == 0 {
         assert!(t.elapsed() < Duration::from_secs(10), "commands not sent");
         c.tick();
         thread::sleep(Duration::from_millis(5));
@@ -354,9 +354,9 @@ fn commands() {
             assert_eq!((x.program, x.iso), (5, conf::val(*s, v).unwrap() as u32));
         }
     }
-    // SET_OPTIONS {video_mode: VIDEO_PURE (11)}
+    // WRITE_SETTINGS {video_mode: VIDEO_PURE (11)}
     assert_eq!(body(7, 0), [0x08, 0x29, 0x12, 0x03, 0xc8, 0x02, 0x0b]);
-    // START_CAPTURE {RECORD_MODE_NORMAL}: the simulated camera stays in VIDEO_NORMAL
+    // START_RECORDING {RECORD_MODE_NORMAL}: the simulated camera stays in VIDEO_NORMAL
     assert_eq!(body(4, 0), [0x08, 0x01]);
     let k = pb::Mark::decode(&body(60, 0)[..]).unwrap();
     assert_eq!(k.tag, "com.insta360.keyTime.highlight");
@@ -505,7 +505,7 @@ fn real_camera() {
             crate::png::write(&d.join(format!("real-{k}.png")), tw, th, &px).unwrap();
         }
     }
-    // stop: the preview goes, STOP_LIVE_STREAM is answered
+    // stop: the preview goes, STOP_PREVIEW is answered
     let t1 = Instant::now();
     c.want = false;
     until(&mut c, 5.0, |c| c.feed.is_none() && !c.st.live);
@@ -539,7 +539,7 @@ fn stale_report() {
     let (a, _ea, _sa) = sim(200);
     set(&a, 1);
     until(&mut c, 10.0, |c| c.st.on);
-    c.w.tx.send(Cmd::Note(Note::StorageFull)).unwrap();
+    c.w.tx.send(Cmd::Note(Note::CardFull)).unwrap();
     thread::sleep(Duration::from_millis(300));
     let (b, _eb, _sb) = sim(0);
     set(&b, 2);
@@ -663,7 +663,7 @@ impl Real {
     /// photo and video modes they use (every type the shown settings read).
     fn snap(&self) -> String {
         use pb::Setting::*;
-        let o = self.cam.options(&[PhotoMode, VideoMode, Stitching, Lens]);
+        let o = self.cam.settings(&[PhotoMode, VideoMode, Stitching, Lens]);
         let mut s = format!("{:?}\n", o.wait());
         let mut ts = vec![];
         for (_, sl, _) in conf::KEYS {
@@ -674,7 +674,7 @@ impl Real {
             }
         }
         for fm in [pb::Profile::PhotoSingle, pb::Profile::VideoNormal] {
-            let v = self.cam.photo_options(&ts, fm).wait().map(|r| r.params);
+            let v = self.cam.params(&ts, fm).wait().map(|r| r.params);
             s += &format!("{fm:?}: {v:?}\n");
         }
         s
@@ -720,9 +720,9 @@ impl Real {
         let photo = conf::photo(&m);
         let po = self
             .cam
-            .photo_options(conf::types(sl, photo), conf::func(&m).unwrap())
+            .params(conf::types(sl, photo), conf::func(&m).unwrap())
             .wait();
-        let o = self.cam.options(&[pb::Setting::Stitching]).wait();
+        let o = self.cam.settings(&[pb::Setting::Stitching]).wait();
         let (po, o) = (
             po.map_err(|e| e.to_string())?,
             o.map_err(|e| e.to_string())?,
@@ -749,7 +749,7 @@ impl Real {
         }
         let o = self
             .cam
-            .options(&[pb::Setting::PhotoMode, pb::Setting::VideoMode])
+            .settings(&[pb::Setting::PhotoMode, pb::Setting::VideoMode])
             .wait();
         let o = o.map_err(|e| e.to_string())?;
         if conf::current(&o).as_deref() != Some(m) {
@@ -1126,7 +1126,7 @@ fn real_writes() {
                     .count(),
                 codes(&r.notes.lock().unwrap()[k..])
             );
-            // the X5 (fw v1.13.21) answers SET_FAVORITE with status 400 in every form tried: nothing to set back
+            // the X5 (fw v1.13.21) answers SET_FAVORITES with status 400 in every form tried: nothing to set back
             if f.unwrap_or(false) != if refused { it.fav } else { on } {
                 return Err(format!("favourite {on}: the camera says {f:?}"));
             }
@@ -1162,7 +1162,7 @@ fn real_writes() {
         println!("  clock skew after the manual sync (clip name): {after:+} s");
         println!("  notifications during the clip: {}", codes(&ns));
         for (at, x) in &ns {
-            if let Note::CaptureStatus(_) | Note::RecordStatus(_) | Note::CaptureStopped(_) = x {
+            if let Note::Capture(_) | Note::Record(_) | Note::Stopped(_) = x {
                 println!(
                     "    +{:.2} s {x:?}",
                     at.duration_since(ns[0].0).as_secs_f64()

@@ -128,17 +128,17 @@ fn fixtures() -> PathBuf {
     d
 }
 
-/// The stitching inputs of an `.insv` trailer: the V3 "extra info" block's record type 1 is the metadata
-/// protobuf (PROTOCOL.md §9.4/§9.5). Port of insta360-stitch's reader; the app's own lives in `media`.
+/// The stitching inputs of an `.insv` trailer: the V3 "extra info" block's record type 1 is the metadata protobuf. Port
+/// of insta360-stitch's reader; the app's own lives in `media`.
 #[derive(Default, Debug)]
 struct Meta {
-    offset: String,
+    calib: String,
     /// #54, the v3 calibration: the string the camera also reports as setting `calib_v3`, the live preview's calibration
     v3: String,
     crop: f32,
     shift: [f32; 2],
     blend: Option<f64>,
-    /// DUAL_STREAM_TRACK_REVERSE: track 0 holds lens 1
+    /// reversed dual track (#131 = 4): track 0 holds lens 1
     reverse: bool,
 }
 
@@ -181,8 +181,8 @@ fn trailer(p: &Path) -> Meta {
         .into_iter()
         .flatten()
         .find(|b| !b.is_empty())
-        .expect("offset");
-    m.offset = String::from_utf8_lossy(o).into_owned();
+        .expect("calibration");
+    m.calib = String::from_utf8_lossy(o).into_owned();
     m
 }
 
@@ -277,7 +277,7 @@ struct Clip {
 fn clip() -> Option<Clip> {
     let insv = samples()?.join("v635.insv");
     let meta = trailer(&insv);
-    let cal = Calib::parse(&meta.offset).unwrap();
+    let cal = Calib::parse(&meta.calib).unwrap();
     let mut nv = [frame(&insv, 0, 0)?, frame(&insv, 1, 0)?];
     if meta.reverse {
         nv.swap(0, 1);
@@ -1095,7 +1095,7 @@ fn vs_old() {
     let src = [&src[0], &src[1]];
     let (w, h) = (7680, 3840);
     eprintln!(
-        "v635: offset v{}, crop {} {:?}, blend {:?}, reverse {}",
+        "v635: calibration v{}, crop {} {:?}, blend {:?}, reverse {}",
         c.cal.version, c.meta.crop, c.meta.shift, c.meta.blend, c.meta.reverse
     );
     let o = Opts {
@@ -1577,7 +1577,7 @@ fn lrv() {
     let (lrv, insv) = (d.join("v635.lrv"), d.join("v635.insv"));
     let (ml, mi) = (trailer(&lrv), trailer(&insv));
     assert!(
-        ml.offset == mi.offset && ml.v3 == mi.v3 && (ml.crop, ml.shift) == (mi.crop, mi.shift),
+        ml.calib == mi.calib && ml.v3 == mi.v3 && (ml.crop, ml.shift) == (mi.crop, mi.shift),
         ".lrv vs .insv trailer"
     );
     eprintln!(
@@ -1589,7 +1589,7 @@ fn lrv() {
     let Some(nv) = frame(&lrv, 0, N) else { return };
     let g = gpu();
     let cx = Ctx::new(&g.dev, &g.q);
-    let cal = Calib::parse(&ml.offset).unwrap();
+    let cal = Calib::parse(&ml.calib).unwrap();
     let o = Opts {
         blend: ml.blend.unwrap_or(6.0),
         colour: None,
@@ -1744,7 +1744,7 @@ fn live() {
     };
     let cals = [
         ("v3", Calib::parse(&m.v3).unwrap()),
-        ("v6", Calib::parse(&m.offset).unwrap()),
+        ("v6", Calib::parse(&m.calib).unwrap()),
     ];
     let mut res = vec![];
     for (name, cal) in &cals {
@@ -2142,12 +2142,12 @@ fn seam_sums(
 }
 
 /// The decline rule against RAFT always, scored in belt space as the old belt dump was (insta360-stitch
-/// `tools/eval/flowlab.py`, PROTOCOL.md §9.9), but sampling the decoded lens pictures directly on the CPU: seam =
-/// mean |grey lens 0 − lens 1| over ±3° of the template seam at the rays the stitch warps to with the flows it applies
-/// (read back after the colour fit); wobble = mean change of the blended ±8° band of the same frame from the previous
-/// frame's flows to this one's; rows 30° ≤ |a| ≤ 150°. Per 10° stretch and frame, with the rule's own judgement, as
-/// CSV. `X5_SEAM` = `<file>:<first>:<count>,…` (relative to `X5_SAMPLES`), `X5_SEAM_OUT` = output dir,
-/// `X5_SEAM_DUMP` = `<file stem>:<frame>,…` whose panoramas (3840 × 1920, both modes) go there as PPM.
+/// `tools/eval/flowlab.py`), but sampling the decoded lens pictures directly on the CPU: seam = mean |grey lens 0 −
+/// lens 1| over ±3° of the template seam at the rays the stitch warps to with the flows it applies (read back after the
+/// colour fit); wobble = mean change of the blended ±8° band of the same frame from the previous frame's flows to this
+/// one's; rows 30° ≤ |a| ≤ 150°. Per 10° stretch and frame, with the rule's own judgement, as CSV. `X5_SEAM` =
+/// `<file>:<first>:<count>,…` (relative to `X5_SAMPLES`), `X5_SEAM_OUT` = output dir, `X5_SEAM_DUMP` = `<file
+/// stem>:<frame>,…` whose panoramas (3840 × 1920, both modes) go there as PPM.
 #[test]
 #[ignore]
 fn seam_score() {
@@ -2170,7 +2170,7 @@ fn seam_score() {
         let insv = dir.join(file);
         let name = insv.file_stem().unwrap().to_string_lossy().into_owned();
         let meta = trailer(&insv);
-        let cal = Calib::parse(&meta.offset).unwrap();
+        let cal = Calib::parse(&meta.calib).unwrap();
         let probe = Command::new("ffprobe")
             .args(["-v", "error", "-select_streams", "v:0", "-show_entries"])
             .args(["stream=width", "-of", "csv=p=0"])
@@ -2303,7 +2303,7 @@ fn seam_held() {
     let Some(dir) = samples() else { return };
     let insv = dir.join("v606.insv");
     let (meta, n, d, w) = (trailer(&insv), 3, 3, 12);
-    let cal = Calib::parse(&meta.offset).unwrap();
+    let cal = Calib::parse(&meta.calib).unwrap();
     let fr = Frame {
         w: SIDE as u32,
         h: SIDE as u32,

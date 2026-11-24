@@ -1,9 +1,9 @@
 //! A simulated X5 for runs without the camera (tests, the `replay=` hook): link's simulated camera, so the real I/O
-//! thread, framing, session and the app's workers all run. It answers what the app asks (identity, options with the
-//! live calibration and the media clock, capture status, params, `/CONF`) and, on START_LIVE_STREAM,
-//! streams a recorded live preview (`x5 live` output: `<p>.h264` with `<p>.timestamps.txt`, IMU in `<p>.30`) at its
-//! recorded timestamps in real time, looping, on its own camera clock, in pairs as the X5 sends it over USB. Writes and capture commands are logged and
-//! answered 200, nothing more.
+//! thread, framing, session and the app's workers all run. It answers what the app asks (identity, settings with the
+//! live calibration and the media clock, capture status, params, `/CONF`) and, on START_PREVIEW, streams a recorded
+//! live preview (`x5 live` output: `<p>.h264` with `<p>.timestamps.txt`, IMU in `<p>.30`) at its recorded timestamps in
+//! real time, looping, on its own camera clock, in pairs as the X5 sends it over USB. Writes and capture commands are
+//! logged and answered 200, nothing more.
 
 use crate::camera::Connect;
 use link::{Camera, Sim, code, pb, stream};
@@ -181,7 +181,7 @@ fn handler(
         r.log.lock().unwrap().push((c, b.to_vec()));
         let ok = |m: &dyn Fn() -> Vec<u8>| (200, m());
         match c {
-            code::GET_OPTIONS => ok(&|| {
+            code::READ_SETTINGS => ok(&|| {
                 let o = pb::Settings {
                     model: "Insta360 X5".into(),
                     serial: "SIM0001".into(),
@@ -210,7 +210,7 @@ fn handler(
                 }
                 .encode_to_vec()
             }),
-            code::GET_PHOTO_OPTIONS => ok(&|| {
+            code::READ_PARAMS => ok(&|| {
                 let x = pb::params::Exposure {
                     program: pb::params::exposure::Program::FullAuto as i32,
                     ..Default::default()
@@ -225,16 +225,16 @@ fn handler(
                 };
                 pb::ReadParamsReply { params: Some(o) }.encode_to_vec()
             }),
-            code::GET_FILE if r.conf.is_some() => ok(&|| {
+            code::LOCATE_FILE if r.conf.is_some() => ok(&|| {
                 pb::LocateFileReply {
                     uri: "/CONF".into(),
                     version: 71,
                 }
                 .encode_to_vec()
             }),
-            code::GET_FILE => (500, vec![]),
-            code::GET_FILE_LIST => ok(&|| pb::ListFilesReply::default().encode_to_vec()),
-            code::START_LIVE => {
+            code::LOCATE_FILE => (500, vec![]),
+            code::LIST_FILES => ok(&|| pb::ListFilesReply::default().encode_to_vec()),
+            code::START_PREVIEW => {
                 if let Some(s) = sim.lock().unwrap().clone()
                     && live.is_none()
                 {
@@ -248,7 +248,7 @@ fn handler(
                 }
                 (200, vec![])
             }
-            code::STOP_LIVE => {
+            code::STOP_PREVIEW => {
                 if let Some(s) = live.take() {
                     s.store(true, Relaxed);
                 }

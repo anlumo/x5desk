@@ -1,6 +1,6 @@
-//! The camera's album: listed files grouped into items the way the official app groups them (a recording's lens
-//! files and proxy, a photo and its raw; PROTOCOL.md §9.2 fileKey), their metadata and favourite flags, and
-//! thumbnails: the trailer's NV12 picture scaled down and cached on disk.
+//! The camera's album: listed files grouped into items (a recording's lens files and proxy, a photo and its raw, by
+//! [`key`]), their metadata and favourite flags, and thumbnails: the trailer's NV12 picture scaled down and cached on
+//! disk.
 
 use crate::work::key;
 use link::pb;
@@ -21,7 +21,7 @@ pub enum Kind {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Item {
-    /// fileKey: directory and name key
+    /// directory and name key
     pub key: String,
     pub kind: Kind,
     /// every file in download order: main files in lens order (or the photo), proxy, raw, the rest; the first one
@@ -37,8 +37,8 @@ pub struct Item {
 }
 
 impl Item {
-    /// The file the camera keeps the item's favourite flag on, picked as the app does (`WorkEditInfoUtils.a`): a
-    /// photo's first file, a video's last main file (`_10_` of a recording in two files).
+    /// The file the camera keeps the item's favourite flag on: a photo's first file, a video's last main file (`_10_`
+    /// of a recording in two files).
     pub fn flag(&self) -> &str {
         let u = &self.uris;
         match self.kind {

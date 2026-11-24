@@ -1,8 +1,7 @@
 # Todo
 
 Merged on 2026-11-10 from the comparison with golblick, `target/plates-train/PLAN.md`, the open risks of the desktop
-app plan (`insta360/PLAN.md` §5, 2026-10-22) and the feature inventory's open questions
-(`insta360/re/analysis/app_features.md` §c). Items already done in the code were left out.
+app plan (2026-10-22) and the open questions about the camera. Items already done in the code were left out.
 
 ## Stitch: takeaways from golblick
 
@@ -21,22 +20,22 @@ comparison page <https://claude.ai/artifact/WzKEEXqGvqmLj1ojXMq9p8>). Their figu
   preview frame. Open: on these clips a lone 1.5° fade scores as well; the low band pays only on a brightness step
   between the lenses (lens 1 × 0.8, colour matching off: step 4.4 lone fade, 3.0 two bands, 3.1 single ramp), and it
   spreads a very near object's edge into a soft 6° haze (635 railing). Scoring: `target/bands-scratch/harness`.
-- [ ] **Lens guards.** With guards on, the mask at 200° (`offset.rs` `pack`, q[16]) blends the guard's rim into the
+- [ ] **Lens guards.** With guards on, the mask at 200° (`calib.rs` `pack`, q[16]) blends the guard's rim into the
   overlap. golblick reads a stored guard factor of 1.0225 (field of view about 2.25 % narrower) and picks it per
   photo by scoring the overlap at both angles. Find the field, shrink the image circle when set; needs a clip shot
   with guards.
-- [ ] **Score colour matching against the app's export.** golblick found lens balancing worse than none against the
-  vendor player (error 4.0 with, 2.4 without; near content moved 10–13 levels). Ours (`Opts::colour`, on by default:
-  `app/src/export.rs` `colour: true`) was never scored that way. Error against an app export of the same clip, on
-  vs off; turn the default off if off wins. No app export of a clip we hold exists yet. Proxy (stab footage test
-  `level`, 2026-11-20), the camera's own stitched thumbnail after alignment, 320 × 160 (low frequencies only),
-  per 15° of seam the step lens 1 − lens 0 over 3°–15° either side: ours off within 0.44 levels (median) of the
-  camera's, on 1.20 (12 handheld clips, on worse on 11); scooter clips, rider and scooter close to the seam, 0.71 /
-  8.18 (35, day and night, on worse on all).
-  Ours off matches the camera's step within 0.2–0.6 levels, i.e. the camera balances nothing in its own stitch;
-  that is all this shows, the app's export runs its own matching. Weak, so the default stays on. Needed: the app's
-  360° exports of v635, v606 and 2026-03-04 `_672` (equirect at the largest size, no filter, colour preset,
-  enhancement or denoise, horizon levelling off), scored with the same alignment against ours, colour on and off.
+- [ ] **Score colour matching against the Insta360 app's export.** golblick found lens balancing worse than none against
+  the vendor player (error 4.0 with, 2.4 without; near content moved 10–13 levels). Ours (`Opts::colour`, on by default:
+  `app/src/export.rs` `colour: true`) was never scored that way. Error against an Insta360 app export of the same clip,
+  on vs off; turn the default off if off wins. No app export of a clip we hold exists yet. Proxy (stab footage test
+  `level`, 2026-11-20), the camera's own stitched thumbnail after alignment, 320 × 160 (low frequencies only), per 15°
+  of seam the step lens 1 − lens 0 over 3°–15° either side: ours off within 0.44 levels (median) of the camera's, on
+  1.20 (12 handheld clips, on worse on 11); scooter clips, rider and scooter close to the seam, 0.71 / 8.18 (35, day and
+  night, on worse on all). Ours off matches the camera's step within 0.2–0.6 levels, i.e. the camera balances nothing in
+  its own stitch; that is all this shows, the Insta360 app's export runs its own matching. Weak, so the default stays
+  on. Needed: its 360° exports of v635, v606 and 2026-03-04 `_672` (equirect at the largest size, no filter, colour
+  preset, enhancement or denoise, horizon levelling off), scored with the same alignment against ours, colour on and
+  off.
 - [x] **Decline rule for the flow.** golblick keeps the straight seam unless the alternative cuts the disagreement
   by 10 % (and the straight seam disagrees by 2 grey levels or more). Ours (`Flow::decline`, on in `Flow::RAFT`;
   `post.wgsl` `judge`): per 10° stretch of the seam, on the belt RAFT saw (no lens samples, no readback), the mean grey
@@ -390,14 +389,14 @@ cuts on the music's beats), seam flow on exports and paused frames (RAFT-small),
 
 - [x] **Wind noise on every export.** Library exports take the editor's RNNoise (`Set::denoise` into
   `export::Edit::denoise`): the Export screen's Audio row, the MCP `export` tool's `denoise` (0–1; catalog: denoise).
-  Off by default: the vendor's app wind-reduces recordings whose trailer audio mode (#61) is 9, AI wind reduction,
-  but all 46 X5 files we have carry 9 (firmware 1.7.43–1.13.21), so the mark tells nothing apart, and at strength 1 a
-  ride without speech exports nearly silent. Those recordings are dual mono (L = R). Score (no clean reference) on the
-  five ride dates, wind and motor whine, no speech; speech only in 910, 631 and 605: at strength 1 both RNNoise and
-  DeepFilterNet 3 take a ride 35–45 dB down below 300 Hz and ~30 dB above; the strength mixes linearly (0.5: −6 dB).
-  Clean LibriSpeech over ride noise, −10…+5 dB: DFN3 SI-SDR 11.2–20.6 dB against RNNoise's 6.1–13.1, PESQ-WB
-  1.62–2.88 against 1.33–2.24; on real speech the two are close. Cost, one core: RNNoise RTF 0.038, DFN3 0.030 (its
-  tract binary). DFN3: code and weights MIT or Apache-2.0 (README, since 2026-11-06).
+  Off by default: trailer audio mode (#61) 9 marks AI wind reduction, but all 46 X5 files we have carry 9 (firmware
+  1.7.43–1.13.21), so the mark tells nothing apart, and at strength 1 a ride without speech exports nearly silent. Those
+  recordings are dual mono (L = R). Score (no clean reference) on the five ride dates, wind and motor whine, no speech;
+  speech only in 910, 631 and 605: at strength 1 both RNNoise and DeepFilterNet 3 take a ride 35–45 dB down below 300 Hz
+  and ~30 dB above; the strength mixes linearly (0.5: −6 dB). Clean LibriSpeech over ride noise, −10…+5 dB: DFN3 SI-SDR
+  11.2–20.6 dB against RNNoise's 6.1–13.1, PESQ-WB 1.62–2.88 against 1.33–2.24; on real speech the two are close. Cost,
+  one core: RNNoise RTF 0.038, DFN3 0.030 (its tract binary). DFN3: code and weights MIT or Apache-2.0 (README, since
+  2026-11-06).
 - [ ] **Replace RNNoise by DeepFilterNet 3** (the user decides). Better on speech under ride noise (above), same cost.
   About 2.1 M parameters, 8.6 MB fp32 ONNX in three graphs (Conv, ConvTranspose, GRU, Einsum), which burn-onnx 0.22
   turns into code that compiles (not run); around them a port of libDF's DSP (STFT 960 / 480, ERB and complex
@@ -722,20 +721,21 @@ cuts on the music's beats), seam flow on exports and paused frames (RAFT-small),
 
 ## Camera
 
-Tests on the real X5 send only request types the app sends; never format the SD card.
+Tests on the real X5 send only request types the camera is known to take (unknown codes once rebooted it); never
+format the SD card.
 
 - [ ] **Wi-Fi tests in station mode** on the home network, which needs its credentials from the user. Never join the
   camera's own access point: it takes this machine offline.
-- [ ] **Activation.** How the firmware reacts to option 19 = 0 or 100 (`SET_OPTIONS[19]`): does it lock features?
-- [ ] **Settings the app never writes for the X5.** Does the camera accept options 14 (mute), 76 (flicker),
-  88 (language), 66 (video encoding) and 17 (button press)?
-- [ ] **Self-timer.** x5desk counts down on the host and the camera stores option 26: does the camera wait as well
-  (a double delay)?
-- [ ] **Unconfirmed on X5 firmware.** Favourites sync (msg 176 / 201); AEB grouping and its HDR processing type (trailer #74); the
-  trailer records EDITOR 18, APEI 26 and HIGHLIGHT 10 on real files; which capture setting gives audio mode 9, 10 or
-  11.
-- [ ] **Firmware file.** Format and signature checks of the X5 `.bin`; msg 235 is in the catalog, but the traced
-  upload sends no control message before `/upload_fw`. Only matters for firmware updates.
+- [ ] **Activation.** How the firmware reacts to setting 19 = 0 or 100 (`WRITE_SETTINGS[19]`): does it lock features?
+- [ ] **Untried settings.** Does the X5 accept settings 14 (mute), 76 (flicker), 88 (language), 66 (video encoding)
+  and 17 (button press)?
+- [ ] **Self-timer.** x5desk counts down on the host and the camera stores the timer (param 26): does the camera wait
+  as well (a double delay)?
+- [ ] **Unconfirmed on X5 firmware.** Favourites sync (msg 176 / 201); AEB grouping and its HDR processing type (trailer
+  #74); the trailer records 18 (editing), 26 and 10 (highlights) on real files; which capture setting gives audio mode
+  9, 10 or 11.
+- [ ] **Firmware file.** Format and signature checks of the X5 `.bin`; request 235 exists, but an upload goes to
+  `/upload_fw` with no control message before it. Only matters for firmware updates.
 
 ## Host
 

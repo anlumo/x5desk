@@ -1,10 +1,9 @@
-//! Downloads: a persistent queue of camera files, run one at a time over four tunnel connections (one connection
-//! is camera-limited to ~18 MB/s, four reach 29–42 MB/s, PLAN.md §1; onto FAT or exFAT one, in order, see link).
-//! Data goes to `<dst>.part` with link's sidecar, so a cancelled or interrupted file resumes where it stopped, also
-//! after a restart. Imports from a mounted card (`file://` sources) run in the same queue as local copies
-//! ([`disk::copy`], also resumable), with or without a camera; one whose card is gone waits for it, one whose card is
-//! there without its file fails. The queue is a text file in the config dir: state, URI, failure reason and
-//! destination per line.
+//! Downloads: a persistent queue of camera files, run one at a time over four tunnel connections (one connection is
+//! camera-limited to ~18 MB/s, four reach 29–42 MB/s; onto FAT or exFAT one, in order, see link). Data goes to
+//! `<dst>.part` with link's sidecar, so a cancelled or interrupted file resumes where it stopped, also after a restart.
+//! Imports from a mounted card (`file://` sources) run in the same queue as local copies ([`disk::copy`], also
+//! resumable), with or without a camera; one whose card is gone waits for it, one whose card is there without its file
+//! fails. The queue is a text file in the config dir: state, URI, failure reason and destination per line.
 
 use crate::disk;
 use link::{Camera, Download, Error, Pending, Prog};
@@ -184,8 +183,8 @@ impl Queue {
         }
     }
 
-    /// Stops the running download until the camera stops capturing (§7.12, as the app does): it goes back to the
-    /// queue with what arrived. A card import is no camera file: it goes on.
+    /// Stops the running download until the camera stops capturing: it goes back to the queue with what arrived. A card
+    /// import is no camera file: it goes on.
     pub fn hold(&mut self) {
         for d in (self.v.iter_mut()).filter(|d| d.st == St::Running && local(&d.uri).is_none()) {
             d.prog.cancel.store(true, Relaxed);

@@ -1,11 +1,11 @@
 //! The camera worker: the X5 over USB or Wi-Fi. A worker thread owns the link: it follows USB hotplug, connects
 //! (automatically if wanted; the sync runs on the link's thread and a disconnect or quit cancels it), reads identity,
-//! battery, storage, Wi-Fi and clock, sets the camera clock (on every connect asked to, as the app does on its own,
-//! its answers not waited for; an agent's connect leaves it), lists the album, fetches thumbnails (disk cache first,
-//! the ones on screen first), runs the download queue and the camera commands (no delete while the camera records),
-//! and follows the camera's notifications. A host (the app's Camera screen) sends it commands and shows what it
-//! reports. The capture worker shares the session through [`Tap`]: the handle, and the live-preview packets and
-//! notifications, which the events thread hands it directly.
+//! battery, storage, Wi-Fi and clock, sets the camera clock (on every connect asked to, the app's own ones, its answers
+//! not waited for; an agent's connect leaves it), lists the album, fetches thumbnails (disk cache first, the ones on
+//! screen first), runs the download queue and the camera commands (no delete while the camera records), and follows the
+//! camera's notifications. A host (the app's Camera screen) sends it commands and shows what it reports. The capture
+//! worker shares the session through [`Tap`]: the handle, and the live-preview packets and notifications, which the
+//! events thread hands it directly.
 //!
 //! The album can show a mounted card instead (`disk`: the X5 in USB mass-storage mode, or its card in a reader): the
 //! worker watches the mount table, lists the card's DCIM with the same grouping, reads thumbnails from the trailers,
@@ -68,7 +68,7 @@ pub struct Info {
     pub wifi: Option<(String, String)>,
     /// camera clock minus the computer's, s
     pub skew: Option<i64>,
-    /// capturing: the files are off limits (PROTOCOL.md §7.12)
+    /// capturing: the files are off limits
     pub busy: bool,
     /// connection attempts that finished; when the one running began
     pub tries: u32,
@@ -91,9 +91,9 @@ pub struct Stats {
 
 pub enum Cmd {
     Plug(Plug),
-    /// Connect over USB; `clock`: set the camera clock once connected (§5.1: the app's own connects, by hand or
-    /// automatic; an agent's never). Retries of this connection, and reconnects after a lost link (the 2 s timer, or
-    /// the camera back on the bus), do the same.
+    /// Connect over USB; `clock`: set the camera clock once connected (the app's own connects, by hand or automatic; an
+    /// agent's never). Retries of this connection, and reconnects after a lost link (the 2 s timer, or the camera back
+    /// on the bus), do the same.
     Connect {
         clock: bool,
     },
@@ -101,7 +101,7 @@ pub enum Cmd {
     Refresh,
     /// Item keys whose thumbnails go first.
     Want(Vec<String>),
-    /// Not while the camera records (§7.12).
+    /// Not while the camera records.
     Delete(Vec<String>),
     Fav(Vec<(String, bool)>),
     Format,
@@ -139,8 +139,8 @@ pub struct Worker {
 
 impl Worker {
     /// `usb`: follow the bus (otherwise only [`Cmd::Connect`] connects); `auto`: connect a camera that appears on it
-    /// (setting the clock, as the app does; one back after a lost link or while a retry waits as its session did), and
-    /// try again after a busy camera or a lost link; `wake`: something arrived.
+    /// (setting the clock, as the app's own connects do; one back after a lost link or while a retry waits as its
+    /// session did), and try again after a busy camera or a lost link; `wake`: something arrived.
     pub fn spawn(
         connect: Connect,
         q: dl::Shared,
@@ -227,8 +227,8 @@ const FLY: usize = 3;
 /// How often the bus is looked at when there are no hotplug events.
 const SCAN: Duration = Duration::from_secs(2);
 
-/// Capture states that put the files off limits: the video ones (the app's `CaptureType.isVideoType`, §7.12; wire 1
-/// `RECORDING` is a video). Photos, the self-timer and pre-recording leave the files alone.
+/// Capture states that put the files off limits: the video ones (wire 1 `RECORDING` is one). Photos, the self-timer and
+/// pre-recording leave the files alone.
 fn rec(state: i32) -> bool {
     matches!(state, 1 | 2 | 7 | 9 | 11..=13 | 17 | 18 | 20..=24 | 29..=31 | 33)
 }
@@ -274,7 +274,7 @@ struct W {
     told: bool,
 }
 
-/// A clock sync in flight (PROTOCOL.md §5.3): the answers to come, the first error, whether one did not come or came
+/// A clock sync in flight: the answers to come, the first error, whether one did not come or came
 /// garbled (a timeout, the link gone, an undecodable reply), the note for success, and a connect's notes, which wait
 /// for it.
 struct Clk {
@@ -285,8 +285,8 @@ struct Clk {
     conn: Vec<(String, bool)>,
 }
 
-/// Unix time, the app's favourite timestamp (unix + standard offset: Java's `ZONE_OFFSET`, no DST), offset from UTC
-/// in s, IANA zone (TZ, else the /etc/localtime link), local time as text.
+/// Unix time, the favourite timestamp (unix + the zone's standard offset, no DST), offset from UTC in s, IANA zone (TZ,
+/// else the /etc/localtime link), local time as text.
 #[cfg(unix)]
 pub fn clock() -> (u64, i64, i32, String, String) {
     let t = SystemTime::now()
@@ -391,7 +391,7 @@ pub fn low(b: &pb::Battery) -> bool {
     l <= 20 && !c
 }
 
-/// Too low to start a recording or timelapse: 5 % or less and not charging (the app's rule).
+/// Too low to start a recording or timelapse: 5 % or less and not charging.
 pub fn empty(b: &pb::Battery) -> bool {
     let (l, c) = level(b);
     l <= 5 && !c
@@ -477,9 +477,9 @@ impl W {
                     mut conn,
                     ..
                 } = self.clk.take().unwrap();
-                // the clock as set, for the Clock row (the connect read the options before the sync), also after a
+                // the clock as set, for the Clock row (the connect read the settings before the sync), also after a
                 // refusal: one of the zone alone leaves the clock set. Not after an answer that never came or came
-                // garbled: on a silent camera GET_OPTIONS would hold the worker until its own timeout
+                // garbled: on a silent camera READ_SETTINGS would hold the worker until its own timeout
                 if !lost {
                     self.opts()
                 }
@@ -538,7 +538,7 @@ impl W {
             self.album()
         }
         self.thumbs();
-        // no new download while the camera captures (§7.12)
+        // no new download while the camera captures
         let c = self.cam.as_ref().filter(|_| !self.info.busy);
         if let Some(p) = dl::step(&self.q, c, &self.info.disk, &mut self.cur) {
             self.send(Up::Done(p))
@@ -654,9 +654,9 @@ impl W {
                 self.info.conn = Conn::On;
                 self.info.tries += 1;
                 self.cam = Some(c.clone());
-                // the app's order on every USB and Wi-Fi connect (§5.1): options and capture status, then the clock
-                // (its answers not waited for, a refusal leaves the session up), then the Capture screen and the
-                // listing. A connect that leaves the clock has its notes after the listing
+                // on every USB and Wi-Fi connect: settings and capture status, then the clock (its answers not waited
+                // for, a refusal leaves the session up), then the Capture screen and the listing. A connect that leaves
+                // the clock has its notes after the listing
                 self.opts();
                 let st = c.capture_status().wait();
                 let conn = match self.sync {
@@ -741,7 +741,7 @@ impl W {
     fn opts(&mut self) {
         let Some(c) = &self.cam else { return };
         use pb::Setting::*;
-        match c.options(&[Battery, Storage, Wifi, Clock]).wait() {
+        match c.settings(&[Battery, Storage, Wifi, Clock]).wait() {
             Ok(o) => {
                 let i = &mut self.info;
                 i.battery = o.battery.or(i.battery.take());
@@ -749,15 +749,15 @@ impl W {
                 i.wifi = o.wifi.map(|w| (w.ssid, w.password));
                 i.skew = (o.clock > 0).then(|| (o.clock as i64).saturating_sub(clock().0 as i64));
             }
-            Err(e) => self.note(format!("options: {e}"), true),
+            Err(e) => self.note(format!("settings: {e}"), true),
         }
         self.info();
     }
 
-    /// Sets the camera clock and zone to this computer's with the app's two SET_OPTIONS (PROTOCOL.md §5.3), its
-    /// answers not waited for: [`W::tick`] notes them, after `conn` and the notes of a sync still in flight, and reads
-    /// the options again once the camera answered both, a refusal too (not after a garbled answer). Without an IANA
-    /// zone (not unix: [`clock`]) the camera keeps its clock, said once: then `conn` comes back for the caller to note.
+    /// Sets the camera clock and zone to this computer's with two WRITE_SETTINGS, its answers not waited for:
+    /// [`W::tick`] notes them, after `conn` and the notes of a sync still in flight, and reads the settings again once
+    /// the camera answered both, a refusal too (not after a garbled answer). Without an IANA zone (not unix: [`clock`])
+    /// the camera keeps its clock, said once: then `conn` comes back for the caller to note.
     fn time(&mut self, c: &Camera, mut conn: Vec<(String, bool)>) -> Vec<(String, bool)> {
         if !cfg!(unix) {
             if !std::mem::replace(&mut self.told, true) {
@@ -952,19 +952,19 @@ impl W {
                 self.info.battery = Some(b);
                 self.info()
             }
-            Event::Note(Note::Storage(_) | Note::StorageFull | Note::StorageLocation(_)) => {
+            Event::Note(Note::Card(_) | Note::CardFull | Note::Volume(_)) => {
                 self.opts();
                 self.relist = soon
             }
             // new, deleted or re-flagged files (8284: favourite change)
             Event::Note(
-                Note::DeleteResult(_)
-                | Note::CaptureStopped(_)
+                Note::Delete(_)
+                | Note::Stopped(_)
                 | Note::Photo(_)
-                | Note::AutoSplit(_)
+                | Note::Split(_)
                 | Note::Other(8284, _),
             ) => self.relist = soon,
-            Event::Note(Note::CaptureStatus(s)) => {
+            Event::Note(Note::Capture(s)) => {
                 let b = rec(s.state);
                 if self.info.busy && !b {
                     self.relist = soon
@@ -996,16 +996,16 @@ impl W {
         let Some(cam) = self.cam.clone() else {
             return self.note("not connected", true);
         };
-        // noted once the camera answered, the options read again if it took both
+        // noted once the camera answered, the settings read again if it took both
         if let Cmd::Time = c {
             if !cfg!(unix) {
                 return self.note("time sync: no IANA time zone known on this system", true);
             }
             return drop(self.time(&cam, vec![]));
         }
-        // the files are off limits while it records (§7.12), the album shows what it had. The camera is asked too: the
-        // note of a capture just started can still be on its way, a card's album left the connect's status unread; a
-        // timelapse, interval or starlapse running counts as well
+        // the files are off limits while it records, the album shows what it had. The camera is asked too: the note of
+        // a capture just started can still be on its way, a card's album left the connect's status unread; a timelapse,
+        // interval or starlapse running counts as well
         if let Cmd::Delete(_) = c {
             let st = match self.info.busy {
                 true => Ok(None),
@@ -1034,8 +1034,8 @@ impl W {
             _ => return,
         };
         let r: link::Result<String> = match c {
-            // the app's passes (PROTOCOL.md §7.8): batches of 200 URIs 150 ms apart, one by one from a batch that
-            // fails on, a failure of one ends it; then the leftovers of a fresh listing, five passes at most
+            // in passes: batches of 200 URIs 150 ms apart, one by one from a batch that fails on, a failure of one ends
+            // it; then the leftovers of a fresh listing, five passes at most
             Cmd::Delete(u) => (|| {
                 use pb::{Media as M, Volume::Camera as L};
                 let mut left = u.clone();
@@ -1052,7 +1052,7 @@ impl W {
                             Err(_) => n = 1,
                         }
                     }
-                    // the app trusts the answer for a single file
+                    // a single file's answer is trusted
                     if left.len() == 1 {
                         left.clear();
                         break;
@@ -1071,7 +1071,7 @@ impl W {
                     u.len()
                 ))
             })(),
-            // the app sends at most 100 per request; the newer timestamp wins on the camera
+            // at most 100 per request; the newer timestamp wins on the camera
             Cmd::Fav(v) => (|| {
                 let ts = clock().1;
                 for ch in v.chunks(100) {

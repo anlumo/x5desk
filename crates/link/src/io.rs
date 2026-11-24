@@ -5,7 +5,7 @@ use crate::{
     Done, Error, Event, Frame, Link, Msg, Note, Pool, Result,
     http::{Prog, Xfer},
     pb,
-    ucd::{self, Pkt},
+    wire::{self, Pkt},
 };
 use prost::Message;
 use std::{
@@ -21,7 +21,7 @@ use std::{
 };
 
 const SEC: Duration = Duration::from_secs(1);
-/// No inbound byte for this long: the link is dead (the camera heartbeats about once a second, §8.10).
+/// No inbound byte for this long: the link is dead (the camera heartbeats about once a second).
 const IDLE: Duration = Duration::from_secs(30);
 
 pub(crate) struct Io<L> {
@@ -106,9 +106,9 @@ impl<L: Link> Io<L> {
         }
     }
 
-    /// Sync handshake (§3.3): drop everything before the marker, frame from the byte after it.
+    /// Sync handshake: drop everything before the marker, frame from the byte after it.
     fn sync(&mut self) -> Result<()> {
-        self.l.send(ucd::SYNC)?;
+        self.l.send(wire::SYNC)?;
         self.heartbeat()?;
         let end = Instant::now() + Duration::from_secs(30);
         let mut got = 0;
@@ -128,15 +128,15 @@ impl<L: Link> Io<L> {
                     got += v.len();
                     self.rx.extend_from_slice(&v);
                     self.recycle(v);
-                    if self.rx.windows(8).any(|w| w == ucd::BUSY) {
+                    if self.rx.windows(8).any(|w| w == wire::BUSY) {
                         return Err(Error::Busy);
                     }
-                    if let Some(i) = ucd::mark(&self.rx) {
+                    if let Some(i) = wire::mark(&self.rx) {
                         self.rx.drain(..i);
                         self.seen = Instant::now();
                         return self.parse();
                     }
-                    let k = self.rx.len().saturating_sub(ucd::MARK.len() - 1);
+                    let k = self.rx.len().saturating_sub(wire::MARK.len() - 1);
                     self.rx.drain(..k);
                 }
                 Ok(Msg::Close(tx)) => return Err(self.close(tx)),
@@ -154,11 +154,11 @@ impl<L: Link> Io<L> {
 
     fn heartbeat(&mut self) -> Result<()> {
         self.hb = Instant::now();
-        Ok(self.l.send(ucd::HB)?)
+        Ok(self.l.send(wire::HB)?)
     }
 
-    /// Wi-Fi only, in the app's order (§5.1): CHECK_TYPE (GET_OPTIONS), then CHECK_AUTHORIZATION; on status 1 (not
-    /// authorized) wait for the user to confirm on the camera (8209; outcome 4, pending, keeps waiting).
+    /// Wi-Fi only: an identity read (READ_SETTINGS), then AUTHORIZE; on status 1 (not authorized) wait for the user to
+    /// confirm on the camera (8209; outcome 4, pending, keeps waiting).
     fn authorize(&mut self, uuid: &str) -> Result<()> {
         let call = |s: &mut Self, code, q: Vec<u8>| {
             let (tx, rx) = sync_channel(1);
@@ -168,14 +168,14 @@ impl<L: Link> Io<L> {
         let q = pb::ReadSettings {
             keys: vec![48, 15, 11, 198],
         };
-        call(self, crate::code::GET_OPTIONS, q.encode_to_vec())?;
+        call(self, crate::code::READ_SETTINGS, q.encode_to_vec())?;
         // An 8209 may arrive right behind the response.
         self.auth = None;
         let q = pb::Authorize {
             client: uuid.into(),
             initiator: 2,
         };
-        let b = call(self, crate::code::CHECK_AUTH, q.encode_to_vec())?;
+        let b = call(self, crate::code::AUTHORIZE, q.encode_to_vec())?;
         match pb::AuthorizeReply::decode(&b[..])?.status {
             0 => Ok(()),
             1 => match self.pump(60 * SEC, |s| s.auth.take().filter(|&r| r != 4))? {
@@ -269,7 +269,7 @@ impl<L: Link> Io<L> {
         let rx = std::mem::take(&mut self.rx);
         let mut o = 0;
         let r = loop {
-            match ucd::next(&rx[o..]) {
+            match wire::next(&rx[o..]) {
                 Ok(Some((p, n))) => {
                     o += n;
                     if let Err(e) = self.on(p) {
@@ -294,7 +294,7 @@ impl<L: Link> Io<L> {
                 end,
                 body,
             } => {
-                // Reassembly by (direction, id); method and status come from the last fragment (§4.8).
+                // Reassembly by (direction, id); method and status come from the last fragment.
                 let key = id | (note as u32) << 30;
                 let i = self.frags.iter().position(|f| f.0 == key);
                 if !end {
@@ -318,7 +318,7 @@ impl<L: Link> Io<L> {
                     None => Cow::Borrowed(body),
                 };
                 if note {
-                    // An empty body is {OUTCOME_GRANTED, AUTH_OP_BLE} (§5.2); other operation types are not about this
+                    // An empty body is {OUTCOME_GRANTED, AUTH_OP_BLE}; other operation types are not about this
                     // connection.
                     if code == 8209
                         && let Ok(n) = pb::AuthNote::decode(&*b)
@@ -344,7 +344,7 @@ impl<L: Link> Io<L> {
                     at: Instant::now(),
                 }));
             }
-            // Camera→host: 0x04 data, 0x02 / 0x10 close (§8.6).
+            // Camera→host: 0x04 data, 0x02 / 0x10 close.
             Pkt::Tunnel { c, flags, data } => self.http(c, data, flags & 0x12 != 0)?,
             Pkt::Other => {}
         }
@@ -358,20 +358,20 @@ impl<L: Link> Io<L> {
             self.id + 1
         };
         match code {
-            crate::code::START_LIVE => self.live = true,
-            crate::code::STOP_LIVE => self.live = false,
+            crate::code::START_PREVIEW => self.live = true,
+            crate::code::STOP_PREVIEW => self.live = false,
             _ => {}
         }
         self.reqs.push((self.id, Instant::now() + t, done));
-        let n = body.len().div_ceil(ucd::FRAG).max(1);
+        let n = body.len().div_ceil(wire::FRAG).max(1);
         for i in 0..n {
             self.out.clear();
-            ucd::msg(
+            wire::msg(
                 &mut self.out,
                 code,
                 self.id,
                 i + 1 == n,
-                &body[i * ucd::FRAG..((i + 1) * ucd::FRAG).min(body.len())],
+                &body[i * wire::FRAG..((i + 1) * wire::FRAG).min(body.len())],
             );
             self.l.send(&self.out)?
         }
@@ -465,7 +465,7 @@ impl<L: Link> Io<L> {
     }
 
     /// Fails the transfers (closing their connections), and on a clean close reads up to the answer of one last
-    /// request: STOP_LIVE_STREAM if the preview runs, else a capture status. Over USB the camera hands whatever it
+    /// request: STOP_PREVIEW if the preview runs, else a capture status. Over USB the camera hands whatever it
     /// already queued for the IN pipe to the next client: up to 2.2 MB of tunnel data after a 4-connection
     /// download, and a client that sends only SYNC then missed the marker for 30 s. The camera answers after all
     /// of it. Then fails what is pending and stops the transport.
@@ -476,7 +476,7 @@ impl<L: Link> Io<L> {
         if matches!(e, Some(Error::Closed)) {
             let (tx, rx) = sync_channel(1);
             let code = if self.live {
-                crate::code::STOP_LIVE
+                crate::code::STOP_PREVIEW
             } else {
                 crate::code::CAPTURE_STATUS
             };

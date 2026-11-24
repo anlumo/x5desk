@@ -29,7 +29,7 @@ impl Clip {
         let e = |x: std::io::Error| format!("{}: {x}", p.display());
         let tr = Trailer::open(p).map_err(e)?;
         let meta = tr.meta.clone();
-        let cal = Calib::parse(&meta.offset)?;
+        let cal = Calib::parse(&meta.calib)?;
         let mp4 = Mp4::open(p).map_err(e)?;
         let v: Vec<usize> = (0..mp4.tracks.len())
             .filter(|&t| {
@@ -45,7 +45,7 @@ impl Clip {
                 p.display()
             ));
         };
-        // DUAL_STREAM_TRACK_REVERSE: the first track holds lens 1
+        // reversed dual track (#131 = 4): the first track holds lens 1
         let lens = if meta.stream == 4 { [b, a] } else { [a, b] };
         let t0 = &mp4.tracks[lens[0]];
         let n = t0.samples.len().min(mp4.tracks[lens[1]].samples.len());

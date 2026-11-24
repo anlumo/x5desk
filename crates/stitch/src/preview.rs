@@ -3,7 +3,7 @@
 //! a render pass, so it can draw into a texture egui shows (`Rgba8Unorm`, `register_native_texture`) or into egui's
 //! own pass from a paint callback.
 
-use crate::{Calib, Ctx, Frame, Pano, Pose, Src, State, Stitcher, bind, init, offset::PLEN};
+use crate::{Calib, Ctx, Frame, Pano, Pose, Src, State, Stitcher, bind, calib::PLEN, init};
 use glam::{Mat3, Vec3};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

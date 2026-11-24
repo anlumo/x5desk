@@ -1,5 +1,4 @@
-//! Effects (PLAN.md group 14): creative effects on stitched X5 footage, our own. The Insta360 app's templates and
-//! models come from its server and are not used (`../insta360/re/analysis/app_features.md` §10, §11.6).
+//! Effects (PLAN.md group 14): creative effects on stitched X5 footage, our own.
 //!
 //! Two kinds of output:
 //! - Passes on equirect frames in stitch's layout (`Rgba8Unorm` or `Rgba16Float`, sRGB-encoded values), recorded into

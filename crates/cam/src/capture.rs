@@ -382,7 +382,7 @@ impl W {
         let r = (|| {
             use pb::Setting::*;
             let o = c
-                .options(&[
+                .settings(&[
                     PhotoMode, VideoMode, Lens, Battery, Storage, VideoLeft, PhotosLeft, Stitching,
                     Temp,
                 ])
@@ -435,7 +435,7 @@ impl W {
                 }
             }
         }
-        s.po = c.photo_options(&ts, fm).wait()?.params.unwrap_or_default();
+        s.po = c.params(&ts, fm).wait()?.params.unwrap_or_default();
         s.vals = Some(m.clone());
         Ok(())
     }
@@ -450,7 +450,7 @@ impl W {
         }
         use pb::Setting::*;
         let ts = [Battery, Storage, VideoLeft, PhotosLeft, Temp];
-        if let Ok(o) = c.options(&ts).wait() {
+        if let Ok(o) = c.settings(&ts).wait() {
             let x = &mut self.st.o;
             x.battery = o.battery.or(x.battery.take());
             x.storage = o.storage.or(x.storage.take());
@@ -473,11 +473,11 @@ impl W {
         }
     }
 
-    /// The live calibration (`calib_v6`, else `calib_v3`, else the v1 string `calib`: the app's order), the camera
-    /// clock against this computer's (the fastest of 5 `media_clock` round trips), then the preview.
+    /// The live calibration (`calib_v6`, else `calib_v3`, else the v1 string `calib`), the camera clock against this
+    /// computer's (the fastest of 5 `media_clock` round trips), then the preview.
     fn live(&mut self, c: &Camera) -> link::Result<()> {
         use pb::Setting::*;
-        let o = c.options(&[CalibV6, CalibV3, Calib]).wait()?;
+        let o = c.settings(&[CalibV6, CalibV3, Calib]).wait()?;
         self.st.cal = [(o.calib_v6, "v6"), (o.calib_v3, "v3"), (o.calib, "v1")]
             .into_iter()
             .find(|x| !x.0.is_empty());
@@ -498,7 +498,7 @@ impl W {
         let mut best = self.st.off;
         for _ in 0..5 {
             let t0 = mono();
-            let m = c.options(&[pb::Setting::MediaClock]).wait()?.media_clock;
+            let m = c.settings(&[pb::Setting::MediaClock]).wait()?.media_clock;
             let t1 = mono();
             let rtt = (t1 - t0) as f64 * 1e-6;
             if m > 0 && best.is_none_or(|b| rtt < b.1) {
@@ -556,11 +556,11 @@ impl W {
         }
         match w {
             Write::Photo(q) => c
-                .call::<pb::WriteParamsReply>(code::SET_PHOTO_OPTIONS, &q, T)
+                .call::<pb::WriteParamsReply>(code::WRITE_PARAMS, &q, T)
                 .wait()
                 .map(drop)?,
             Write::Opts(q) => c
-                .call::<pb::WriteSettingsReply>(code::SET_OPTIONS, &q, T)
+                .call::<pb::WriteSettingsReply>(code::WRITE_SETTINGS, &q, T)
                 .wait()
                 .map(drop)?,
         }
@@ -677,23 +677,21 @@ impl W {
         s.last = format!("{n:?}").chars().take(80).collect();
         match n {
             Note::Battery(b) | Note::BatteryLow(b) => s.o.battery = Some(b),
-            Note::CaptureStatus(x) => self.cap(x.state, x.elapsed as u64),
+            Note::Capture(x) => self.cap(x.state, x.elapsed as u64),
             Note::Temp(t) => s.temp = Some(t),
-            Note::LiveParams(p) => s.params = Some(p),
-            Note::PictureState(p) => {
+            Note::Live(p) => s.params = Some(p),
+            Note::PhotoStage(p) => {
                 let x = format!("photo: {:?}", p.stage());
                 self.note(x, false);
             }
-            Note::CaptureStopped(x) => {
+            Note::Stopped(x) => {
                 let e = x.cause();
                 self.note(format!("capture stopped: {e:?}"), true);
                 self.load();
             }
             Note::Shutdown(x) => self.note(format!("the camera shuts down: {:?}", x.cause()), true),
-            Note::StorageFull => self.note("the SD card is full", true),
-            Note::Storage(_) | Note::SubMode(_) | Note::PhotoOptions(_) | Note::Photo(_) => {
-                self.load()
-            }
+            Note::CardFull => self.note("the SD card is full", true),
+            Note::Card(_) | Note::Mode(_) | Note::Params(_) | Note::Photo(_) => self.load(),
             _ => {}
         }
     }

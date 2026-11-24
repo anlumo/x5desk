@@ -170,9 +170,9 @@ fn mac_mounts() {
     fs::remove_dir_all(&d).unwrap();
 }
 
-/// A card's DCIM as the album shows it: the camera's grouping, metadata and thumbnails from the trailers (one per
-/// item: its first file's), the favourites file; files the app would not collect and empty ones left out (an
-/// interrupted recording: a 0-byte main file beside its proxy).
+/// A card's DCIM as the album shows it: the camera's grouping, metadata and thumbnails from the trailers (one per item:
+/// its first file's), the favourites file; files that are no camera files and empty ones left out (an interrupted
+/// recording: a 0-byte main file beside its proxy).
 #[test]
 fn card() {
     let d = dir("card");

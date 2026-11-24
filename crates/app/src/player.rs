@@ -177,7 +177,7 @@ impl Src {
     ) -> Result<Src, String> {
         let c = ctx.clone();
         let v = Video::open(g, files, move || c.request_repaint())?;
-        let cal = Calib::parse(&m.offset)?;
+        let cal = Calib::parse(&m.calib)?;
         let [x, y, w, h] = v.view;
         let (lens, fr) = if v.rings.len() == 1 {
             // both lenses side by side, lens 0 left; the proxy's window sits ½(crop/w − crop/iw) calibration px off
@@ -193,7 +193,7 @@ impl Src {
             };
             ([(0, r[0]), (0, r[1])], fr)
         } else {
-            // DUAL_STREAM_TRACK_REVERSE: track 0 holds lens 1
+            // reversed dual track (#131 = 4): track 0 holds lens 1
             let r = (m.stream == 4) as usize;
             let fr = Frame {
                 w,
@@ -935,7 +935,7 @@ impl Player {
         let meta = Trailer::open(&first)
             .map_err(|e| format!("no Insta360 trailer ({e})"))?
             .meta;
-        if meta.offset.is_empty() {
+        if meta.calib.is_empty() {
             return Err("no lens calibration in the trailer".into());
         }
         let cur = work.main.is_empty() as usize;

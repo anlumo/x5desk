@@ -169,7 +169,7 @@ fn clip(d: &Path, name: &'static str) -> Clip {
         .min(poses.len());
     Clip {
         out: off.then(|| vec![fr; poses.len()]),
-        cal: Calib::parse(&t.meta.offset).unwrap(),
+        cal: Calib::parse(&t.meta.calib).unwrap(),
         fr: Frame {
             w: S,
             h: S,
@@ -224,7 +224,7 @@ impl Dec {
 
     /// At `ls` × `ls`.
     fn sized(g: &Gpu, c: &Clip, n: usize, ls: u32) -> Dec {
-        // DUAL_STREAM_TRACK_REVERSE (4): track 0 holds lens 1
+        // reversed dual track (#131 = 4): track 0 holds lens 1
         let tracks = if c.m.stream == 4 { [1, 0] } else { [0, 1] };
         let kids = tracks
             .map(|t| {

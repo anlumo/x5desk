@@ -1,4 +1,4 @@
-//! Wi-Fi (PROTOCOL.md §3): UCD on TCP 6666 of the camera's access point, HTTP on port 80.
+//! Wi-Fi: packets on TCP 6666 of the camera's access point, HTTP on port 80.
 
 use crate::{Error, Link, Msg, Pool, Result};
 use std::{
@@ -10,7 +10,7 @@ use std::{
 };
 
 const CONNECT: Duration = Duration::from_secs(5);
-/// Minimum gap between two control packets (§3.6).
+/// Minimum gap between two control packets.
 const GAP: Duration = Duration::from_millis(4);
 
 pub(crate) struct Tcp {
@@ -65,7 +65,7 @@ fn reader(
 }
 
 impl Tcp {
-    /// `ctl`: the UCD port (6666), `web`: the HTTP server (80).
+    /// `ctl`: the packet port (6666), `web`: the HTTP server (80).
     pub fn open(ctl: SocketAddr, web: SocketAddr, tx: Sender<Msg>, pool: Pool) -> Result<Tcp> {
         let host = web.ip().to_string();
         let ctl = TcpStream::connect_timeout(&ctl, CONNECT)?;

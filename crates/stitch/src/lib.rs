@@ -1,25 +1,23 @@
 //! Dual-fisheye -> equirect / perspective for the Insta360 X5 on the app's shared wgpu device.
 //!
-//! The map-based stitch of the Insta360 app (`bcv::stitcher::MapMakerRender` + `DynamicStitchDoubleFisheyeStitchProgram`)
-//! evaluated per output pixel, with optional RAFT seam flow along the seam belt of its DISFLOW / AI modes
-//! (`ins::stitcher::SeamlessBlenderImpl`), colour matching between the lenses and a per-frame orientation with a
+//! A stitch evaluated per output pixel: each lens's calibrated projection, the blend across the seam, optional RAFT
+//! seam flow along a belt around the seam, colour matching between the lenses and a per-frame orientation with a
 //! rolling-shutter term. Inputs are the decoder's NV12 or P010 textures, one per lens or both lenses side by side in
 //! one (`Ctx::rect`); the preview also draws from an equirect (`Ctx::pano`). Nothing passes through the CPU per frame.
-//! Maths: `../insta360/re/analysis/stitchmath/*.md`, `PROTOCOL.md` §9.9.
 //!
 //! Every pass that samples the lenses is recorded into the caller's command encoder, so the decoder's semaphores go
 //! on the caller's submit. RAFT (`Stitcher::flow`) submits on its own.
 
-mod offset;
+mod calib;
 mod preview;
 mod raft;
 
-pub use offset::{Calib, Lens, Model};
+pub use calib::{Calib, Lens, Model};
 pub use preview::{Input, Mode, Preview, View};
 pub use raft::{Raft, attach, cache};
 
+use calib::PLEN;
 use glam::{Mat3, Quat, Vec3};
-use offset::PLEN;
 use wgpu::util::DeviceExt as _;
 
 /// Lens frame geometry: per-lens picture size (its `Src` rect) and the window crop applied by the camera before
@@ -44,7 +42,7 @@ pub struct Flow {
     /// Belt columns (across the seam) and rows (along it).
     pub cols: u32,
     pub rows: u32,
-    /// beltAngle in degrees: the warp ramps over ±beltAngle/2 around the seam.
+    /// Belt angle in degrees: the warp ramps over ±belt_angle/2 around the seam.
     pub belt_angle: f64,
     /// Flow region of the belt (first column, width), rendered `scale`× oversampled and box-averaged.
     pub roi: [u32; 2],
@@ -59,8 +57,7 @@ pub struct Flow {
 
 impl Flow {
     /// RAFT-small on the central 128 columns (±11.7°, about the lens overlap) of a 192 × 2176 belt (5.4 px/°,
-    /// ±17.4° ⊇ the ±16° warp zone of beltAngle 32), rendered 2× and box-averaged, smoothed over time (0.3); tuned
-    /// against the app's AI flow (PROTOCOL.md §9.9).
+    /// ±17.4° ⊇ the ±16° warp zone of a 32° belt), rendered 2× and box-averaged, smoothed over time (0.3).
     pub const RAFT: Self = Self {
         cols: 192,
         rows: 2176,
@@ -794,7 +791,7 @@ impl Stitcher {
             w,
             b.cfg.smooth.to_bits(),
             b.fresh as u32,
-            // the belt's px/rad across, as `offset.rs` `pack` P[9]
+            // the belt's px/rad across, as `calib.rs` `pack` P[9]
             (((h - 1) as f64 / 400.0).to_degrees() as f32).to_bits(),
             (b.cfg.belt_angle as f32 / 2.0).to_bits(),
             b.cfg.decline as u32,

@@ -1,7 +1,7 @@
-//! Request encodings against PROTOCOL.md's hex examples, and the whole session against a simulated camera.
+//! Request encodings byte for byte, and the whole session against a simulated camera.
 
 use super::*;
-use crate::ucd::Pkt;
+use crate::wire::Pkt;
 use std::{sync::atomic::Ordering::Relaxed, time::Instant};
 
 fn hex(s: &str) -> Vec<u8> {
@@ -26,14 +26,14 @@ fn req(rx: &Receiver<Msg>) -> (u16, Vec<u8>) {
 /// Whole packet as sent for request id `id`.
 fn wire(code: u16, id: u32, body: &[u8]) -> Vec<u8> {
     let mut v = vec![];
-    ucd::msg(&mut v, code, id, true, body);
+    wire::msg(&mut v, code, id, true, body);
     v
 }
 
 #[test]
 fn encodings() {
     let (c, rx) = fake();
-    let _p = c.options(&[
+    let _p = c.settings(&[
         pb::Setting::Model,
         pb::Setting::Serial,
         pb::Setting::Battery,
@@ -115,8 +115,8 @@ fn encodings() {
         (k, pb::SetFavorites::decode(&b[..]).unwrap().flags[0].on),
         (176, 1)
     );
-    // Time: 2025-01-01 12:00:00 UTC, +3600 s, Europe/Vienna; two requests (§5.3), both out before any answer (this
-    // handle never answers) and ahead of the next call.
+    // Time: 2025-01-01 12:00:00 UTC, +3600 s, Europe/Vienna; two requests, both out before any answer (this handle
+    // never answers) and ahead of the next call.
     let _p = c.set_time(1735732800, 3600, "Europe/Vienna");
     let _q = c.capture_status();
     let (k, b) = req(&rx);
@@ -180,7 +180,7 @@ struct Cam {
 }
 
 fn reply(v: &mut Vec<u8>, status: u16, id: u32, end: bool, body: &[u8]) {
-    ucd::msg(v, status, id, end, body)
+    wire::msg(v, status, id, end, body)
 }
 
 fn note(v: &mut Vec<u8>, code: u16, body: &[u8]) {
@@ -188,7 +188,7 @@ fn note(v: &mut Vec<u8>, code: u16, body: &[u8]) {
     h[..2].copy_from_slice(&code.to_le_bytes());
     h[2] = 2;
     h[3..7].copy_from_slice(&(3u32 << 30 | 77).to_le_bytes());
-    ucd::put(v, 4, &h, body)
+    wire::put(v, 4, &h, body)
 }
 
 impl Cam {
@@ -232,19 +232,19 @@ impl Cam {
 impl Link for Cam {
     fn send(&mut self, p: &[u8]) -> std::io::Result<()> {
         let mut v = vec![];
-        if p == ucd::SYNC {
+        if p == wire::SYNC {
             // Queued heartbeats before the reply, then a LinuxCmd; split across reads.
             for _ in 0..5 {
-                v.extend(ucd::HB)
+                v.extend(wire::HB)
             }
-            v.extend(ucd::SYNC);
+            v.extend(wire::SYNC);
             v.extend(hex("0a 00 00 00 09 00 00 01 02 01"));
             let (a, b) = v.split_at(20);
             self.tx.send(Msg::Rx(a.to_vec())).unwrap();
             self.tx.send(Msg::Rx(b.to_vec())).unwrap();
             return Ok(());
         }
-        let Some((Pkt::Msg { code, id, body, .. }, _)) = ucd::next(p).unwrap() else {
+        let Some((Pkt::Msg { code, id, body, .. }, _)) = wire::next(p).unwrap() else {
             return Ok(());
         };
         self.log.lock().unwrap().push(format!("req {code}"));
@@ -331,7 +331,7 @@ impl Link for Cam {
                     let mut h = [0; 9];
                     h[0] = stream::VIDEO;
                     h[1..].copy_from_slice(&(1000 + 33 * i).to_le_bytes());
-                    ucd::put(&mut v, 1, &h, &[0, 0, 0, 1, 0x65, i as u8]);
+                    wire::put(&mut v, 1, &h, &[0, 0, 0, 1, 0x65, i as u8]);
                 }
             }
             83 => reply(
@@ -360,7 +360,7 @@ impl Link for Cam {
         for k in (0..4).filter(|_| !self.direct) {
             let mut v = vec![];
             let h = b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 9-9/10\r\n\r\nx";
-            ucd::tunnel(&mut v, k, 0x0c, 0, h);
+            wire::tunnel(&mut v, k, 0x0c, 0, h);
             self.tx.send(Msg::Rx(v)).unwrap();
         }
         for d in self.http(req) {
@@ -368,7 +368,7 @@ impl Link for Cam {
                 Msg::Http(c, d)
             } else {
                 let mut v = vec![];
-                ucd::tunnel(&mut v, c, 0x04, 0, &d);
+                wire::tunnel(&mut v, c, 0x04, 0, &d);
                 Msg::Rx(v)
             };
             self.tx.send(m).unwrap();
@@ -448,7 +448,7 @@ fn session(direct: bool) {
     ));
 
     c.live_start().wait().unwrap();
-    let Event::Note(Note::LiveParams(p)) = ev.recv().unwrap() else {
+    let Event::Note(Note::Live(p)) = ev.recv().unwrap() else {
         panic!()
     };
     assert_eq!((p.width, p.height), (2656, 1328));
@@ -516,10 +516,10 @@ fn session_direct_http() {
     session(true)
 }
 
-/// Wi-Fi transport on real sockets against a local camera: UCD on one port (sync after queued heartbeats;
-/// CHECK_AUTHORIZATION, refused unless CHECK_TYPE came first, answers 1 (not authorized), then 8209s: a refusal for
-/// another operation, outcome 4 (pending), then empty = user confirmed), HTTP on another (range start honoured, body to
-/// EOF, then the server closes, as with `Connection: close`).
+/// Wi-Fi transport on real sockets against a local camera: packets on one port (sync after queued heartbeats; AUTHORIZE,
+/// refused unless an identity read came first, answers 1 (not authorized), then 8209s: a refusal for another operation,
+/// outcome 4 (pending), then empty = user confirmed), HTTP on another (range start honoured, body to EOF, then the
+/// server closes, as with `Connection: close`).
 #[test]
 fn wifi_sockets() {
     use std::io::{Read, Write};
@@ -548,13 +548,13 @@ fn wifi_sockets() {
             buf.extend_from_slice(&b[..n]);
             let mut v = vec![];
             if !synced {
-                let Some(i) = ucd::mark(&buf) else { continue };
+                let Some(i) = wire::mark(&buf) else { continue };
                 buf.drain(..i);
                 synced = true;
-                v.extend(ucd::HB.repeat(3));
-                v.extend(ucd::SYNC);
+                v.extend(wire::HB.repeat(3));
+                v.extend(wire::SYNC);
             }
-            while let Ok(Some((p, n))) = ucd::next(&buf) {
+            while let Ok(Some((p, n))) = wire::next(&buf) {
                 if let Pkt::Msg { code, id, .. } = p {
                     let mut cs = cs.lock().unwrap();
                     cs.push(code);
@@ -645,7 +645,7 @@ fn wifi_sockets() {
     assert!(std::fs::read(&p).unwrap() == *big);
     std::fs::remove_dir_all(&dir).unwrap();
     c.close().wait().unwrap();
-    // CHECK_TYPE, CHECK_AUTHORIZATION, identify, and the capture status read before closing.
+    // The identity read, AUTHORIZE, identify, and the capture status read before closing.
     assert_eq!(*codes.lock().unwrap(), [8, 39, 8, 15]);
 }
 

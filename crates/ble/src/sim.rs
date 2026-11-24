@@ -140,7 +140,7 @@ fn run(
                         }
                         let (otx, orx) = unbounded_channel();
                         let mut s = Sess::new(d.clone(), ev.clone());
-                        // the X5's first notification, a heartbeat: plain UCD
+                        // the X5's first notification, a heartbeat: plain packets
                         let hb = [7, 0, 0, 0, 5, 0, 0];
                         if !mute {
                             let _ = s.feed(&hb);
@@ -151,7 +151,7 @@ fn run(
                             tx: u(0xbe81),
                             rx: u(0xbe82),
                             mtu: 517,
-                            ucp: false,
+                            wrap: false,
                             first: (!mute).then(|| (Duration::from_millis(30), hb.into())),
                         };
                         link = Some((s, orx, d.clone()));
@@ -246,7 +246,7 @@ mod tests {
         let mut a = Adv::test("X5 SIM001");
         a.dev = crate::Dev("sim/X5".into());
         let (b, ev, sim) = Ble::sim(vec![a], |c, q, s| match c {
-            code::GET_OPTIONS => {
+            code::READ_SETTINGS => {
                 let o = pb::Settings {
                     wifi: Some(pb::settings::Wifi {
                         ssid: "X5 SIM001.OSC".into(),
@@ -261,13 +261,13 @@ mod tests {
                 };
                 (200, r.encode_to_vec())
             }
-            code::CHECK_AUTH => {
-                // UNAUTHORIZED, then the user allows it on the camera
-                s.note(code::AUTH_RESULT, &[8, 0, 16, 0]);
+            code::AUTHORIZE => {
+                // not authorized (1), then the user allows it on the camera
+                s.note(code::AUTH_NOTE, &[8, 0, 16, 0]);
                 let r = pb::AuthorizeReply { status: 1 };
                 (200, r.encode_to_vec())
             }
-            code::SET_WIFI_CONN => {
+            code::JOIN_STATION => {
                 let i = msg::JoinStation::decode(q).unwrap().station;
                 let r = msg::StationNote {
                     result: 0,
@@ -277,10 +277,10 @@ mod tests {
                         ..i
                     }),
                 };
-                s.note(code::WIFI_STATUS, &r.encode_to_vec());
+                s.note(code::STATION_NOTE, &r.encode_to_vec());
                 (200, vec![])
             }
-            code::GET_WIFI_MODE => (500, vec![]),
+            code::READ_WIFI_MODE => (500, vec![]),
             _ => (200, vec![]),
         })
         .unwrap();
@@ -301,7 +301,7 @@ mod tests {
             Err(Error::NoDevice)
         ));
         let c = b.connect(&seen.dev).wait().unwrap();
-        assert!(c.link().first.is_some() && !c.link().ucp);
+        assert!(c.link().first.is_some() && !c.link().wrap);
         assert_eq!(c.wifi().wait().unwrap().password, "88888888");
         c.authorize("uuid", Duration::from_secs(2)).wait().unwrap();
         let r = c
@@ -315,11 +315,11 @@ mod tests {
             Err(Error::Status(500, None))
         ));
         assert!(matches!(
-            c.note(code::WIFI_START, Duration::from_millis(50), true)
+            c.note(code::WIFI_UP, Duration::from_millis(50), true)
                 .wait(),
             Err(Error::Timeout)
         ));
-        let w = c.note(code::WIFI_START, Duration::from_secs(5), true);
+        let w = c.note(code::WIFI_UP, Duration::from_secs(5), true);
         sim.lose();
         assert!(matches!(w.wait(), Err(Error::Closed)));
         let closed = loop {
@@ -335,7 +335,7 @@ mod tests {
         sim.mute(true);
         let c = b.connect(&seen.dev).wait().unwrap();
         assert!(c.link().first.is_none());
-        let r = c.raw(code::GET_OPTIONS, vec![], Duration::from_millis(100));
+        let r = c.raw(code::READ_SETTINGS, vec![], Duration::from_millis(100));
         assert!(matches!(r.wait(), Err(Error::Timeout)));
     }
 }

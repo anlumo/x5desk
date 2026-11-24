@@ -1415,10 +1415,10 @@ async fn held_up() {
     ok(&c, "card_open", json!({ "path": card })).await;
     // back to the camera's album: its listing goes unanswered, the worker waits in it (10 s)
     let fake = a.sim().unwrap().fake.clone();
-    fake.lock().unwrap().mute = vec![link::code::GET_FILE_LIST];
+    fake.lock().unwrap().mute = vec![link::code::LIST_FILES];
     let lists = || {
         (fake.lock().unwrap().log.iter())
-            .filter(|x| x.1 == link::code::GET_FILE_LIST)
+            .filter(|x| x.1 == link::code::LIST_FILES)
             .count()
     };
     let n = lists();

@@ -135,8 +135,8 @@ async fn keys(c: &Cli) -> Vec<String> {
 fn clockless(h: &Host) {
     use pb::Setting::*;
     for (_, c, b) in fake(h).lock().unwrap().log.iter() {
-        assert!(![code::ERASE_SD, code::FORMAT_STORAGE].contains(c), "{c}");
-        if *c == code::SET_OPTIONS {
+        assert!(![code::ERASE, code::FORMAT_VOLUME].contains(c), "{c}");
+        if *c == code::WRITE_SETTINGS {
             let q = pb::WriteSettings::decode(&b[..]).unwrap();
             for t in [Clock, UtcOffset, Zone] {
                 assert!(!q.keys.contains(&(t as i32)), "{t:?}: {q:?}");
@@ -181,7 +181,7 @@ async fn capture() {
     assert_eq!(setting(&st, "exposure_bias")["tested"], false);
 
     // a tested setting, its value given as a number
-    let n = count(&h, code::SET_PHOTO_OPTIONS);
+    let n = count(&h, code::WRITE_PARAMS);
     let r = ok(
         &c,
         "capture_set",
@@ -192,7 +192,7 @@ async fn capture() {
         (&r["value"], &r["shown"]),
         (&json!("4000"), &json!("4000 K"))
     );
-    assert_eq!(count(&h, code::SET_PHOTO_OPTIONS), n + 1);
+    assert_eq!(count(&h, code::WRITE_PARAMS), n + 1);
     let st = ok(&c, "capture_status", json!({})).await;
     assert_eq!(setting(&st, "white_balance")["value"], "4000");
     let r = ok(
@@ -215,7 +215,7 @@ async fn capture() {
         assert!(e.contains(w), "{k}: {e}");
     }
     assert_eq!(
-        count(&h, code::SET_PHOTO_OPTIONS),
+        count(&h, code::WRITE_PARAMS),
         n + 1,
         "nothing more went out"
     );
@@ -242,12 +242,12 @@ async fn capture() {
     assert!(e.contains("live mode"), "{e}");
     let e = err(&c, "capture_mode", json!({ "mode": "nosuch" })).await;
     assert!(e.contains("VIDEO_NORMAL (Video)"), "{e}");
-    let n = count(&h, code::SET_OPTIONS);
+    let n = count(&h, code::WRITE_SETTINGS);
     assert_eq!(
         ok(&c, "capture_mode", json!({ "mode": "video" })).await["mode"],
         "VIDEO_NORMAL"
     );
-    assert_eq!(count(&h, code::SET_OPTIONS), n + 1);
+    assert_eq!(count(&h, code::WRITE_SETTINGS), n + 1);
     assert!(
         err(&c, "capture_photo", json!({}))
             .await
@@ -324,8 +324,8 @@ async fn capture() {
         true
     );
     let (sets, opts) = (
-        count(&h, code::SET_PHOTO_OPTIONS),
-        count(&h, code::SET_OPTIONS),
+        count(&h, code::WRITE_PARAMS),
+        count(&h, code::WRITE_SETTINGS),
     );
     for (t, a, w) in [
         (
@@ -350,14 +350,14 @@ async fn capture() {
     }
     assert_eq!(
         (
-            count(&h, code::SET_PHOTO_OPTIONS),
-            count(&h, code::SET_OPTIONS)
+            count(&h, code::WRITE_PARAMS),
+            count(&h, code::WRITE_SETTINGS)
         ),
         (sets, opts)
     );
     let m = ok(&c, "capture_mark", json!({})).await;
     assert!(m["marked_at_s"].is_number(), "{m}");
-    assert_eq!(count(&h, code::KEY_TIME_POINT), 1);
+    assert_eq!(count(&h, code::MARK), 1);
     let s = ok(&c, "capture_record", json!({ "action": "stop" })).await;
     println!("{s}");
     assert!(s["file"].as_str().unwrap().ends_with(".insv"), "{s}");
@@ -431,10 +431,10 @@ async fn capture() {
         (&st["mode"]["tested"], &st["mode"]["known_to_the_protocol"]),
         (&json!(false), &json!(false))
     );
-    let n = count(&h, code::START_CAPTURE);
+    let n = count(&h, code::START_RECORDING);
     let e = err(&c, "capture_record", json!({ "action": "start" })).await;
     assert!(e.contains("untested"), "{e}");
-    assert_eq!(count(&h, code::START_CAPTURE), n);
+    assert_eq!(count(&h, code::START_RECORDING), n);
     fake(&h).lock().unwrap().capture.as_mut().unwrap().video = 0;
     note(&h);
 
@@ -472,9 +472,9 @@ async fn untested() {
 
     ok(&c, "capture_mode", json!({ "mode": "VIDEO_TIMELAPSE" })).await;
     fake(&h).lock().unwrap().capture.as_mut().unwrap().nameless = true;
-    let n = count(&h, code::START_TIMELAPSE);
+    let n = count(&h, code::START_LAPSE);
     ok(&c, "capture_record", json!({ "action": "start" })).await;
-    assert_eq!(count(&h, code::START_TIMELAPSE), n + 1);
+    assert_eq!(count(&h, code::START_LAPSE), n + 1);
     let s = ok(&c, "capture_record", json!({ "action": "stop" })).await;
     assert!(
         s["uri"].is_null() && s["note"].as_str().unwrap().contains("named no file"),
@@ -523,7 +523,7 @@ async fn self_timer() {
 async fn own_outcome() {
     let h = host("read,local,camera").await;
     let c = on(&h).await;
-    fake(&h).lock().unwrap().mute = vec![code::SET_PHOTO_OPTIONS];
+    fake(&h).lock().unwrap().mute = vec![code::WRITE_PARAMS];
     let (s, p) = tokio::join!(
         call(
             &c,
@@ -678,11 +678,11 @@ async fn end_stops_recording() {
         (&json!(true), &json!(true)),
         "{st}"
     );
-    let n = count(&h, code::STOP_CAPTURE);
+    let n = count(&h, code::STOP_RECORDING);
     let t0 = Instant::now();
     h.shutdown().await;
     println!("ended in {:?}", t0.elapsed());
-    assert_eq!(count(&h, code::STOP_CAPTURE), n + 1);
+    assert_eq!(count(&h, code::STOP_RECORDING), n + 1);
     assert_eq!(fake(&h).lock().unwrap().cap, 0);
     let log = std::fs::read_to_string(&h.sim().unwrap().log).unwrap();
     assert!(
@@ -707,9 +707,9 @@ async fn end_stops_recording() {
         (&st["capturing"], &st["started_by_this_host"]),
         (&json!(true), &json!(false))
     );
-    let n = count(&h, code::STOP_CAPTURE);
+    let n = count(&h, code::STOP_RECORDING);
     h.shutdown().await;
-    assert_eq!(count(&h, code::STOP_CAPTURE), n);
+    assert_eq!(count(&h, code::STOP_RECORDING), n);
 }
 
 /// A client whose connection is narrowed by its own `--tiers`.
@@ -730,7 +730,7 @@ async fn refused_start() {
     let c = on(&h).await;
     ok(&c, "capture_mode", json!({ "mode": "VIDEO_NORMAL" })).await;
     for (code, w) in [
-        (code::START_CAPTURE, "refused the start"),
+        (code::START_RECORDING, "refused the start"),
         (code::CAPTURE_STATUS, "nothing sent"),
     ] {
         fake(&h).lock().unwrap().refuse = vec![code];
@@ -767,10 +767,10 @@ async fn slow_start() {
     assert!(e.contains("this host started"), "{e}");
     let e = err(&c, "camera_release", json!({})).await;
     assert!(e.contains("this host started"), "{e}");
-    let n = count(&h, code::STOP_CAPTURE);
+    let n = count(&h, code::STOP_RECORDING);
     h.shutdown().await;
     let log = std::fs::read_to_string(&h.sim().unwrap().log).unwrap();
-    assert_eq!(count(&h, code::STOP_CAPTURE), n + 1, "{log}");
+    assert_eq!(count(&h, code::STOP_RECORDING), n + 1, "{log}");
     assert!(
         log.contains("stopped the recording this host started"),
         "{log}"
@@ -784,7 +784,7 @@ async fn timed_retry() {
     let h = host("read,local,camera").await;
     let c = on(&h).await;
     ok(&c, "capture_mode", json!({ "mode": "VIDEO_NORMAL" })).await;
-    let n = count(&h, code::STOP_CAPTURE);
+    let n = count(&h, code::STOP_RECORDING);
     let h2 = h.clone();
     let other = async move {
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -804,7 +804,7 @@ async fn timed_retry() {
     );
     println!("{r}");
     assert!(r["file"].as_str().unwrap().ends_with(".insv"), "{r}");
-    assert_eq!(count(&h, code::STOP_CAPTURE), n + 1);
+    assert_eq!(count(&h, code::STOP_RECORDING), n + 1);
     let log = std::fs::read_to_string(&h.sim().unwrap().log).unwrap();
     assert!(log.contains("again every 5 s"), "{log}");
     h.shutdown().await;
@@ -836,9 +836,9 @@ async fn reconnect_unread() {
         (&json!(true), &json!(true)),
         "{st}"
     );
-    let n = count(&h, code::STOP_CAPTURE);
+    let n = count(&h, code::STOP_RECORDING);
     h.shutdown().await;
-    assert_eq!(count(&h, code::STOP_CAPTURE), n + 1);
+    assert_eq!(count(&h, code::STOP_RECORDING), n + 1);
 }
 
 /// downloaded_only in a later host: a download whose file still has the size the camera sent is verified (the jobs
@@ -940,7 +940,7 @@ async fn slow_timed() {
     let c = on(&h).await;
     ok(&c, "capture_mode", json!({ "mode": "VIDEO_NORMAL" })).await;
     fake(&h).lock().unwrap().capture.as_mut().unwrap().lag = Some(Duration::from_secs(7));
-    let n = count(&h, code::STOP_CAPTURE);
+    let n = count(&h, code::STOP_RECORDING);
     let c2 = connect(&h).await;
     let (r, e) = tokio::join!(
         ok(
@@ -956,7 +956,7 @@ async fn slow_timed() {
     println!("{r}\n{e}");
     assert!(e.contains("this host started"), "{e}");
     assert!(r["file"].as_str().unwrap().ends_with(".insv"), "{r}");
-    assert_eq!(count(&h, code::STOP_CAPTURE), n + 1);
+    assert_eq!(count(&h, code::STOP_RECORDING), n + 1);
     h.shutdown().await;
 }
 
@@ -1007,7 +1007,7 @@ async fn late_reconnect() {
         (&json!(true), &json!(true)),
         "{st}"
     );
-    let n = count(&h, code::STOP_CAPTURE);
+    let n = count(&h, code::STOP_RECORDING);
     h.shutdown().await;
-    assert_eq!(count(&h, code::STOP_CAPTURE), n + 1);
+    assert_eq!(count(&h, code::STOP_RECORDING), n + 1);
 }

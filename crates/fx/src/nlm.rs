@@ -1,6 +1,6 @@
-//! Non-local means for stills from video (frame grabs): the vendor denoises them, video frames pass untouched (the
-//! camera denoises its recording). In place on an `Rgba8Unorm` frame (grabs are 8-bit; the tiles hold RGB packed in
-//! 8 bits), recorded into the caller's encoder.
+//! Non-local means for stills from video (frame grabs); video frames pass untouched (the camera denoises its
+//! recording). In place on an `Rgba8Unorm` frame (grabs are 8-bit; the tiles hold RGB packed in 8 bits), recorded into
+//! the caller's encoder.
 //!
 //! Each pixel becomes the mean of the pixels within ±7 px (15 × 15), weighted by exp(−D / h²), D the mean squared
 //! luma difference of their 7 × 7 patches; RGB is averaged with those weights (a separate, stronger chroma filter

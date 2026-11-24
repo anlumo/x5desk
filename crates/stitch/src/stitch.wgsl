@@ -5,11 +5,11 @@
 //   [9] belt px/rad across, [10] belt alpha half-width (deg), [11] flow-region oversampling,
 //   [12] flow-region first belt column, [13] flow-region width (belt columns),
 //   [14] seam low band block side (lens px), [15..17] its blocks across, down per lens (0: none, with flow)
-//   per lens at 32 + 32k: [0..9] world->camera rotation, [9] model (0 poly, 1 omni radtan, 2 omni radtan-pro),
+//   per lens at 32 + 32k: [0..9] world->camera rotation, [9] model (0 poly, 1 omni radtan, 2 omni radtan v6),
 //   [10..12] principal point (lens px), [12..14] focal (lens px), [14] xi, [15] cos FOV/2 - 0.01,
 //   [16] image-circle radius at FOV/2 (lens px), [17] mask feather per px, [18..31] distortion coefficients
 // Frames: output ray -> pose -> camera body `w` (calibration world: Z up, lens 0 axis -X) -> lens camera.
-// The seam belt lives in the app's template frame S = (-w.x, -w.y, w.z) (lens 0 on +X_S).
+// The seam belt lives in the template frame S = (-w.x, -w.y, w.z) (lens 0 on +X_S).
 
 // lens k: NV12 / P010 planes; r: its rect in them (x, y, w, h luma px; a side-by-side half or a decoder's display
 // window); k: full-range Y'CbCr = k.x · plane value, Cb Cr less k.y (lib.rs `scale`)
@@ -74,7 +74,7 @@ fn project(b: u32, p: vec3f) -> vec3f {
             let p2 = P[b + 22];
             d = m * rad + vec2f(2.0 * p1 * m.x * m.y + p2 * (r2 + 2.0 * m.x * m.x),
                                 p1 * (r2 + 2.0 * m.y * m.y) + 2.0 * p2 * m.x * m.y);
-        } else {  // RadtanDistortPro, 13 coefficients
+        } else {  // v6, 13 coefficients
             let rad = 1.0 + r2 * (P[b + 18] + r2 * (P[b + 19] + r2 * (P[b + 20] + r2 * (P[b + 21] + r2 * P[b + 22]))));
             let ta = P[b + 23] + P[b + 25] * r2;
             let tb = P[b + 24] + P[b + 26] * r2;
@@ -182,7 +182,7 @@ fn flow(k: u32, b: vec2f) -> vec2f {
 
 fn body(s: vec3f) -> vec3f { return vec3f(-s.x, -s.y, s.z); }
 
-// seam flow (getLeft/RightLineSphereMap): the body rays lens 0 and lens 1 sample for body ray w
+// seam flow: the body rays lens 0 and lens 1 sample for body ray w
 fn warp(w: vec3f) -> array<vec3f, 2> {
     // inside the belt zone lens 0 follows (1-α)·R2L, lens 1 follows α·L2R
     var r = array(w, w);
@@ -205,7 +205,7 @@ fn shade(w: vec3f, w0: vec3f, w1: vec3f) -> vec3f {
     let b = look(1u, w1);
     let c0 = tex(0u, a);
     let c1 = tex(1u, b);
-    // TemplateBlenderImpl::getAlpha: linear ramp ±h around 90° from lens 0's nominal axis,
+    // blend: linear ramp ±h around 90° from lens 0's nominal axis,
     // h widening from P[2] to P[3] between polar angles 155° and 170°
     let h = mix(P[2], P[3], clamp((-0.9063 - w.z) / (0.9848 - 0.9063), 0.0, 1.0));
     let t = degrees(acos(clamp(-w.x, -1.0, 1.0)));
@@ -244,7 +244,7 @@ fn seam(w: vec3f, n: f32) -> vec3f {
     return clamp(mix(c1, c0, an) + (aw - an) * (l0.xyz - l1.xyz), vec3f(0.0), vec3f(1.0));
 }
 
-// Equirect, GL pano convention (DynamicStitchDoubleFisheyeStitchProgram): row 0 = zenith, centre = lens 0 axis.
+// Equirect, GL pano convention: row 0 = zenith, centre = lens 0 axis.
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3u) {
     let size = vec2u(u32(P[0]), u32(P[1]));
@@ -276,7 +276,7 @@ fn luma(k: u32, q: vec3f) -> f32 {
 }
 
 // RAFT inputs (raft.rs) over the belt's flow region: s × s sub-samples per pixel at belt coordinates
-// first column + (col·s + i)/s, no half-pixel shift (getFisheye2LineMap), box-averaged (point-sampled belts alias and
+// first column + (col·s + i)/s, no half-pixel shift, box-averaged (point-sampled belts alias and
 // the flow jitters); a lens's pixels that lack a valid sub-sample take the other lens's value (RAFT has no mask
 // input, and black areas pull the flow); scaled to [-1, 1], grey in 3 channels.
 @compute @workgroup_size(8, 8)

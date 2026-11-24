@@ -1,9 +1,9 @@
 //! Read-only checks against a real X5 in USB app mode.
 //!
-//! x5 info                     identity, options, capture status, storage
+//! x5 info                     identity, settings, capture status, storage
 //! x5 ls                       all files (MEDIA_VIDEO_PHOTO, MEDIA_RAW) and the file info list
 //! x5 conf <out>               the capture-parameter JSON
-//! x5 favs                     favourite flags (GET_EDITINFO_LIST): path, flag, modified
+//! x5 favs                     favourite flags (READ_FAVORITES): path, flag, modified
 //! x5 raw <code> [hex]         a request from `RO`, raw
 //! x5 thumb <uri> <out>        trailer thumbnail
 //! x5 burst <n>                thumbnails of the first n files, one by one, then all n in flight at once
@@ -23,14 +23,14 @@ use std::{
 const RO: [u16; 8] = {
     use link::code::*;
     [
-        GET_OPTIONS,
-        GET_PHOTO_OPTIONS,
-        GET_FILE_EXTRA,
-        GET_FILE_LIST,
+        READ_SETTINGS,
+        READ_PARAMS,
+        READ_EXTRA,
+        LIST_FILES,
         CAPTURE_STATUS,
-        GET_FILEINFO_LIST,
-        GET_FILE,
-        GET_EDITINFO_LIST,
+        LIST_ENTRIES,
+        LOCATE_FILE,
+        READ_FAVORITES,
     ]
 };
 
@@ -63,7 +63,7 @@ fn main() -> link::Result<()> {
                 );
                 use pb::Setting::*;
                 let o = c
-                    .options(&[Storage, Storages, Stitching, PhotoMode, VideoMode])
+                    .settings(&[Storage, Storages, Stitching, PhotoMode, VideoMode])
                     .wait()?;
                 println!(
                     "storage {:?}\nsplicing {} photo_mode {:?} video_mode {:?}",
@@ -191,7 +191,7 @@ fn main() -> link::Result<()> {
                 );
             }
             "par" => {
-                // n parallel whole-file GETs into memory (like re/scripts/x5tunbench.py)
+                // n parallel whole-file GETs into memory
                 let t = Instant::now();
                 let ps: Vec<_> = a[2..].iter().map(|u| c.get(u)).collect();
                 let n: usize = ps
@@ -270,7 +270,7 @@ fn main() -> link::Result<()> {
                 );
                 std::thread::sleep(Duration::from_millis(300));
                 println!(
-                    "stream packets: {early} sent before the STOP_LIVE_STREAM answer, not saved; {} after it",
+                    "stream packets: {early} sent before the STOP_PREVIEW answer, not saved; {} after it",
                     fs(&ev)
                 );
             }

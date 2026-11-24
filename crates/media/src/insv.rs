@@ -1,6 +1,6 @@
-//! Insta360 trailer ("extra info" V3) of `.insv` / `.insp` / `.lrv` files (re/analysis/formats.md §3): the
-//! metadata protobuf (record 1; the camera link reads part of it as `Metadata`), IMU samples (record 3), per-frame exposure (records 4 and 12) and raw access
-//! to every other record. The parsers also take record payloads fetched remotely (`GET_FILE_EXTRA`).
+//! Insta360 trailer ("extra info" V3) of `.insv` / `.insp` / `.lrv` files: the metadata protobuf (record 1; the camera
+//! link reads part of it as `Metadata`), IMU samples (record 3), per-frame exposure (records 4 and 12) and raw access
+//! to every other record. The parsers also take record payloads fetched remotely (`READ_EXTRA`).
 //!
 //! Verified on X5 footage (firmware 1.7.43): timestamps are µs on the camera clock; the IMU runs at ~1 kHz;
 //! time stamp type (#64) 2, exposure file: exposure item k with `t == first_frame` is video frame 0.
@@ -17,8 +17,8 @@ pub const EXPOSURE: u8 = 4;
 pub const EXT_THUMBNAIL: u8 = 5;
 pub const FRAME_PTS: u8 = 6;
 pub const GPS: u8 = 7;
-/// Exposure of the second sensor (`EXPOTIME_VIN1`).
-pub const EXPOSURE_VIN1: u8 = 12;
+/// Exposure of the second sensor.
+pub const EXPOSURE1: u8 = 12;
 
 /// Index entry; `off` is absolute in the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,14 +70,14 @@ pub struct Meta {
     pub thumb: u32,
     /// #132 1 H.264, 2 H.265, 3 MJPEG.
     pub codec: u32,
-    /// Best calibration string: #111 v6 > #54 v3 > #5 v1 (the app's order).
-    pub offset: String,
+    /// Best calibration string: #111 v6 > #54 v3 > #5 v1.
+    pub calib: String,
     /// #136 calibration version the camera captured with (4 = V6).
-    pub offset_version: u32,
+    pub calib_version: u32,
     /// #27 window crop: square window cut from the calibration frame, and its offset from centre.
     pub crop: f32,
     pub shift: [f32; 2],
-    /// #128 blend angle in degrees; the camera writes 0 and the app keeps its 6° default unless > 0.
+    /// #128 blend angle in degrees; the camera writes 0, which leaves the 6° default.
     pub blend: Option<f64>,
     /// #62 gyro record holds raw 20-byte items (else 56-byte processed ones).
     pub raw_gyro: bool,
@@ -92,7 +92,7 @@ pub struct Meta {
     /// #64 1 MP4 timestamps, 2 frame times from the exposure record.
     pub pts_type: u32,
     /// #42 stabilised in camera.
-    pub flowstate: bool,
+    pub stabilised: bool,
     /// #88 1 not split, 2 split recording.
     pub split: u32,
     /// #154 / #155 trim_start / trim_end, ms: 3000 where the camera marks the first / last 3 s; the trailer
@@ -208,7 +208,7 @@ impl Trailer {
         Ok(imu(&b, &self.meta))
     }
 
-    /// Per-frame exposure from video frame 0 on: `kind` is [`EXPOSURE`] (sensor 0) or [`EXPOSURE_VIN1`].
+    /// Per-frame exposure from video frame 0 on: `kind` is [`EXPOSURE`] (sensor 0) or [`EXPOSURE1`].
     pub fn frames(&self, kind: u8) -> io::Result<Vec<Exposure>> {
         let mut b = vec![];
         self.get(kind, &mut b)?;
@@ -241,10 +241,8 @@ pub fn exposure(b: &[u8]) -> Vec<Exposure> {
 /// Gyro record. Raw items: u64 µs, then u16 acc x y z, gyro x y z, offset binary scaled by the #65 ranges (the
 /// gyro scale matches the video's rotation within ±1.3 %, crate stab). The X5 writes them in batches of 16 stamped
 /// 1 ms apart at a true 1002 Hz, so stamps inside a batch run up to ~30 µs fast.
-/// Processed items (56 B): i64, then f64 acc x y z, gyro x y z. `arvbmg::ParseGyroData` (libarvbmg
-/// @0x2c17f48) copies the six values into the `GyroData` fields its raw path fills with acc (g) and gyro (rad/s), and
-/// scales both kinds of stamps by the same 1e-3, so they share the raw items' units; no X5 sample has them.
-/// (formats.md's gyro-first order comes from the Java tool's decode of the single metadata sample #14.)
+/// Processed items (56 B): i64, then f64 acc x y z, gyro x y z, in the raw items' units (acc in g, gyro in rad/s, the
+/// stamps scaled by the same 1e-3); no X5 sample has them.
 pub fn imu(b: &[u8], m: &Meta) -> Vec<Imu> {
     if m.raw_gyro {
         let (a, g) = (
@@ -332,7 +330,7 @@ impl Meta {
                 (82, F::Int(x)) => m.stitch = x as u32,
                 (75, F::Int(x)) => m.thumb = x as u32,
                 (132, F::Int(x)) => m.codec = x as u32,
-                (136, F::Int(x)) => m.offset_version = x as u32,
+                (136, F::Int(x)) => m.calib_version = x as u32,
                 (27, F::Bytes(w)) => {
                     for (t, f) in fields(w) {
                         match (t, f) {
@@ -357,7 +355,7 @@ impl Meta {
                 (24, F::Int(x)) => m.first_frame = x,
                 (25, F::F64(x)) => m.rolling_shutter = x,
                 (64, F::Int(x)) => m.pts_type = x as u32,
-                (42, F::Int(x)) => m.flowstate = x != 0,
+                (42, F::Int(x)) => m.stabilised = x != 0,
                 (88, F::Int(x)) => m.split = x as u32,
                 (154, F::Int(x)) => m.trim[0] = x as u32,
                 (155, F::Int(x)) => m.trim[1] = x as u32,
@@ -368,7 +366,7 @@ impl Meta {
         if m.duration_ms == 0 {
             m.duration_ms = secs * 1000;
         }
-        m.offset = [v6, v3, v1]
+        m.calib = [v6, v3, v1]
             .into_iter()
             .flatten()
             .find(|b| !b.is_empty())
@@ -458,7 +456,7 @@ mod tests {
                 "{name}"
             );
             assert!(
-                mt.offset.split('_').count() > 10,
+                mt.calib.split('_').count() > 10,
                 "{name}: calibration string"
             );
             assert_eq!(mt.resolution, [v.width, v.height], "{name}");
@@ -498,7 +496,7 @@ mod tests {
                 f.iter().all(|e| e.time > 0.0 && e.time < 1.0 / 30.0),
                 "{name}: shutter"
             );
-            let f1 = t.frames(EXPOSURE_VIN1).unwrap();
+            let f1 = t.frames(EXPOSURE1).unwrap();
             if !f1.is_empty() {
                 assert!(
                     f1.len() == f.len() && f1.iter().zip(&f).all(|(a, b)| a.t.abs_diff(b.t) < 100),
@@ -526,7 +524,7 @@ mod tests {
                 .fold(0f32, |a, b| a.max(b.abs()));
             assert!(wmax < (mt.gyro_range as f32).to_radians(), "{name}");
             println!(
-                "{name}: {} {} {}×{} {:.3} fps {} ms (MP4 {movie:.3} s), group {:?}, stream {}, offset v{} ({} chars), {} recs, \
+                "{name}: {} {} {}×{} {:.3} fps {} ms (MP4 {movie:.3} s), group {:?}, stream {}, calibration v{} ({} chars), {} recs, \
                  {} frames ({} video), frame dt {dt:.1} µs, shutter {:.5}–{:.5} s, rolling shutter {} ms, \
                  imu {} @ {rate:.1} Hz, mean |acc| {g:.3} g, max |ω| {wmax:.2} rad/s, acc/gyro range {}/{}",
                 mt.camera,
@@ -537,8 +535,8 @@ mod tests {
                 mt.duration_ms,
                 (mt.group.kind, mt.group.index, mt.group.total),
                 mt.stream,
-                mt.offset_version,
-                mt.offset.len(),
+                mt.calib_version,
+                mt.calib.len(),
                 t.recs.len(),
                 f.len(),
                 v.samples.len(),

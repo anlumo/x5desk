@@ -168,16 +168,16 @@ position; it is not legal advice.
   open models listed above.
 - **What it shares with the camera is an interface.** To talk to the camera and to read its files, a program has to use
   the message layouts the camera expects over USB, Wi-Fi and Bluetooth (`crates/proto/proto`) and the layout of the
-  metadata in its recordings. That is interface information, and it is included only as far as working with the camera
-  requires. Copyright protects the code of a program, not the protocols and file formats it uses: in the EU, Directive
-  2009/24/EC excludes the ideas and principles behind a program's interfaces from protection (Article 1(2)), and the
-  Court of Justice held that a program's functionality and its data file formats are not protected expression (SAS
-  Institute v World Programming, C-406/10). US law draws the same line (17 U.S.C. § 102(b)).
-- **Finding out how to interoperate is permitted.** The same Directive lets the lawful user of a program observe,
-  study and test it to determine the ideas and principles behind it (Article 5(3)) and obtain the information needed
-  to make an independently created program work with it (Article 6), and it voids contract terms that say otherwise
-  (Article 8). In the US, 17 U.S.C. § 1201(f) and the case law on interoperability (Sega v. Accolade, Sony v.
-  Connectix) are the counterparts.
+  metadata in its recordings. That is interface information, written down here under names of this project's own, and it
+  is included only as far as working with the camera requires. Copyright protects the code of a program, not the
+  protocols and file formats it uses: in the EU, Directive 2009/24/EC excludes the ideas and principles behind a
+  program's interfaces from protection (Article 1(2)), and the Court of Justice held that a program's functionality and
+  its data file formats are not protected expression (SAS Institute v World Programming, C-406/10). US law draws the
+  same line (17 U.S.C. § 102(b)).
+- **Interoperability is a recognised purpose.** The same Directive treats making an independently created program work
+  with other programs as a legitimate aim (recitals 10 and 15, Article 6), and contract terms cannot rule out what it
+  allows for that aim (Article 8). In the US, 17 U.S.C. § 1201(f) and the case law on interoperability (Sega v.
+  Accolade, Sony v. Connectix) recognise the same aim.
 - **Nothing is circumvented.** The camera's recordings are ordinary MP4 and JPEG files with unencrypted metadata, and
   its protocol is not encrypted. x5desk breaks no encryption, copy protection or licence check and does not touch the
   camera's firmware. It connects the way the camera offers: over USB once its owner picks the mode on the camera's

@@ -40,7 +40,7 @@ pub const SIZE: (u32, u32) = (128, 2176);
 
 /// Convs (in, out channels) run in f16: the GRU (242 → 96, ×3 per iteration) and the flow head's hidden layer
 /// (96 → 128), ≈ 84 % of the update block's FLOPs; on Vulkan they then run on the cooperative-matrix units. The rest
-/// stays f32: the convs on the flow itself (2 → 64 in, 128 → 2 out) drift by pixels in f16 (PROTOCOL.md §9.9).
+/// stays f32: the convs on the flow itself (2 → 64 in, 128 → 2 out) drift by pixels in f16.
 const HALF: [(usize, usize); 2] = [(242, 96), (96, 128)];
 
 /// Casts the `HALF` conv weights and their biases to f16.

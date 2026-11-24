@@ -23,8 +23,7 @@ pub fn ext(p: &Path) -> String {
         .to_ascii_lowercase()
 }
 
-/// Recording key: the name without its extension and its stream parts (`00`, `01`, `10`, `11`), `LRV` read as
-/// `VID` (the official app's fileKey, re/analysis/media.md §3.4).
+/// Recording key: the name without its extension and its stream parts (`00`, `01`, `10`, `11`), `LRV` read as `VID`.
 pub fn key(name: &str) -> String {
     let stem = name.rsplit_once('.').map_or(name, |s| s.0);
     let mut k = String::new();

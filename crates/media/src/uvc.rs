@@ -1,5 +1,5 @@
 //! UVC capture of the X5's Webcam Mode through V4L2 (mmap streaming, MJPEG). Requesting 2880×1440 selects the
-//! in-camera stitched equirect, 1920×1080 the flat view (PLAN.md §3.2).
+//! in-camera stitched equirect, 1920×1080 the flat view.
 //!
 //! The camera streams over a bulk endpoint and keeps producing while nobody reads, so a new stream first delivers
 //! stale data at bus speed: up to ~130 buffers, part of them not even frame-aligned; a mode switch's backlog holds the

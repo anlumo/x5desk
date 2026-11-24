@@ -24,7 +24,7 @@ use std::{
 use stitch::Ctx;
 use video::Gpu;
 
-const UNV: &str = "⚠ Not run on an X5 yet: the app's message, unit-tested";
+const UNV: &str = "⚠ Not run on an X5 yet: its request is unit-tested";
 
 /// Mode `m` as the camera's app names it, marked ⚠ when the switch to it did not run on an X5.
 fn mlabel(m: &str) -> String {
@@ -528,7 +528,7 @@ impl Capture {
             ui.label("Connect the camera on the Camera screen for its capture controls.");
             return;
         }
-        ui.weak("⚠: not run on an X5 yet (the app's messages, unit-tested)");
+        ui.weak("⚠: not run on an X5 yet (its requests are unit-tested)");
         ui.add_space(4.0);
         self.status(ui, &s);
         ui.add_space(6.0);
@@ -748,7 +748,7 @@ impl Capture {
             let (txt, can) = match shot {
                 Shot::Photo(_) => ("Take photo", true),
                 Shot::Rec(_) | Shot::Lapse(_) if run => ("Stop", true),
-                // the app's rule: no recording at 5 % unless charging
+                // no recording at 5 % unless charging
                 Shot::Rec(_) | Shot::Lapse(_) => ("Start recording", !low),
                 Shot::None => ("Streamed by this app (Live screen)", false),
             };
@@ -777,7 +777,7 @@ impl Capture {
                 };
                 self.timer = match (self.timer, timer, run) {
                     (Some(_), ..) => None,
-                    // the X5 leaves the self-timer to the app (app_features.md §5)
+                    // the X5 leaves the self-timer to the client
                     (None, t, false) if t > 0 => {
                         Some(Instant::now() + Duration::from_secs(t as u64))
                     }

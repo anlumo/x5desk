@@ -22,7 +22,7 @@ fn notes() {
         retry: None,
     };
     let cap = |s: C, t| {
-        Note::CaptureStatus(pb::CaptureNote {
+        Note::Capture(pb::CaptureNote {
             state: s as i32,
             elapsed: t,
         })
@@ -43,7 +43,7 @@ fn notes() {
     assert_eq!(w.st.temp, Some(t));
     w.on(cap(C::Idle, 0));
     assert!(!running(w.st.cap) && w.st.since.is_none());
-    w.on(Note::CaptureStopped(pb::StoppedNote {
+    w.on(Note::Stopped(pb::StoppedNote {
         cause: pb::stopped_note::Cause::BatteryLow as i32,
     }));
     let (n, e) = w.st.note.clone().unwrap();
@@ -61,7 +61,7 @@ fn closed_quietly() {
     let st = run(&w, &f, Cmd::Note(Note::Temp(Default::default())), &[]).0;
     assert!(st.vals.is_some());
     c.close().wait().unwrap();
-    let st = run(&w, &f, Cmd::Note(Note::SubMode(Default::default())), &[]).0;
+    let st = run(&w, &f, Cmd::Note(Note::Mode(Default::default())), &[]).0;
     // the reload ran (its values dropped first) and failed
     assert!(st.vals.is_none() && st.note.is_none(), "{:?}", st.note);
 }
@@ -129,7 +129,7 @@ fn rig(f: &Shared) -> (Worker, Camera, Sim) {
             return (200, vec![0xff; 3]);
         }
         match code {
-            code::GET_OPTIONS => ok(pb::ReadSettingsReply {
+            code::READ_SETTINGS => ok(pb::ReadSettingsReply {
                 keys: vec![],
                 settings: Some(pb::Settings {
                     video_mode: f.video.unwrap_or(pb::VideoMode::VideoNone) as i32,
@@ -144,7 +144,7 @@ fn rig(f: &Shared) -> (Worker, Camera, Sim) {
                     ..Default::default()
                 }),
             }),
-            code::GET_PHOTO_OPTIONS => ok(pb::ReadParamsReply {
+            code::READ_PARAMS => ok(pb::ReadParamsReply {
                 params: Some(pb::Params {
                     video_exposure: Some(pb::params::Exposure {
                         program: f.prog as i32,
@@ -153,25 +153,25 @@ fn rig(f: &Shared) -> (Worker, Camera, Sim) {
                     ..Default::default()
                 }),
             }),
-            code::GET_FILE => ok(pb::LocateFileReply {
+            code::LOCATE_FILE => ok(pb::LocateFileReply {
                 uri: "/CONF".into(),
                 version: 71,
             }),
-            code::START_CAPTURE => {
+            code::START_RECORDING => {
                 f.state = C::Recording;
                 (200, vec![])
             }
-            code::START_TIMELAPSE => {
+            code::START_LAPSE => {
                 f.state = C::TimelapseRecording;
                 (200, vec![])
             }
-            code::TAKE_PICTURE => ok(pb::TakePhotoReply {
+            code::TAKE_PHOTO => ok(pb::TakePhotoReply {
                 photo: Some(pb::PhotoFile {
                     uri: "/DCIM/Camera01/IMG_20261104_120000_00_002.insp".into(),
                     ..Default::default()
                 }),
             }),
-            code::STOP_CAPTURE | code::STOP_TIMELAPSE => {
+            code::STOP_RECORDING | code::STOP_LAPSE => {
                 f.state = C::Idle;
                 ok(pb::StopRecordingReply {
                     file: Some(pb::VideoFile {
@@ -207,7 +207,7 @@ fn run(w: &Worker, f: &Shared, c: Cmd, codes: &[u16]) -> (St, Vec<(u16, Vec<u8>)
     (st, l.into_iter().filter(|l| codes.contains(&l.0)).collect())
 }
 
-const WRITES: [u16; 2] = [code::SET_PHOTO_OPTIONS, code::SET_OPTIONS];
+const WRITES: [u16; 2] = [code::WRITE_PARAMS, code::WRITE_SETTINGS];
 
 /// A setting goes out only with a value its `/CONF` list allows given the values it depends on, as the screen offers
 /// them: an allowed EV is written; an EV the list lacks, ISO 400 in FULL_AUTO (Auto only) and a mode the camera is
@@ -234,7 +234,7 @@ fn set_allowed() {
         Write::Photo(m) => m.encode_to_vec(),
         Write::Opts(m) => m.encode_to_vec(),
     };
-    assert_eq!(l, [(code::SET_PHOTO_OPTIONS, want(conf::Slot::Ev, "-0.3"))]);
+    assert_eq!(l, [(code::WRITE_PARAMS, want(conf::Slot::Ev, "-0.3"))]);
     assert!(st.note.is_none(), "{:?}", st.note);
     assert_eq!(st.allowed("exposure_iso"), ["0"]);
     for (k, v) in [("exposure_bias", "-0.7"), ("exposure_iso", "400")] {
@@ -271,11 +271,11 @@ fn set_allowed() {
 }
 
 const SHUTTER: [u16; 5] = [
-    code::TAKE_PICTURE,
-    code::START_CAPTURE,
-    code::STOP_CAPTURE,
-    code::START_TIMELAPSE,
-    code::STOP_TIMELAPSE,
+    code::TAKE_PHOTO,
+    code::START_RECORDING,
+    code::STOP_RECORDING,
+    code::START_LAPSE,
+    code::STOP_LAPSE,
 ];
 
 /// The shutter says what it means and the worker looks at the camera's capture state first: a stop while it does not
@@ -300,37 +300,37 @@ fn start_stop() {
     let (rec, stop) = (Some("captures already"), Some("nothing to stop"));
     step(Cmd::Stop, &[], stop);
     // the state follows the camera's notifications, which this one does not send: the worker asks it first
-    step(Cmd::Start, &[code::START_CAPTURE], None);
+    step(Cmd::Start, &[code::START_RECORDING], None);
     step(Cmd::Start, &[], rec);
     step(Cmd::Shoot, &[], Some("nothing taken"));
-    let st = step(Cmd::Stop, &[code::STOP_CAPTURE], None);
+    let st = step(Cmd::Stop, &[code::STOP_RECORDING], None);
     assert!(st.note.unwrap().0.starts_with("recorded /DCIM/"));
     // the camera started recording by itself (its button): a Start the screen sent before it knew sends nothing,
     // and the state shows the recording
     f.lock().unwrap().state = pb::CaptureState::Recording;
     let st = step(Cmd::Start, &[], rec);
     assert!(running(st.cap) && st.since.is_some());
-    step(Cmd::Stop, &[code::STOP_CAPTURE], None);
+    step(Cmd::Stop, &[code::STOP_RECORDING], None);
     step(Cmd::Stop, &[], stop);
     f.lock().unwrap().video = Some(pb::VideoMode::VideoTimelapse);
     w.tx.send(Cmd::Cam(1, Some(c.clone()))).unwrap();
     assert_eq!(next(&w).mode.as_deref(), Some("VIDEO_TIMELAPSE"));
-    step(Cmd::Start, &[code::START_TIMELAPSE], None);
+    step(Cmd::Start, &[code::START_LAPSE], None);
     step(Cmd::Start, &[], rec);
-    step(Cmd::Stop, &[code::STOP_TIMELAPSE], None);
+    step(Cmd::Stop, &[code::STOP_LAPSE], None);
     step(Cmd::Stop, &[], stop);
     // a photo mode: the shutter takes one, start and stop send nothing
     f.lock().unwrap().video = None;
     w.tx.send(Cmd::Cam(1, Some(c.clone()))).unwrap();
     assert_eq!(next(&w).mode.as_deref(), Some("PHOTO_SINGLE"));
     step(Cmd::Start, &[], Some("no recording or timelapse mode"));
-    step(Cmd::Shoot, &[code::TAKE_PICTURE], None);
+    step(Cmd::Shoot, &[code::TAKE_PHOTO], None);
     drop(w);
     c.close().wait().unwrap();
 }
 
-/// No recording or timelapse starts at 5 % battery or less unless the camera charges (the app's rule, the screen's
-/// Start disabled): the level as the battery notification reports it, as the screen has it. A stop still goes out.
+/// No recording or timelapse starts at 5 % battery or less unless the camera charges (the screen's Start disabled): the
+/// level as the battery notification reports it, as the screen has it. A stop still goes out.
 #[test]
 fn battery_start() {
     use pb::battery::Power::{self, *};
@@ -403,7 +403,7 @@ fn asked() {
                 c: Box::new(c),
                 seen: s,
             },
-            &[WRITES.as_slice(), &SHUTTER, &[code::SET_OPTIONS]].concat(),
+            &[WRITES.as_slice(), &SHUTTER, &[code::WRITE_SETTINGS]].concat(),
         );
         let (k, o) = st.out.clone().expect("an outcome");
         assert_eq!(k, n);
@@ -433,7 +433,7 @@ fn asked() {
     f.lock().unwrap().refuse = vec![code::CAPTURE_STATUS];
     let (_, o, n) = ask(7, Cmd::Start, None);
     assert!(no(&o, "nothing sent") && n == 0, "{o:?}");
-    f.lock().unwrap().refuse = vec![code::START_CAPTURE];
+    f.lock().unwrap().refuse = vec![code::START_RECORDING];
     let (st, o, _) = ask(8, Cmd::Start, None);
     assert!(no(&o, "refused the start") && !running(st.cap), "{o:?}");
     f.lock().unwrap().refuse.clear();
@@ -459,7 +459,7 @@ fn asked() {
     let (_, o, _) = ask(13, Cmd::Shoot, seen("PHOTO_SINGLE"));
     let u = "/DCIM/Camera01/IMG_20261104_120000_00_002.insp";
     assert_eq!(o, Out::Sent(Some(u.into())));
-    f.lock().unwrap().junk = vec![code::TAKE_PICTURE];
+    f.lock().unwrap().junk = vec![code::TAKE_PHOTO];
     assert!(matches!(ask(14, Cmd::Shoot, None).1, Out::Failed(_)));
     drop(w);
     c.close().wait().unwrap();

@@ -56,7 +56,7 @@ fn flows() {
     until(&mut b, 3.0, |s| !s.seen.is_empty());
     let x = b.st.seen[0].clone();
     assert_eq!(
-        (&*x.token, x.rssi, x.proto.map(|p| p.wifi)),
+        (&*x.token, x.rssi, x.ap.map(|p| p.wifi)),
         ("SIM001", Some(-58), Some(120))
     );
     b.tx.send(Cmd::Scan(false)).unwrap();
@@ -78,13 +78,13 @@ fn flows() {
     let a = pb::Authorize::decode(&q[..]).unwrap();
     assert_eq!(
         (c, &*a.client, a.initiator),
-        (code::CHECK_AUTH, "client-id", 2)
+        (code::AUTHORIZE, "client-id", 2)
     );
     b.tx.send(Cmd::Ap).unwrap();
     until(&mut b, 3.0, |s| s.ap.is_some());
     assert_eq!(b.st.ap, Some(("X5 SIM001.OSC".into(), "88888888".into())));
     let (c, q) = log.lock().unwrap().last().cloned().unwrap();
-    assert_eq!(c, code::GET_OPTIONS);
+    assert_eq!(c, code::READ_SETTINGS);
     assert_eq!(pb::ReadSettings::decode(&q[..]).unwrap().keys, [36, 37, 43]);
     let n = log.lock().unwrap().len();
     b.tx.send(Cmd::Join("HomeNet".into(), "secret pw".into()))
@@ -95,11 +95,11 @@ fn flows() {
         b.st.note,
         Some(("the camera joined HomeNet at 192.168.1.57".into(), false))
     );
-    // PROTOCOL.md §2.9: STA mode, phone info, the network
+    // station mode, the phone, the network
     let l = log.lock().unwrap()[n..].to_vec();
     assert_eq!(
         l.iter().map(|x| x.0).collect::<Vec<_>>(),
-        [code::SET_WIFI_MODE, code::PHONE_INFO, code::SET_WIFI_CONN]
+        [code::WRITE_WIFI_MODE, code::PHONE, code::JOIN_STATION]
     );
     assert_eq!(
         msg::WriteWifiMode::decode(&l[0].1[..]).unwrap().mode,
@@ -118,7 +118,7 @@ fn flows() {
     until(&mut b, 3.0, |s| {
         s.busy.is_none() && log.lock().unwrap().len() == n + 2
     });
-    assert_eq!(codes(&log)[n..], [code::GET_WIFI_MODE, code::GET_WIFI_CONN]);
+    assert_eq!(codes(&log)[n..], [code::READ_WIFI_MODE, code::READ_STATION]);
     assert_eq!(b.st.sta, Some((0, "HomeNet".into(), "192.168.1.57".into())));
     b.tx.send(Cmd::Close).unwrap();
     until(&mut b, 3.0, |s| {
@@ -163,7 +163,7 @@ fn station_read() {
             (&sta, Some((note.into(), false)))
         );
         assert_eq!(b.addr, sta.map_or("".into(), |s| s.2));
-        assert_eq!(codes(&log)[n..], [code::GET_WIFI_MODE, code::GET_WIFI_CONN]);
+        assert_eq!(codes(&log)[n..], [code::READ_WIFI_MODE, code::READ_STATION]);
     }
 }
 
@@ -183,7 +183,7 @@ fn cancel_and_loss() {
     b.tx.send(Cmd::Cancel).unwrap();
     until(&mut b, 3.0, |s| s.busy.is_none());
     assert_eq!(b.st.note, Some(("pairing cancelled".into(), false)));
-    until(&mut b, 3.0, |_| codes(&log).contains(&code::CANCEL_AUTH));
+    until(&mut b, 3.0, |_| codes(&log).contains(&code::DEAUTHORIZE));
     assert!(!b.st.paired);
     sim.lock().unwrap().as_ref().unwrap().lose();
     until(&mut b, 3.0, |s| s.conn == Conn::Off);

@@ -50,7 +50,7 @@ fn clock_row() {
     w.tx.send(Cmd::Time).unwrap();
     assert_eq!(row(&w, i.skew).0.map(skew), ok);
     f.lock().unwrap().clk = Some((clock().0 - 100, Instant::now()));
-    f.lock().unwrap().refuse = vec![link::code::SET_OPTIONS];
+    f.lock().unwrap().refuse = vec![link::code::WRITE_SETTINGS];
     w.tx.send(Cmd::Refresh).unwrap();
     let i = wait(&w, 5.0, |u| match u {
         Up::Info(i) if i.skew.is_some_and(|s| s < -90) => Some(i),

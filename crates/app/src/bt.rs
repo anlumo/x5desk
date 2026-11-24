@@ -47,7 +47,7 @@ pub struct Seen {
     /// the serial's last six characters, from its `X5 <token>` name
     pub token: String,
     pub rssi: Option<i16>,
-    pub proto: Option<ble::Proto>,
+    pub ap: Option<ble::ApState>,
     pub at: Instant,
 }
 
@@ -266,7 +266,7 @@ impl W {
                 if matches!(self.flow, Some(Flow::Pair(_))) {
                     // withdraws the prompt; the flow's own wait ends on its time
                     if let Some(c) = &self.cam {
-                        drop(c.cancel_auth())
+                        drop(c.deauthorize())
                     }
                     (self.flow, self.st.busy) = (None, None);
                     self.note("pairing cancelled", false)
@@ -295,8 +295,8 @@ impl W {
                     ),
                     Step::Retry(e) => format!("connect failed ({e}), trying again"),
                     Step::Connected(_) => "connected".into(),
-                    Step::Options(o) => format!("camera answers: {}", o.model),
-                    Step::Synced(_) => "options read".into(),
+                    Step::Ident(o) => format!("camera answers: {}", o.model),
+                    Step::Synced(_) => "settings read".into(),
                     Step::Auth(0) => "authorized".into(),
                     Step::Auth(1) => "allow this computer on the camera's screen".into(),
                     Step::Auth(7) => "camera asleep, asking again".into(),
@@ -416,7 +416,7 @@ impl W {
             Flow::Mode(c, p) => match p.poll() {
                 // a mode that cannot be read leaves the connection to tell
                 Some(r) => {
-                    self.flow = Some(Flow::Sta(r.ok(), c.wifi_conn()));
+                    self.flow = Some(Flow::Sta(r.ok(), c.read_station()));
                     return;
                 }
                 None => None,
@@ -459,7 +459,7 @@ impl W {
                     let s = Seen {
                         token: a.token().unwrap_or("?").into(),
                         rssi: a.rssi,
-                        proto: a.proto(),
+                        ap: a.ap_state(),
                         at: Instant::now(),
                         dev: a.dev,
                     };
@@ -634,7 +634,7 @@ impl Bt {
                             _ => "".into(),
                         })
                         .on_hover_text("Signal strength");
-                        ui.label(match x.proto.map(|p| p.wifi) {
+                        ui.label(match x.ap.map(|p| p.wifi) {
                             None | Some(0) => "Wi-Fi off".into(),
                             Some(255) => "Wi-Fi not started".into(),
                             Some(t) => format!("Wi-Fi on for {t} s more"),
@@ -785,7 +785,7 @@ impl Bt {
                 .add_enabled(on && free, egui::Button::new("Read station connection ⚠"))
                 .on_hover_text(
                     "Asks the camera over Bluetooth for its Wi-Fi mode and the network and address it has in station \
-                     mode (from an earlier join); changes nothing.\n⚠ Not run on an X5 yet: the app's messages, \
+                     mode (from an earlier join); changes nothing.\n⚠ Not run on an X5 yet: its messages are \
                      tested on a simulated camera",
                 )
                 .clicked()
@@ -905,7 +905,7 @@ fn answer(c: u16, q: &[u8], s: &ble::Sim, w: &mut Net) -> (u16, Vec<u8>) {
         });
     };
     match c {
-        code::GET_OPTIONS => {
+        code::READ_SETTINGS => {
             let o = pb::Settings {
                 model: "Insta360 X5".into(),
                 wifi: Some(pb::settings::Wifi {
@@ -921,13 +921,13 @@ fn answer(c: u16, q: &[u8], s: &ble::Sim, w: &mut Net) -> (u16, Vec<u8>) {
             };
             (200, r.encode_to_vec())
         }
-        code::CHECK_AUTH => {
-            // OUTCOME_GRANTED for AUTH_OP_BLE with the zero spelled out: the X5 sends a non-empty 8209 (PROTOCOL.md §5.2)
-            later(code::AUTH_RESULT, vec![8, 0]);
+        code::AUTHORIZE => {
+            // OUTCOME_GRANTED for AUTH_OP_BLE with the zero spelled out: the X5 sends a non-empty 8209
+            later(code::AUTH_NOTE, vec![8, 0]);
             let r = pb::AuthorizeReply { status: 1 };
             (200, r.encode_to_vec())
         }
-        code::SET_WIFI_CONN => {
+        code::JOIN_STATION => {
             let i = msg::JoinStation::decode(q)
                 .ok()
                 .and_then(|m| m.station)
@@ -941,15 +941,15 @@ fn answer(c: u16, q: &[u8], s: &ble::Sim, w: &mut Net) -> (u16, Vec<u8>) {
                 result: 0,
                 station: Some(w.1.clone()),
             };
-            later(code::WIFI_STATUS, r.encode_to_vec());
+            later(code::STATION_NOTE, r.encode_to_vec());
             (200, vec![])
         }
-        code::SET_WIFI_MODE => {
+        code::WRITE_WIFI_MODE => {
             w.0 = msg::WriteWifiMode::decode(q).map_or(w.0, |m| m.mode);
             (200, vec![])
         }
-        code::GET_WIFI_MODE => (200, msg::WifiModeReply { mode: w.0 }.encode_to_vec()),
-        code::GET_WIFI_CONN => {
+        code::READ_WIFI_MODE => (200, msg::WifiModeReply { mode: w.0 }.encode_to_vec()),
+        code::READ_STATION => {
             let r = msg::StationReply {
                 station: Some(w.1.clone()),
             };

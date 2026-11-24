@@ -1,4 +1,4 @@
-//! The camera worker against link's simulated camera (`sim`): the real I/O thread, UCD framing and tunnel HTTP, with
+//! The camera worker against link's simulated camera (`sim`): the real I/O thread, packet framing and tunnel HTTP, with
 //! a fake card behind them. The commands that change the camera are checked here at the message level only; so are
 //! the worker's guards (no delete while recording, a connect that leaves the clock).
 
@@ -112,14 +112,14 @@ fn album_and_cache() {
         .unwrap()
         .path();
     std::fs::write(&e, b"").unwrap();
-    let k = count(&f, link::code::GET_FILE_EXTRA);
+    let k = count(&f, link::code::READ_EXTRA);
     w.tx.send(Cmd::Connect { clock: true }).unwrap();
     assert_eq!(album(&w).len(), 5);
     let mut n = 0;
     let s = stats(&w, &mut n);
     assert_eq!((n, s.cam, s.cached), (5, 1, 4));
     assert_eq!(
-        count(&f, link::code::GET_FILE_EXTRA),
+        count(&f, link::code::READ_EXTRA),
         k + 1,
         "the other thumbnails from the warm cache"
     );
@@ -237,9 +237,9 @@ fn low_battery() {
     drop(w);
 }
 
-/// Every connect sets the camera clock once, in the app's order (§5.1, §5.3): identity, options and capture status,
-/// then its two SET_OPTIONS, then the listing; the note says so once both answered. A camera that refuses it still
-/// connects and lists its album, the refusal in an error note after the connect note.
+/// Every connect sets the camera clock once, in this order: identity, settings and capture status, then its two
+/// WRITE_SETTINGS, then the listing; the note says so once both answered. A camera that refuses it still connects and
+/// lists its album, the refusal in an error note after the connect note.
 #[test]
 #[cfg(unix)] // the clock is set on unix only
 fn connect_time() {
@@ -269,7 +269,7 @@ fn connect_time() {
         let (notes, n, l) = run();
         let k: Vec<u16> = l.iter().map(|l| l.0).collect();
         let s: Vec<usize> = (0..k.len())
-            .filter(|&i| k[i] == link::code::SET_OPTIONS)
+            .filter(|&i| k[i] == link::code::WRITE_SETTINGS)
             .collect();
         println!("connect {i}: requests {k:?}; notes {notes:?}");
         assert_eq!(n, 1);
@@ -277,10 +277,10 @@ fn connect_time() {
         assert!(s.len() == 2 && s[1] == s[0] + 1, "{k:?}");
         assert_eq!(
             k[..s[0]],
-            [GET_OPTIONS, GET_OPTIONS, CAPTURE_STATUS],
+            [READ_SETTINGS, READ_SETTINGS, CAPTURE_STATUS],
             "{k:?}"
         );
-        assert_eq!(k.get(s[1] + 1), Some(&GET_FILE_LIST), "{k:?}");
+        assert_eq!(k.get(s[1] + 1), Some(&LIST_FILES), "{k:?}");
         let set: Vec<pb::WriteSettings> = (s.iter())
             .map(|&i| pb::WriteSettings::decode(&l[i].1[..]).unwrap())
             .collect();
@@ -305,11 +305,11 @@ fn connect_time() {
             matches!(u, Up::Note(s, _) if s == "disconnected").then_some(())
         });
     }
-    f.lock().unwrap().refuse = vec![link::code::SET_OPTIONS];
+    f.lock().unwrap().refuse = vec![link::code::WRITE_SETTINGS];
     let (notes, n, l) = run();
     println!("refused: notes {notes:?}");
     assert_eq!(n, 1, "listed all the same");
-    assert!(l.iter().any(|l| l.0 == link::code::GET_FILE_LIST));
+    assert!(l.iter().any(|l| l.0 == link::code::LIST_FILES));
     assert!(
         notes.len() == 2
             && !notes[0].1
@@ -322,14 +322,14 @@ fn connect_time() {
     drop(w);
 }
 
-/// A camera that never answers the clock's SET_OPTIONS holds nothing up (the connect waited for each answer, up to
+/// A camera that never answers the clock's WRITE_SETTINGS holds nothing up (the connect waited for each answer, up to
 /// 10 s, with Disconnect and Quit unhandled): the album is listed and listed again meanwhile, Disconnect and the
 /// worker's end are handled at once, and the connect's notes come with the answers' timeout.
 #[test]
 #[cfg(unix)] // the clock is set on unix only
 fn silent_time() {
     let f = card(&NAMES[..2]);
-    f.lock().unwrap().mute = vec![link::code::SET_OPTIONS];
+    f.lock().unwrap().mute = vec![link::code::WRITE_SETTINGS];
     let q = Arc::new(Mutex::new(dl::Queue::load(None)));
     let (w, _) = spawn(&f, 50_000_000, q, Cache::at(None));
     let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
@@ -337,7 +337,7 @@ fn silent_time() {
     w.tx.send(Cmd::Connect { clock: true }).unwrap();
     assert_eq!(album(&w).len(), 1);
     let listed = ms(t);
-    assert_eq!(count(&f, link::code::SET_OPTIONS), 2, "both sent");
+    assert_eq!(count(&f, link::code::WRITE_SETTINGS), 2, "both sent");
     let t = Instant::now();
     w.tx.send(Cmd::Refresh).unwrap();
     album(&w);
@@ -356,7 +356,7 @@ fn silent_time() {
     let off = ms(t);
     assert!(notes.is_empty(), "{notes:?}");
 
-    let (t, g) = (Instant::now(), count(&f, link::code::GET_OPTIONS));
+    let (t, g) = (Instant::now(), count(&f, link::code::READ_SETTINGS));
     w.tx.send(Cmd::Connect { clock: true }).unwrap();
     album(&w);
     let mut notes = vec![];
@@ -375,7 +375,7 @@ fn silent_time() {
         "{notes:?}"
     );
     // the options not read again after the timeout: the connect's two only
-    assert_eq!(count(&f, link::code::GET_OPTIONS), g + 2);
+    assert_eq!(count(&f, link::code::READ_SETTINGS), g + 2);
 
     w.tx.send(Cmd::Disconnect).unwrap();
     conn(&w, Conn::Off);
@@ -454,8 +454,8 @@ fn download_resume() {
     std::fs::remove_dir_all(&d).unwrap();
 }
 
-/// A video capture puts the files off limits (§7.12): the running download goes back to the queue with what it
-/// has, nothing starts while the capture runs, the download resumes once it stops; byte-identical at the end.
+/// A video capture puts the files off limits: the running download goes back to the queue with what it has, nothing
+/// starts while the capture runs, the download resumes once it stops; byte-identical at the end.
 #[test]
 fn capture_hold() {
     let d = dir("hold");
@@ -551,8 +551,8 @@ fn quit_import() {
     std::fs::remove_dir_all(&d).unwrap();
 }
 
-/// The app's delete passes (§7.8): a batch the camera refuses goes again one URI at a time, what a fresh listing
-/// still has gets another pass, a single URI it refuses ends it.
+/// Delete passes: a batch the camera refuses goes again one URI at a time, what a fresh listing still has gets another
+/// pass, a single URI it refuses ends it.
 #[test]
 fn delete_passes() {
     let names: Vec<String> = (0..9)
@@ -595,7 +595,7 @@ fn delete_passes() {
 }
 
 /// Delete in batches of 200, 150 ms apart; favourites; format, each followed by a fresh album; time sync (unix: two
-/// SET_OPTIONS, §5.3, then the clock read).
+/// WRITE_SETTINGS, then the clock read).
 #[test]
 fn commands() {
     let names: Vec<String> = (0..450)
@@ -647,7 +647,7 @@ fn commands() {
     let s = l
         .iter()
         .rev()
-        .find(|l| l.1 == link::code::SET_FAVORITE)
+        .find(|l| l.1 == link::code::SET_FAVORITES)
         .unwrap();
     let s = &pb::SetFavorites::decode(&s.2[..]).unwrap().flags[0];
     assert_eq!((&*s.path, s.on), (&*u, 1));
@@ -656,10 +656,7 @@ fn commands() {
     w.tx.send(Cmd::Format).unwrap();
     after(&w);
     let l = f.lock().unwrap().log.clone();
-    assert!(
-        l.iter()
-            .any(|l| l.1 == link::code::ERASE_SD && l.2.is_empty())
-    );
+    assert!(l.iter().any(|l| l.1 == link::code::ERASE && l.2.is_empty()));
 
     // the clock: unix only (`no_zone` elsewhere)
     #[cfg(unix)]
@@ -674,12 +671,12 @@ fn commands() {
         let l = f.lock().unwrap().log[n0..].to_vec();
         use link::code::*;
         let k: Vec<u16> = (l.iter().map(|l| l.1))
-            .filter(|&c| c != GET_FILE_EXTRA)
+            .filter(|&c| c != READ_EXTRA)
             .collect();
-        assert_eq!(k, [SET_OPTIONS, SET_OPTIONS, GET_OPTIONS]);
+        assert_eq!(k, [WRITE_SETTINGS, WRITE_SETTINGS, READ_SETTINGS]);
         let set: Vec<pb::WriteSettings> = l
             .iter()
-            .filter(|l| l.1 == link::code::SET_OPTIONS)
+            .filter(|l| l.1 == link::code::WRITE_SETTINGS)
             .map(|l| pb::WriteSettings::decode(&l.2[..]).unwrap())
             .collect();
         let (t, _, off, tz, _) = clock();
@@ -723,8 +720,8 @@ fn local_clock() {
     assert_eq!(l - t as i64, a.min(b));
 }
 
-/// No delete while the camera records (§7.12: its files are off limits): the album keeps what it showed, its Delete
-/// is refused with a note and nothing goes out; once the recording stops it goes through.
+/// No delete while the camera records (its files are off limits): the album keeps what it showed, its Delete is refused
+/// with a note and nothing goes out; once the recording stops it goes through.
 #[test]
 fn delete_recording() {
     let f = card(&NAMES[..3]);
@@ -772,7 +769,7 @@ fn delete_recording() {
     drop(w);
 }
 
-/// A connect asked to leave the camera clock (an agent's) sends no SET_OPTIONS, and its notes come all the same; so
+/// A connect asked to leave the camera clock (an agent's) sends no WRITE_SETTINGS, and its notes come all the same; so
 /// do the worker's reconnects after a lost link (automatic, the X5 still in app mode): after 2 s, and at once when the
 /// camera comes back on the bus (a glitch re-enumerates it). The app's own connect still sets it (unix), so does its
 /// auto-connect of a camera plugged in after a disconnect.
@@ -781,7 +778,7 @@ fn connect_no_clock() {
     let f = card(&NAMES[..2]);
     let q = Arc::new(Mutex::new(dl::Queue::load(None)));
     let (w, sim) = spawn(&f, 50_000_000, q, Cache::at(None));
-    let set = || count(&f, link::code::SET_OPTIONS);
+    let set = || count(&f, link::code::WRITE_SETTINGS);
     let unplug = || sim.lock().unwrap().as_ref().unwrap().unplug();
     w.tx.send(Cmd::Connect { clock: false }).unwrap();
     assert_eq!(album(&w).len(), 1);
@@ -798,7 +795,7 @@ fn connect_no_clock() {
     let n = connected(&w);
     println!("reconnected: {n}");
     assert!(!n.contains("clock"), "{n}");
-    assert_eq!(set(), 0, "no SET_OPTIONS");
+    assert_eq!(set(), 0, "no WRITE_SETTINGS");
     // the camera off the bus and back (no timer: it was not in app mode when the link went)
     w.tx.send(Cmd::Plug(Plug::None)).unwrap();
     unplug();
@@ -814,7 +811,7 @@ fn connect_no_clock() {
         !n.contains("clock") && t.elapsed() < Duration::from_secs(2),
         "{n}"
     );
-    assert_eq!(set(), 0, "no SET_OPTIONS");
+    assert_eq!(set(), 0, "no WRITE_SETTINGS");
     w.tx.send(Cmd::Disconnect).unwrap();
     conn(&w, Conn::Off);
     #[cfg(unix)]
@@ -938,6 +935,6 @@ fn no_zone() {
         s.1 && s.0.starts_with("time sync: no IANA time zone"),
         "{s:?}"
     );
-    assert_eq!(count(&f, link::code::SET_OPTIONS), 0);
+    assert_eq!(count(&f, link::code::WRITE_SETTINGS), 0);
     drop(w);
 }

@@ -1,12 +1,11 @@
-//! The camera's capture-parameter JSON (`/CONF`, PROTOCOL.md §8.10, `analysis/app_features.md` §3–4): per lens block
-//! (`Sphere06C` 360, `Fisheyes06C` single lens) its modes, per mode its settings, each with the values allowed given
-//! the values of the settings it depends on (`depend_on` joined by `|`, else `default`). And how a setting reaches
-//! the camera: `SET_PHOTO_OPTIONS` with the mode's profile, or `SET_OPTIONS`. The app maps the JSON's strings to
-//! protobuf values through an asset of its own (`proto.json`); here the enum values in `proto/` spell them behind the
-//! enum's prefix (resolutions by the per-lens picture), plus the few they do not give. The writes in [`CHECKED`] ran on an X5 and read back, so did the
-//! switches to the modes in [`SWITCHED`] and the shutter in those of [`SHOT`] (360, fw v1.13.21: the app's
-//! `capture::tests::real_writes` / `real_ilog`); the others go out the same way. The capture worker sends only values
-//! a mode's lists allow (`Key::allowed`).
+//! The camera's capture-parameter JSON (`/CONF`): per lens block (`Sphere06C` 360, `Fisheyes06C` single lens) its
+//! modes, per mode its settings, each with the values allowed given the values of the settings it depends on
+//! (`depend_on` joined by `|`, else `default`). And how a setting reaches the camera: `WRITE_PARAMS` with the mode's
+//! profile, or `WRITE_SETTINGS`. The JSON's strings map to protobuf values: the enum values in `proto/` spell them
+//! behind the enum's prefix (resolutions by the per-lens picture), plus the few they do not give. The writes in
+//! [`CHECKED`] ran on an X5 and read back, so did the switches to the modes in [`SWITCHED`] and the shutter in those of
+//! [`SHOT`] (360, fw v1.13.21: the app's `capture::tests::real_writes` / `real_ilog`); the others go out the same way.
+//! The capture worker sends only values a mode's lists allow (`Key::allowed`).
 
 use link::{Mode as Sub, pb};
 use pb::Param as T;
@@ -285,8 +284,8 @@ impl Conf {
     }
 }
 
-/// Where a setting's value lives on the wire. `Dur` is read only: its encoding is not known for sure. `P3` (AE_SWITCH
-/// in the app) is 1 / 0, as the app's `DefaultAESwitchCameraImpl` writes it.
+/// Where a setting's value lives on the wire. `Dur` is read only: its encoding is not known for sure. `P3`
+/// (`p3_switch`) is 1 / 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Slot {
     Prog,
@@ -485,8 +484,7 @@ pub fn val(s: Slot, v: &str) -> Option<f64> {
     }
 }
 
-/// The exposures a mode reads and writes: photo (and video, as the app writes both) for photo modes, video for the
-/// others.
+/// The exposures a mode reads and writes: photo and video for photo modes, video for the others.
 fn expo(photo: bool) -> &'static [T] {
     if photo {
         &[T::VideoExposure, T::PhotoExposure]
@@ -669,7 +667,7 @@ pub fn func(mode: &str) -> Option<pb::Profile> {
     })
 }
 
-/// The photo or video mode setting of a `/CONF` mode (`SET_OPTIONS` 40 / 41).
+/// The photo or video mode setting of a `/CONF` mode (`WRITE_SETTINGS` 40 / 41).
 pub fn sub(mode: &str) -> Option<Sub> {
     use pb::{PhotoMode as P, VideoMode as V};
     Some(match mode {
@@ -690,7 +688,7 @@ pub fn current(o: &pb::Settings) -> Option<String> {
     })
 }
 
-/// What the shutter does in a mode (app_features.md §3).
+/// What the shutter does in a mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shot {
     Photo(pb::take_photo::Kind),
@@ -724,7 +722,7 @@ pub fn shot(mode: &str) -> Shot {
 }
 
 /// Highlight marks: while recording in the normal, loop and HDR modes, FreeFrame (single lens) and TimeShift
-/// (app: `OneX5PanoramaSupportConfig`; TimeShift only at 1×, which this app does not check).
+/// (TimeShift only at 1×, which this app does not check).
 pub fn marks(mode: &str) -> bool {
     matches!(
         mode,
@@ -795,9 +793,8 @@ mod tests {
         }
     }
 
-    /// The wire values against `proto/` (enum numbers) and the app's encodings: EV in tenths (the Insta360 app's
-    /// `capture/model/setting/EV.java` has EV_MINUS_4 = −40 … EV_4 = 40, which `setExposureEV` writes into
-    /// `ev` as it is), white balance in K, the shutter in seconds.
+    /// The wire values against `proto/` (enum numbers) and the encodings: EV in tenths (−4 … +4 EV as −40 … 40 in
+    /// `ev`), white balance in K, the shutter in seconds.
     #[test]
     fn values() {
         let r = |v| val(Slot::Res, v);
@@ -888,7 +885,7 @@ mod tests {
             w(Slot::PhotoHdr, "AEB", true),
             hex("08 4d 12 03 e8 04 02 18 06")
         );
-        // SET_OPTIONS keys [135], value {stitching (field 135) true}
+        // WRITE_SETTINGS keys [135], value {stitching (field 135) true}
         assert_eq!(w(Slot::Splice, "false", true), hex("08 87 01 12 00"));
         assert_eq!(
             w(Slot::Splice, "true", true),
@@ -938,8 +935,8 @@ mod tests {
         );
     }
 
-    /// The camera's own `/CONF` (`X5_CONF`, e.g. `re/hw/x5-conf.bin`): every mode and setting parses, every value
-    /// the controls offer has a wire value, and dependencies pick their lists.
+    /// The camera's own `/CONF` (`X5_CONF`, a `/CONF` saved from an X5 with `x5 conf`): every mode and setting parses,
+    /// every value the controls offer has a wire value, and dependencies pick their lists.
     #[test]
     fn camera_conf() {
         let Some(p) = std::env::var_os("X5_CONF") else {

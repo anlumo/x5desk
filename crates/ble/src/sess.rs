@@ -1,4 +1,4 @@
-//! The UCD session on a GATT pipe, without I/O: frames requests, picks the framing from the camera's first
+//! The packet session on a GATT pipe, without I/O: frames requests, picks the framing from the camera's first
 //! notification, reassembles responses and notifications, and times out what the camera never answers.
 
 use crate::{Dev, Done, Error, Event, Note, Result, pb, wire};
@@ -17,14 +17,14 @@ pub(crate) enum Op {
 }
 
 pub(crate) struct Sess {
-    /// UCP framing; `None` until the first notification (or its timeout) decides.
-    pub ucp: Option<bool>,
+    /// wrapped framing; `None` until the first notification (or its timeout) decides.
+    pub wrap: Option<bool>,
     /// Frames to write, in order.
     pub out: Vec<Vec<u8>>,
     pub id: u32,
     dev: Dev,
     ev: Sender<Event>,
-    /// UCP bytes not yet unframed.
+    /// wrapped bytes not yet unframed.
     raw: Vec<u8>,
     rx: Vec<u8>,
     /// `(id, deadline, done)`.
@@ -33,14 +33,14 @@ pub(crate) struct Sess {
     waits: Vec<(u32, Instant, Done)>,
     /// Newest body per notification code that no waiter took.
     last: Vec<(u16, Vec<u8>)>,
-    /// Incomplete messages by `(notification, id)` (§4.6), oldest first.
+    /// Incomplete messages by `(notification, id)`, oldest first.
     frags: Vec<((bool, u32), Vec<u8>)>,
 }
 
 impl Sess {
     pub fn new(dev: Dev, ev: Sender<Event>) -> Sess {
         Sess {
-            ucp: None,
+            wrap: None,
             out: vec![],
             id: 0,
             dev,
@@ -57,13 +57,13 @@ impl Sess {
     pub fn op(&mut self, o: Op, now: Instant) {
         match o {
             Op::Req(c, b, t, d) => {
-                // First id 1; after 2^30 − 1 it wraps to 0 (§4.6).
+                // First id 1; after 2^30 − 1 it wraps to 0.
                 self.id = if self.id >= 0x3FFF_FFFF {
                     0
                 } else {
                     self.id + 1
                 };
-                wire::frames(&mut self.out, c, self.id, &b, self.ucp == Some(true));
+                wire::frames(&mut self.out, c, self.id, &b, self.wrap == Some(true));
                 self.reqs.push((self.id, now + t, d))
             }
             Op::Note(c, t, fresh, d) => {
@@ -80,7 +80,7 @@ impl Sess {
     /// Bytes of one notification of the camera's characteristic.
     pub fn feed(&mut self, b: &[u8]) -> Result<()> {
         if !*self
-            .ucp
+            .wrap
             .get_or_insert_with(|| b.starts_with(&[0xFF, 6, 0x41]))
         {
             self.rx.extend_from_slice(b);
@@ -127,7 +127,7 @@ impl Sess {
             else {
                 continue;
             };
-            // Method and id come from the last fragment (§4.8).
+            // Method and id come from the last fragment.
             let j = self.frags.iter().position(|x| x.0 == (note, id));
             let b = match (j, end) {
                 (None, true) => body.to_vec(),
@@ -234,13 +234,13 @@ mod tests {
         ev: Receiver<Event>,
     }
 
-    fn sim(ucp: Option<bool>) -> Sim {
+    fn sim(wrap: Option<bool>) -> Sim {
         let (tx, ops) = unbounded_channel();
         let (etx, ev) = mpsc::channel();
         let dev = Dev::test();
         let c = Camera::new(tx, dev.clone(), Link::default());
         let mut s = Sess::new(dev, etx);
-        s.ucp = ucp;
+        s.wrap = wrap;
         Sim { ops, c, s, ev }
     }
 
@@ -306,16 +306,16 @@ mod tests {
         }
     }
 
-    /// Every request of ble.md §10 and PROTOCOL.md §1.4 / §2.6 / §2.8 / §5.2 through the typed API, byte for byte.
+    /// Every request of the typed API, byte for byte.
     #[test]
     fn requests() {
         let mut m = sim(Some(false));
         m.s.id = 4;
         let w = m.c.wifi();
-        let a = m.c.check_auth(UUID);
+        let a = m.c.ask_auth(UUID);
         let g = m.c.wifi_mode();
         let s = m.c.set_wifi_mode(msg::AP, "");
-        let i = m.c.wifi_conn();
+        let i = m.c.read_station();
         let o = m.c.open_wifi(0);
         m.pump();
         let auth = "38 00 00 00 04 00 00 27 00 02 06 00 00 80 00 00 0a 24 30 31 32 33 34 35 36 37 2d 38 39 61 62 \
@@ -337,16 +337,16 @@ mod tests {
         m.ok(8, &());
         m.ok(7, &msg::WifiModeReply { mode: msg::STA });
         m.ok(6, &pb::AuthorizeReply::default());
-        // Response header from ble.md §10 (status 200, id 5) with a ReadSettingsReply body.
+        // Response header (status 200, id 5) with a ReadSettingsReply body.
         let mut v = hex("00 00 00 00 04 00 00 c8 00 02 05 00 00 80 00 00");
         v.extend(opts(wifi()).encode_to_vec());
         v[0] = v.len() as u8;
-        // Delivered one byte per notification: chunk boundaries carry no meaning (ble.md §4).
+        // Delivered one byte per notification: chunk boundaries carry no meaning.
         for b in v.chunks(1) {
             m.s.feed(b).unwrap()
         }
         assert_eq!(w.wait().unwrap(), wifi());
-        // STATUS_GRANTED is the proto3 default: an empty body (PROTOCOL.md §5.2).
+        // STATUS_GRANTED is the proto3 default: an empty body.
         assert_eq!(a.wait().unwrap().status, 0);
         assert_eq!(g.wait().unwrap(), msg::STA);
         s.wait().unwrap();
@@ -364,9 +364,12 @@ mod tests {
                 6,
                 Box::new(|c: &Camera| drop(c.set_wifi_mode(msg::AP, "AT"))) as Box<dyn Fn(&Camera)>,
             ),
-            (0, Box::new(|c| drop(c.options(&[48, 15, 11, 198])))),
-            (5, Box::new(move |c| drop(c.set_options(&[97], on.clone())))),
-            (3, Box::new(|c| drop(c.check_auth(UUID)))),
+            (0, Box::new(|c| drop(c.settings(&[48, 15, 11, 198])))),
+            (
+                5,
+                Box::new(move |c| drop(c.set_settings(&[97], on.clone()))),
+            ),
+            (3, Box::new(|c| drop(c.ask_auth(UUID)))),
             (1, Box::new(|c| drop(c.wifi()))),
         ] {
             m.s.id = id;
@@ -390,15 +393,15 @@ mod tests {
     #[test]
     fn errors_and_notes() {
         let mut m = sim(None);
-        let p = m.c.raw(code::GET_OPTIONS, vec![], Duration::from_secs(5));
+        let p = m.c.raw(code::READ_SETTINGS, vec![], Duration::from_secs(5));
         m.pump();
-        // The first notification is plain UCD, so the session stays in UCD framing. Error response with
-        // `Error{CODE_FAILED}` (PROTOCOL.md §4.10), then 8209 (refused) and 8195 (battery) (§4.10).
+        // The first notification is plain packets, so the session stays in plain framing. Error response with
+        // `Error{CODE_FAILED}`, then 8209 (refused) and 8195 (battery).
         let b = hex("12 00 00 00 04 00 00 f4 01 02 01 00 00 80 00 00 08 03 \
              12 00 00 00 04 00 00 11 20 02 05 00 00 c0 00 00 08 01 \
              16 00 00 00 04 00 00 03 20 02 05 00 00 c0 00 00 0a 04 10 50 18 64");
         m.s.feed(&b).unwrap();
-        assert_eq!(m.s.ucp, Some(false));
+        assert_eq!(m.s.wrap, Some(false));
         match p.wait() {
             Err(Error::Status(500, Some(e))) => assert_eq!(e.code, 3),
             r => panic!("{r:?}"),
@@ -432,23 +435,21 @@ mod tests {
 
         // Latched notifications: one that arrived earlier counts unless `fresh`.
         let mut m = sim(Some(false));
-        m.notify(code::WIFI_START, &[]);
-        assert!(matches!(
-            m.ev.try_recv(),
-            Ok(Event::Note(_, Note::WifiStarted))
-        ));
-        let f = m.c.note(code::WIFI_START, Duration::from_secs(5), true);
+        m.notify(code::WIFI_UP, &[]);
+        assert!(matches!(m.ev.try_recv(), Ok(Event::Note(_, Note::WifiUp))));
+        let f = m.c.note(code::WIFI_UP, Duration::from_secs(5), true);
         m.pump();
         assert!(f.poll().is_none());
-        let l = m.c.note(code::WIFI_START, Duration::from_secs(5), false);
+        let l = m.c.note(code::WIFI_UP, Duration::from_secs(5), false);
         m.pump();
         assert!(l.poll().is_none());
-        m.notify(code::WIFI_START, &[]);
+        m.notify(code::WIFI_UP, &[]);
         assert_eq!(f.wait().unwrap(), b"");
         assert_eq!(l.wait().unwrap(), b"");
         // Timeouts and close.
-        let t = m.c.note(code::AUTH_RESULT, Duration::ZERO, false);
-        let r = m.c.raw(code::GET_WIFI_MODE, vec![], Duration::from_secs(5));
+        let t = m.c.note(code::AUTH_NOTE, Duration::ZERO, false);
+        let r =
+            m.c.raw(code::READ_WIFI_MODE, vec![], Duration::from_secs(5));
         m.pump();
         assert!(m.s.expire(Instant::now()).is_some());
         assert!(matches!(t.wait(), Err(Error::Timeout)));
@@ -457,14 +458,14 @@ mod tests {
     }
 
     #[test]
-    fn ucp() {
+    fn wrap() {
         let mut m = sim(None);
-        // Camera sync (`ff 06 41`, payload made up) → UCP mode and the legacy sync reply.
+        // Camera sync (`ff 06 41`, payload made up) → wrapped mode and the sync reply.
         let mut f = vec![];
         wire::frame(&mut f, 6, 0x41, &hex("ab ba ab ba"));
         m.s.feed(&f[..3]).unwrap();
         m.s.feed(&f[3..]).unwrap();
-        assert_eq!(m.s.ucp, Some(true));
+        assert_eq!(m.s.wrap, Some(true));
         assert_eq!(
             m.out(),
             [hex("ff 07 41 0a 00 ab ba ab ba ab ba ab ba ab ba 4e 23")]
@@ -479,7 +480,7 @@ mod tests {
                 "ff 07 40 10 00 10 00 00 00 04 00 00 96 00 02 01 00 00 80 00 00 fc fa"
             )]
         );
-        // The camera's frames carry UCD packets; a corrupt byte in front is skipped.
+        // The camera's frames carry packets; a corrupt byte in front is skipped.
         let mut v = vec![];
         wire::put(
             &mut v,
@@ -501,11 +502,11 @@ mod tests {
         m.step();
         let o = m.out();
         assert_eq!(o.len(), 1);
-        assert_eq!(&o[0][7..9], &code::CHECK_AUTH.to_le_bytes());
+        assert_eq!(&o[0][7..9], &code::AUTHORIZE.to_le_bytes());
         m.ok(1, &pb::AuthorizeReply { status: 1 });
-        // Outcome 4 (pending) keeps waiting; the success the camera sends may be an empty body (PROTOCOL.md §5.2).
-        m.notify(code::AUTH_RESULT, &hex("08 04"));
-        m.notify(code::AUTH_RESULT, &[]);
+        // Outcome 4 (pending) keeps waiting; the success the camera sends may be an empty body.
+        m.notify(code::AUTH_NOTE, &hex("08 04"));
+        m.notify(code::AUTH_NOTE, &[]);
         m.step();
         a.wait().unwrap();
 
@@ -515,7 +516,7 @@ mod tests {
         m.step();
         m.step();
         m.ok(1, &pb::AuthorizeReply { status: 1 });
-        m.notify(code::AUTH_RESULT, &hex("08 01"));
+        m.notify(code::AUTH_NOTE, &hex("08 01"));
         assert!(matches!(a.wait(), Err(Error::Refused(1))));
 
         // Another phone holds the camera.
@@ -529,9 +530,9 @@ mod tests {
 
     #[test]
     fn ap() {
-        // Camera in STA mode: wait for 8215, GET_WIFI_MODE, SET_WIFI_MODE(AP), wait for a new 8215, read the AP.
+        // Camera in STA mode: wait for 8215, READ_WIFI_MODE, WRITE_WIFI_MODE(AP), wait for a new 8215, read the AP.
         let mut m = sim(Some(false));
-        m.notify(code::WIFI_START, &[]);
+        m.notify(code::WIFI_UP, &[]);
         let a = m.c.ap(Duration::from_secs(5));
         m.step(); // takes the 8215 that came first
         m.step();
@@ -547,7 +548,7 @@ mod tests {
             [hex("12 00 00 00 04 00 00 93 00 02 02 00 00 80 00 00 08 01")]
         );
         m.ok(2, &());
-        m.notify(code::WIFI_START, &[]);
+        m.notify(code::WIFI_UP, &[]);
         m.step();
         assert_eq!(
             m.out(),
@@ -565,7 +566,7 @@ mod tests {
         let r = m.c.station("home", "secret", Duration::from_secs(5));
         m.step(); // waiter for 8232
         m.step();
-        // SET_WIFI_MODE{1, STA}, PHONE_INFO, SET_WIFI_CONNECTION_INFO (PROTOCOL.md §2.9).
+        // WRITE_WIFI_MODE{1, STA}, PHONE, JOIN_STATION.
         assert_eq!(
             m.out(),
             [hex(
@@ -575,7 +576,7 @@ mod tests {
         m.ok(1, &());
         m.step();
         let o = m.out();
-        assert_eq!(&o[0][7..9], &code::PHONE_INFO.to_le_bytes());
+        assert_eq!(&o[0][7..9], &code::PHONE.to_le_bytes());
         m.ok(2, &());
         m.step();
         assert_eq!(
@@ -592,7 +593,7 @@ mod tests {
                 ..Default::default()
             }),
         };
-        m.notify(code::WIFI_STATUS, &res.encode_to_vec());
+        m.notify(code::STATION_NOTE, &res.encode_to_vec());
         assert_eq!(r.wait().unwrap(), res);
     }
 
@@ -610,11 +611,11 @@ mod tests {
 
     #[test]
     fn wake_up() {
-        // An asleep camera (CHECK_AUTHORIZATION 7) that wakes on the second try; its 8215 came early.
+        // An asleep camera (AUTHORIZE 7) that wakes on the second try; its 8215 came early.
         let mut m = sim(Some(false));
-        m.notify(code::WIFI_START, &[]);
+        m.notify(code::WIFI_UP, &[]);
         let (p, steps) = wake(&m, Duration::from_secs(5));
-        // CHECK_TYPE, byte for byte as PROTOCOL.md §1.4.
+        // The identity read, byte for byte.
         m.step();
         assert_eq!(
             m.out(),
@@ -633,11 +634,11 @@ mod tests {
                 settings: Some(id.clone()),
             },
         );
-        // SYNCING_OPTIONS: the BLE option list alone; the app's GET_CURRENT_CAPTURE_STATUS stays local for an X5.
+        // The settings sync: the BLE settings list alone, no capture status.
         m.step();
         let o = m.out();
         assert_eq!(o.len(), 1);
-        assert_eq!(&o[0][7..9], &code::GET_OPTIONS.to_le_bytes());
+        assert_eq!(&o[0][7..9], &code::READ_SETTINGS.to_le_bytes());
         let q = pb::ReadSettings::decode(body(&o[0])).unwrap();
         assert_eq!(q.keys, crate::SYNC);
         let on = pb::Settings {
@@ -651,7 +652,7 @@ mod tests {
                 settings: Some(on.clone()),
             },
         );
-        // CHECK_AUTHORIZATION, id 3 straight after the sync: asleep, asked again after 2 s, then authorized (empty
+        // AUTHORIZE, id 3 straight after the sync: asleep, asked again after 2 s, then authorized (empty
         // body).
         let mut auth = hex(
             "38 00 00 00 04 00 00 27 00 02 03 00 00 80 00 00 0a 24 30 31 32 33 34 35 36 37 2d 38 39 61 62 \
@@ -676,7 +677,7 @@ mod tests {
             matches!(
                 &s[..],
                 [
-                    Step::Options(a),
+                    Step::Ident(a),
                     Step::Synced(Ok(b)),
                     Step::Auth(7),
                     Step::Auth(0),
@@ -686,7 +687,7 @@ mod tests {
             "{s:?}"
         );
 
-        // No 8215 within the time: OPEN_CAMERA_WIFI, then a fresh 8215.
+        // No 8215 within the time: OPEN_WIFI, then a fresh 8215.
         let mut m = sim(Some(false));
         m.s.id = 10;
         let (p, steps) = wake(&m, Duration::from_millis(50));
@@ -708,7 +709,7 @@ mod tests {
             [hex("10 00 00 00 04 00 00 21 00 02 0e 00 00 80 00 00")]
         );
         m.ok(14, &());
-        m.notify(code::WIFI_START, &[]);
+        m.notify(code::WIFI_UP, &[]);
         p.wait().unwrap();
         let s: Vec<_> = steps.try_iter().collect();
         assert!(

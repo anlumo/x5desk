@@ -11,10 +11,9 @@
   CFBundleIconName is the icon in Assets.car (../icon/icon.swift); cargo-packager sets CFBundleIconFile, the icns.
 
   The documents are what the Library opens (finder.rs takes Finder's requests), by extension: Insta360's own formats
-  have no type identifier on macOS (Insta360 Studio declares them so too), and the system's types for MP4 and JPEG
-  take in more (public.mpeg-4 .m4v, public.jpeg .jpe) than the Library knows. Insta360's at the default rank, so the
-  user picks which app opens them (Get Info, Open with); MP4 and JPEG at Alternate: x5desk is offered for them, never
-  made their default.
+  have no type identifier on macOS, and the system's types for MP4 and JPEG take in more (public.mpeg-4 .m4v,
+  public.jpeg .jpe) than the Library knows. Insta360's at the default rank, so the user picks which app opens them (Get
+  Info, Open with); MP4 and JPEG at Alternate: x5desk is offered for them, never made their default.
 -->
 <plist version="1.0">
 <dict>

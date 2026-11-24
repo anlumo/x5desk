@@ -1,15 +1,15 @@
-//! UCD v1 framing (PROTOCOL.md §4): `u32 total_len, u8 type, u16 pad`, then the payload and `pad` zero bytes.
+//! The camera's packet framing (version 1): `u32 total_len, u8 type, u16 pad`, then the payload and `pad` zero bytes.
 
 pub const SYNC: &[u8] = b"\x11\0\0\0\x06\0\0syNceNdinS";
 pub const MARK: &[u8] = b"syNceNdinS";
 pub const HB: &[u8] = b"\x07\0\0\0\x05\0\0";
 /// Camera's answer to a sync while another client holds the session.
 pub const BUSY: &[u8] = b"\x08\0\0\0\xb0\0\0\x01";
-/// Largest request body per fragment: legacy budget, keeps every fragment below 2 MiB (§3.9).
+/// Largest request body per fragment: keeps every fragment below 2 MiB.
 pub const FRAG: usize = 2_097_135;
 
 /// Appends one packet. A packet whose unpadded size is a multiple of 512 gets one pad byte, so no USB bulk
-/// transfer ends on a max-packet boundary and the camera never needs a ZLP (§4.3, §8.3).
+/// transfer ends on a max-packet boundary and the camera never needs a ZLP.
 pub fn put(v: &mut Vec<u8>, t: u8, head: &[u8], body: &[u8]) {
     let n = 7 + head.len() + body.len();
     let pad = n.is_multiple_of(512) as usize;
@@ -30,7 +30,7 @@ pub fn msg(v: &mut Vec<u8>, code: u16, id: u32, end: bool, body: &[u8]) {
     put(v, 4, &h, body)
 }
 
-/// SocketTunnel packet (type 7, §8.6).
+/// Socket tunnel packet (type 7).
 pub fn tunnel(v: &mut Vec<u8>, c: u32, flags: u16, win: u64, data: &[u8]) {
     let mut h = [0; 14];
     h[..4].copy_from_slice(&c.to_le_bytes());
@@ -71,7 +71,7 @@ fn u32_(b: &[u8]) -> u32 {
     u32::from_le_bytes(b[..4].try_into().unwrap())
 }
 
-/// The packet at the start of `b` and its size; `Ok(None)` while incomplete, `Err` on a desync (§3.7).
+/// The packet at the start of `b` and its size; `Ok(None)` while incomplete, `Err` on a desync.
 pub fn next(b: &[u8]) -> Result<Option<(Pkt<'_>, usize)>, ()> {
     if b.len() < 7 {
         return Ok(None);
