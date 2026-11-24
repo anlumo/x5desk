@@ -2089,6 +2089,355 @@ fn plate_dump() {
     }
 }
 
+/// The privacy pass's detections over whole clips, for review cards (`X5_DET_DUMP` = output folder; skipped without):
+/// the clips of `X5_DUMP_CLIPS` (comma-separated, in `X5_RIDES`, else `X5_SAMPLES`), every 3rd frame (the first
+/// `X5_FRAMES` only) stitched as `plates` does, plates (≥ 0.1) and faces (≥ 0.5) as the export finds them on its
+/// 7680 equirect (`X5_STAB=off`: level, as an export's pass with stabilisation off searches). `<clip>.txt`: the frame
+/// rate and count, then a line a detection: `p` or `f`, frame, the equirect's pose (`Pose::q` x y z w), direction,
+/// width and height (degrees), score; last `Hide`'s plate and face tracks. Written at the end: a clip with one is done.
+#[test]
+fn det_dump() {
+    let Some(out) = std::env::var_os("X5_DET_DUMP").map(PathBuf::from) else {
+        return;
+    };
+    std::fs::create_dir_all(&out).unwrap();
+    let d = (std::env::var_os("X5_RIDES").map(PathBuf::from))
+        .or_else(samples)
+        .unwrap();
+    let cap: usize = std::env::var("X5_FRAMES").map_or(usize::MAX, |v| v.parse().unwrap());
+    const W: u32 = 7680;
+    let g = gpu();
+    let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
+    let ft = face_tiles();
+    let names = std::env::var("X5_DUMP_CLIPS").unwrap_or_default();
+    for name in names.split(',').filter(|n| !n.is_empty()) {
+        let f = out.join(format!("{name}.txt"));
+        if f.exists() {
+            continue;
+        }
+        let c = clip(&d, name.to_string().leak());
+        let n = c.n.min(cap);
+        let rig = Rig::sized(&g, &c, 3840, W);
+        let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
+        let mut dec = Dec::sized(&g, &c, n, 3840);
+        let (mut s, mut h, mut m, t) = (
+            vec![],
+            [Hide::plates(W), Hide::new()],
+            [0; 2],
+            Instant::now(),
+        );
+        writeln!(s, "{} {n}", c.fps).unwrap();
+        for k in 0..n {
+            assert!(dec.next());
+            if k % 3 != 0 {
+                continue;
+            }
+            rig.upload(&g, &dec.buf);
+            rig.stitch(&g, &c.poses[k]);
+            let _ = g.dev.poll(wgpu::PollType::wait_indefinitely());
+            let q = c.poses[k].q;
+            let r = [
+                ai.plates(&pano, 0.1).unwrap(),
+                ai.faces(&pano, &ft, 0.5).unwrap(),
+            ];
+            for (i, r) in r.into_iter().enumerate() {
+                for x in &r {
+                    writeln!(
+                        s,
+                        "{} {k} {} {} {} {} {:.6} {:.6} {:.6} {:.4} {:.4} {:.4}",
+                        ["p", "f"][i],
+                        q.x,
+                        q.y,
+                        q.z,
+                        q.w,
+                        x.dir.x,
+                        x.dir.y,
+                        x.dir.z,
+                        x.size.x,
+                        x.size.y,
+                        x.score
+                    )
+                    .unwrap();
+                }
+                m[i] += r.len();
+                h[i].push(k, r);
+            }
+        }
+        drop(dec);
+        let tr = h.each_ref().map(|h| h.tracks(c.fps).len());
+        writeln!(s, "tracks {} {}", tr[0], tr[1]).unwrap();
+        std::fs::write(out.join(format!("{name}.part")), s).unwrap();
+        std::fs::rename(out.join(format!("{name}.part")), f).unwrap();
+        eprintln!(
+            "{name}: {} frames searched, {} plates ({} tracks hidden), {} faces ({} tracks), {:.0} s",
+            n.div_ceil(3),
+            m[0],
+            tr[0],
+            m[1],
+            tr[1],
+            t.elapsed().as_secs_f64()
+        );
+    }
+}
+
+/// Camera `c`'s view of equirect `e` (RGBA, `w` × `w` / 2, the stitcher's layout) at `s` pixels, RGB, sampled as
+/// `crop.wgsl` samples it for the networks (a box of taps an output pixel, bilinear, the columns wrapping): a face tile
+/// drawn here is the one YuNet saw, which `Ai` hands out for plates only (`plate_inputs`).
+fn draw(e: &[u8], w: usize, c: &Cam, s: [usize; 2]) -> Vec<u8> {
+    use std::f32::consts::{PI, TAU};
+    let (h, sz) = (w / 2, Vec2::new(s[0] as f32, s[1] as f32));
+    let k = ((2.0 * c.ext / sz).max_element() * w as f32 / TAU)
+        .ceil()
+        .clamp(1.0, 4.0) as usize;
+    let v = |x: usize, y: usize| {
+        let p = &e[(y * w + x % w) * 4..];
+        Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32)
+    };
+    let mut o = Vec::with_capacity(s[0] * s[1] * 3);
+    for y in 0..s[1] {
+        for x in 0..s[0] {
+            let mut a = Vec3::ZERO;
+            for t in 0..k * k {
+                let d = (Vec2::new((t % k) as f32, (t / k) as f32) + 0.5) / k as f32;
+                let r = c.ray((Vec2::new(x as f32, y as f32) + d) / sz * 2.0 - 1.0);
+                let p = Vec2::new(
+                    (-r.y).atan2(r.x) / TAU * w as f32,
+                    r.z.clamp(-1.0, 1.0).acos() / PI * (h - 1) as f32,
+                );
+                let f = p - p.floor();
+                let x0 = (p.x.floor() as i64).rem_euclid(w as i64) as usize;
+                let (y0, y1) = ((p.y as usize).min(h - 1), (p.y as usize + 1).min(h - 1));
+                a += (v(x0, y0).lerp(v(x0 + 1, y0), f.x))
+                    .lerp(v(x0, y1).lerp(v(x0 + 1, y1), f.x), f.y);
+            }
+            o.extend((a / (k * k) as f32).to_array().map(|v| v.round() as u8));
+        }
+    }
+    o
+}
+
+/// The box (x0, y0, x1, y1 in −1..1) that `Cam::boxed` turns into `r`'s centre and size on `c`.
+fn unbox(c: &Cam, r: &Region) -> [f32; 4] {
+    let m = c.px(r.dir).unwrap();
+    let half = |e: Vec2, deg: f32| {
+        let (mut a, mut b) = (0.0f32, 4.0f32);
+        for _ in 0..40 {
+            let h = (a + b) / 2.0;
+            match c
+                .ray(m - h * e)
+                .angle_between(c.ray(m + h * e))
+                .to_degrees()
+                < deg
+            {
+                true => a = h,
+                false => b = h,
+            }
+        }
+        (a + b) / 2.0
+    };
+    let h = Vec2::new(half(Vec2::X, r.size.x), half(Vec2::Y, r.size.y));
+    [m.x - h.x, m.y - h.y, m.x + h.x, m.y + h.y]
+}
+
+fn ppm(f: &Path, rgb: &[u8], w: usize, h: usize) {
+    let mut p = format!("P6\n{w} {h}\n255\n").into_bytes();
+    p.extend(rgb);
+    std::fs::write(f, p).unwrap();
+}
+
+/// Review cards of `det_dump`'s detections (`X5_DET_CARDS` = output folder, `X5_CARDS_LIST` = a file of lines `<id>
+/// <p|f> <clip> <frame>` and the detection's direction, width, height and score as `det_dump` wrote them; skipped
+/// without either): the frames stitched again as there and the detection found again where the detector saw it, a plate
+/// among `Ai::plate_inputs`' crops, a face among the face tiles searched one at a time. Per card `<id>_in.ppm`, the
+/// detector's input (the plate crop as `plate_inputs` gives it, the face tile as `draw` draws it), and `<id>_cx.ppm`, a
+/// wider view around it; in `cards.jsonl` the box in the input's pixels, its outline in the wider view, the input's
+/// camera (and tile), the score it was found again with (-1: not found, `det_dump`'s box kept), how far the box lies
+/// from `det_dump`'s (degrees) and, for plates, `draw`'s mean difference from the crop the detector saw.
+#[test]
+fn det_cards() {
+    let (Some(out), Some(list)) = (
+        std::env::var_os("X5_DET_CARDS").map(PathBuf::from),
+        std::env::var_os("X5_CARDS_LIST"),
+    ) else {
+        eprintln!("X5_DET_CARDS or X5_CARDS_LIST unset: skipped");
+        return;
+    };
+    std::fs::create_dir_all(&out).unwrap();
+    let d = (std::env::var_os("X5_RIDES").map(PathBuf::from))
+        .or_else(samples)
+        .unwrap();
+    let s = std::fs::read_to_string(list).unwrap();
+    let mut clips = BTreeMap::<&str, BTreeMap<usize, Vec<(&str, bool, Region)>>>::new();
+    for l in s.lines() {
+        let v: Vec<&str> = l.split_whitespace().collect();
+        let x = |i: usize| v[i].parse::<f32>().unwrap();
+        let r = Region {
+            dir: Vec3::new(x(4), x(5), x(6)).normalize(),
+            size: Vec2::new(x(7), x(8)),
+            score: x(9),
+            up: Vec3::Z,
+        };
+        (clips.entry(v[2]).or_default())
+            .entry(v[3].parse().unwrap())
+            .or_default()
+            .push((v[0], v[1] == "p", r));
+    }
+    const W: u32 = 7680;
+    const CX: [usize; 2] = [768, 432];
+    let g = gpu();
+    let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
+    let ft = face_tiles();
+    let mut log = std::fs::File::create(out.join("cards.jsonl")).unwrap();
+    let js = |v: &[f32]| (v.iter().map(|x| format!("{x:.6}")).collect::<Vec<_>>()).join(",");
+    for (name, ks) in &clips {
+        let c = clip(&d, name.to_string().leak());
+        let last = *ks.keys().last().unwrap();
+        let rig = Rig::sized(&g, &c, 3840, W);
+        let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
+        let mut dec = Dec::sized(&g, &c, last + 1, 3840);
+        for k in 0..=last {
+            assert!(dec.next());
+            // every frame det_dump stitched: the stitcher smooths its colour fit and flow over the frames it stitches
+            if k % 3 != 0 {
+                continue;
+            }
+            rig.upload(&g, &dec.buf);
+            rig.stitch(&g, &c.poses[k]);
+            let _ = g.dev.poll(wgpu::PollType::wait_indefinitely());
+            let Some(cs) = ks.get(&k) else { continue };
+            let e = stitch::read_texture(&g.dev, &g.q, &rig.st.out);
+            let pi = match cs.iter().any(|x| x.1) {
+                true => ai.plate_inputs(&pano, 0.1).unwrap(),
+                false => vec![],
+            };
+            let fs: Vec<Vec<Region>> = match cs.iter().any(|x| !x.1) {
+                true => (ft.iter())
+                    .map(|t| ai.faces(&pano, std::slice::from_ref(t), 0.5).unwrap())
+                    .collect(),
+                false => vec![],
+            };
+            for (id, pl, r) in cs {
+                let far = |x: &Region| {
+                    x.dir.angle_between(r.dir).to_degrees() + (x.score - r.score).abs()
+                };
+                let on = |c: &Cam, b: &([f32; 4], f32)| {
+                    let (dir, size) = c.boxed(b.0.map(|v| 2.0 * v / 256.0 - 1.0));
+                    Region {
+                        dir,
+                        size,
+                        score: b.1,
+                        up: Vec3::Z,
+                    }
+                };
+                let px = |b: [f32; 4], s: f32| b.map(|v| (v + 1.0) / 2.0 * s);
+                // `r`'s box on `c` (−1..1), if inside it
+                let fit = |c: &Cam| {
+                    (c.f.dot(r.dir) > 0.3)
+                        .then(|| unbox(c, r))
+                        .filter(|b| b.iter().all(|v| v.abs() < 0.98))
+                };
+                // the detector's input (camera, side, RGB), the box on it (pixels), the score found again (-1: not
+                // found; scores move a little from process to process, so one near the threshold can be gone: then
+                // det_dump's box on the input holding it finest, the plate crop of the fewest degrees, the face tile
+                // with it nearest the centre), the face tile, `draw`'s difference
+                let (cam, side, img, b, s2, tile, diff) = if *pl {
+                    let m = (pi.iter())
+                        .flat_map(|(c, i, bs)| bs.iter().map(move |b| (c, i, b)))
+                        .min_by(|x, y| far(&on(x.0, x.2)).total_cmp(&far(&on(y.0, y.2))))
+                        .filter(|x| far(&on(x.0, x.2)) < 0.5);
+                    let Some((cam, bgr, b, s2)) =
+                        m.map(|(c, i, b)| (c, i, b.0, b.1)).or_else(|| {
+                            (pi.iter())
+                                .filter_map(|(c, i, _)| Some((c, i, px(fit(c)?, 256.0), -1.0)))
+                                .min_by(|x, y| x.0.ext.x.total_cmp(&y.0.ext.x))
+                        })
+                    else {
+                        eprintln!("{id}: frame {k}: the plate on no crop, left out");
+                        continue;
+                    };
+                    let rgb: Vec<u8> = bgr.chunks(3).flat_map(|p| [p[2], p[1], p[0]]).collect();
+                    let l = draw(&e, W as usize, cam, [256; 2]);
+                    let diff = (l.iter().zip(&rgb))
+                        .map(|(a, b)| a.abs_diff(*b) as f64)
+                        .sum::<f64>()
+                        / rgb.len() as f64;
+                    (*cam, 256, rgb, b, s2, -1, diff)
+                } else {
+                    let m = (fs.iter().enumerate())
+                        .flat_map(|(t, xs)| xs.iter().map(move |x| (t, x)))
+                        .min_by(|a, b| far(a.1).total_cmp(&far(b.1)))
+                        .filter(|(_, x)| far(x) < 0.5);
+                    let mid = |b: &[f32; 4]| (b[0] + b[2]).abs().max((b[1] + b[3]).abs());
+                    let Some((t, b, s2)) =
+                        m.map(|(t, x)| (t, unbox(&ft[t], x), x.score)).or_else(|| {
+                            (0..ft.len())
+                                .filter_map(|t| Some((t, fit(&ft[t])?, -1.0)))
+                                .min_by(|x, y| mid(&x.1).total_cmp(&mid(&y.1)))
+                        })
+                    else {
+                        eprintln!("{id}: frame {k}: the face on no tile, left out");
+                        continue;
+                    };
+                    let img = draw(&e, W as usize, &ft[t], [640; 2]);
+                    (ft[t], 640, img, px(b, 640.0), s2, t as i32, -1.0)
+                };
+                let off = (cam.boxed(b.map(|v| 2.0 * v / side as f32 - 1.0)).0)
+                    .angle_between(r.dir)
+                    .to_degrees();
+                // three crops wide around a plate; around a face eight faces, fewer for the rider's own hands and face
+                let fov = match pl {
+                    true => (6.0 * cam.ext.x.atan().to_degrees()).clamp(40.0, 100.0),
+                    false => (r.size.max_element() * 8.0)
+                        .min(r.size.max_element() * 2.5 + 35.0)
+                        .clamp(16.0, 120.0),
+                };
+                let t = (fov / 2.0f32).to_radians().tan();
+                let cx = Cam::new(
+                    r.dir,
+                    Vec3::Z,
+                    Vec2::new(t, t * CX[1] as f32 / CX[0] as f32),
+                );
+                let n = b.map(|v| 2.0 * v / side as f32 - 1.0);
+                let cn = [(n[0], n[1]), (n[2], n[1]), (n[2], n[3]), (n[0], n[3])].map(Vec2::from);
+                let edge = |i: usize| cn[i / 16].lerp(cn[(i / 16 + 1) % 4], (i % 16) as f32 / 16.0);
+                let pts: Vec<String> = (0..64)
+                    .filter_map(|i| cx.px(cam.ray(edge(i))))
+                    .map(|p| (p + 1.0) / 2.0 * Vec2::new(CX[0] as f32, CX[1] as f32))
+                    .map(|p| format!("[{:.1},{:.1}]", p.x, p.y))
+                    .collect();
+                ppm(&out.join(format!("{id}_in.ppm")), &img, side, side);
+                ppm(
+                    &out.join(format!("{id}_cx.ppm")),
+                    &draw(&e, W as usize, &cx, CX),
+                    CX[0],
+                    CX[1],
+                );
+                let q = c.poses[k].q;
+                writeln!(
+                    log,
+                    "{{\"id\":\"{id}\",\"kind\":\"{}\",\"clip\":\"{name}\",\"frame\":{k},\"q\":[{}],\"dir\":[{}],\
+                     \"size\":[{}],\"score\":{},\"side\":{side},\"box\":[{}],\"cam\":{{\"f\":[{}],\"r\":[{}],\"u\":[{}],\
+                     \"ext\":[{}]}},\"tile\":{tile},\"fov\":{fov:.2},\"pts\":[{}],\"off\":{off:.4},\"found\":{s2:.4},\
+                     \"diff\":{diff:.3}}}",
+                    ["f", "p"][*pl as usize],
+                    js(&q.to_array()),
+                    js(&r.dir.to_array()),
+                    js(&r.size.to_array()),
+                    r.score,
+                    js(&b),
+                    js(&cam.f.to_array()),
+                    js(&cam.r.to_array()),
+                    js(&cam.u.to_array()),
+                    js(&cam.ext.to_array()),
+                    pts.join(",")
+                )
+                .unwrap();
+            }
+        }
+        eprintln!("{name}: {} cards", ks.values().map(Vec::len).sum::<usize>());
+    }
+}
+
 /// Highlights and auto edit on the sample clips (`X5_HIGH`, default all three): every 10th frame the detector over
 /// `sphere()` (auto framing and people), faces and a thumbnail (visual change); camera motion from the gyro, audio
 /// from the AAC track. Prints the signals of each pick, checks the timeline with crate edit (`Timeline::check`, a
