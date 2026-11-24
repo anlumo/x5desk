@@ -19,6 +19,19 @@ pub(crate) mod yunet {
 /// Tile side (a multiple of 32), tiles per run.
 pub(crate) const FS: u32 = 640;
 const MAX: usize = 8;
+/// The second look (`faces`): a face found stands only if YuNet finds it again (`AGAIN` or more) on a tile of its own,
+/// centred on it and upright, `LOOK` times its size wide (`NEAR`° to 90°), within half its size of it and at half to
+/// twice its size. On the face tiles a face 1° wide is 7 px, under the 10 px YuNet finds, and what lies off a tile's
+/// centre is turned, stretched or cut at its edge: there YuNet took the rider's hands, legs and bag, the scooter,
+/// wheels, lamps and lit windows for faces five times as often as it found one. Against the review of 2026-11-24 (the
+/// face tracks of 29 rides at 7680, every 3rd frame, ≥ 0.5; `AGAIN` picked on the rides of other days than 04-16): of
+/// 23 strangers' faces none lost (04-16: 0 of 8), of 111 false ones 80 gone (04-16: 19 of 28); by the sample's strata
+/// 8,340 face tracks to about 3,200, an estimated 1,090 strangers' faces among them before and after. At 0.5 a blurred
+/// face 1° wide was lost (found again at 0.41). Faces on posters and the rider's own stay. On a 3072 equirect the
+/// second look scores these faces alike.
+const LOOK: f32 = 10.0;
+const NEAR: f32 = 20.0;
+const AGAIN: f32 = 0.4;
 /// BGR 0..255 (OpenCV's `blobFromImage` without scaling).
 pub(crate) const NORM: Norm = Norm {
     a: [255.0; 3],
@@ -115,9 +128,42 @@ impl Ai {
     }
 
     /// Faces with score ≥ `min` over `tiles` (`face_tiles()`; square), `MAX` tiles per run: per tile non-maximum
-    /// suppression (IoU 0.3, as OpenCV's `FaceDetectorYN`), then across tiles as `detect`. YuNet's own threshold is
-    /// 0.9; privacy wants the faces it is less sure of too (0.5 to 0.6).
+    /// suppression (IoU 0.3, as OpenCV's `FaceDetectorYN`), then across tiles as `detect`; each found again on a
+    /// second look (`LOOK`). YuNet's own threshold is 0.9; privacy wants the faces it is less sure of too (0.5 to 0.6).
     pub fn faces(&mut self, p: &Pano, tiles: &[Cam], min: f32) -> Result<Vec<Region>, String> {
+        let fs = merge(
+            (self.found(p, tiles, min)?.into_iter())
+                .map(|(e, _, r)| (e, r))
+                .collect(),
+        );
+        let sz = |r: &Region| r.size.max_element();
+        let look: Vec<Cam> = (fs.iter())
+            .map(|r| {
+                let t = ((LOOK * sz(r)).clamp(NEAR, 90.0) / 2.0).to_radians().tan();
+                Cam::new(r.dir, Vec3::Z, Vec2::splat(t))
+            })
+            .collect();
+        let again = self.found(p, &look, AGAIN)?;
+        Ok((fs.into_iter().enumerate())
+            .filter(|(i, r)| {
+                again.iter().any(|(_, t, x)| {
+                    t == i
+                        && x.dir.angle_between(r.dir).to_degrees() <= sz(r) / 2.0
+                        && (0.5..2.0).contains(&(sz(x) / sz(r)))
+                })
+            })
+            .map(|(_, r)| r)
+            .collect())
+    }
+
+    /// Faces with score ≥ `min` on each of `tiles` after its own suppression: whether a box touches its tile's edge,
+    /// the tile, the face.
+    fn found(
+        &mut self,
+        p: &Pano,
+        tiles: &[Cam],
+        min: f32,
+    ) -> Result<Vec<(bool, usize, Region)>, String> {
         #[allow(unused_mut)]
         let mut n = self.nets()?;
         #[cfg(target_os = "macos")]
@@ -131,7 +177,7 @@ impl Ai {
         }
         let s = FS as usize;
         let mut all = vec![];
-        for ch in tiles.chunks(MAX) {
+        for (ci, ch) in tiles.chunks(MAX).enumerate() {
             let jobs: Vec<Job> = ch
                 .iter()
                 .enumerate()
@@ -178,16 +224,15 @@ impl Ai {
                         b.push(([c.x - h.x, c.y - h.y, c.x + h.x, c.y + h.y], r[0]));
                     }
                 }
-                all.extend(
-                    nms(b, 0.3)
-                        .into_iter()
-                        .map(|(b, score)| place(cam, b, s as f32, score)),
-                );
+                all.extend(nms(b, 0.3).into_iter().map(|(b, score)| {
+                    let (e, r) = place(cam, b, s as f32, score);
+                    (e, ci * MAX + ti, r)
+                }));
             }
             self.spent(2, t.elapsed());
         }
         self.pv = Some(n);
-        Ok(merge(all))
+        Ok(all)
     }
 }
 

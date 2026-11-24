@@ -2438,6 +2438,85 @@ fn det_cards() {
     }
 }
 
+/// The faces `Ai::faces` keeps of `det_dump`'s (`X5_FACE_CHECK` = output folder, `X5_DET_DUMP` = det_dump's folder,
+/// the clips of `X5_DUMP_CLIPS` in `X5_RIDES`; skipped without either): every 3rd frame stitched as there, the faces
+/// searched again (≥ 0.5) on the frames with faces in the dump. `<clip>.txt`: a line a face kept, frame, direction,
+/// width, height, score; last the wall time of the searches (s) and the faces in the dump on those frames.
+#[test]
+fn face_check() {
+    let (Some(out), Some(dump)) = (
+        std::env::var_os("X5_FACE_CHECK").map(PathBuf::from),
+        std::env::var_os("X5_DET_DUMP").map(PathBuf::from),
+    ) else {
+        return;
+    };
+    std::fs::create_dir_all(&out).unwrap();
+    let d = (std::env::var_os("X5_RIDES").map(PathBuf::from))
+        .or_else(samples)
+        .unwrap();
+    const W: u32 = 7680;
+    let g = gpu();
+    let mut ai = Ai::new(&g.inst, &g.ad, &g.dev, &g.q).unwrap();
+    let ft = face_tiles();
+    let names = std::env::var("X5_DUMP_CLIPS").unwrap_or_default();
+    for name in names.split(',').filter(|n| !n.is_empty()) {
+        let f = out.join(format!("{name}.txt"));
+        if f.exists() {
+            continue;
+        }
+        let mut want = BTreeMap::<usize, usize>::new();
+        for l in std::fs::read_to_string(dump.join(format!("{name}.txt")))
+            .unwrap()
+            .lines()
+            .filter(|l| l.starts_with("f "))
+        {
+            *want
+                .entry(l.split(' ').nth(1).unwrap().parse().unwrap())
+                .or_default() += 1;
+        }
+        let Some(&last) = want.keys().last() else {
+            continue;
+        };
+        let c = clip(&d, name.to_string().leak());
+        let rig = Rig::sized(&g, &c, 3840, W);
+        let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
+        let mut dec = Dec::sized(&g, &c, last + 1, 3840);
+        let (mut s, mut t, mut n) = (vec![], 0.0, 0);
+        for k in 0..=last {
+            assert!(dec.next());
+            if k % 3 != 0 {
+                continue;
+            }
+            rig.upload(&g, &dec.buf);
+            rig.stitch(&g, &c.poses[k]);
+            let _ = g.dev.poll(wgpu::PollType::wait_indefinitely());
+            if !want.contains_key(&k) {
+                continue;
+            }
+            let t0 = Instant::now();
+            let fs = ai.faces(&pano, &ft, 0.5).unwrap();
+            t += t0.elapsed().as_secs_f64();
+            n += fs.len();
+            for x in fs {
+                writeln!(
+                    s,
+                    "{k} {:.6} {:.6} {:.6} {:.4} {:.4} {:.4}",
+                    x.dir.x, x.dir.y, x.dir.z, x.size.x, x.size.y, x.score
+                )
+                .unwrap();
+            }
+        }
+        drop(dec);
+        let m: usize = want.values().sum();
+        writeln!(s, "time {t:.3} dump {m}").unwrap();
+        std::fs::write(&f, s).unwrap();
+        eprintln!(
+            "{name}: {} frames searched, {m} faces in the dump, {n} kept, {t:.1} s",
+            want.len()
+        );
+    }
+}
+
 /// Highlights and auto edit on the sample clips (`X5_HIGH`, default all three): every 10th frame the detector over
 /// `sphere()` (auto framing and people), faces and a thumbnail (visual change); camera motion from the gyro, audio
 /// from the AAC track. Prints the signals of each pick, checks the timeline with crate edit (`Timeline::check`, a
