@@ -1388,11 +1388,28 @@ fn privacy() {
             h.push(k, f.clone());
         }
         let reg = h.regions(n, c.fps);
+        // the raw detector: tracks over every frame's faces, frames inside one without its detection
+        let mut raw = Hide::new();
+        for (k, f) in all.iter().enumerate() {
+            raw.push(k, f.clone());
+        }
+        let tr = raw.tracks(c.fps);
+        // faces of the raw tracks holding a detection of a track the regions come from: `Hide` drops a track as the
+        // searched frames show it (wider than its `BIG`: the holder's own face stays unblurred), and a face near that
+        // width measures either side of it on the frames between
+        let ht = h.tracks(c.fps);
+        let has = |t: &Vec<(usize, Region)>, k: usize, x: &Region| {
+            t.iter().any(|(j, y)| *j == k && y.dir == x.dir)
+        };
+        let keep: Vec<_> = (tr.iter())
+            .filter(|t| t.iter().any(|(j, y)| ht.iter().any(|u| has(u, *j, y))))
+            .collect();
+        let kept = |k: usize, x: &Region| keep.iter().any(|t| has(t, k, x));
         let conf: Vec<(usize, Region)> = (0..n)
             .flat_map(|k| {
                 all[k]
                     .iter()
-                    .filter(|x| x.score >= 0.8)
+                    .filter(move |x| x.score >= 0.8 && kept(k, x))
                     .map(move |x| (k, *x))
             })
             .collect();
@@ -1400,21 +1417,15 @@ fn privacy() {
         let centre = |k: usize, x: &Region| reg[k].iter().any(|r| inside(r, x.dir));
         let miss: Vec<_> = conf.iter().filter(|(k, x)| !covered(&reg[*k], x)).collect();
         let cmiss = conf.iter().filter(|(k, x)| !centre(*k, x)).count();
-        // every face the detector saw (≥ 0.6), off the frames the regions come from
+        // every face the detector saw (≥ 0.6) in a track kept, off the frames the regions come from
         let mut w = [0; 3];
         for k in (0..n).filter(|k| k % 3 != 0) {
-            for x in &all[k] {
+            for x in all[k].iter().filter(|x| kept(k, x)) {
                 w[0] += 1;
                 w[1] += !covered(&reg[k], x) as usize;
                 w[2] += !centre(k, x) as usize;
             }
         }
-        // the raw detector: tracks over every frame's faces, frames inside one without its detection
-        let mut raw = Hide::new();
-        for (k, f) in all.iter().enumerate() {
-            raw.push(k, f.clone());
-        }
-        let tr = raw.tracks(c.fps);
         let long = tr.iter().filter(|t| t.len() >= 10).count();
         let gaps: usize = tr
             .iter()

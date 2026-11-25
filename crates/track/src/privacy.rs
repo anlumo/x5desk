@@ -32,6 +32,13 @@ const MAX: usize = 8;
 const LOOK: f32 = 10.0;
 const NEAR: f32 = 20.0;
 const AGAIN: f32 = 0.4;
+/// A face track is hidden only with a detection narrower than this (°, the larger side; `Hide::tracks`): per track, as
+/// a face near it measures either side of it from frame to frame (dropping detections blurred the holder's face on the
+/// samples in some frames, not others). In the review the only real faces that wide were the rider's own and one on a
+/// billboard, neither of which needs the blur (the user, 2026-11-24); the widest stranger's face was 4.3°, and a
+/// stranger closer than about 1.5 m now goes unblurred. With the second look, of 111 false faces 93 gone (04-16: 23 of
+/// 28), no stranger's face lost; about 2,400 face tracks left of 8,340.
+const BIG: f32 = 8.0;
 /// BGR 0..255 (OpenCV's `blobFromImage` without scaling).
 pub(crate) const NORM: Norm = Norm {
     a: [255.0; 3],
@@ -346,8 +353,9 @@ impl Hide {
 
     /// Tracks: each detection joins the nearest track whose last detection is at most `GAP` old and
     /// within reach of where its last motion puts it (its size, `REACH` times for plates, at least 2°, more by the time
-    /// since; plates: `SWEEP` more from a track of one detection, within `SOON` s), the best scores first; of plates,
-    /// the tracks with `TWICE` sure detections or `MANY` very sure ones within a second.
+    /// since; plates: `SWEEP` more from a track of one detection, within `SOON` s), the best scores first; of faces, the
+    /// tracks with a detection narrower than `BIG`; of plates, those with `TWICE` sure detections or `MANY` very sure
+    /// ones within a second.
     pub fn tracks(&self, fps: f32) -> Vec<Vec<(usize, Region)>> {
         let (reach, sweep) = if self.w > 0 {
             (REACH, SWEEP)
@@ -398,9 +406,13 @@ impl Hide {
             let v: Vec<usize> = (t.iter().filter(|d| d.1.score >= VERY))
                 .map(|d| d.0)
                 .collect();
-            self.w == 0
-                || t.iter().filter(|d| sure(&d.1, self.w)).count() >= TWICE
-                || v.windows(MANY).any(|w| (w[MANY - 1] - w[0]) as f32 <= fps)
+            match self.w {
+                0 => t.iter().any(|d| d.1.size.max_element() < BIG),
+                _ => {
+                    t.iter().filter(|d| sure(&d.1, self.w)).count() >= TWICE
+                        || v.windows(MANY).any(|w| (w[MANY - 1] - w[0]) as f32 <= fps)
+                }
+            }
         });
         tl
     }
