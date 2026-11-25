@@ -2000,7 +2000,8 @@ fn plate_views() {
 /// `plates` does, each plate crop as the detector sees it (`<clip>_<frame>_<i>.ppm`, RGB) with its candidate boxes of
 /// score ≥ 0.05 in `crops.jsonl` (crop pixels, the crop's direction and tangent extent, the pose of the equirect it was
 /// cut from: `Pose::q` x y z w, which a label made from it carries, `plate`). With `X5_DUMP_LIST` (`plate_views`' list)
-/// instead: the frames that test searches around the listed ones.
+/// instead: the frames that test searches around the listed ones (within `X5_DUMP_NEAR` frames, default half a
+/// second). Every 3rd frame is stitched as the export's search stitches it, dumped or not.
 #[test]
 fn plate_dump() {
     let Some(out) = std::env::var_os("X5_PLATE_DUMP").map(PathBuf::from) else {
@@ -2032,7 +2033,8 @@ fn plate_dump() {
     let mut log = std::fs::File::create(out.join("crops.jsonl")).unwrap();
     for ((d, name), ks) in &clips {
         let c = clip(d, name.to_string().leak());
-        let near = (c.fps / 2.0) as usize;
+        let near =
+            std::env::var("X5_DUMP_NEAR").map_or((c.fps / 2.0) as usize, |v| v.parse().unwrap());
         let last = (ks.last()).map_or(c.n - 1, |k| (k + near).min(c.n - 1));
         let rig = Rig::sized(&g, &c, 3840, 7680);
         let pano = ai.pano(&rig.st.out.create_view(&Default::default()));
@@ -2040,15 +2042,21 @@ fn plate_dump() {
         let mut n = 0;
         for k in 0..=last {
             assert!(dec.next());
-            if match ks.is_empty() {
-                true => k % every != 0,
-                false => k % 3 != 0 || ks.iter().all(|&f| f.abs_diff(k) > near),
-            } {
+            let want = match ks.is_empty() {
+                true => k % every == 0,
+                false => k % 3 == 0 && ks.iter().any(|&f| f.abs_diff(k) <= near),
+            };
+            // the stitcher smooths its colour fit and flow over the frames it stitches: a crop is the export's only
+            // after the same ones
+            if !want && k % 3 != 0 {
                 continue;
             }
             rig.upload(&g, &dec.buf);
             rig.stitch(&g, &c.poses[k]);
             let _ = g.dev.poll(wgpu::PollType::wait_indefinitely());
+            if !want {
+                continue;
+            }
             for (i, (cam, bgr, b)) in ai
                 .plate_inputs(&pano, 0.05)
                 .unwrap()
