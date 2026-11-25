@@ -87,10 +87,12 @@ ride; held out of the flag training: 2026-04-16 and the sample clips v606 / v627
   of 32 readable; `plates` unchanged; models/README updated. Left: a carry past a car that turns its plate away (740 frame 3078),
   a backward carry from a plate that comes out from behind the camera mount onto a headlight (718 frame 2258), and
   detector mistakes the timing only moves (717, 737, 741, 689). Faces still use the old timing.
-- [ ] **Hard-negative fine-tune: shelved.** Only 56 of the 344 junk flags had a detection at the flagged frame, and
-  even those included real plates (the flag judged the blur `Hide` drew, not the detection), so the labels would teach
-  the detector to miss plates. Revisit only with blurs that sit on a detection of the very same frame. Tools stay:
-  `dump_flags.sh`, `make_flags.py`, `train_flags.sh` (watchdogs fixed to kill the whole scope).
+- [x] **Hard-negative fine-tune** (2026-11-25). The flags of 2026-11-10 judged the blur `Hide` drew, not a detection,
+  so they were shelved; the detection review of 2026-11-24 (one detection a card, on the crop the detector saw) gave
+  clean labels. Figures in models/README; scripts, crops and checkpoints in `target/neg-scratch`.
+- [ ] **`plates_flags` can't measure a new model.** It reads the detections frozen in its fixture; searching again
+  with today's `plate_views` moves the views up to 12° off the fixture's regions (stabilisation changed in 8868548).
+  The fine-tune was measured on a copy of the galleries' tree (bc5725e). Rebuild the fixture in today's frame.
 - [ ] **The 669 false positive.** The gap between a scooter rider and the scooter (2026-03-04, held out): a real
   detector mistake, still open with the fine-tune shelved.
 - [x] **Re-pick `Hide`'s plate rule** (0018c58). A track is now also hidden

@@ -79,12 +79,13 @@ plates-yolox-nano-256.onnx
           yolox_nano.pth: 150 epochs on the public crops with random down/up-scaling, blur and JPEG like the X5's; 40
           epochs with the first own tiles added, from its best checkpoint; 40 with the bike rides' added, from that
           one's best (AP 49.72, AP50 ~0.835, on a public validation slice of 1,149 crops; sha256 4408c8e9...); 40 with
-          Vietnamese street photos added for two-line plates, from that one's best (AP 49.03 on the same slice).
-          Scripts, data and checkpoints are in target/plates-train, not in git.
-          sha256 57a8627eb0377135d280e423b16551601e08af220923c74ae452da61f5c1fe3e.
+          Vietnamese street photos added for two-line plates, from that one's best (AP 49.03 on the same slice; sha256
+          57a8627e...); 40 with crops of the detection review added (hard negatives, below), from that one's best (AP
+          49.58). Scripts, data and checkpoints are in target/plates-train and target/neg-scratch, not in git.
+          sha256 ebada5d0f3ec33fc30d7f27e542bc464d15ff8f007c8fa5b0bc07161e2154562.
   Licence: YOLOX and its base weights Apache-2.0, Copyright (c) 2021-2022 Megvii Inc. -> LICENSE-yolox. No YOLOv9 code
            or weights in its line.
-  Training data: 32,340 crops as `plate_crops` builds them, 27,620 boxes. Public, 22,660 crops: Open Images V7 "Vehicle
+  Training data: 37,040 crops as `plate_crops` builds them, 31,620 boxes. Public, 22,660 crops: Open Images V7 "Vehicle
            registration plate" (8,157 images, 9,851 boxes; images CC BY 2.0, per-image attribution kept with the data),
            UC3M-LP (1,975 images; Zenodo record 17152029, CC BY 4.0), the Romanian licence plate dataset (534 images;
            RobertLucian/license-plate-dataset, MIT). Base weights: COCO 2017. Own X5 footage, 692 tiles repeated 10
@@ -94,7 +95,37 @@ plates-yolox-nano-256.onnx
            crops (733 plates) of 361 street photos of hoanglvuit/Vietnam_License_Plate_Segment_Datasets on Hugging Face
            (Vietnam; plate polygons, one-line and square two-line plates), repeated 5 times. **That dataset states no
            licence**, so its terms are unknown; the user chose to ship on 2026-11-09. Crops holding a confident box off
-           the labelled plates were left out, as possibly unlabelled plates. The set's other half stays a test.
+           the labelled plates were left out, as possibly unlabelled plates. The set's other half stays a test. The
+           detection review: 470 crops of 22 segments of three bike rides, repeated 10 times: 82 around detections the
+           user marked wrong (no label), 388 around plates the user confirmed (400 boxes); never in git.
+  Hard negatives from the detection review (2026-11-25; this file): the user marked 240 plate detections of the
+  export's search on the rides, each on the crop the detector saw (63 wrong, 5 unsure, the rest plates that no label
+  held). Fine-tune of the two-line model as above. The crops are the detector's own (tests/footage.rs `plate_dump`,
+  after the export's stitch of every 3rd frame, level), at the marked frame and up to 4 more of its track within 0.5 s
+  while the track keeps to the same object (no gap over 2 searched frames, no jump past its size, size within 0.67 to
+  1.5 times: a track may hop from a tail light to the next car's plate). Every other candidate box (score >= 0.05) in a
+  crop belongs to another marked track (its mark), or is unknown and blurred away (107; it may be a plate), or touches
+  a marked box, and the crop is dropped (18); crops holding an unsure one too. Left out: the 2026-04-16 ride (the test)
+  and the 2026-03-04 one (held out), frames within 1 s of a labelled frame of `plates_rides`, plates within 30 s and
+  25 deg (5 s and 60 deg) of one of its labels. Before / after, same harness (RTX 4090, NVDEC):
+    The test ride's 53 marked detections, searched as an export (`det_dump`, level) and linked by `Hide::plates`:
+      wrong ones still hidden 3 / 1 of 11, plates hidden 38 / 37 of 41 (the one lost is 13 px wide and was hidden by
+      `MANY`: its 0.8 to 0.9 scores fell to 0.7 to 0.9). On the marked crops alone, score >= 0.5: wrong 5 / 0 of 11,
+      plates 40 / 40 of 41.
+    tests/footage.rs `plates_flags` on detections searched again by each model (`plate_views` of bc5725e, the
+      galleries' tree: today's stabilisation levels differently and moves the views up to 12 deg off the fixture's
+      regions), clips not trained on (2026-03-04, 2026-04-16, the walks, the samples): regions without a plate still
+      blurred 15 / 13 of 301, plates 30 px wide or more still blurred 75 / 77 of 77, marked plates uncovered 0 / 0. All
+      clips: 38 / 34 of 741, 206 / 205 of 216, 0 / 0 (the trained rides alone: 23 / 21 of 440, 131 / 128 of 139).
+    `plates_rides`: 3 / 2 of 85 uncovered, all unreadable (30 to 49 px; the held-out ride 1 / 0 of 28), readable 0 / 0
+      of 32. `plates`: 62 / 61 of 100 uncovered; regions holding no labelled plate, v635 / v606 / v627, 0 / 0.11 / 0.10
+      against 0 / 0.11 / 0.20 deg^2 per labelled frame.
+    Held-out street photos, plates in a vehicle crop covered at 0.1: two-line 1,481 / 1,482 of 1,493, one-line 1,086 /
+      1,085 of 1,093; car photos with no box on the plate 5 / 5 of 299. Boxes off the labelled plates fall by 17 to
+      23 % (street photos, car photos).
+    Limits: 11 wrong detections on the test ride, so the gain is a few regions; the count rule's `VERY` sits where the
+      new scores move (the 13 px plate above). On the marked crops of the trained rides left out of training, 3 of 34
+      plates fall under 0.5: two on a lorry painted on a billboard, one at night.
   Small plates by repetition (2026-11-12; src/privacy.rs `VERY`, `MANY`): the 30 px width of `sure` dropped plates the
   user reads in the views, 14 to 29 px wide (the second gallery's marks). Now a plate track is also hidden with 8
   detections of score >= 0.8 at any width within a second; two sure ones (>= 0.5, >= 30 px) still do as before (over
