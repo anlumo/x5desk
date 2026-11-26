@@ -972,6 +972,32 @@ fn hide() {
     }
 }
 
+/// The holder's face: a track 8° or wider on every searched frame of the shot stays unblurred; one starting 2 s late,
+/// ending 2 s early or once under 8° is a bystander's, blurred.
+#[test]
+fn hide_holder() {
+    use crate::{Hide, Region};
+    let fps = 30.0;
+    let tracks = |on: std::ops::Range<usize>, w: fn(usize) -> f32| {
+        let mut h = Hide::new();
+        for k in (0..300).step_by(3) {
+            let d = Region {
+                dir: dir(-30.0 + k as f32 / fps, -40.0),
+                size: Vec2::splat(w(k)),
+                score: 0.9,
+                up: Vec3::Z,
+            };
+            h.push(k, on.contains(&k).then_some(d).into_iter().collect());
+        }
+        h.tracks(fps).len()
+    };
+    assert_eq!(tracks(0..300, |_| 12.0), 0, "the whole shot");
+    assert_eq!(tracks(60..300, |_| 12.0), 1, "from 2 s in");
+    assert_eq!(tracks(0..240, |_| 12.0), 1, "to 2 s before the end");
+    let once = |k| if k == 150 { 7.5 } else { 12.0 };
+    assert_eq!(tracks(0..300, once), 1, "7.5° once");
+}
+
 /// Plate decoding: per anchor x, y offsets and log width, height in grid cells, objectness and plate probability, the
 /// grids of strides 8, 16, 32 in turn; boxes whose product is over the threshold, non-maximum suppression at IoU 0.45
 /// (two boxes of one plate are one, a box beside it stays), and a box's place on the sphere through its crop.

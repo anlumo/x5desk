@@ -1395,8 +1395,8 @@ fn privacy() {
         }
         let tr = raw.tracks(c.fps);
         // faces of the raw tracks holding a detection of a track the regions come from: `Hide` drops a track as the
-        // searched frames show it (wider than its `BIG`: the holder's own face stays unblurred), and a face near that
-        // width measures either side of it on the frames between
+        // searched frames show it (`BIG` or wider throughout the shot: the holder's own face stays unblurred), and a
+        // face near that width measures either side of it on the frames between
         let ht = h.tracks(c.fps);
         let has = |t: &Vec<(usize, Region)>, k: usize, x: &Region| {
             t.iter().any(|(j, y)| *j == k && y.dir == x.dir)

@@ -32,12 +32,19 @@ const MAX: usize = 8;
 const LOOK: f32 = 10.0;
 const NEAR: f32 = 20.0;
 const AGAIN: f32 = 0.4;
-/// A face track is hidden only with a detection narrower than this (°, the larger side; `Hide::tracks`): per track, as
-/// a face near it measures either side of it from frame to frame (dropping detections blurred the holder's face on the
-/// samples in some frames, not others). In the review the only real faces that wide were the rider's own and one on a
-/// billboard, neither of which needs the blur (the user, 2026-11-24); the widest stranger's face was 4.3°, and a
-/// stranger closer than about 1.5 m now goes unblurred. With the second look, of 111 false faces 93 gone (04-16: 23 of
-/// 28), no stranger's face lost; about 2,400 face tracks left of 8,340.
+/// A face track is left unblurred only if every one of its detections is this wide or wider (°, the larger side) and it
+/// runs through the whole shot, its first detection within `GAP` of the first key `Hide` was given and its last within
+/// `GAP` of the last (`Hide::tracks`): "Only people who never leave that distance in the whole shot can be holding the
+/// camera" (the user, 2026-11-26). Per track, as a face near the width measures either side of it from frame to frame
+/// (dropping detections blurred the holder's face on the samples in some frames, not others). On the rides the only
+/// real faces that wide were the rider's own and one on a billboard (review of 2026-11-24); on selfie-stick footage
+/// bystanders come as close as the holder (review of 2026-11-26 over every first-pass face, 17 clips, 3 more held out):
+/// of 77 bystanders' faces 20 were 8° or wider, the holder's 8° to 56°. By width alone 9 of the 77 went unblurred, with
+/// the whole shot none (held out: none either way); false faces blurred 31 to 46 of 91. The cost: the holder's track
+/// breaks (the face turned away or missed for over `GAP`, a narrower detection joined, the linking split it), so the
+/// holder's face is blurred on 53 of 57 cards (by width alone 5; held out 5 of 6, 0): of 2,525 tracks 8° or wider
+/// throughout, one ran through its whole clip (58 s); of spans with the holder's face found every second, 58 % of 10 s
+/// ones leave it unblurred, 34 % of 30 s, 18 % of 60 s.
 const BIG: f32 = 8.0;
 /// BGR 0..255 (OpenCV's `blobFromImage` without scaling).
 pub(crate) const NORM: Norm = Norm {
@@ -138,13 +145,6 @@ impl Ai {
     /// suppression (IoU 0.3, as OpenCV's `FaceDetectorYN`), then across tiles as `detect`; each found again on a
     /// second look (`LOOK`). YuNet's own threshold is 0.9; privacy wants the faces it is less sure of too (0.5 to 0.6).
     pub fn faces(&mut self, p: &Pano, tiles: &[Cam], min: f32) -> Result<Vec<Region>, String> {
-        let fs = merge(
-            (self.found(p, tiles, min)?.into_iter())
-                .map(|(e, _, r)| (e, r))
-                .collect(),
-        );
-        let sz = |r: &Region| r.size.max_element();
-        let look: Vec<Cam> = (fs.iter())
         Ok((self.looked(p, tiles, min)?.into_iter())
             .filter_map(|(r, a)| a.map(|_| r))
             .collect())
@@ -158,6 +158,13 @@ impl Ai {
         tiles: &[Cam],
         min: f32,
     ) -> Result<Vec<(Region, Option<f32>)>, String> {
+        let fs = merge(
+            (self.found(p, tiles, min)?.into_iter())
+                .map(|(e, _, r)| (e, r))
+                .collect(),
+        );
+        let sz = |r: &Region| r.size.max_element();
+        let look: Vec<Cam> = (fs.iter())
             .map(|r| {
                 let t = ((LOOK * sz(r)).clamp(NEAR, 90.0) / 2.0).to_radians().tan();
                 Cam::new(r.dir, Vec3::Z, Vec2::splat(t))
@@ -369,9 +376,9 @@ impl Hide {
 
     /// Tracks: each detection joins the nearest track whose last detection is at most `GAP` old and
     /// within reach of where its last motion puts it (its size, `REACH` times for plates, at least 2°, more by the time
-    /// since; plates: `SWEEP` more from a track of one detection, within `SOON` s), the best scores first; of faces, the
-    /// tracks with a detection narrower than `BIG`; of plates, those with `TWICE` sure detections or `MANY` very sure
-    /// ones within a second.
+    /// since; plates: `SWEEP` more from a track of one detection, within `SOON` s), the best scores first; of faces,
+    /// all but the tracks `BIG` or wider throughout the shot (the keys' span); of plates, those with `TWICE` sure
+    /// detections or `MANY` very sure ones within a second.
     pub fn tracks(&self, fps: f32) -> Vec<Vec<(usize, Region)>> {
         let (reach, sweep) = if self.w > 0 {
             (REACH, SWEEP)
@@ -423,7 +430,12 @@ impl Hide {
                 .map(|d| d.0)
                 .collect();
             match self.w {
-                0 => t.iter().any(|d| d.1.size.max_element() < BIG),
+                0 => {
+                    let (a, b) = (self.keys[0].0, self.keys[self.keys.len() - 1].0);
+                    t.iter().any(|d| d.1.size.max_element() < BIG)
+                        || (t[0].0 - a) as f32 / fps > GAP
+                        || (b - t[t.len() - 1].0) as f32 / fps > GAP
+                }
                 _ => {
                     t.iter().filter(|d| sure(&d.1, self.w)).count() >= TWICE
                         || v.windows(MANY).any(|w| (w[MANY - 1] - w[0]) as f32 <= fps)
