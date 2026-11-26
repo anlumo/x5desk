@@ -145,6 +145,19 @@ impl Ai {
         );
         let sz = |r: &Region| r.size.max_element();
         let look: Vec<Cam> = (fs.iter())
+        Ok((self.looked(p, tiles, min)?.into_iter())
+            .filter_map(|(r, a)| a.map(|_| r))
+            .collect())
+    }
+
+    /// Every face of `faces`' first pass, with the best score the second look found it again with (None: dropped).
+    /// Tooling: reviews of what the second look drops.
+    pub fn looked(
+        &mut self,
+        p: &Pano,
+        tiles: &[Cam],
+        min: f32,
+    ) -> Result<Vec<(Region, Option<f32>)>, String> {
             .map(|r| {
                 let t = ((LOOK * sz(r)).clamp(NEAR, 90.0) / 2.0).to_radians().tan();
                 Cam::new(r.dir, Vec3::Z, Vec2::splat(t))
@@ -152,14 +165,17 @@ impl Ai {
             .collect();
         let again = self.found(p, &look, AGAIN)?;
         Ok((fs.into_iter().enumerate())
-            .filter(|(i, r)| {
-                again.iter().any(|(_, t, x)| {
-                    t == i
-                        && x.dir.angle_between(r.dir).to_degrees() <= sz(r) / 2.0
-                        && (0.5..2.0).contains(&(sz(x) / sz(r)))
-                })
+            .map(|(i, r)| {
+                let a = (again.iter())
+                    .filter(|(_, t, x)| {
+                        *t == i
+                            && x.dir.angle_between(r.dir).to_degrees() <= sz(&r) / 2.0
+                            && (0.5..2.0).contains(&(sz(x) / sz(&r)))
+                    })
+                    .map(|(_, _, x)| x.score)
+                    .max_by(f32::total_cmp);
+                (r, a)
             })
-            .map(|(_, r)| r)
             .collect())
     }
 

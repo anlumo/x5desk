@@ -2111,9 +2111,11 @@ fn plate_dump() {
 /// The privacy pass's detections over whole clips, for review cards (`X5_DET_DUMP` = output folder; skipped without):
 /// the clips of `X5_DUMP_CLIPS` (comma-separated, in `X5_RIDES`, else `X5_SAMPLES`), every 3rd frame (the first
 /// `X5_FRAMES` only) stitched as `plates` does, plates (≥ 0.1) and faces (≥ 0.5) as the export finds them on its
-/// 7680 equirect (`X5_STAB=off`: level, as an export's pass with stabilisation off searches). `<clip>.txt`: the frame
-/// rate and count, then a line a detection: `p` or `f`, frame, the equirect's pose (`Pose::q` x y z w), direction,
-/// width and height (degrees), score; last `Hide`'s plate and face tracks. Written at the end: a clip with one is done.
+/// 7680 equirect (`X5_STAB=off`: level, as an export's pass with stabilisation off searches); of faces, every one of
+/// the first pass, the ones the second look drops too. `<clip>.txt`: the frame rate and count, then a line a
+/// detection: `p` or `f`, frame, the equirect's pose (`Pose::q` x y z w), direction, width and height (degrees), score,
+/// for faces the score the second look found it again with (-1: dropped, `Ai::faces` keeps the others); last `Hide`'s
+/// plate and face tracks. Written at the end: a clip with one is done.
 #[test]
 fn det_dump() {
     let Some(out) = std::env::var_os("X5_DET_DUMP").map(PathBuf::from) else {
@@ -2155,29 +2157,22 @@ fn det_dump() {
             rig.stitch(&g, &c.poses[k]);
             let _ = g.dev.poll(wgpu::PollType::wait_indefinitely());
             let q = c.poses[k].q;
-            let r = [
-                ai.plates(&pano, 0.1).unwrap(),
-                ai.faces(&pano, &ft, 0.5).unwrap(),
-            ];
-            for (i, r) in r.into_iter().enumerate() {
-                for x in &r {
-                    writeln!(
-                        s,
-                        "{} {k} {} {} {} {} {:.6} {:.6} {:.6} {:.4} {:.4} {:.4}",
-                        ["p", "f"][i],
-                        q.x,
-                        q.y,
-                        q.z,
-                        q.w,
-                        x.dir.x,
-                        x.dir.y,
-                        x.dir.z,
-                        x.size.x,
-                        x.size.y,
-                        x.score
-                    )
-                    .unwrap();
-                }
+            let pl = ai.plates(&pano, 0.1).unwrap();
+            let fl = ai.looked(&pano, &ft, 0.5).unwrap();
+            let all = (pl.iter().map(|x| ("p", x, String::new()))).chain(
+                fl.iter()
+                    .map(|(x, a)| ("f", x, format!(" {:.4}", a.unwrap_or(-1.0)))),
+            );
+            for (t, x, a) in all {
+                writeln!(
+                    s,
+                    "{t} {k} {} {} {} {} {:.6} {:.6} {:.6} {:.4} {:.4} {:.4}{a}",
+                    q.x, q.y, q.z, q.w, x.dir.x, x.dir.y, x.dir.z, x.size.x, x.size.y, x.score
+                )
+                .unwrap();
+            }
+            let fl: Vec<Region> = fl.into_iter().filter_map(|(x, a)| a.map(|_| x)).collect();
+            for (i, r) in [pl, fl].into_iter().enumerate() {
                 m[i] += r.len();
                 h[i].push(k, r);
             }
@@ -2267,11 +2262,12 @@ fn ppm(f: &Path, rgb: &[u8], w: usize, h: usize) {
 /// Review cards of `det_dump`'s detections (`X5_DET_CARDS` = output folder, `X5_CARDS_LIST` = a file of lines `<id>
 /// <p|f> <clip> <frame>` and the detection's direction, width, height and score as `det_dump` wrote them; skipped
 /// without either): the frames stitched again as there and the detection found again where the detector saw it, a plate
-/// among `Ai::plate_inputs`' crops, a face among the face tiles searched one at a time. Per card `<id>_in.ppm`, the
-/// detector's input (the plate crop as `plate_inputs` gives it, the face tile as `draw` draws it), and `<id>_cx.ppm`, a
-/// wider view around it; in `cards.jsonl` the box in the input's pixels, its outline in the wider view, the input's
-/// camera (and tile), the score it was found again with (-1: not found, `det_dump`'s box kept), how far the box lies
-/// from `det_dump`'s (degrees) and, for plates, `draw`'s mean difference from the crop the detector saw.
+/// among `Ai::plate_inputs`' crops, a face among the first pass's faces (one the second look drops too) on the face
+/// tiles searched one at a time. Per card `<id>_in.ppm`, the detector's input (the plate crop as `plate_inputs` gives
+/// it, the face tile as `draw` draws it), and `<id>_cx.ppm`, a wider view around it; in `cards.jsonl` the box in the
+/// input's pixels, its outline in the wider view, the input's camera (and tile), the score it was found again with (-1:
+/// not found, `det_dump`'s box kept), how far the box lies from `det_dump`'s (degrees) and, for plates, `draw`'s mean
+/// difference from the crop the detector saw.
 #[test]
 fn det_cards() {
     let (Some(out), Some(list)) = (
@@ -2331,7 +2327,13 @@ fn det_cards() {
             };
             let fs: Vec<Vec<Region>> = match cs.iter().any(|x| !x.1) {
                 true => (ft.iter())
-                    .map(|t| ai.faces(&pano, std::slice::from_ref(t), 0.5).unwrap())
+                    .map(|t| {
+                        (ai.looked(&pano, std::slice::from_ref(t), 0.5)
+                            .unwrap()
+                            .into_iter())
+                        .map(|x| x.0)
+                        .collect()
+                    })
                     .collect(),
                 false => vec![],
             };
